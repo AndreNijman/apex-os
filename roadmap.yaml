@@ -3421,30 +3421,19 @@ tasks:
   - tests
   - stop_slop
   evidence: >-
-    OS half landed on roadmap/v2.2. APEX shipped with no firewall at all, firewalld absent and nftables present
-    with an empty ruleset, so every bound port was reachable, seventeen of them on the L16 including a model
-    server and a Steam remote-play socket. files/system/nftables/apex.nft drops inbound, permits outbound and
-    drops forwarding; established/related, loopback, ICMP, IPv6 neighbour discovery, DHCP and mDNS pass, echo is
-    rate limited, and ssh is open because apex host run and remote agents are ssh. Exceptions go into two named
-    nftables sets, never into the ruleset, and apex firewall manages them by service name from a shipped
-    catalogue. The unit loads before network-pre.target and conflicts with nftables.service, and the image enables
-    it and asserts the policy parses under nft -c. tests/test-apex-firewall.sh 25/0. Criterion 1 is met; criterion
-    2 asks for the exceptions in the APEX UI, and only the CLI exists so far. BOTH HALVES NOW LANDED by
-    integrate-4, so this moves partial -> done. apex-os roadmap/v2.2 = 9fafab4 (7 commits, ZERO conflicts) and
-    apex-shell roadmap/v2.2 = b2bc964 (2 commits, ZERO conflicts -- the anticipated qmldir/PageRegistry clashes
-    did not happen, p1-020 and p1-044 add in different regions of both files). The OS half changes NO Rust and
-    that is proven by construction rather than asserted: git diff --name-only b2d7905 9fafab4 -- apexd/ is EMPTY.
-    test-apex-firewall.sh 25/0/1 -> 31/0/1 (the 1 skip is 'the ruleset parses', which needs root; the suite
-    deliberately never LOADS the policy). Shell side: settings-pages 15/0 -> 16/0 (the new FirewallPage is
-    enumerated), check-firewall-ui 29/0, firewall-test.js all-pass, no duplicate qmldir registration after both
-    landings. test-apex-firewall-live.sh and test-apex-firewall-ssh.sh were deliberately NOT re-run at
-    integration: both ssh to katana and load a default-drop policy there, and katana was to stay read-only; the
-    branch's own card records that its live run completed and left katana with an empty ruleset. Three things are
-    open and none is an acceptance gap: apex firewall status has no --json so the page parses prose (the parsing
-    is proven against real output; FirewallCmd in apexd/apex/src/main.rs is where the flag would go, and it is a
-    Rust change so it needs run-clippy.sh); LLMNR 5355 tcp+udp is accepted on every interface and mDNS accepts a
-    unicast query from any source rather than only link-local; and apex firewall allow on an image predating the
-    subcommand fails the same way status does.
+    Landed in both repos and built on well past the branches. Verified 2026-09-21 by a two-dot tree diff
+    restricted to the files each branch's own commits touch, because the obvious tests lie here: git cherry
+    reports 0 unlanded while a three-dot diff reports 1338 insertions, since three-dot measures from the merge
+    base and not against the tip. apex-os task/p1-044-firewall-live @4cc3f4b1 -- all 5 files differ with the TIP
+    AHEAD: files/system/libexec/apex-firewall 10441 bytes on the branch against 25127 on the tip,
+    tests/test-apex-firewall.sh 12470 against 35545; the ~30 lines the branch holds that the tip lacks are the old
+    shape of code the tip rewrote. apex-shell task/p1-044-firewall-settings @e51412b -- all 7 files present on the
+    tip and every one larger (firewall.js 12842 to 21752, firewall-test.js 11298 to 20350). The follow-up recorded
+    as optional and outstanding, apex firewall status --json so the shell page stops parsing prose, is ALREADY
+    DONE: cmd_status_json at apex-firewall line 206 with the {name,proto,port,rejected,detail} contract documented
+    at line 277. Remaining open items are judgements for Andre, not dispatchable work: LLMNR accepted on every
+    interface, mDNS accepting unicast from any source, and whether the settings page should stop offering commands
+    katana's older image cannot run.
 - id: P1-045
   title: Persistent-state migration framework
   priority: P1

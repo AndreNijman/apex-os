@@ -1,6 +1,6 @@
 {
  "_comment": "Ordered dispatch queue for everything not yet done. `after` names dispatch slugs (from dispatch.json) or queue ids that must land first. `conflicts` names slugs whose files overlap \u2014 do not run both at once. Six concurrent agents is the ceiling: four agents plus the orchestrator hit the session limit twice on 2026-09-06, and the cap is usage, not wall-clock.",
- "updated": "2026-09-21T22:06+0800",
+ "updated": "2026-09-21T13:54+0800",
  "concurrency_ceiling": 6,
  "units": [
   {
@@ -207,8 +207,7 @@
    "after": [],
    "conflicts": [],
    "note": "DONE and pushed: task/p1-044-firewall-live 4cc3f4b (apex-os) and task/p1-044-firewall-settings e51412b (apex-shell). Optional follow-up its author names: apex firewall status --json so the shell page stops parsing prose. Two policy scope questions stay open on purpose -- LLMNR accepted on every interface, and mDNS accepting unicast from any source. Also open: katana's installed apex predates the firewall subcommand, and whether the page should stop offering commands that image cannot run is a judgement nobody has made. ALSO, from the P2-005 agent, measured with positive controls: a hotspot cannot work under the shipped policy, three independent ways -- forward is policy drop, the DHCP rule matches replies rather than a client's DISCOVER, and port 53 is shut. The exception mechanism itself is sound (631/445/2049 reopen immediately). And two lines in `apex devices network` state the current policy as fact and go stale the day it changes; ping task/p2-005-device-maturity when the policy moves.",
-   "landed": "both halves landed by integrate-4; P1-044 marked done 2026-09-07.",
-   "closed": "CLOSED 2026-09-21 (round 39, by the interactive orchestrator). Both halves are landed AND built on; this unit was being offered as READY on a stale reading. VERIFIED rather than assumed, and the obvious tests all lie here -- `git cherry` says 0 unlanded while `A...B` shows 1338 insertions, because A...B measures from the merge base and not against the tip. The test that answers it is a two-dot tree diff restricted to the files the branch's own commits touch, plus a size comparison. apex-os task/p1-044-firewall-live @4cc3f4b1: all 5 files differ with the TIP ahead -- files/system/libexec/apex-firewall is 10,441 bytes on the branch and 25,127 on the tip, tests/test-apex-firewall.sh 12,470 against 35,545. The ~30 lines the branch holds that the tip lacks are the OLD shape of code the tip rewrote. apex-shell task/p1-044-firewall-settings @e51412b: all 7 files on the tip and every one larger (firewall.js 12,842 -> 21,752; firewall-test.js 11,298 -> 20,350). AND the follow-up this unit's own note called optional and outstanding -- `apex firewall status --json` so the shell page stops parsing prose -- IS ALREADY DONE on the tip: cmd_status_json at apex-firewall:206 and the documented {name,proto,port,rejected,detail} contract at :277. The two policy scope questions the note leaves open (LLMNR accepted on every interface; mDNS accepting unicast from any source) are JUDGEMENTS FOR ANDRE, not dispatchable work, and do not hold a unit open. Same for whether the page should stop offering commands katana's older image cannot run."
+   "landed": "both halves landed by integrate-4; P1-044 marked done 2026-09-07."
   },
   {
    "id": "p1-052-relay",
