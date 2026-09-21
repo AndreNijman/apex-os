@@ -220,3 +220,32 @@ no overlap with your four files). Merge it first.
 
 Battery was 58% and discharging at 13:42; CI runs cost this machine nothing,
 but read `/sys/class/power_supply/BAT*/status` before any local build.
+
+---
+
+## ROUND 38 AGENT — started 2026-09-21 ~14:05 AWST
+
+Fresh agent on the card above. Working log, newest at the bottom.
+
+- **Digest re-verified against the registry, not the card**: `skopeo inspect
+  --no-creds docker://ghcr.io/andrenijman/apex-os@sha256:2ff544dd…` resolves,
+  RepoTags lists `kernel-7.2.6-cachyos1.apex1.fc43.x86_64-544143e`, and run
+  35557283953's own log line is `pushed ghcr.io/andrenijman/apex-os@sha256:2ff544dd021478dbd36dab4efb1ce43ad9cc858f16cd07a271f01693822972d6`.
+  All three agree.
+- **Merged `origin/roadmap/v2.2` (71bc2177) → `3d0925b8`**, clean, no
+  conflicts. `kernel/` and `Containerfile.kernel` have zero drift since the
+  kernel was built at `544143e1`, checked against both HEAD and v2.2 — so the
+  `cmp kernel.pin` identity check in `Containerfile.core` will match.
+- Pre-pin gates on the merged tree: `check-kernel-image-pin.sh` **exit 1**
+  (`FAIL: Containerfile.core defaults APEX_KERNEL_IMAGE to 'localhost/apex-kernel:local'.`)
+  — the red half on the REAL tree; `check-suites-run-in-ci.sh` 103 suites / 96
+  in CI / 7 exempt / 0 unrun; `check-no-conflict-markers.sh` PASS.
+- The core job runs on `ubuntu-24.04` (`build-image.yml:432`), not katana, so
+  no gaming check applies. `PUBLISH` is `github.ref == refs/heads/main`, so a
+  task-branch run publishes nothing.
+- Battery 50% discharging at start; no local build is planned, CI costs this
+  machine nothing.
+
+### NEXT (round 38, supersedes everything above)
+Pin the digest at Containerfile.core:93, fix the comment block, write
+`ROADMAP/evidence/kernel-publish-20260921.md`, gate green, commit, push.

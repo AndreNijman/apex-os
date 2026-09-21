@@ -1,6 +1,6 @@
 {
  "_comment": "Live dispatch table. The orchestrator writes this at every dispatch and every landing. resume.sh reads it. agent_id is only useful while the session that spawned it lives; after a restart, dispatch a fresh agent with the card instead.",
- "updated": "2026-09-21T13:58+0800",
+ "updated": "2026-09-21T14:03+0800",
  "_round": "Round 38 STARTED 2026-09-21T13:40+0800 by the autoresume orchestrator after the round-37 shutdown. The six round-37 agents were dead (uptime 6 min at 13:42); none was messaged. Landed two branches (below), set L-002 partial, closed the stale android-release queue unit, pushed every unpushed task branch (initramfs-slim forced to 847b5bfb; migrate-preconditions new at 754b6174; kernel-akmods new at 4031d43f; luks-boot fast-forwarded to fdb97b04), fixed two worktrees whose upstream was origin/roadmap/v2.2 (wt-luks-boot, wt-kernel-akmods), took a sleep:idle:handle-lid-switch BLOCK inhibitor as user unit apex-roadmap-orchestrator-r38 (5 h), then re-dispatched six fresh agents, one per dead card, with L-003 folded into the luks-boot agent as a sequential second item. roadmap/v2.2 (apex-os) = 71bc2177, pushed. apex-shell = 9567586, untouched (nothing unlanded).",
  "_landed_this_round": [
   {
@@ -28,9 +28,10 @@
    "worktree": "/var/tmp/apex-work/wt-kernel-akmods",
    "branch": "task/kernel-akmods",
    "card": "ROADMAP/state/agents/kernel-akmods.md (ROUND 38 CONTINUATION section appended by the orchestrator at dispatch)",
-   "dispatched": "2026-09-21T13:58+0800",
-   "agent_id": "(filled after dispatch)",
-   "why": "THE image blocker, highest priority on the board. NEW FACT: the reproducer PASSED (repro.log: kmod-nvidia built in 96 s and installed, rc=0, from layer b45ec0aeb90a with --isolation=chroot), so the failure is not a source incompatibility. The real build died at 10:46 with EXIT=1, no akmods marker, no podman Error line, and no suspend in the journal. First job: commit the four dirty files (the recovery-reachable gate), then settle how the build actually died before touching the driver."
+   "dispatched": "2026-09-21T14:00+0800",
+   "agent_id": "a9f50bcd118bd0278",
+   "why": "THE image blocker, highest priority on the board. NEW FACT: the reproducer PASSED (repro.log: kmod-nvidia built in 96 s and installed, rc=0, from layer b45ec0aeb90a with --isolation=chroot), so the failure is not a source incompatibility. The real build died at 10:46 with EXIT=1, no akmods marker, no podman Error line, and no suspend in the journal. First job: commit the four dirty files (the recovery-reachable gate), then settle how the build actually died before touching the driver.",
+   "session": "round 38 orchestrator (autoresume, 2026-09-21 13:40 AWST)"
   },
   {
    "slug": "kernel-publish",
@@ -39,9 +40,10 @@
    "worktree": "/var/tmp/apex-work/wt-kernel-publish",
    "branch": "task/kernel-publish",
    "card": "ROADMAP/state/agents/kernel-publish.md (ROUND 38 CONTINUATION section appended by the orchestrator at dispatch)",
-   "dispatched": "2026-09-21T13:58+0800",
-   "agent_id": "(filled after dispatch)",
-   "why": "Run 35557283953 is GREEN; digest sha256:2ff544dd021478dbd36dab4efb1ce43ad9cc858f16cd07a271f01693822972d6 (tag kernel-7.2.6-cachyos1.apex1.fc43.x86_64-544143e) read off the registry by the orchestrator and written into the card. Pin it at Containerfile.core:93, gate green, push, dispatch the CI core build, record the run id. Not landable until pinned."
+   "dispatched": "2026-09-21T14:00+0800",
+   "agent_id": "ae2a8141b6bfb5adf",
+   "why": "Run 35557283953 is GREEN; digest sha256:2ff544dd021478dbd36dab4efb1ce43ad9cc858f16cd07a271f01693822972d6 (tag kernel-7.2.6-cachyos1.apex1.fc43.x86_64-544143e) read off the registry by the orchestrator and written into the card. Pin it at Containerfile.core:93, gate green, push, dispatch the CI core build, record the run id. Not landable until pinned.",
+   "session": "round 38 orchestrator (autoresume, 2026-09-21 13:40 AWST)"
   },
   {
    "slug": "initramfs-slim",
@@ -50,9 +52,10 @@
    "worktree": "/var/tmp/apex-work/wt-initramfs-slim",
    "branch": "task/initramfs-slim",
    "card": "ROADMAP/state/agents/initramfs-slim.md (ROUND 38 CONTINUATION section appended by the orchestrator at dispatch)",
-   "dispatched": "2026-09-21T13:58+0800",
-   "agent_id": "(filled after dispatch)",
-   "why": "Andre: 'it has to work in 512.' Branch pushed by the orchestrator at 847b5bfb. NEXT 3-7: fix the ethernet gate that cannot pass, gates into a script, size matrix, cross-build reproducibility, VM boot proof, evidence. migrate-preconditions consumes the per-deployment number."
+   "dispatched": "2026-09-21T14:00+0800",
+   "agent_id": "a05c92fe310e85221",
+   "why": "Andre: 'it has to work in 512.' Branch pushed by the orchestrator at 847b5bfb. NEXT 3-7: fix the ethernet gate that cannot pass, gates into a script, size matrix, cross-build reproducibility, VM boot proof, evidence. migrate-preconditions consumes the per-deployment number.",
+   "session": "round 38 orchestrator (autoresume, 2026-09-21 13:40 AWST)"
   },
   {
    "slug": "migrate-preconditions",
@@ -61,9 +64,10 @@
    "worktree": "/var/tmp/apex-work/wt-migrate-preconditions",
    "branch": "task/migrate-preconditions",
    "card": "ROADMAP/state/agents/migrate-preconditions.md (ROUND 38 CONTINUATION section appended by the orchestrator at dispatch)",
-   "dispatched": "2026-09-21T13:58+0800",
-   "agent_id": "(filled after dispatch)",
-   "why": "Card said nothing committed; two commits (89ff6803, 754b6174) exist and are now on origin, plus one dirty apex-boot-migrate hunk. Precondition decision engine: which ESP, BitLocker as a note, precheck read-only and leak-free before it touches the real L16, --explain decision table, PATH-shim gate."
+   "dispatched": "2026-09-21T14:00+0800",
+   "agent_id": "a50ad6ae8378fdb19",
+   "why": "Card said nothing committed; two commits (89ff6803, 754b6174) exist and are now on origin, plus one dirty apex-boot-migrate hunk. Precondition decision engine: which ESP, BitLocker as a note, precheck read-only and leak-free before it touches the real L16, --explain decision table, PATH-shim gate.",
+   "session": "round 38 orchestrator (autoresume, 2026-09-21 13:40 AWST)"
   },
   {
    "slug": "luks-boot",
@@ -75,9 +79,10 @@
    "worktree": "/var/tmp/apex-work/wt-luks-boot",
    "branch": "task/luks-boot",
    "card": "ROADMAP/state/agents/luks-boot.md (ROUND 38 CONTINUATION section appended by the orchestrator at dispatch)",
-   "dispatched": "2026-09-21T13:58+0800",
-   "agent_id": "(filled after dispatch)",
-   "why": "L-002 remainder then L-003, one agent because both use the same bootlab and this laptop runs one heavy job at a time. run2 measured switched-root=yes (blocker (a) closed, branch landed as d00c3060, L-002 partial); left: the ESP-fallback check that mounted a still-mounted loop partition, a boot-half re-run, set-status. Then run luks-enroll-2's never-run luks-pcr7 scenario for real (katana's scratch is /var/lab/scratch, not /var/lab-scratch) and record L-003."
+   "dispatched": "2026-09-21T14:00+0800",
+   "agent_id": "a553fa0621b3f63ee",
+   "why": "L-002 remainder then L-003, one agent because both use the same bootlab and this laptop runs one heavy job at a time. run2 measured switched-root=yes (blocker (a) closed, branch landed as d00c3060, L-002 partial); left: the ESP-fallback check that mounted a still-mounted loop partition, a boot-half re-run, set-status. Then run luks-enroll-2's never-run luks-pcr7 scenario for real (katana's scratch is /var/lab/scratch, not /var/lab-scratch) and record L-003.",
+   "session": "round 38 orchestrator (autoresume, 2026-09-21 13:40 AWST)"
   },
   {
    "slug": "windows-installer-3",
@@ -86,9 +91,10 @@
    "worktree": "/var/tmp/apex-work/wt-windows-installer-3",
    "branch": "task/windows-installer-3",
    "card": "ROADMAP/state/agents/windows-installer-3.md (ROUND 38 CONTINUATION section appended by the orchestrator at dispatch)",
-   "dispatched": "2026-09-21T13:58+0800",
-   "agent_id": "(filled after dispatch)",
-   "why": "Andre: 'the full completed working windows app that does the whole stack.' Branch landed as 71bc2177 (suite 13/0/1). payload-write PASSED in the guest at 12:04; host-side byte verification was cut off at overlay-map.json by the shutdown. Finish it, write the evidence, tighten ARCHITECTURE.md Exclusivity, then bitlocker-discover (never completed), then priorities 5/6 design."
+   "dispatched": "2026-09-21T14:00+0800",
+   "agent_id": "a544c193de917bf65",
+   "why": "Andre: 'the full completed working windows app that does the whole stack.' Branch landed as 71bc2177 (suite 13/0/1). payload-write PASSED in the guest at 12:04; host-side byte verification was cut off at overlay-map.json by the shutdown. Finish it, write the evidence, tighten ARCHITECTURE.md Exclusivity, then bitlocker-discover (never completed), then priorities 5/6 design.",
+   "session": "round 38 orchestrator (autoresume, 2026-09-21 13:40 AWST)"
   }
  ],
  "_field_contract": "resume.sh does os.path.isdir(worktree) and git rev-list origin/<branch>..HEAD, so `worktree` and `branch` must each be ONE value. An agent working two repos records the other in second_worktree/second_branch, which resume.sh ignores. Writing 'a and b' there makes the next report say 'no worktree' for a worktree that is fine.",
@@ -426,6 +432,6 @@
    "The Pixel 10a was NOT connected at 12:00, so _android_install_pending is still pending."
   ]
  },
- "_battery": "58% and DISCHARGING at 13:42 AWST when this round started, on the L16. The inhibitor blocks idle AND lid suspend, so a dead battery is the failure mode now, not a suspend. Every card tells its agent to read /sys/class/power_supply/BAT*/status before any run over ten minutes; the orchestrator watches capacity and will tell agents to checkpoint if it falls under 20%. The WIP snapshot timer (3 min) is the backstop either way.",
+ "_battery": "58% and DISCHARGING at 13:42 AWST when this round started, on the L16. The inhibitor blocks idle AND lid suspend, so a dead battery is the failure mode now, not a suspend. Every card tells its agent to read /sys/class/power_supply/BAT*/status before any run over ten minutes; the orchestrator watches capacity and will tell agents to checkpoint if it falls under 20%. The WIP snapshot timer (3 min) is the backstop either way. UPDATE 14:02: 50% and discharging, down 8 points in 20 minutes before any heavy job started -- roughly 75 minutes to the 20% floor at that rate. Andre was push-notified to plug in.",
  "_shutdown_state_round37_consumed": "The round-37 shutdown record was acted on in round 38 (every item in next_round_should done except the phone, which is still not attached: adb devices empty, lsusb no android device at 13:50). Its text lives in git history of refs/wip/roadmap-state."
 }
