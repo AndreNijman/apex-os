@@ -320,11 +320,36 @@ disagree:
 **Reading LBA 2 directly is the single most common shortcut in GPT code** —
 the spec permits `PartitionEntryLBA` to be anything, but in practice it is 2 on
 almost every disk, so code that hardcodes it works everywhere until it does
-not. After an `SET_DRIVE_LAYOUT_EX`, such a reader sees the *pre-change* table
+not. After a `SET_DRIVE_LAYOUT_EX`, such a reader sees the *pre-change* table
 and will happily conclude the partition is still Windows basic data. This tool
 already does the right thing — its survey reported the new type correctly, and
 its "the on-disk GPT and Windows' partition table AGREE" line held throughout —
 but any *other* tool on the user's machine may not.
+
+### But WHERE it relocates to is a function of `FirstUsableLBA`, and that scopes the hazard
+
+The destination is not a constant. Windows parks the array so that it **ends
+exactly at `FirstUsableLBA`** — checked, not inferred: `2016 + 32 == 2048`.
+Read off the pristine images:
+
+| disk | who partitioned it | `FirstUsableLBA` | array lands at | relocation? |
+|---|---|---|---|---|
+| `fixture-a.raw` / `fixture-b.raw` | `sfdisk`/`sgdisk` in the lab, 1 MiB reserve | **2048** | 2048 − 32 = **2016** | **yes**, stale table left at LBA 2 |
+| `golden.raw` | **Windows Setup itself** | **34** | 34 − 32 = **2** | **no** — it lands back where it started |
+
+So the hazard **does not arise on a disk Windows partitioned**, which is what
+every real target machine has. It arises on a disk initialised by tooling that
+reserves 1 MiB — which is `sgdisk`, `sfdisk`, `parted` and essentially all
+Linux partitioning, **including the disks APEX itself creates**. That is not a
+reason to dismiss it; it is a reason to state where it bites.
+
+**Honest status of the golden.raw row: it is a derivation, not a measurement.**
+The rule was measured once, on one disk, and `golden.raw`'s `FirstUsableLBA` is
+a fact read from its header — but no `SET_DRIVE_LAYOUT_EX` with a real change
+has been run against a `FirstUsableLBA=34` disk to confirm the array stays at
+LBA 2. The system disk was only ever probed with no-ops in this job. The
+second-ESP work, which necessarily rewrites `golden.raw`'s GPT, is where that
+gets confirmed.
 
 M1 has no such hazard: it edits the array in place, so there is exactly one
 table and no stale copy, and its total delta is 16 bytes of type GUID per copy
@@ -407,6 +432,8 @@ The pristine fixtures were never at risk: guests run against qcow2 overlays and
   *real* GPT change to a live system disk is safe — only that Windows does not
   refuse the write. A real change there is what BitLocker and PCR 5 guard, and
   PCR 5 remains unmeasured on a TPM machine.
-- M2's relocation behaviour was observed once, on a disk whose first partition
-  starts at LBA 2048. Whether the kernel always parks the array at
-  `first-partition-LBA − 32` is not established by one observation.
+- M2's relocation behaviour was observed **once**. The rule it fits — the array
+  is parked to end at `FirstUsableLBA` — is consistent with that observation and
+  with both pristine images' headers, but one observation does not establish a
+  rule. In particular, the claim that a `FirstUsableLBA=34` disk sees **no**
+  relocation is a prediction, not a measurement.
