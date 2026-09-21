@@ -91,22 +91,79 @@ and then `du -sh` on the deployments that boot it:
 **101 MiB observed against 376 MiB observed, on the same machine, in the same
 directory.** Three slim deployments are 303 MiB; with the 48 MiB the migration
 engine reserves that is 351 MiB against katana's own 512 MiB ESP
-(`nvme1n1p2`) — **161 MiB spare**. The same three fat deployments are 1128 MiB
-and are why katana is refused `esp-too-small` today.
+(`nvme1n1p2`). The engine measures FAT free space rather than partition size and
+reports **503 MiB free against 350 MiB needed — 153 MiB spare** (§4). The same
+three fat deployments are 1128 MiB, which is why katana was refused
+`esp-too-small` until this image.
 
 This is a `du` of the ostree deployment directories, not of an ESP: katana boots
 GRUB/ostree from `/boot` on the root filesystem. The per-deployment directory
 holds exactly what a Type #1 ESP layout would hold, so the figure transfers, but
 no ESP was written and nothing on katana was modified.
 
-## 4. Cross-build reproducibility — the answer splits in two
+## 4. katana can migrate — the first APEX machine that can
+
+This is the end-to-end consequence, and it is the only measurement here that
+was not predictable from the file sizes.
+
+`apex-boot-migrate precheck` documents itself as writing nothing and mounting
+the ESP `ro` (the mode is deliberate — a `rw` mount sets the dirty bit on the
+partition the machine boots from). `status` was read first; nothing was staged
+and no `stage`, `commit` or `auto` was run.
+
+```
+$ sudo apex-boot-migrate precheck --explain          # on katana, over ssh
+STATUS  CHECK                REASON
+OK      uefi                 booted through UEFI
+OK      on-ostree            booted store is ostreeContainer, so there is something to migrate
+OK      no-staged-update     no ostree deployment is staged for the next boot
+OK      tools                mkfs.vfat, rsync and podman are all in this image
+OK      bootc-new-enough     install to-existing-root has --composefs-backend
+OK      secure-boot          Secure Boot is not enforcing, so an unsigned loader is accepted
+OK      root-space           43 GiB free, 43 GiB needed
+OK      esp-choice           bootc will write PARTUUID 99af3362-… of 1 ESP(s) on the root's disk
+OK      esp-space            503 MiB free, 350 MiB needed
+NOTE    esp-changes-disk     boots from PARTUUID 2ba9a2ea-…, will write 99af3362-…
+
+This machine can migrate. "apex update" will do it, or run
+"apex-boot-migrate auto" now.
+rc=0
+```
+
+**Before this image the same machine, same partition, refused
+`esp-too-small`: 503 MiB free against 1173 MiB needed.** The initramfs work is
+the only thing that changed between those two runs. The engine's own
+arithmetic — **350 MiB** — matches the build log's `3 × 100.9 + 48` to the
+rounding, which is worth saying explicitly because the engine derives it from
+the live deployment and the build log derives it from the files dracut wrote.
+
+### Three other units' open items are closed by that one command
+
+* **`sdboot-xbootldr` NEXT #6** — *"the cross-disk note is tested against both
+  real `efibootmgr -v` spellings but has never fired in a guest."* It has now
+  fired on real hardware: `NOTE esp-changes-disk`, with BootCurrent's PARTUUID
+  `2ba9a2ea…` (the Windows disk katana boots from today) against
+  `99af3362…` (APEX's own 512 MiB `EFI-SYSTEM` on the root's disk). It is a
+  note and not a refusal, which is what that unit argued for.
+* **`sdboot-xbootldr` NEXT #3** — *"`apex-os:daily` ships no `rsync` — the first
+  refusal a real APEX machine gets today."* `OK tools: mkfs.vfat, rsync and
+  podman are all in this image`. Fixed by this build, exactly as predicted.
+* **`migrate-preconditions`** — katana's measured per-deployment ceiling of
+  154 MiB is met with **53 MiB to spare**, and its §5 conclusion ("512 MiB
+  still strands it, both wait on `initramfs-slim`") is discharged.
+
+What this does **not** show: that migrating succeeds. Only that nothing refuses
+it. `stage`, `commit`, the trial boot and `confirm` on real hardware remain
+`sdboot-migrate-2`'s work, and deliberately nothing beyond `precheck` was run.
+
+## 5. Cross-build reproducibility — the answer splits in two
 
 This answers `sdboot-xbootldr`'s NEXT #2 ("does an APEX update ever leave the
 initramfs byte-identical, so `find_vmlinuz_initrd_duplicate` fires and a second
 deployment costs zero ESP?"). The predecessor measured run-to-run inside one
 chroot; this is across independent builds.
 
-### 4a. The content IS bit-reproducible
+### 5a. The content IS bit-reproducible
 
 Two `podman build --no-cache --layers=false --isolation=chroot` runs, half a
 minute apart, from the **same parent image**
@@ -124,7 +181,7 @@ So `dracut --reproducible` holds across separate container builds, not only
 across two runs in one chroot. **bootc's `find_vmlinuz_initrd_duplicate`
 compares content, so it *can* fire.** The blocker is upstream of dracut.
 
-### 4b. The layer digest is NOT reproducible — and a landed comment says it is
+### 5b. The layer digest is NOT reproducible — and a landed comment says it is
 
 The same two builds:
 
@@ -139,7 +196,7 @@ The same two builds:
 > unchanged theme + unchanged kernel yield a byte-identical initramfs and the
 > layer digest stops moving."*
 
-The first half is right (4a). **The second half is false.** The layer tar
+The first half is right (5a). **The second half is false.** The layer tar
 records `initramfs.img`'s mtime, `dracut --reproducible` normalises timestamps
 *inside* the cpio and not the file it writes, and there is no `--timestamp` and
 no `SOURCE_DATE_EPOCH` anywhere in `.github/workflows/build-image.yml`. The
@@ -158,7 +215,7 @@ adopted: `--timestamp` rewrites every mtime in the tier, and its interaction
 with ostree, bootc and the `core`/`base` tiers is unmeasured. Anyone taking it
 owes a real image build first.
 
-### 4c. In practice it has never fired, and the registry proves it without a pull
+### 5c. In practice it has never fired, and the registry proves it without a pull
 
 14 published `apex-<sha>` tags, read with `skopeo inspect --raw` — manifests
 only, no image pulled (cached in `/var/lab-scratch/initramfs-slim-2/manifests/`):
@@ -180,10 +237,10 @@ already deterministic from an unchanged parent. The lever is *"stop rebuilding
 Until then `per_deployment × 3` stays the binding number, which is exactly why
 the 100.9 MiB in §2 matters.
 
-## 5. A 275 MiB-per-update download win that nobody had claimed
+## 6. A 275 MiB-per-update download win that nobody had claimed
 
 Same registry data, same zero pulls. The apex tier is one squashed layer whose
-digest moves every build (4c), so **every APEX machine re-downloads all of it on
+digest moves every build (5c), so **every APEX machine re-downloads all of it on
 every update**:
 
 | | compressed apex-tier layer |
@@ -195,7 +252,7 @@ That is **~275 MiB off every single `bootc upgrade`**, independent of the ESP
 argument, and it is the cheapest download win in `docs/update-cost.md`'s table —
 the `image` tier is the one row that rebuilds "every run". Recorded there.
 
-## 6. Found: `/root` is a dangling symlink, and dracut says FAILED then exits 0
+## 7. Found: `/root` is a dangling symlink, and dracut says FAILED then exits 0
 
 The real build log carries, between `dracut` starting and the budget check
 passing:
@@ -227,11 +284,11 @@ argument for having it.
 
 ## What this file does not prove
 
-* **Cross-host reproducibility is still untested.** 4a is two builds on one
+* **Cross-host reproducibility is still untested.** 5a is two builds on one
   machine from one parent. A GitHub runner was not one of the two.
-* **`--timestamp` was not put through an image build.** 4b's lever is measured
+* **`--timestamp` was not put through an image build.** 5b's lever is measured
   on a local two-build pair only.
-* **No ESP was written.** §3 is `du` on ostree deployment directories on a
+* **No ESP was written and no migration was run.** §3 is `du` on ostree deployment directories on a
   GRUB/ostree machine, not a filled 512 MiB FAT partition.
 * **katana was read, never modified.** `bootc status`, `ls -l`, `du`, `df`,
   `lsblk`, `uname` only.

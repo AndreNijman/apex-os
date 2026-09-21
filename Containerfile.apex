@@ -230,11 +230,13 @@ RUN set -eux; \
 # network stack. MEASURED on the first build that ran this stanza end to end
 # (run 35624291221, kernel 7.2.6-cachyos1.apex1): vmlinuz 16,906,312 B +
 # initramfs 88,935,408 B = 100.9 MiB per deployment, so apex-boot-migrate needs
-# 3 x 100.9 + 48 = 351 MiB and a 512 MiB ESP fits with 161 MiB spare. It was
-# 375.2 MiB and 1173 MiB before. Confirmed on katana, which boots this image:
-# its three deployment directories are 101M (this build) against 376M and 376M
-# (the two before it). Either way the claim is asserted below against the
-# produced image, not assumed from the config file.
+# 3 x 100.9 + 48 = 351 MiB against 1173 MiB before. Confirmed on katana, which
+# boots this image: its three deployment directories are 101M (this build)
+# against 376M and 376M (the two before it), and the engine itself now answers
+# `OK esp-space: 503 MiB free, 350 MiB needed` / "This machine can migrate" —
+# the first APEX machine that passes. (503 not 512: that is the FAT filesystem's
+# free space, which is what the engine measures.) Either way the claim is
+# asserted below against the produced image, not assumed from the config file.
 #
 # Keeping the theme switch in this tier rather than core is a download
 # optimisation: every dnf transaction rewrites the ~200 MB sqlite rpmdb into its

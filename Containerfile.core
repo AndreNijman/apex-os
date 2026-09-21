@@ -844,7 +844,11 @@ RUN set -eux; \
 #     initramfs   88,935,408 B   84.8 MiB
 #     vmlinuz     16,906,312 B   16.1 MiB
 #     ────────────────────────
-#     per deployment 100.9 MiB  ×  3 + 48 MiB = 351 MiB   →  fits, 161 spare.
+#     per deployment 100.9 MiB  ×  3 + 48 MiB = 351 MiB   →  fits.
+#
+# katana's own engine agrees, read-only: `apex-boot-migrate precheck` answers
+# `OK esp-space: 503 MiB free, 350 MiB needed` and "This machine can migrate".
+# 503 rather than 512 is the FAT free space, which is what it measures.
 #
 # Corroborated by `du` on katana's three deployment directories: 101M for this
 # build against 376M and 376M for the two before it. Seventeen gates ran in that
