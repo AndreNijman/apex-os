@@ -57,11 +57,21 @@ Dispatched round 39; re-dispatched round 40, 2026-09-22.
   it only checks `niri validate` + `grep repeat-rate 42` in the *generated*
   file — neither of which needs the include to exist.
 - **secret-broker's single failure is `the session's script actually ran`** in
-  the "a confined session cannot read the credential" section. The test prints
-  its own diagnosis: *"the sandbox did not come up... a 'uid map: Permission
-  denied' here means unprivileged user namespaces are blocked — see the CI
-  sysctl"*. It burned ~25 s (16:29:07 -> 16:29:32), i.e. a timeout. This is the
-  runner-environment class, not a regression.
+  the "a confined session cannot read the credential" section. **CLASSIFICATION
+  UNKNOWN — do not repeat the test's own diagnosis, it is wrong here.** The
+  test prints *"the sandbox did not come up... uid map: Permission denied…"*,
+  but the CI log refutes that: the `Install bubblewrap` step printed
+  `kernel.apparmor_restrict_unprivileged_userns = 0`,
+  `bubblewrap works: a confined session can be built`,
+  `dev.tty.legacy_tiocsti = 0`, bwrap 0.9.0 installed; the session started
+  (`PASS a confined session started (id 1)`); and the FIRST line of the
+  in-sandbox script *did* reach the transcript
+  (`--- can the session read the credential file directly? ---`). So the
+  sandbox came up and the script stalled after line 1, or the transcript
+  stopped updating. The 25 s is exactly the poll budget (100 x 0.25 s).
+- **Finding in its own right:** that gate conflates "never started" with
+  "started and stalled at line N", and prints a diagnosis that was false on the
+  very run it fired on. It should say where the transcript stopped.
 
 ## BLOCKED ON
 
