@@ -352,8 +352,22 @@ second-ESP work, which necessarily rewrites `golden.raw`'s GPT, is where that
 gets confirmed.
 
 M1 has no such hazard: it edits the array in place, so there is exactly one
-table and no stale copy, and its total delta is 16 bytes of type GUID per copy
-plus the CRCs that describe them.
+table and no stale copy.
+
+**Both rows are host-measured, not argued.** M1 was originally undone before M2
+ran — which made the comparison fair but left M1's final state unverified, true
+by construction rather than by bytes. A `keep-m1.txt` switch now stops the job
+after M1, and a second 30-second boot produced an image the same verifier
+checked (12 checks, 0 failures; the relocation-destination check is skipped
+because nothing relocated):
+
+| | bytes changed, primary GPT area | bytes changed, backup GPT area | total | stale table left |
+|---|---|---|---|---|
+| **M1** raw read-modify-write | **24** — `HeaderCRC32` (4), `PartitionEntryArrayCRC32` (4), and **16 bytes of type GUID** at LBA 2 | **24** — the same three fields | **48** | none |
+| **M2** `SET_DRIVE_LAYOUT_EX` | **161** — 10 in the header (incl. `PartitionEntryLBA` 2 → 2016) + 151 writing a whole new array at LBA 2016 | **24** — 16 bytes of type GUID + two CRCs; not relocated | **185** | **yes**, the entire old array at LBA 2 |
+
+M1's delta is the theoretical minimum for this change: the 16 bytes that had to
+change, and the two checksums that describe them, in each copy. Nothing else.
 
 ## Against the doc's six invariants
 
