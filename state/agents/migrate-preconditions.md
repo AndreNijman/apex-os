@@ -131,3 +131,44 @@ prints the measured need and the measured free space, not a constant.
 Battery was 58% and DISCHARGING at 13:42 — check
 `/sys/class/power_supply/BAT*/status` before any loopback run over ten
 minutes.
+
+---
+
+## PRODUCT DECISION MADE — 2026-09-21, by Andre. Merge the tip and read it.
+
+`docs/apex-owns-its-esp.md`, landed on `roadmap/v2.2` as `bc5c3822`.
+
+Andre, verbatim: *"windows side install should be like everything else with the
+systemd-boot. maybe it should build a new esp for apex or something."*
+
+This answers the FIRST of the two questions this card says are "Andre's, do not
+solve them". It is now settled:
+
+1. **No ostree/GRUB variant for Windows machines.** Every APEX machine boots
+   systemd-boot from a UKI through the same `bootc install --composefs-backend
+   --bootloader systemd` path.
+2. **APEX builds its own ESP. Windows' ESP is read for facts and NEVER
+   written.** Not "preferably not" — never. No flag makes it writable.
+
+The 68.3 MiB-free measurement stops being a constraint to defeat and becomes
+the reason not to borrow the partition at all: a Windows feature update that
+grows `\EFI\Microsoft` would reclaim any slack squeezed into it, and the next
+`apex update` would fail on a machine that worked the day before.
+
+Already true on the tip, checked rather than assumed — do not re-derive:
+
+- `bootc install to-filesystem` writes to the ESP **the caller mounts**; its
+  own help says partitions "are prepared and mounted by an external tool or
+  script".
+- `apex-boot-migrate` already accepts `APEX_MIGRATE_ESP`.
+- It already distinguishes `find_esp()` (the root disk's ESP) from
+  `booted_esp_partuuid()` (the one firmware loaded from).
+
+The work is ESP **creation** and preferring APEX's own, not inventing ESP
+selection.
+
+**The second product decision — whether the tool may retype a basic-data
+partition itself — is STILL Andre's and is unchanged.**
+
+`initramfs-slim` is not retired: the 512 MiB ceiling still binds wherever the
+ESP is already APEX's own, which is the L16 and every existing install.
