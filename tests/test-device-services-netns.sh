@@ -198,11 +198,19 @@ echo 1 > /proc/sys/net/ipv4/ip_forward 2>/dev/null || fatal "cannot enable forwa
 udp_probe() {
     local dport=$1 dst=${2:-10.91.0.1} sport=${3:-0} mode=${4:-unicast} out tag
     tag="${dport}.${dst##*.}.${sport}"
-    python3 - "$dport" >"/tmp/.rx.$tag" 2>/dev/null <<'PY' &
-import socket, sys
+    python3 - "$dport" "$mode" "$dst" >"/tmp/.rx.$tag" 2>/dev/null <<'PY' &
+import socket, struct, sys
 s = socket.socket(socket.AF_INET, socket.SOCK_DGRAM)
 s.setsockopt(socket.SOL_SOCKET, socket.SO_REUSEADDR, 1)
 s.bind(("0.0.0.0", int(sys.argv[1])))
+# A multicast datagram is only delivered to a socket that JOINED the group.
+# Without this the case fails for a reason that has nothing to do with the
+# firewall, which is how the equivalent probe in test-apex-firewall-live.sh
+# first went red.
+if len(sys.argv) > 2 and sys.argv[2] == "mcast":
+    s.setsockopt(socket.IPPROTO_IP, socket.IP_ADD_MEMBERSHIP,
+                 struct.pack("4s4s", socket.inet_aton(sys.argv[3]),
+                             socket.inet_aton("10.91.0.1")))
 s.settimeout(2.0)
 try:
     s.recvfrom(512); print("ARRIVED")
@@ -217,7 +225,17 @@ dport, dst, sport, mode = int(sys.argv[1]), sys.argv[2], int(sys.argv[3]), sys.a
 s = socket.socket(socket.AF_INET, socket.SOCK_DGRAM)
 s.setsockopt(socket.SOL_SOCKET, socket.SO_REUSEADDR, 1)
 src = "10.91.0.2" if dst.startswith("10.91.") else "10.92.0.2"
-if mode == "bcast":
+if mode == "mcast":
+    # A multicast destination tells you nothing about which link to use, and
+    # the line above picks by dst prefix — so 224.0.0.251 selected the SECOND
+    # veth while the receiver had joined the group on the first, and the
+    # datagram was never going to arrive. Name the link the receiver is on.
+    src = "10.91.0.2"
+    # The namespace has no route for 224.0.0.0/4, so name the outgoing
+    # interface by its address or the datagram never leaves.
+    s.setsockopt(socket.IPPROTO_IP, socket.IP_MULTICAST_IF, socket.inet_aton(src))
+    s.setsockopt(socket.IPPROTO_IP, socket.IP_MULTICAST_TTL, 1)
+elif mode == "bcast":
     # What a client that has no address yet actually sends: SO_BROADCAST, from
     # port 68 to port 67. The destination is the link's broadcast rather than
     # 255.255.255.255 only because this namespace has two links and a limited
@@ -296,7 +314,10 @@ PY
 nft -f "$RULES" 2>/dev/null || fatal "the shipped ruleset would not load in a namespace"
 
 # Discovery, which the policy permits so that a driverless printer can be found.
-echo "CASE mdns-control  $(udp_probe 5353)"
+# mDNS is scoped to its multicast group, so the control has to BE multicast;
+# the unicast probe beside it is the half the policy now refuses.
+echo "CASE mdns-control  $(udp_probe 5353 224.0.0.251 0 mcast)"
+echo "CASE mdns-unicast  $(udp_probe 5353)"
 echo "CASE llmnr-udp     $(udp_probe 5355)"
 echo "CASE llmnr-tcp     $(tcp_probe 5355)"
 
@@ -415,12 +436,24 @@ fi
 
 echo
 echo "── discovery, which has to work with nobody configuring anything ───────"
-[ "$(verdict llmnr-udp)" = ARRIVED ] \
-    && ok "LLMNR over UDP reaches this machine" \
-    || bad "LLMNR over UDP reaches this machine" "a Windows host could not resolve this one by name"
-[ "$(verdict llmnr-tcp)" = ARRIVED ] \
-    && ok "LLMNR over TCP reaches this machine" \
-    || bad "LLMNR over TCP reaches this machine" "the TCP half of LLMNR is shut"
+# A unicast datagram to 5353 is not how a printer is found; it is how a
+# stranger enumerates this machine and how an mDNS reflector recruits it.
+[ "$(verdict mdns-unicast)" = SILENT ] \
+    && ok "a unicast probe to mDNS is refused" \
+    || bad "a unicast probe to mDNS is refused" "port 5353 is open to any host, not just the group"
+
+# LLMNR is refused, and that is a measurement rather than a preference:
+# systemd-resolved ships LLMNR=resolve, which asks LLMNR questions and never
+# answers them, so accepting 5355 admitted packets to a service that discards
+# them. Windows has found Linux hosts over mDNS since Windows 10 1803, so no
+# name is lost. Asserted in both halves so re-adding the rule without
+# re-deciding the policy turns this red.
+[ "$(verdict llmnr-udp)" = SILENT ] \
+    && ok "LLMNR over UDP is refused" \
+    || bad "LLMNR over UDP is refused" "5355 is open and nothing on this machine answers it"
+[ "$(verdict llmnr-tcp)" = SILENT ] \
+    && ok "LLMNR over TCP is refused" \
+    || bad "LLMNR over TCP is refused" "the TCP half of 5355 is open and answered by nothing"
 
 echo
 echo "── sharing, which is closed until somebody says otherwise ──────────────"
