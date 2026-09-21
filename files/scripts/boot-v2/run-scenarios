@@ -2459,6 +2459,63 @@ scenario_luks_pcr7_signed() {
     else
         ok "PCR 11 MOVED between the enrolling boot and this one ($pcr11_a -> $pcr11_b) and the signed policy still unsealed — a value-bound policy would have refused"
     fi
+
+    # ── boot C: the refusal arm. A UKI whose PCR policy is signed by the OTHER
+    #    key, and the recovery key boot A generated.
+    #
+    #    WITHOUT THIS, BOOT B IS NOT YET A RESULT. "The token unsealed under a
+    #    PCR 11 it was not enrolled against" has two explanations — the
+    #    signature satisfied a PolicyAuthorize, or the policy constrains nothing
+    #    and would unseal for anybody. tpm2_report already refuses a zero policy
+    #    hash, which rules the second out by inspection; this rules it out by
+    #    measurement, in a guest, against the same token.
+    #
+    #    --pcrpkey stays the REAL public key (luks_uki does this for every
+    #    caller) so the refusal is isolated to the SIGNATURE. If the embedded
+    #    public key were swapped too, "the key in the image is not the enrolled
+    #    one" would explain the refusal just as well, and the boot would not
+    #    distinguish a policy check from a key-identity check. ────────────────
+    local hookdir_c="$WORK/luks-pcr7s-hook-c"
+    rm -rf "$hookdir_c"; mkdir -p "$hookdir_c/var/lib/dracut/hooks/pre-mount"
+    install -m 0755 "$HERE/guest-luks-probe.sh" \
+        "$hookdir_c/var/lib/dracut/hooks/pre-mount/50-apex-luks-probe.sh"
+    local have_recovery=0
+    if [[ -s "$WORK/luks-pcr7s-recovery.key" ]]; then
+        install -m 0400 "$WORK/luks-pcr7s-recovery.key" "$hookdir_c/apex-bootlab-recovery-key"
+        have_recovery=1
+    fi
+    ( cd "$hookdir_c" && find . -print0 | cpio --null -o -H newc --quiet ) \
+        > "$WORK/luks-pcr7s-hook-c.cpio"
+    luks_uki pcr7sc "$KEYS/foreign/key.pem" "$WORK/luks-pcr7s-hook-c.cpio" \
+        "apex.bootlab.luks=unlock" || return
+
+    local diskc="$WORK/disk-pcr7s-c.img" varsc="$WORK/vars-pcr7s-c.fd"
+    local serc="$WORK/serial-pcr7s-c.log"
+    "$HERE/apex-mkesp" --disk "$diskc" --size 1024 \
+        --sb-key "$KEYS/sb/key.pem" --sb-cert "$KEYS/sb/cert.pem" \
+        --uki "lukspcr7sc:0:$WORK/uki-luks-pcr7sc.efi" --default 'apex-lukspcr7sc*' >/dev/null
+    fresh_vars "$varsc"
+    rc=0
+    vm_boot --disk "$diskc" --vars "$varsc" --name pcr7s-foreign --serial "$serc" \
+            --tpm-state "$state" --extra-disk "$img" \
+            --mem 4096 --timeout 240 || rc=$?
+    assert_eq 0 "$rc" "pcr7-signed foreign-signature boot: clean guest poweroff"
+    # A signature WAS offered. Without this the refusal below would read the
+    # same whether the signature failed to verify or was never published at
+    # all, and only the first says anything about the policy.
+    assert_serial_has "$serc" "APEX-BOOTLAB: pcr-signature=/run/systemd/tpm2-pcr-signature.json"
+    assert_serial_has "$serc" "APEX-BOOTLAB: tpm-unlock=REFUSED"
+    assert_serial_lacks "$serc" "APEX-BOOTLAB: tpm-unlock=SUCCESS"
+    if (( have_recovery )); then
+        assert_serial_has "$serc" "APEX-BOOTLAB: recovery-unlock=SUCCESS"
+        # A mapper appearing says a keyslot was satisfied. The marker says the
+        # user got THEIR DISK back — written through the TPM path in boot B,
+        # read here through the recovery key, so the two are joined in one
+        # scenario rather than left as separate green checks that never met.
+        assert_serial_has "$serc" "APEX-BOOTLAB: recovery-marker=found"
+    else
+        cannot "no recovery key was captured from boot A, so the refusal arm's recovery path is untested this run"
+    fi
 }
 
 # ═════════════════════════════════════════════════════════════════════════════
