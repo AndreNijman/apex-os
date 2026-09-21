@@ -68,8 +68,9 @@ The dispatch note said `Installer safety and UI` "ran on no push". That is not
 what the runs say: it ran on nine (five green, four red — 35518416643,
 35566068754, 35611127672, 35649643570). The corrected number is the stronger
 one: the job was selected by 5% of pushes and by 100% of merge-shaped
-classifications, and the four reds it did produce were spread across four days
-without ever being the thing a landing was blocked on.
+classifications, and none of the four reds was a run against which a landing
+was checked — each of them is a run that happened to touch `installer/` on its
+way past.
 
 ## The fix
 
@@ -139,6 +140,29 @@ FAIL: on.push.branches equals the step INTEGRATION_BRANCHES list
 7 passed, 0 failed        (exit 0)
 ```
 
+### And on a GitHub runner — GREEN
+
+Run **35651168049**, `pr-validation.yml` dispatched on `task/ci-selector-base`.
+`Static validation` green, and the new step reports the same seven:
+
+```
+##[group]Run ./tests/check-ci-selector-parity.sh
+PASS: the merge PR selects exactly installer and rust — rc=0 jobs=[installer,rust]
+PASS: a push to the integration branch selects what the merge PR selects — rc=0 jobs=[installer,rust]
+PASS: a push to a TASK branch still classifies narrowly — rc=0 jobs=[rust]
+PASS: an all-zeros before (new branch) falls back to the merge base — rc=0 jobs=[installer,rust]
+PASS: an unreachable before (force push) falls back to the merge base — rc=0 jobs=[installer,rust]
+PASS: no usable range selects every suite and does not exit 128 — rc=0 jobs=[android,engine,installer,rust]
+PASS: on.push.branches equals the step's INTEGRATION_BRANCHES (roadmap/v2.2 )
+
+7 passed, 0 failed
+```
+
+That matters for more than a tick: the gate builds git repositories and parses
+YAML with nothing but python3's standard library, deliberately, because the
+runner image is not contracted to carry PyYAML and a gate that cannot run is
+worth nothing.
+
 The five assertions that pass in both directions are the point of the second
 list: they are the evidence that the fallbacks were not regressed while the
 base was changed.
@@ -196,11 +220,32 @@ in this same run.
    broken guard from a missing image. That is the more serious half: it is a
    control that no longer controls anything.
 
+**This suite has never once passed in CI, and that is measurable rather than
+inferred.** `installer/test-installer-luks.sh` and the workflow step that runs
+it landed 2026-09-20 (`92bdf557`, extended by `05b0ea55` on 09-21). Every
+`Installer safety and UI` job since:
+
+| run | date | `Run installer disk-encryption suite` |
+|---|---|---|
+| 35518416643 | 09-20 15:04 | skipped — `installer-locale` above it was red |
+| 35566068754 | 09-21 05:50 | skipped — same |
+| 35611127672 | 09-21 14:17 | skipped — same |
+| 35649643570 | 09-21 20:12 | **failure** — the first run to reach it |
+| 35650126791 | 09-21 20:17 | **failure** |
+
+All three skipped runs died on `FAIL …and the console keymap — want [de] got []`,
+the locale defect `6fa9ddbc` fixed. So the luks red is not something the tip
+introduced: it is a red that has been hiding behind another red since the suite
+landed, and `6fa9ddbc` is what uncovered it. The five *green* installer runs
+(2026-09-12/13) predate the step entirely — it is not in their step list.
+
 ### RED 2 — the accessibility audit's state is UNKNOWN, not green
 
 `Run installer accessibility audit` reported `-` in that job, because the
 disk-encryption step above it failed and a failed step skips every step below
-it. The `installer` job's steps carry no `if: ${{ !cancelled() }}`, unlike the
+it. It last reported for itself on 2026-09-13 (run 34727364060, green), before
+either the keyboard or the disk-encryption step existed above it; it has been
+skipped in every installer job since. The `installer` job's steps carry no `if: ${{ !cancelled() }}`, unlike the
 `engine` job's gates, which were given it after run 34714159369 for precisely
 this. So the installer job's later steps are switched off by any earlier red.
 Small, mechanical, and its own unit.
@@ -247,6 +292,14 @@ with `force_core` as the escape hatch rather than a widened filter.
   would equal the head, the diff would be empty, every selector false, every job
   skipped and `result` green. The new list assertion forces that into the open
   rather than preventing it.
+- **The `push` arm's own runner-side proof is still owed, and here is what it
+  looks like.** Everything below was measured on `workflow_dispatch` runs,
+  which exercise the `*)` arm — the same `git merge-base origin/main` call
+  under the same `actions/checkout@v4` `fetch-depth: 0`, so this is sound
+  inference, not measurement of the changed line. The first push to
+  `roadmap/v2.2` after this lands must log
+  `::notice::classified push over 57f593ad..<new sha>` in `Select tests` and
+  dispatch all four jobs. That is the thing to look for.
 - `git merge-base origin/main "$head"` does resolve on the runner —
   run 35647188306 logged `classified workflow_dispatch over 57f593ad..9c389baf`
   and `57f593ad` is the tip of `main`, so `actions/checkout@v4` with
