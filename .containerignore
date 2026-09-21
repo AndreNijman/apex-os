@@ -7,7 +7,30 @@
 # seeding a container build. CI never noticed because a fresh checkout has no
 # target/; a local build is where it bites, and "works in CI, wrong locally" is
 # the harder direction to debug.
+#
+# ── ANCHORED. `**/target/` is FORBIDDEN here, and this is the second time ───
+#
+# This file shipped `**/target/` and it broke every image build. The pattern
+# also matches `apexd/apex-backup-core/src/target/`, which is a SOURCE module —
+# the backup destinations, fs/ssh/bucket — so `COPY apexd/` delivered a tree
+# whose lib.rs says `pub mod target;` with no such file, and cargo answered:
+#
+#     error[E0583]: file not found for module `target`
+#     error: could not compile `apex-backup-core` (lib)
+#
+# The `base` job then exited 101 having produced no image. Run 35608265004.
+#
+# .gitignore learned this first and its comment records it: a bare `target/`
+# hid that same directory from git for the life of the repository, and the fix
+# was to anchor each real cargo output directory by path. This file now does
+# the same, and tests/check-containerignore-anchored.sh refuses any unanchored
+# `target` pattern so the lesson does not have to be learned a third time.
+#
+# Only apexd/ and windows-installer/ carry a Cargo.toml with its own build
+# directory; every other Cargo.toml under apexd/ is a workspace member and
+# shares apexd/target/.
 apexd/target/
-**/target/
+apexd/target-clippy/
+windows-installer/target/
 
 .git/

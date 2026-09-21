@@ -3520,6 +3520,22 @@ jobs:
           # owner asked for by name, which no CI run had ever executed.
           ./tests/check-suites-run-in-ci.sh
 
+      - name: The build context carries every tracked source file
+        # `.containerignore` carried `**/target/`, which also matches
+        # apexd/apex-backup-core/src/target/ — a SOURCE module, the backup
+        # destinations. `COPY apexd/` then delivered a crate whose lib.rs says
+        # `pub mod target;` with no such file, and every image build died in
+        # `base` with `error[E0583]: file not found for module target`, exit
+        # 101, no image. Run 35608265004.
+        #
+        # Nothing else could have caught it: the file is committed, .gitignore
+        # is correct, and the compiler names a module rather than a path. The
+        # gate asks git what it tracks under each crate's src/ and whether the
+        # context rules would drop it, so a future pattern nobody predicted is
+        # caught by the same check.
+        if: ${{ !cancelled() }}
+        run: ./tests/check-containerignore-anchored.sh
+
       - name: No merge conflict markers reach the tip
         # Landed after a merge replay shipped `<<<<<<<`/`=======`/`>>>>>>>` into
         # apex-shell's src/state/IpcManager.qml and a smoke script. The QML one

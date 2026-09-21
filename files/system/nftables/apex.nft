@@ -146,12 +146,45 @@ table inet apex {
         iifname @hotspot_ifaces udp dport { 53, 67 } accept
         iifname @hotspot_ifaces tcp dport 53 accept
 
-        # mDNS and LLMNR. Printers, Chromecasts, and `apex host` discovery all
-        # depend on answering these; a desktop that cannot be resolved by name
-        # on its own LAN is a support ticket.
-        udp dport 5353 accept
-        udp dport 5355 accept
-        tcp dport 5355 accept
+        # mDNS. Printers, Chromecasts and `apex host` discovery depend on
+        # answering this; a desktop that cannot be resolved by name on its own
+        # LAN is a support ticket. Measured on the L16 2026-09-21: with avahi
+        # running, one `avahi-browse` found a FUJIFILM ApeosPrint over _ipp,
+        # _ipps and _pdl-datastream.
+        #
+        # Scoped to the mDNS multicast groups rather than accepting the port
+        # from anywhere. RFC 6762 sends queries to 224.0.0.251 and ff02::fb, so
+        # discovery is unaffected, while a UNICAST packet to port 5353 from an
+        # arbitrary host is refused. That packet is not how a printer is found;
+        # it is how a stranger enumerates this machine, and how an mDNS
+        # reflection amplifier recruits it. Replies to queries THIS machine
+        # sent arrive on an ephemeral port and are already covered by the
+        # established/related rule at the top of this chain.
+        ip daddr 224.0.0.251 udp dport 5353 accept
+        ip6 daddr ff02::fb   udp dport 5353 accept
+
+        # LLMNR is NOT accepted, and that is a measurement rather than a
+        # preference.
+        #
+        # systemd-resolved ships `LLMNR=resolve` (the upstream default, in
+        # /usr/lib/systemd/resolved.conf; APEX pins nothing). `resolve` asks
+        # LLMNR questions and NEVER answers them -- answering needs `LLMNR=yes`.
+        # Measured on the L16 2026-09-21: resolved reports
+        # `Protocols: LLMNR=resolve` on every scope, so an inbound LLMNR query
+        # reaches a service that discards it. The old `udp/tcp dport 5355
+        # accept` pair therefore admitted packets to nothing, on every
+        # interface, for no function.
+        #
+        # What it did buy was exposure. LLMNR poisoning is the standard way a
+        # stranger on a cafe or hotel LAN answers a name lookup and becomes the
+        # host you meant; the port being open is what lets that machine also
+        # probe back. Windows finds Linux hosts over mDNS on anything since
+        # Windows 10 1803, so nothing on a normal LAN loses a name.
+        #
+        # If a future APEX ever sets `LLMNR=yes`, this needs a rule again --
+        # scoped to 224.0.0.252 and ff02::1:3, which is the link-local scope
+        # RFC 4795 defines. Until something answers, there is nothing to open.
+        # A user who wants it today has `apex firewall allow`.
 
         # ssh, and the one exception that is genuinely load-bearing here: APEX
         # remote agents, `apex host run` and `apex build --on` are all ssh, and
