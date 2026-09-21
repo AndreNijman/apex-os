@@ -600,3 +600,188 @@ nobody has asked.
 | Orca at the login screen (queue item 1) | **could-not-run** — pressing the key makes the machine speak, and nobody is at it |
 | greeter audio (queue item 2) | **could-not-run** — same; pipewire is inactive in the greeter session, which is the first thing to check |
 | magnifier / high-contrast / reduced-motion | **not measured this round** |
+
+---
+
+## 4. P1-038 — the session rows, and the agent that was already using the seat
+
+A labwc session was armed the documented way and came up: `qual-greetd-restore`
+dead-man first, then
+`greetd-set.sh apex-labwc "" p1038-labwc`, then `systemctl restart greetd` (the
+script clears `/run/greetd.run`, which is the whole trick — a bare restart
+starts the greeter and logs nothing unusual). Session 68 on seat0/tty1,
+`Type=wayland`, with `labwc` 9632, `quickshell -c /usr/share/apex-shell` 9702
+and `Xwayland :0`.
+
+**It was given up 6 minutes later, deliberately.** See the last subsection.
+
+### 4.1 The real shell's accessibility tree — the reading this round was worth most
+
+`run-lockscreen-atspi.sh` records the shell as publishing one node:
+`root | role=application | name=quickshell | ChildCount=0`. On this image, in a
+real labwc session, with `ScreenReaderEnabled` set:
+
+| | |
+|---|---|
+| applications on the bus | **3** — `quickshell`, `polkit-mate-authentication-agent-1`, `xdg-desktop-portal-gtk` |
+| `quickshell` nodes | **9** (application + **8 `frame`s**) |
+| max depth | 1 |
+| named nodes under the application | 0 |
+| nodes exposing `Action` | 0 |
+| re-walk at t+5 s and t+15 s | 11 total nodes both times — **not lazy** |
+
+So `ChildCount` moved from 0 to 8 and the frames arrived; **what did not arrive
+is anything inside them.** The bar publishes no controls.
+
+Then the session was locked, which is the surface `run-lockscreen-atspi.sh` is
+named for:
+
+```
+  2147483727 | role=frame        | states=active,enabled,sensitive,showing,visible
+    2147483721 | role=text  | name= | desc=Type your password and press Enter to unlock.
+               | states=editable,enabled,focusable,focused,sensitive,showing,visible | actions=SetFocus
+    2147483722 | role=label | name= | states=enabled,focusable,read-only,sensitive,showing,visible | actions=SetFocus
+  2147483728 | role=frame        (the same two again — one lock surface per output)
+```
+
+17 nodes while locked. **The lock screen IS reachable, and the password field
+again has an empty name and keeps its description** — the same
+`Accessible.passwordEdit` behaviour §3 measured at the greeter.
+
+The conclusion is sharper than "P2-003 is fixed": **the markup that exists now
+reaches the bus, and the bar has none.** The lock screen is marked up
+(`check-lockscreen-a11y.sh` asserts it) and appears; the bar's eight frames are
+empty because there is nothing attached to their contents. That is a concrete,
+bounded next task, and it could not have been seen before this image.
+
+#### Two traps for whoever measures this next
+
+- **Ask for the bus address; do not guess the path.** In a user session it is
+  `/run/user/1000/at-spi/bus_0`, not `…/at-spi/bus`, and **it does not exist
+  until something calls `org.a11y.Bus.GetAddress`**. A probe that stats the
+  path reports "no accessibility bus" about a perfectly healthy session. This
+  round did exactly that and got a false negative before correcting it.
+- **`loginctl unlock-session` does not unlock the APEX lock screen.**
+  `LockedHint` stayed `yes` after it. That is arguably right — a lock any
+  process on the bus can lift is not a lock — but it is undocumented and it
+  strands an unattended run. Recorded, not graded.
+
+### 4.2 Application floors
+
+Floors only. None of these is the row; each is the part of the row that can be
+read without a person looking at the screen.
+
+| row | floor measured | verdict |
+|---|---|---|
+| 11 LibreOffice | `soffice --writer` maps `libvcllo.so` with `libgtk-3.so.0.2420.32` and `libwayland-client.so.0.26.0` in `/proc/<pid>/maps` — **the gtk3 VCL plugin, on Wayland** | **floor: pass.** The row (gtk3 *and* qt6 VCL) still needs a person: only the plugin actually loaded can be read this way |
+| 12 Blender | `blender --factory-startup` runs and maps `libwayland-client`, `libX11` **and** `libxcb` | **floor: pass, backend undecided.** Blender links all three; the maps cannot say which GHOST backend it chose, and it printed no backend line |
+| 8 Wine / XWayland | **blocked on a broken install — see below** | **could-not-run** |
+
+#### `apex install wine` on katana produced a wine that cannot run anything
+
+```
+$ wine64 notepad
+wine: created the configuration directory '/var/home/andre/.wine'
+wine: could not exec wineserver
+```
+
+| binary | katana |
+|---|---|
+| `wine64` | `/usr/bin/wine64` |
+| `wineserver` | **ABSENT** |
+| `wineboot` | **ABSENT** |
+| `winecfg` | **ABSENT** |
+| `wine` | ABSENT (expected — not a Fedora binary name) |
+
+`katana-p1038-apps-20260922.md` says "`/usr/bin/wine64`, `wineboot`, `winedbg`
+and `/usr/bin/chromium-browser` are all present", and records as a finding that
+a `command -v wine` answering ABSENT is the wrong question. **The right question
+answers ABSENT too**: `wineserver` is the process every wine invocation execs
+first, and it is not on this machine. Row 8 is blocked on the install, not on
+the compositor — and the earlier evidence's binary list needs correcting.
+
+### 4.3 Rows 13 / 14 / 15 — could-not-run, and the reason is another agent
+
+Scale (1.25 / 1.5 / 1.0), transform (90 / normal) and mode (60 Hz / 240 Hz) were
+scripted against `wlr-randr` with the shell's pid asserted unchanged after each.
+`wlr-randr` had listed both outputs in full 90 seconds earlier — `HDMI-A-1`
+Lenovo R25f-30 at 1920x1080@239.96 position 1920,0, `eDP-1` AU Optronics 0x978F
+at 1920x1080@144.03 position 0,0, both `Transform: normal`, `Scale: 1.000000`,
+`Adaptive Sync: disabled`. By the time the loop ran, every call answered
+`unknown output` and `wlr-randr --json` answered `[]`.
+
+The cause is not labwc. At **03:53:07** a second desktop session started on
+tty2, `PAMName=login`, `XDG_VTNR=2`, `XDG_SESSION_DESKTOP=Hyprland`, as
+`qual-sess-hyprland.service` running `/usr/bin/start-hyprland` — and `chvt 2`
+took seat0 with it. An inactive session's compositor has no outputs, so
+`wlr-randr` correctly reported none. Rows 13/14/15 measured nothing and are
+graded **could-not-run**, reason: the seat was taken mid-run.
+
+### 4.4 Another agent was on this machine at the same time
+
+This is the finding of section 4 and it is about the program, not the image.
+
+`sudo`'s own journal for 03:35–03:55 carries commands that are not this unit's:
+
+```
+ 3  systemd-run --unit=qual-sess-hyprland … --property=PAMName=login
+                --property=TTYPath=/dev/tty2 … /bin/sh -lc /usr/bin/start-hyprland
+ 5  systemctl stop qual-sess-hyprland.service
+ 3  chvt 2
+ 4  /usr/libexec/apex-greet-wallpaper
+ 3  gsettings get org.gnome.desktop.interface toolkit-accessibility
+ 2  python3 /tmp/a11y-probe.py
+ 3  rm -f /var/tmp/qual-sess-hyprland.log
+```
+
+That is a second roadmap agent running **P2-003 accessibility work on a
+Hyprland session**, started, stopped and restarted three times while this unit
+was arming a labwc session on the same seat. Neither unit's card mentions the
+other. Two agents were dispatched at one physical seat in round 40.
+
+Nothing was fixed here and nothing of theirs was touched. This unit stood down:
+
+| step | reading afterwards |
+|---|---|
+| disarm this unit's `qual-greetd-restore` dead-man **first** — its action restarts greetd and would have stomped their session at 04:32 | 0 timers matching `qual-greetd-restore*` |
+| restore `/etc/greetd/config.toml` from `.orig-qual2` **without** restarting greetd | `cmp` identical; sha256 `d7298f54fa4bf46de3a426e3a6abecac02b7d64a7e1f5bfe03b4662682514d3d`, the pre-arming value; **0** `initial_session` lines; `/run/greetd.run` present, so the next restart starts the greeter and not a session |
+| `loginctl terminate-session 68` (this unit's own session only) | `labwc` count **0**; greeter back as `c2`, its `qs` running |
+| `chvt 2` — hand the seat back | seat0 `ActiveSession=89`, their Hyprland session, where it was |
+| whole machine | 0 failed units; `apex game status active: false`; `/sys/kernel/sched_ext/state` `disabled`; 0 leftover blender/soffice/wine; 0 timers of this unit's left |
+
+`qual-sess-hyprland.service` was left running and was never stopped by this
+unit.
+
+### P1-038 scorecard
+
+| row | verdict |
+|---|---|
+| 1–5 Firefox/Chromium sharing, OBS, Discord, Flatpak portals | **could-not-run** — a portal picker is a dialog somebody has to choose in; Discord and Chromium can also raise a keyring prompt on a screen nobody is at |
+| 6–7 Steam, gamescope | **not re-run** — `katana-image-qual-20260919.md` §6.3 already reached Steam Big Picture inside gamescope on the RTX 3070 on this machine. Cited, not repeated |
+| 8 Wine / XWayland | **could-not-run — broken install.** `wineserver`, `wineboot` and `winecfg` are absent; `wine64` dies with `could not exec wineserver` |
+| 9 VS Code, 10 JetBrains | **could-not-run** — VS Code can raise a keyring prompt unattended; JetBrains was deliberately not installed |
+| 11 LibreOffice | **floor: pass** (gtk3 VCL on Wayland). Row needs a person for the qt6 plugin |
+| 12 Blender | **floor: pass** (runs, maps a display stack). Backend undecidable from maps |
+| 13 fractional scaling, 14 rotation, 15 refresh-rate | **could-not-run** — the seat was taken by another agent's session mid-run; `wlr-randr` then reported no outputs |
+| 16 VRR | **permanently could-not-run on katana** — no connector exposes `vrr_capable`. Confirmed again this round: `wlr-randr` reports `Adaptive Sync: disabled` on both outputs |
+| 17 suspend/resume | **could-not-run** — suspending a machine nobody is at, with this program's record of a suspend that did not come back |
+| 18 output hotplug | **could-not-run** — plugging a cable needs a person |
+
+What section 4 does add to P1-038: the labwc session **comes up from greetd on
+this image**, with the shell, Xwayland, the portal and the polkit agent all
+registering; two real outputs at genuinely different DPI are present and
+enumerable; and the accessibility half of the matrix has a real reading for the
+first time.
+
+---
+
+## What this round changed, in one place
+
+| | |
+|---|---|
+| **P1-043** | Gaming Mode has loaded a sched-ext scheduler through apexd, on hardware, for the first time. Two new defects: `root/ops` carries a build-ID suffix, and the `switch` branch has a 1.42 s race that reports a live scheduler as `not loaded` |
+| **P2-003** | The greeter publishes 17 accessibility nodes; the shell publishes 9 and its lock screen 17; the bar publishes none. The one-node era is over |
+| **P2-005** | The IPP path completes end to end against two vendors' printers without paper |
+| **P2-006** | All the NetworkManager and firewall lines answer; the hotspot row stays could-not-run for two named reasons |
+| **P2-007** | udev, udisks2 and bluetooth all answer; the tool's `paired devices` reading is right and the starting sweep's was wrong |
+| **P1-038** | Two floors measured, one row blocked on a broken wine install, and three rows lost to a second agent on the same seat |
