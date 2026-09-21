@@ -64,19 +64,83 @@ on the very initramfs the branch produces (`! grep -qE
   modules. A host-built listing therefore fails four unlock-chain gates for a
   reason that has nothing to do with this branch.
 
+### MEASURED — round 39, the attribution matrix (NEW, supersedes round 1's numbers)
+
+All five built in the SAME deployment chroot (`vm/mk-initramfs.sh`, the real
+bootc-installed APEX deployment, kernel **7.2.5**-cachyos1 — NOT the L16 host's
+7.2.3), with the exact flags Containerfile.apex:244 uses. Bytes, then what the
+step bought:
+
+| variant | what it adds | bytes | MiB | delta |
+|---|---|---|---|---|
+| v0 | as shipped (`add_drivers+=nvidia…`) | 376,595,424 | 359.1 | — |
+| v1 | minus `add_drivers` (RPMFusion default) | 291,208,822 | 277.7 | **-81.4** |
+| v2 | + omit nouveau/amdgpu/i915/xe/radeon/amdkfd/nvidia* | 138,978,697 | 132.5 | **-145.2** |
+| v3 | + omit network/nfs/nvmf modules (**what the branch ships**) | 103,256,987 | 98.5 | **-34.0** |
+| v4 | v3 with `compress="zstd -19"` in dracut.conf.d | 103,256,987 | 98.5 | **0.0** |
+
+* **The per-deployment number, quotable:** vmlinuz 16,910,408 + initramfs
+  103,256,987 = **120,167,395 B = 114.6 MiB per deployment**, so
+  `need = 3 x 114.6 + 48 = 391 MiB`. **Fits a 512 MiB ESP with ~120 MiB spare.**
+  Today's shipped image is 16,910,408 + 376,456,492 = 375.2 MiB per deployment,
+  `need = 1173 MiB` — which is why every 512 MiB ESP is refused today.
+* **v2 alone does NOT fit the 130 MiB ceiling (132.5 MiB).** Both omissions are
+  load-bearing; the KMS one alone is not enough.
+
+### FOUND — `compress=` in dracut.conf.d is dead code in this build
+
+v3 and v4 are the SAME sha256 (`b6ca6196…3946`), byte for byte, and both record
+`--zstd` in their dracut Arguments. `Containerfile.apex:244` passes `--zstd` on
+the COMMAND LINE, which overrides any `compress=` in dracut.conf.d. So tuning
+compression through the conf file cannot work and any future attempt to do it
+there is a no-op that looks like a setting. (Round 1's host-measured "varB19
+saves 3.2 MB" was produced without that command-line flag and does not
+transfer.) Adopting -19 would mean changing the Containerfile's dracut flags.
+
+### MEASURED — the reproducibility answer
+
+* **Run-to-run: byte-identical.** v3 built twice in the same chroot ->
+  `b6ca6196…3946` both times, `cmp` clean. `--reproducible` holds.
+* **Lab chroot vs the real image build: faithful, not bit-identical.** Lab v0
+  vs the initramfs the image build actually shipped on this disk:
+  - the dracut MODULE LIST is **identical**
+  - **zero** paths present in the shipped image are missing from the lab one
+  - the lab one has **14 extra entries** and is 138,932 B larger (0.037%):
+    `dev/{console,kmsg,null,random,urandom}`, `var/roothome`,
+    `var/lib/nfs/statd*`, `usr/etc/*`, one authselect symlink — every one of
+    them an artefact of the bind mounts that make the chroot runnable.
+  So the lab predicts image content exactly and image BYTES to 0.04%. It does
+  NOT prove cross-host bit-reproducibility, and `--reproducible` fixes
+  timestamps, not the package set.
+
+### FOUND — a stale comment the branch contradicts
+
+`Containerfile.apex:226-229` still says core's 99-nvidia-dracut.conf "is what
+puts nvidia/nvidia_modeset/nvidia_drm/nvidia_uvm INTO this initramfs". The
+branch inverts exactly that. Must be rewritten with the gates.
+
 ### NEXT
 
-Write `files/scripts/check-initramfs-budget.sh` (predicate script, two modes:
-`--initrd IMG` for the Containerfile, `--list/--mods/--kconfig/--vmlinuz-bytes`
-for tests so CI never needs `lsinitrd`), replace the three broken/duplicated
-gates in Containerfile.apex with a call to it, add `tests/test-apex-initramfs-
-budget.sh` with a red fixture (vm/out/v0-nohook.img) and a green one
-(deployment-built v3), wire into pr-validation.yml, commit, push.
+Write `tests/test-apex-initramfs-budget.sh`: gzip `labv0.list` (fat) and
+`labv3.list` (slim) into `tests/fixtures/initramfs/`, assert the six slimming
+gates FAIL on fat and PASS on slim by name, plus a synthetic listing for the
+unlock-chain gates, then replace the inline gates in Containerfile.apex with a
+COPY + call of files/scripts/check-initramfs-budget.sh, wire the suite into
+pr-validation.yml, commit, push.
 
 ### DONE — round 39
 
 * merged origin/roadmap/v2.2 (b137f03f) into the branch at 530a9dc6, clean
 * ran all 12 gates against varB.list — found the two defects above
+* **7d9b959a pushed**: files/scripts/check-initramfs-budget.sh, the gates as a
+  predicate. Verified BOTH ways on real artifacts (green on slim, red on fat
+  naming gsp_ga10x.bin at 75 MB). shellcheck clean.
+  - Its own first draft had the repo's pipefail defect INSIDE it:
+    `printf | grep -qE` returned 141 on an early match (listing line 280) and 0
+    on a late one, so 7 present files read as absent. Predicates now grep a
+    real file. Recorded in the commit message.
+* re-attached the lab disk (now **/dev/loop1**, was loop2), mounted the
+  deployment; built v2/v3/v4/v3b; measured the full matrix + reproducibility.
 
 ## STATE — round 2 (fresh agent, 2026-09-21 ~11:45 AWST)
 

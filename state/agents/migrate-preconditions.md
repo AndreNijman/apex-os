@@ -1,5 +1,24 @@
 # migrate-preconditions — decide, before anything is written, whether this machine may migrate
 
+## LANDABLE — `7b509f19` on `task/migrate-preconditions`, pushed
+
+`roadmap/v2.2` (`b137f03f`) is merged in; `tests/test-boot-migrate.sh` is
+**83 passed, 0 failed**, and the new gate was mutation-tested red both ways.
+It makes `precheck` enforce `docs/apex-owns-its-esp.md` — a machine whose
+chosen ESP is Windows' is now refused instead of written — and stops the tool
+claiming an ESP override that does not exist. Nothing here creates a partition
+or writes a boot variable.
+
+**What landing it changes for a live machine:** one new refusal,
+`esp-is-windows`, on machines whose root-disk first ESP carries
+`bootmgfw.efi`. Checked, not assumed, on both machines this program owns: the
+L16 has no Windows on any disk, and katana's root-disk ESP is its own
+`EFI-SYSTEM` (Windows' is on a disk bootc never searches). Neither is
+affected. The behaviour it removes is writing Windows' ESP, which the decision
+forbids outright.
+
+---
+
 ## ROUND 39 STATUS — read this first; it supersedes every section below it
 
 ### THE JUDGEMENT ON THE 342 LINES: they survive. Do not revert them.
@@ -74,6 +93,42 @@ Two consequences, both bigger than this unit:
   exist. `bitlocker-shared-esp` kept but now only reachable under `--explain`,
   reworded to describe the fix rather than a hazard that can no longer happen.
   **77 passed, 0 failed** (`tests/test-boot-migrate.sh`).
+- `b45d641b` `test(boot): prove the Windows-ESP refusal by running it, not by
+  grepping for it` — six BEHAVIOURAL assertions, not greps: they run the engine
+  against two fixture ESPs differing by one file. **Mutation-tested both ways**
+  — `if windows_loader_on_esp` → `if false` gives "an ESP carrying Windows'
+  loader was allowed"; → `if true` gives "it is unconditional, so it proves
+  nothing"; unmutated 83/0. A grep for the refusal's name would have passed the
+  second mutation. `precheck --explain` is what makes this runnable without
+  root, loopback or UEFI on a CI runner.
+- `918f360f` + `7b509f19` — `ROADMAP/evidence/migrate-preconditions-20260921.md`.
+
+### MEASURED ON THE REAL L16 — read-only, and it proved the leak fix too
+
+`sudo apex-boot-migrate precheck --explain`, ESP **not** previously mounted, so
+this exercised the `ro` mount and the new `trap release_esp EXIT` against the
+production ESP. Afterwards `findmnt -S /dev/nvme0n1p1` is empty and
+`/run/apex-boot-migrate/esp` is empty. **No leak, no dirty bit.**
+
+The table showed **two** refusals: `secure-boot-unsigned-loader` AND
+`esp-too-small` (590 MiB free, 1170 needed, short by 580). **Plain `precheck`
+shows only the first** — it exits at Secure Boot having never mounted the ESP.
+That is the case for `--explain` in one screen, on a real machine.
+
+### THE NUMBER `initramfs-slim` IS AIMING AT — and it is tighter than anyone said
+
+The refusal now computes the budget from the live partition at run time, not a
+constant: **the L16 needs a kernel + initramfs of 180 MiB or less**, and
+**katana needs 154 MiB or less** (512 MiB ESP, so `(511-48)/3`). varB (~100 MB
+initramfs) + this vmlinuz is ~117 MiB and clears both — their number to
+confirm, not mine.
+
+**Correction to `docs/apex-owns-its-esp.md`, worth the orchestrator's
+attention:** it lists katana as needing "no new partition at all", with no
+shrink and no partitioning, as "the cheapest first proof". True, and not
+sufficient — the partition katana already has is **512 MiB**, so it fails the
+same fit check the L16 does, by more than 2x. **The katana proof and "it has to
+work in 512" are one requirement, and both wait on `initramfs-slim`.**
 
 ### MUST-MEASURE CHECKLIST (from `docs/apex-owns-its-esp.md`) — who takes what
 
@@ -90,13 +145,13 @@ answers #3 and that #1 depends on.
 
 ### NEXT
 
-1. Add the both-ways gate for `esp-is-windows` to `tests/test-boot-migrate.sh`:
-   PATH shims for lsblk/findmnt/blkid/df/du plus `APEX_MIGRATE_FAKEROOT` and
-   `APEX_MIGRATE_MOUNTDIR`, one fixture ESP WITH
-   `EFI/Microsoft/Boot/bootmgfw.efi` and one without, asserting REFUSE on the
-   first and no `esp-is-windows` verdict on the second. It must fail when the
-   refusal is deleted AND fail when it is made unconditional — a gate that
-   passes both ways is the dominant CI defect family in this repo.
+1. Land `7b509f19`. Then the next unit of work — and it is NOT this branch's —
+   is ESP **creation**, which is blocked as described under BLOCKED ON: with
+   `find_first_colocated_esp()` unoverridable, "prefer APEX's own ESP" means
+   being FIRST in the root disk's partition order, which is a GPT change and
+   therefore must-measure #1 (and #5 where Windows shares the disk). Whoever
+   takes it should start from `ROADMAP/evidence/migrate-preconditions-20260921.md`
+   §1, not from `docs/apex-owns-its-esp.md`'s "the caller mounts it" claim.
 
 ### FOUND (round 39 — defects in shipped/landed material, not mine)
 

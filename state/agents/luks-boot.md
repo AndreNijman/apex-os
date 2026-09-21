@@ -94,9 +94,11 @@ its work is already MERGED into this branch at 3e235bc1 — do not redo it),
    `/var`, 21 GB available RAM, `/dev/kvm` present.
 
 ## IN PROGRESS
-- **round 39: `luks-pcr7-run2.service` on KATANA**, launched 17:55 AWST,
-  checkout `31a3419b`, log `/var/lab/scratch/luks-boot/run2.log`. run1
-  (`325df6c4`) got boot A fully green and then aborted — see FOUND #8/#9.
+- **round 39: `luks-pcr7-run3.service` on KATANA**, launched 17:33 AWST,
+  checkout `2225d94c`, log `/var/lab/scratch/luks-boot/run3.log`.
+  run2 (`31a3419b`) ran ALL THREE BOOTS: **25 passed, 1 failed**, the one
+  failure being boot C's recovery unlock — FOUND #13, a trailing newline in
+  the LAB's key file, now fixed. run1 (`325df6c4`) aborted after boot A.
 - (superseded) `luks-pcr7-run1.service`, launched 17:35 AWST under
   `systemd-run --user`. Dir `/var/lab/scratch/luks-boot/` (my own; the other
   unit's `luks-enroll-2/` tree is untouched — apex-root was COPIED, 376 MB).
@@ -390,3 +392,21 @@ Everything else can be re-derived from git; the next action cannot.
    the shipped script's stderr — the stream the contract reserves for prose
    shown to a person. It does not affect correctness (every parse returned the
    right answer), but it is noise inside a user-facing stream.
+13. **Boot C's recovery unlock failed on a one-byte defect in the LAB, and
+   nothing shipped is wrong.** run2's boot C did the hard part right: the dbx
+   update moved PCR 7 (`69E722B3…` -> `C4681679…`) and the TPM slot refused to
+   unseal — `cryptsetup: TPM policy does not match current system state`, then
+   `tpm-unlock=REFUSED`. The recovery arm then said
+   `Failed to activate with key file '/apex-bootlab-recovery-key'.
+   (Key data incorrect?)`. The key data was correct; the FILE was 72 bytes and
+   a recovery key is 71. `cryptsetup --key-file <regular file>` uses EVERY BYTE
+   as the passphrase, and the scenario captured the key off the serial log and
+   rewrote it with `printf '%s\n'`. **Measured, not reasoned**: host-side on
+   katana against that same volume, over a read-only loop device, the 72-byte
+   file is REFUSED and the identical key piped without the newline OPENS.
+   The shipped script writes 71 bytes (`tr -d '[:space:]'`) and
+   `apex-install` re-strips (`tr -d '\r\n'`) before piping to
+   `--test-passphrase`, so the product was never affected. `luks-pcr7` is the
+   only scenario that recovers the key from a guest's SERIAL LOG rather than
+   from the file the script wrote, which is why it alone had this. The length
+   is now asserted host-side at capture time.
