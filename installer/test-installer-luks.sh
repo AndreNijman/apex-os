@@ -481,6 +481,72 @@ else
         bad "the keymap checks asserted their full set" "only $kp assertions ran"
     fi
 fi
+
+echo
+echo "── --check-passphrase: the encrypt-page check, run standalone ─────────"
+# The GUI calls this from the encrypt page's Continue handler, BEFORE the
+# confirm step, so a Croatian owner whose passphrase has an `x` in it finds
+# out while they can still pick a different one — not on the PROGRESS page,
+# after the point of no return. It needs no image, no answers file, no disk:
+# it is dispatched in the engine's own argument case, before any of that is
+# read. `sudo -n true` is asserted directly rather than trusted, since this
+# section has no ENGINE_RUNNABLE guard to fall back on.
+if sudo -n true 2>/dev/null && [ -x "$ENGINE" ]; then
+    out=$(printf '%s' "apexbootproof1" | sudo -n "$ENGINE" --check-passphrase us "" 2>&1); rc=$?
+    if [ "$out" = "typeable: yes console=us" ] && [ "$rc" = 0 ]; then
+        ok "us + an all-ASCII passphrase: typeable: yes"
+    else bad "us + an all-ASCII passphrase: typeable: yes" "rc=$rc out='$out'"; fi
+
+    # vn is on the record (installer/keymap-checks.sh's own measured table,
+    # also asserted above) as having no digit 1 anywhere in its console
+    # keymap — the same fact the real install path would discover and fall
+    # back to `us` for, just asked for directly instead of via a live install.
+    out=$(printf '%s' "apex1zed" | sudo -n "$ENGINE" --check-passphrase vn "" 2>&1); rc=$?
+    if [ "$out" = "typeable: no console=vn chars=1" ] && [ "$rc" = 0 ]; then
+        ok "vn + a passphrase containing '1': typeable: no, names the character"
+    else bad "vn + a passphrase containing '1': typeable: no, names the character" "rc=$rc out='$out'"; fi
+
+    # No layout at all must not crash the GUI's call — it is asked before the
+    # user has necessarily reached the keyboard page in every flow.
+    out=$(printf '%s' "hello" | sudo -n "$ENGINE" --check-passphrase "" "" 2>&1); rc=$?
+    if [ "$out" = "typeable: unknown reason=no-layout" ] && [ "$rc" = 0 ]; then
+        ok "no layout: typeable: unknown, not a crash"
+    else bad "no layout: typeable: unknown, not a crash" "rc=$rc out='$out'"; fi
+
+    # THE PROPERTY THAT MATTERS MOST: this is advice for a form field, never a
+    # gate. A verdict of "no" must still exit 0 — a future edit that turns this
+    # into `exit 1` on "no" would make the GUI's subprocess call read a
+    # typeable-but-inconvenient passphrase as "the engine crashed" and block an
+    # install this same passphrase would succeed at today.
+    printf '%s' "apex1zed" | sudo -n "$ENGINE" --check-passphrase vn "" >/dev/null 2>&1
+    _cprc=$?
+    if [ "$_cprc" = 0 ]; then ok "a 'no' verdict still exits 0 — advisory, never a gate"
+    else bad "a 'no' verdict still exits 0 — advisory, never a gate" "exit $_cprc"; fi
+
+    # MUTATION: remove the case arm entirely and confirm the same call falls
+    # through to the engine's ordinary refusal instead of silently doing
+    # nothing — a copy of the engine, the original is never touched.
+    CPMUT="$WORK/apex-install.check-passphrase-mutant"
+    sed '/^  --check-passphrase)$/,/^    ;;$/d' "$ENGINE" > "$CPMUT" 2>/dev/null
+    chmod 755 "$CPMUT" 2>/dev/null
+    # A substring match on --check-passphrase would also match the header
+    # comment and the die() message naming it — both mention the flag by name
+    # and neither is what this mutation removes. The CASE LABEL is the thing
+    # under test.
+    if grep -q -- '^  --check-passphrase)$' "$CPMUT"; then
+        bad "mutant: the case arm removed" "the sed program matched no line — the mutant is identical to the engine"
+    else
+        mutout=$(printf '%s' "apexbootproof1" | sudo -n "$CPMUT" --check-passphrase us "" 2>&1)
+        if [[ "$mutout" == *"unknown argument"* ]]; then
+            ok "mutant: the case arm removed" "falls through to the ordinary refusal, as it must"
+        else
+            bad "mutant: the case arm removed" "got '$mutout' — something still answers --check-passphrase with the arm gone"
+        fi
+    fi
+else
+    echo "SKIP  --check-passphrase cases (need passwordless sudo and the engine present)"
+fi
+
 echo
 echo "──────────────────────────────────────────────────────────────────────"
 printf '%s passed, %s failed\n' "$pass" "$fail"
