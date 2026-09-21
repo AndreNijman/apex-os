@@ -235,3 +235,178 @@ number on every continuation line.
   nothing here measures OS-volume suspend semantics — the case that actually
   matters when the installer wants to touch the ESP. Unmeasured, and named as
   unmeasured.
+
+---
+
+# The GPT write mechanism, measured: both candidates work, and they are not equivalent
+
+`windows-installer/lab/jobs/gpt-write-mechanism`, one guest boot (~30 s),
+`APEXLAB-RUN-EXIT 0`, `STATUS PASS`, firmware variables **IDENTICAL**.
+Transcript `/var/lab-scratch/winlab/gpt-write-mechanism.log`; host verification
+`windows-installer/lab/jobs/gpt-write-mechanism/hostverify.py`,
+**13 checks, 0 failures**.
+
+`docs/apex-owns-its-esp.md` settled that the tool edits the GPT entry itself
+and then said, deliberately: *"The mechanism is deliberately NOT decided …
+Which is safer is one guest boot to find out — that measurement is yours to
+make."* This is that boot.
+
+## The question the doc called unverified: may anyone write LBA 2–33 of a LIVE system disk?
+
+**Yes. Windows permits it.** Probed on `\\.\PhysicalDrive0` — `IsSystem=True`,
+`IsBoot=True`, the disk the running Windows booted from — with a **no-op**: the
+exact 512 bytes just read from LBA 2 written straight back, so a success
+changes nothing and a refusal costs nothing.
+
+    SYS-RAW-GPT-WRITE: PERMITTED -- Windows allowed a write to LBA 2 of the disk it booted from
+    SYS-LBA2-UNCHANGED: YES
+
+The same question through the layout IOCTL, also on the live system disk:
+
+    SYS-GET_DRIVE_LAYOUT_EX: ok=True err=0 bytes=480   PartitionStyle=1 PartitionCount=3
+    SYS-SET_DRIVE_LAYOUT_EX (handing back the UNMODIFIED layout): ok=True err=0
+
+Both permitted. And confirmed from the host afterwards against pristine
+`golden.raw`: the system disk's **primary and backup GPT are byte-identical**,
+17 408 and 16 896 bytes comparing equal. Neither probe moved a byte.
+
+So "Windows will not let you" is **not** a safety property either mechanism can
+lean on for the partition table, exactly as it turned out not to be for a
+lettered RAW volume earlier in this round. The protection has to be ours.
+
+## The two mechanisms, head to head on fixture-a
+
+Target: partition 3, "Blank basic" — Windows basic data, no recognised
+filesystem, lettered `F:` — retyped to Linux filesystem, attributes left at 0.
+Both mechanisms produced a correct, consistent GPT. They differ in three ways
+that matter.
+
+| | **M1 — raw read-modify-write of LBA 2–33** | **M2 — GET → patch → SET_DRIVE_LAYOUT_EX** |
+|---|---|---|
+| result | both copies consistent, all four CRCs correct | both copies consistent, all four CRCs correct |
+| who maintains the backup GPT | **us**, by hand — we compute both CRCs and write both copies | **the kernel** |
+| Windows' view straight after | **STALE**: still `GptType={ebd0a0a2…}`, still lettered `F:` | **already correct**: `{0fc63daf…}`, letter gone |
+| after `IOCTL_DISK_UPDATE_PROPERTIES` (0x70140) | correct: `{0fc63daf…}`, letter gone | unchanged (it was already right) |
+| **where the primary entry array ends up** | **LBA 2, where it was** | **LBA 2016 — the kernel MOVED it** |
+
+The doc's two predictions both hold: the raw mechanism does leave Windows'
+cached partition view stale until `IOCTL_DISK_UPDATE_PROPERTIES`, and that
+IOCTL does fix it (`ok=True err=0`); and the kernel does maintain its own state
+and the backup GPT for you.
+
+## The finding that decides it: M2 relocates the table and leaves a stale copy behind
+
+`SET_DRIVE_LAYOUT_EX` did not edit the partition entry array in place. It
+**wrote a new array at LBA 2016** — immediately before the first partition, at
+the end of the 1 MiB alignment gap — rewrote the header's `PartitionEntryLBA`
+to point there, and **left the old array at LBA 2 completely untouched**.
+
+Measured on the host, byte by byte, against the pristine fixture:
+
+- primary GPT area: **161 bytes** differ — 10 in the header (`HeaderCRC32`,
+  two bytes of `PartitionEntryLBA` as 2 → 2016, `PartitionEntryArrayCRC32`)
+  and 151 in the newly written array at LBA 2016;
+- backup GPT area: **24 bytes** differ — **16 of them are exactly the target
+  entry's type GUID**, plus two 4-byte CRCs in the backup header. The backup
+  array was *not* relocated;
+- **LBA 2–33 is byte-identical to pristine.** The old table is still there.
+
+So on disk there are now two partition tables in the primary area that
+disagree:
+
+    a reader that trusts LBA 2 sees this entry as type ebd0a0a2-… (basic data)
+    the header says the live array is at LBA 2016, where it reads 0fc63daf-… (Linux)
+
+**Reading LBA 2 directly is the single most common shortcut in GPT code** —
+the spec permits `PartitionEntryLBA` to be anything, but in practice it is 2 on
+almost every disk, so code that hardcodes it works everywhere until it does
+not. After an `SET_DRIVE_LAYOUT_EX`, such a reader sees the *pre-change* table
+and will happily conclude the partition is still Windows basic data. This tool
+already does the right thing — its survey reported the new type correctly, and
+its "the on-disk GPT and Windows' partition table AGREE" line held throughout —
+but any *other* tool on the user's machine may not.
+
+M1 has no such hazard: it edits the array in place, so there is exactly one
+table and no stale copy, and its total delta is 16 bytes of type GUID per copy
+plus the CRCs that describe them.
+
+## Against the doc's six invariants
+
+1. **"The delta is exactly one entry's type GUID and attributes. Nothing else
+   changes, proven byte-identical against a pristine fixture."** Held for the
+   partition *table contents*: exactly one entry differs, its start, end and
+   attributes are unchanged, the other two entries are identical, and **not one
+   byte of p1 or p3 was written** — changing an entry never touched the bytes
+   it describes. **Not** held literally by M2 at the disk level, because
+   relocating the array rewrites `PartitionEntryLBA` and 151 bytes of
+   previously-zero space. M1 holds it literally.
+2. **"Both copies end consistent, with correct CRCs."** Held by both. All four
+   CRCs recomputed independently on the host with `binascii.crc32` and matched.
+3. **"A backup of both copies is written to a file before the change, and undo
+   restores it."** Implemented and exercised: a 33 792-byte bundle (both
+   headers, both arrays) written before anything changed, then restored —
+   `UNDO-BYTE-EXACT: YES`, the primary GPT region hashing back to exactly its
+   pre-change SHA256, both copies consistent again, and Windows' view back to
+   basic data with letter `F:`.
+4. **"Windows' partition view is coherent afterwards, not stale."** Requires
+   `IOCTL_DISK_UPDATE_PROPERTIES` after M1; automatic after M2. Either way the
+   installer's own survey then reported "the on-disk GPT and Windows'
+   partition table AGREE".
+5. **"Volumes re-enumerated immediately before the write."** Not exercised by
+   this job — it is the Exclusivity rule already measured by `payload-write`.
+6. **"Any layout handed to the kernel is derived from a fresh read of the
+   current one."** Followed by construction in both mechanisms: the target
+   entry is located by its **unique partition GUID** in a fresh on-disk read
+   (M1) and in the kernel's freshly-returned layout (M2), never by an index
+   passed in and never from a cached table.
+
+## What this says about the choice — stated as a reading, not a decision
+
+The mechanism is the implementation's to pick and this is the measurement it
+was waiting for. On the evidence: **M1 is the narrower change and leaves no
+contradictory state on disk; M2 is less code and cannot get the CRCs wrong, but
+its price is a second, stale partition table at the LBA every naive reader
+looks at.** A hybrid is available and was not tested: M1 for the write, then
+`IOCTL_DISK_UPDATE_PROPERTIES` for the view — which is what M1 already does
+here, and which costs one extra IOCTL on the allowlist.
+
+Note for the gate: `IOCTL_DISK_UPDATE_PROPERTIES` (`0x00070140`) and, if M2
+ever wins, `IOCTL_DISK_SET_DRIVE_LAYOUT_EX` (`0x0007C054`) are **not** on
+section 0's allowlist today. Adding them is a deliberate widening that must
+keep the gate failing both ways, per the decision doc.
+
+## Three defects in the job itself, found by running it
+
+The first run reported `BOTH-COPIES-CONSISTENT: False` for every disk it
+looked at, and not one of those failures was about a disk.
+
+1. **PowerShell 5.1 parses `0xFFFFFFFF` as Int32 `-1`**, so `[uint32]0xFFFFFFFF`
+   throws. Every CRC the job computed was an exception and every `ok=False` was
+   its own arithmetic. CRC32 moved to C# via `Add-Type`.
+2. **`FileStream`'s 64 KiB internal buffer over-reads past the end of the
+   device** when reading the backup GPT header, which lives in the disk's very
+   last sector — "The request could not be performed because of an I/O device
+   error". Raw device streams now open unbuffered (`bufferSize 1`).
+3. Worst, and only reachable because of (2): **a header that failed to read
+   became a record of nulls**, so `$h.EntriesLba * 512` evaluated to `0` and
+   the writes aimed at the backup GPT landed on the protective MBR. That is
+   what scrambled fixture-a's overlay on the first run and made `M2` read
+   `PartitionCount=0`. `Read-GptHeader` now throws unless the signature is
+   `EFI PART`, the caller stops, the two headers are cross-checked against each
+   other before any write, and the undo reports every write instead of
+   discarding it with `$null =`.
+
+The pristine fixtures were never at risk: guests run against qcow2 overlays and
+`fixture-a.raw` / `golden.raw` mtimes are unchanged.
+
+## Honest limits
+
+- One guest, one firmware, SATA, 512-byte sectors. 4 Kn and NVMe-attached
+  system disks are unmeasured.
+- The **live system disk** was only probed with no-ops. Nothing here says a
+  *real* GPT change to a live system disk is safe — only that Windows does not
+  refuse the write. A real change there is what BitLocker and PCR 5 guard, and
+  PCR 5 remains unmeasured on a TPM machine.
+- M2's relocation behaviour was observed once, on a disk whose first partition
+  starts at LBA 2048. Whether the kernel always parks the array at
+  `first-partition-LBA − 32` is not established by one observation.
