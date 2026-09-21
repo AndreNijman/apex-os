@@ -273,6 +273,20 @@ class RelayDiallerTest {
         private val listener = ServerSocket(0)
         private val heads = ArrayBlockingQueue<String>(64)
         private val received = ByteArrayOutputStream()
+
+        /**
+         * The joined connection, written by the acceptor thread and read by
+         * the test thread.
+         *
+         * `@Volatile` for the same reason [closed] is. It is in fact ordered
+         * today without it — every caller of [sendCarried] reaches [carried]
+         * first, and that takes the `received` monitor the acceptor released
+         * after assigning this — but that is an accident of the order two
+         * tests happen to call things in, not a property of the field. A test
+         * that sent before it received would get an NPE nobody could explain,
+         * and the keyword costs nothing.
+         */
+        @Volatile
         private var live: Socket? = null
 
         /**
