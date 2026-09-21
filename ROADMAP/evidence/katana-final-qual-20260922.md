@@ -408,3 +408,165 @@ had never been taken outside a container:
 | P2-007 | `hotplug (udev)`, `auto-mount` | **pass** |
 | P2-007 | Thunderbolt / USB-C / dock | **could-not-run** — no controller, no Type-C class on this hardware |
 | P2-007 | bluetooth adapter, radio, codecs, paired | **pass** |
+
+---
+
+## 3. P2-003 — the shell publishes a real accessibility tree, and nothing turns it on
+
+**The card's prediction was right, and the route to measuring it was not the one
+the card described.** No greetd teardown was needed and none was done: the
+greeter *is* a live quickshell session.
+
+### What was already running, before anything was touched
+
+```
+greetd  1518  sway --unsupported-gpu -c /usr/share/apex-greet/sway-greet.conf
+greetd  1600  /usr/libexec/at-spi-bus-launcher
+greetd  1611  /usr/libexec/at-spi2-registryd
+greetd  1627  dbus-daemon --config-file=…/at-spi2/accessibility.conf
+              --address=unix:path=/run/user/973/at-spi/bus
+greetd  1791  qs -p /usr/share/apex-greet/shell.qml
+```
+
+`quickshell-git-0.3.1^860.gitc6a5160-1.fc43`, `at-spi2-core-2.58.8-1.fc43`,
+`orca-49.7-1.fc43`, seat0 `ActiveSession=c1`.
+
+**`/var/lab-scratch/katana-measure/after.txt` graded this COULD-NOT-RUN with the
+reason "no quickshell process". The process is named `qs`.** `pgrep -x
+quickshell` finds nothing on a machine whose greeter is quickshell. The same
+wrong question is in `measure.sh`. Recorded because it is the second time in
+this qualification that the starting sweep asked for the wrong string (the
+first was `bluetoothctl devices`, §2).
+
+### The first reading: zero, not one
+
+`tests/atspi-walk.py` at the tip (sha256 `8593c3f8…`, copied to katana and the
+hash compared there) run as the `greetd` user against that bus:
+
+| | |
+|---|---|
+| `atspi-walk.py --count` | **0** |
+| nodes in `--dump` | **0** |
+| `org.a11y.Status` | `IsEnabled: false`, `ScreenReaderEnabled: false` |
+
+`run-lockscreen-atspi.sh` records the symptom as "the shell publishes ONE node,
+itself". On the shipped greeter it publishes **none**, because Qt's AT-SPI
+bridge does not register at all while `org.a11y.Status.IsEnabled` is false. The
+one-node reading came from a harness that had accessibility on.
+
+### The second reading: flip the flag a screen reader flips
+
+Orca sets `org.a11y.Status.ScreenReaderEnabled` when it starts. That property
+was set to `true` over the greeter's own session bus — nothing was launched,
+nothing spoke, no window was opened — and the tree re-walked 3 s later:
+
+| | before | with the flag on |
+|---|---|---|
+| applications on the bus | 0 | **1** (`quickshell`) |
+| nodes | 0 | **17** |
+| max depth | — | **2** |
+| nodes with a name | — | 11 |
+| nodes exposing `org.a11y.atspi.Action` | — | **12** |
+
+```
+root | role=application | name=quickshell | desc=/usr/bin/quickshell
+  2147483664 | role=frame
+    2147483648 | role=text         | name=Username | desc=The account to log in as            | actions=SetFocus
+    2147483649 | role=push button  | name=Keyboard layout: English (US)                        | actions=Press,SetFocus,Press
+    2147483650 | role=text         | name=         | desc=Password. Press Enter to log in, …   | actions=SetFocus
+    2147483651 | role=alert message| name=
+    2147483652 | role=push button  | name=Previous session                                     | actions=Press,SetFocus,Press
+    2147483653 | role=label        | name=Session: APEX Tiling                                 | actions=SetFocus
+    2147483654 | role=push button  | name=Next session                                         | actions=Press,SetFocus,Press
+  2147483662 | role=frame                                                                       (the same seven again)
+```
+
+**This is the single largest open accessibility defect in the repository
+closing, measured rather than argued.** `tests/check-quickshell-a11y-cause.sh`
+exists to pin a null root caused by quickshell destroying a `QCoreApplication`
+before constructing its `QGuiApplication`; the build on this image carries
+upstream `916a0dd` ("launch: avoid creating multiple QApplications"), and the
+shell now publishes a frame per output with every control under it.
+
+Four things worth reading off that tree rather than the headline:
+
+- **The password field has no name and keeps its description.** `Accessible.
+  passwordEdit` makes Qt's bridge return an empty name, which is exactly the
+  behaviour `check-lockscreen-a11y.sh` asserts on the QML side and which had
+  never been confirmed on the bus. A screen reader is told what the field is
+  for and is not told what is in it.
+- **Two frames, one per output.** katana has `eDP-1` and `HDMI-A-1` connected
+  (`katana-displays-20260922.md`), and the greeter publishes the whole login
+  form twice, once per panel. Independent confirmation of the two-output state
+  from a completely different subsystem.
+- **12 of the 17 nodes expose the `Action` interface** with `Press` and
+  `SetFocus`, so the tree is operable and not merely readable. No action was
+  invoked: pressing "Next session" at a live greeter changes what the machine
+  would log in to.
+- The `alert message` node is present with an empty name — the error line, with
+  no error to show.
+
+### Orca at the greeter, and greeter audio (P2-003 queue items 1 and 2)
+
+Both are **could-not-run**, with the reason stated and the parts that *are*
+measurable measured:
+
+| | |
+|---|---|
+| `orca` installed | yes, `orca-49.7-1.fc43.noarch` |
+| `speech-dispatcher` | yes, `0.12.1-5.fc43` |
+| `espeak-ng` | yes, `1.51.1-12.fc43` |
+| `python3-speechd` | yes |
+| `spd-say` | `/usr/bin/spd-say` |
+| ALSA cards | 2 |
+| pipewire in the greetd session | **inactive** |
+
+Starting Orca makes the machine talk out loud, and nobody is at katana to hear
+it or stop it; "greeter audio" is a claim about a sound a person has to hear.
+What can be said: **the software chain is complete and pipewire is not running
+in the greeter session**, which is the thing to look at first when somebody does
+run it.
+
+### The gate is the finding
+
+A screen reader user's chain on this image is: Orca starts → it sets
+`ScreenReaderEnabled` → Qt registers → the tree appears. That works. What does
+not exist is any other way to turn it on: there is no APEX toggle, no kernel
+cmdline, no `QT_LINUX_ACCESSIBILITY_ALWAYS_ON` in the greeter's environment. So
+
+- a screen reader started **by the user** gets the full 17-node tree, and
+- anything that reads the bus **without** setting the flag — an audit, a test,
+  a magnifier that does not claim to be a screen reader — sees an empty bus and
+  would reasonably report the shell as inaccessible.
+
+That is the shape of the reading `after.txt` and this section both started with.
+
+### The machine was put back
+
+| | |
+|---|---|
+| `org.a11y.Status` | `IsEnabled: false`, `ScreenReaderEnabled: false` — both as found |
+| greetd | `active`, `qs` still pid 1791, `sway` still pid 1518 |
+| `/etc/greetd/config.toml` vs `.orig-qual2` | `cmp` → **identical** (never touched) |
+| seat0 `ActiveSession` | `c1`, unchanged |
+| failed system units | 0 |
+| `apex game status` | `active : false` |
+
+**One residue, stated rather than glossed:** `atspi-walk.py --count` still
+answers `1`. Qt's bridge does not *un*register when the flag goes back to
+false, so quickshell stays on the a11y bus until the greeter next starts. It
+holds nothing, costs nothing, and clears at the next greeter start — but it
+means the pristine "0 applications" reading is only obtainable on a greeter
+nobody has asked.
+
+### P2-003 scorecard
+
+| row | verdict |
+|---|---|
+| quickshell publishes an accessibility tree | **pass — 17 nodes, 2 frames, depth 2** |
+| the tree is operable (`Action` interface) | **pass — 12 nodes, `Press`/`SetFocus`** |
+| the password field does not leak its contents over the bus | **pass — empty name, description kept** |
+| the shell is reachable without a screen reader running | **fail — 0 applications while `IsEnabled` is false** |
+| Orca at the login screen (queue item 1) | **could-not-run** — it speaks, and nobody is at the machine |
+| greeter audio (queue item 2) | **could-not-run** — same; pipewire is inactive in the greeter session, which is the first thing to check |
+| magnifier / high-contrast / reduced-motion | **not measured this round** |
