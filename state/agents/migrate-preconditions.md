@@ -1,6 +1,6 @@
 # migrate-preconditions — decide, before anything is written, whether this machine may migrate
 
-## LANDABLE — `7b509f19` on `task/migrate-preconditions`, pushed
+## LANDABLE — `f3280072` on `task/migrate-preconditions`, pushed
 
 `roadmap/v2.2` (`b137f03f`) is merged in; `tests/test-boot-migrate.sh` is
 **83 passed, 0 failed**, and the new gate was mutation-tested red both ways.
@@ -102,6 +102,27 @@ Two consequences, both bigger than this unit:
   second mutation. `precheck --explain` is what makes this runnable without
   root, loopback or UEFI on a CI runner.
 - `918f360f` + `7b509f19` — `ROADMAP/evidence/migrate-preconditions-20260921.md`.
+- `f3280072` `fix(boot): correct the ESP doc's mechanism claim, and stop the
+  refusal promising a remedy that does not exist` — **a dated CORRECTION block
+  now sits in `docs/apex-owns-its-esp.md`** under "The mechanism already mostly
+  exists", because two of its bullets were labelled "checked rather than
+  assumed" and were checked only against `--help`. The decision is untouched;
+  the claim that the mechanism is nearly free is not. And the refusal no longer
+  says the partition "is APEX's to create" without adding that APEX does not
+  create it yet — a refusal that sends a user hunting for a command nobody
+  wrote is the failure mode this project was told to stop shipping.
+
+### Robustness checks the suite now has behind it
+
+- **83/0 with `bootc`, `podman`, `mkfs.vfat` and `rsync` genuinely absent**
+  (a 2,774-entry symlink PATH minus those four) — the CI runner's shape. The
+  engine records them as refusals instead of crashing, and `esp-is-windows`
+  still fires: 14 verdicts rather than 12.
+- **Five consecutive runs, no flake** (the `awk | grep -q` remedy assertion was
+  the pipefail-141 suspect).
+- `tests/check-suites-run-in-ci.sh`: 102 suites, 95 run by CI, 7 exempt, **0
+  unrun and undeclared** — this suite is not on `suites-not-in-ci.txt`, so the
+  six behavioural assertions really do execute in CI.
 
 ### MEASURED ON THE REAL L16 — read-only, and it proved the leak fix too
 
@@ -277,7 +298,10 @@ has no agent card yet).
 
 ## IN PROGRESS
 
-Orientation done, card written, nothing committed yet.
+**STALE — do not read this line as status.** It said "nothing committed yet"
+while two commits already existed, and it misled round 38 into re-deriving the
+branch state by hand. Current status is the `## LANDABLE` block and the
+`ROUND 39 STATUS` section at the TOP of this file.
 
 ---
 
