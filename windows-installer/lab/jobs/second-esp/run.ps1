@@ -58,7 +58,7 @@ function Run-Diskpart {
 # changed total.
 function Get-TreeManifest {
     param([string]$Root)
-    if (-not (Test-Path $Root)) { return @{} }
+    if (-not (Test-Path $Root)) { return $null }
     $m = @{}
     Get-ChildItem -LiteralPath $Root -Recurse -File -Force -ErrorAction SilentlyContinue |
         ForEach-Object {
@@ -69,13 +69,37 @@ function Get-TreeManifest {
         }
     return $m
 }
+# Proves a path is real and writable before any "nothing was written there"
+# claim is made about it. A negative result read off an inaccessible path is
+# not evidence of anything.
+function Test-PathUsable {
+    param([string]$Root, [string]$Tag)
+    if (-not (Test-Path $Root)) { Emit "PATH-USABLE[$Tag]: NO -- $Root does not exist"; return $false }
+    $probe = Join-Path $Root 'apexlab-probe.tmp'
+    try {
+        Set-Content -Path $probe -Value 'probe' -Encoding Ascii -ErrorAction Stop
+        $ok = Test-Path $probe
+        Remove-Item $probe -Force -ErrorAction SilentlyContinue
+        Emit "PATH-USABLE[$Tag]: $(if ($ok) { 'YES -- created and removed a probe file' } else { 'NO -- write appeared to succeed but the file is not there' })"
+        return $ok
+    } catch {
+        Emit "PATH-USABLE[$Tag]: NO -- $($_.Exception.Message)"
+        return $false
+    }
+}
+
 function Show-Manifest {
     param([string]$Tag, [hashtable]$M)
     Emit "manifest[$Tag]: $($M.Count) files"
     foreach ($k in ($M.Keys | Sort-Object)) { Emit "    $k = $($M[$k])" }
 }
 function Compare-Manifest {
-    param([string]$Tag, [hashtable]$Before, [hashtable]$After)
+    param([string]$Tag, $Before, $After)
+    if ($null -eq $Before -or $null -eq $After) {
+        Emit "delta[$Tag]: NOT MEASURED -- one side of the comparison could not be read"
+        Emit "UNCHANGED[$Tag]: UNKNOWN"
+        return
+    }
     $added   = @($After.Keys  | Where-Object { -not $Before.ContainsKey($_) })
     $removed = @($Before.Keys | Where-Object { -not $After.ContainsKey($_) })
     $changed = @($Before.Keys | Where-Object { $After.ContainsKey($_) -and $After[$_] -ne $Before[$_] })
@@ -149,7 +173,9 @@ if ($phase -eq 1) {
     Emit "C: after shrink: offset=$($c2.Offset) size=$($c2.Size) endsAt=$($c2.Offset + $c2.Size)"
     Emit "C-OFFSET-UNCHANGED: $(if ($c.Offset -eq $c2.Offset) { 'YES -- the shrink moved only the END' } else { 'NO' })"
 
-    $esp2 = Get-Partition -DiskNumber 0 | Where-Object DriveLetter -eq 'S'
+    $esp2 = Get-Partition -DiskNumber 0 |
+            Where-Object { $_.GptType -eq '{c12a7328-f81f-11d2-ba4b-00a0c93ec93b}' -and
+                           $_.Offset -gt $espPart.Offset } | Select-Object -First 1
     if ($esp2) {
         Emit "second-esp: partition #$($esp2.PartitionNumber) offset=$($esp2.Offset) size=$($esp2.Size) type=$($esp2.GptType)"
         Emit "SECOND-ESP-CREATED: YES"
@@ -167,18 +193,37 @@ if ($phase -eq 1) {
 
     # ── THE QUESTION: with two ESPs present and no /s, which one does
     #    Windows' own tool write? ──────────────────────────────────────────
-    $s2Before = Get-TreeManifest 'S:\'
-    Emit "second-esp files before bcdboot: $($s2Before.Count)"
-    Emit "--- bcdboot C:\Windows, NO /s, two ESPs present ---"
+    # Windows does not surface a drive letter for an ESP through
+    # Get-Partition.DriveLetter even when diskpart has assigned one, so the
+    # access path is PROVEN usable before any claim is based on what is or is
+    # not in it.
+    $s2usable = Test-PathUsable 'S:\' 'second ESP'
+    if (-not $s2usable) {
+        Emit "falling back to a directory mount point for the second ESP"
+        New-Item -ItemType Directory -Path 'C:\esp2' -Force | Out-Null
+        Add-PartitionAccessPath -DiskNumber 0 -PartitionNumber $esp2.PartitionNumber `
+            -AccessPath 'C:\esp2' -ErrorAction SilentlyContinue
+        $script:S2ROOT = 'C:\esp2'
+        $s2usable = Test-PathUsable $script:S2ROOT 'second ESP via mount point'
+    } else { $script:S2ROOT = 'S:\' }
+    $pUsable = Test-PathUsable 'P:\' "Windows' own ESP"
+    $s2Before = Get-TreeManifest $script:S2ROOT
+    Emit "second-esp root: $($script:S2ROOT); files before bcdboot: $(if ($null -eq $s2Before) { 'NOT MEASURED' } else { $s2Before.Count })"
+    Emit "--- BCDBOOT RUN: bcdboot C:\Windows, NO /s, two ESPs present ---"
     Emit ((& cmd /c "bcdboot C:\Windows 2>&1") | Out-String -Width 200)
     Emit "bcdboot-exit: $LASTEXITCODE"
 
     $espAfter = Get-TreeManifest 'P:\'
-    $s2After  = Get-TreeManifest 'S:\'
+    $s2After  = Get-TreeManifest $script:S2ROOT
     Compare-Manifest 'WINDOWS OWN ESP across bcdboot' $espMid $espAfter
     Compare-Manifest 'SECOND ESP across bcdboot'      $s2Before $s2After
-    Emit "BCDBOOT-WROTE-WINDOWS-ESP: $(if ($espAfter.Count -ne $espMid.Count) { 'YES' } else { 'see the delta above' })"
-    Emit "BCDBOOT-WROTE-SECOND-ESP:  $(if ($s2After.Count -gt $s2Before.Count) { 'YES' } else { 'NO' })"
+    if ($null -eq $s2Before -or $null -eq $s2After) {
+        Emit "BCDBOOT-WROTE-SECOND-ESP: NOT MEASURED -- the second ESP's contents could not be read, so 'nothing was written there' is NOT a result this run may claim"
+    } elseif ($s2After.Count -gt 0) {
+        Emit "BCDBOOT-WROTE-SECOND-ESP: YES -- $($s2After.Count) files now present where there were $($s2Before.Count)"
+    } else {
+        Emit "BCDBOOT-WROTE-SECOND-ESP: NO -- the access path was proven usable and it is still empty"
+    }
     Show-Bcdmgr 'after bcdboot'
     $espAfter | Export-Clixml -Path (Join-Path $root 'esp-after.xml')
 
