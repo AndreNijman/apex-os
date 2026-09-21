@@ -1,6 +1,6 @@
 {
  "_comment": "Live dispatch table. The orchestrator writes this at every dispatch and every landing. resume.sh reads it. agent_id is only useful while the session that spawned it lives; after a restart, dispatch a fresh agent with the card instead.",
- "updated": "2026-09-22T04:35+0800",
+ "updated": "2026-09-22T05:25+0800",
  "_round": "ROUND 40, opened 2026-09-22 03:10 AWST by the AUTORESUME orchestrator (claude -p, holding ROADMAP/state/autoresume.lock). Round 39 is over and its own _round key says so. NOTHING WAS LANDED THIS ROUND BECAUSE THERE WAS NOTHING TO LAND: every branch whose card says LANDABLE is already an ancestor of roadmap/v2.2 -- kernel-akmods 444102fd, kernel-publish 76a04c49, luks-boot 1fb98233, migrate-preconditions f3280072, initramfs-slim ede9a6f7, plus windows-installer-3, sdboot-xbootldr, luks-enroll-2, luks-installer-2, kernel-build-2, sdboot-migrate-2, android-relay-flake, katana-runner, efivars-guard-2. Checked with merge-base --is-ancestor per branch, not read off the report. The 20 apex-os and 13 apex-shell branches that still report unmerged are the known pre-round-10 cherry-pick set (see _stale_branch_finding) and all show cherry_plus=0.",
  "_landed_this_round": [
   {
@@ -22,6 +22,16 @@
    "two_defects_found_and_deliberately_not_patched": "(a) root/ops is NOT 'lavd' -- it reads lavd_1.1.3_x86_64_unknown_linux_gnu (likewise rusty_, rustland_), so scx_ops_matches() reports every CORRECT load as the wrong scheduler. (b) THE switch BRANCH HAS A RACE, measured at 50 ms: teardown-and-reattach takes ~1.42 s while scxctl returns 162 ms in, so scx_settle_until(Enabled) is satisfied by the scheduler being REPLACED, and the later scx.observed read lands in the disabled trough -- apex game status reported 'not loaded' about a live scx_lavd session. The agent did not patch because this unit qualifies rather than patches and (b) needs a design decision. Seeded as unit gaming-scx-2 with the timing log as its spec.",
    "recorded_rather_than_papered_over": "P1-038 rows 13/14/15 were LOST to the seat collision (see _incident_two_orchestrators_round40) and are not claimed. And `apex install wine` is BROKEN on katana -- wineserver, wineboot and winecfg all absent, wine64 dies with 'could not exec wineserver' -- which CONTRADICTS katana-p1038-apps-20260922.md and means that evidence file needs correcting.",
    "machine_left": "greetd active and cmp-identical, 0 of the agent's timers, 0 failed units, sched_ext disabled, game inactive, NVRAM unchanged against the baseline."
+  },
+  {
+   "merge": "9fb94886",
+   "branch": "task/ci-green-input",
+   "at": "2026-09-22T05:02+0800",
+   "what": "Package engine had THREE red suites, not the two either brief named, and they were three DIFFERENT problems. Flake-vs-regression was settled without bisecting: blobs compared across nine interleaved red/green SHAs were byte-identical at every one. ONLY apex-input was a real regression -- 8/8 red, now 4/4 green in CI at the predicted 103 passed / 0 failed / 8 skipped. One cause behind seven failures: the suite sed-extracts block 6a out of apex-shell-firstrun and commit 37497975 hoisted the NIRI_BIN= line above that range to share it with a sibling block. Correct for the provisioner -- THE SHIPPED SCRIPT WAS NEVER BROKEN AND IS UNTOUCHED -- but the extracted fragment then died under set -u. The suite now asserts the real invariant ('resolved before its first use') rather than the invisible convention that broke, and a diff of all 41 suite summary lines against the baseline run changes only that one.",
+   "the_two_flakes_were_not_skipped": "mux-layouts (4/8) and secret-broker (2/8) remain flakes: NO skip, NO weakened assertion -- which matters because a suite that skips its own subject is this repo's dominant defect family. Both gates had been asserting causes they had never measured; both now record what they actually saw, and both fired once in four runs. secret-broker is 'killed by signal 9', waited 0s, 59 bytes of transcript -- NOT the 'uid map: Permission denied' every prior red had claimed, a cause the same job's own bwrap probe already refuted. mux-layouts drops zellij's scratch tab 42 s in with all twelve sends rc=0 and empty stderr on both IPC forms; retrying does NOT cure it on that runner, so the shipped comment claiming it did is corrected rather than left contradicting the measurement. FOUR RUNS CANNOT SHOW A FLAKE IS CURED AND NO SUCH CLAIM IS MADE -- a 2-in-8 flake is green 75% of the time by itself, so the gate needs a stated policy.",
+   "third_flake_found_locally": "tests/test-mux-layouts.sh:128 piped a command into `grep -q` under pipefail, where SIGPIPE turns a MATCH into exit 141. Measured 2 in 60. This is the same defect the repo already has a memory for and it keeps recurring.",
+   "gates_after_merge": "check-no-conflict-markers PASS. check-suites-run-in-ci: 106 suites, 99 run, 7 exempt, 0 unrun and undeclared.",
+   "orchestrator_error_recorded": "The merge commit was FIRST written with backticks inside a double-quoted -m argument, so zsh ran the quoted fragment as a command substitution and ate it out of the message. Caught before pushing, amended via `git commit -F` with a QUOTED heredoc. This repo already has a memory for exactly this ('backticks in prose executed against the live OS'); the lesson is that -m is as dangerous as a heredoc and commit messages containing shell metacharacters should always go through -F."
   }
  ],
  "_status_recorded_this_round": "See _the_state_that_matters_round40 and _incident_hung_interactive_session. Recording of the L-003 staged-run result is done by PREPEND, never bare set-status.py -- that script REPLACES the evidence field and has no append flag, and L-003's record is 16 KB carrying the round-32 history forward.",
@@ -48,7 +58,8 @@
    "branch": "task/ci-green-input",
    "card": "ROADMAP/state/agents/ci-green-input.md",
    "machine": "L16 + CI runner",
-   "dispatched": "2026-09-22T03:35+0800"
+   "dispatched": "2026-09-22T03:35+0800",
+   "status": "COMPLETE -- landed as merge 9fb94886 at 2026-09-22T05:02+0800"
   },
   {
    "slug": "sdboot-migrate-3",
@@ -83,6 +94,17 @@
    "card": "ROADMAP/state/agents/a11y-gate.md",
    "machine": "katana seat0 (exclusive, per _seat_split_agreed)",
    "dispatched": "2026-09-22T04:32+0800"
+  },
+  {
+   "slug": "pkg-alternatives",
+   "unit": "pkg-alternatives",
+   "items": "P0-001 (package engine), feeds P1-038",
+   "repo": "apex-os",
+   "worktree": "/var/tmp/apex-work/wt-pkg-alternatives",
+   "branch": "task/pkg-alternatives",
+   "card": "ROADMAP/state/agents/pkg-alternatives.md",
+   "machine": "L16 container only -- katana root is 96% full",
+   "dispatched": "2026-09-22T05:22+0800"
   }
  ],
  "_field_contract": "resume.sh does os.path.isdir(worktree) and git rev-list origin/<branch>..HEAD, so `worktree` and `branch` must each be ONE value. An agent working two repos records the other in second_worktree/second_branch, which resume.sh ignores. Writing 'a and b' there makes the next report say 'no worktree' for a worktree that is fine.",
@@ -566,7 +588,22 @@
   "how_it_was_settled": "The peer is addressable by name via ListAgents/SendMessage. That is the mechanism _incident_two_orchestrators should have used all along and it cost two messages. Do not diagnose a peer session from process state -- ask it."
  },
  "_routed_findings_round40": {
-  "wine_is_not_a_broken_install_it_is_an_extension_that_did_not_survive_an_update": "ROUTED TO THE PEER SESSION, which owns it because only it has the evidence. katana-final-qual recorded only the POST-reboot absence (wineserver/wineboot/winecfg ABSENT, wine64 dies 'could not exec wineserver', /usr/bin/wine64 still present). The peer holds an `ls /usr/bin/ | grep ^wine` from BEFORE the reboot showing wineboot, winecfg, wineconsole, winedbg, winedump present. That before/after pair reclassifies it from a failed install into a SYSTEM EXTENSION THAT DID NOT SURVIVE AN IMAGE UPDATE INTACT -- an update-path defect, and far more interesting than the P1-038 row it broke. Diff hint handed over: integrated-image-20260920.md section 2 records the previous boot's rebuild producing a byte-different extension with an IDENTICAL file set of 223 packages, so if binaries vanished this time the file set did NOT stay identical. katana-p1038-apps-20260922.md is wrong and the peer is correcting it.",
+  "wine_is_not_a_broken_install_it_is_an_extension_that_did_not_survive_an_update": "**RETRACTED 2026-09-22 05:20 -- THIS FRAMING WAS WRONG AND THE ORCHESTRATOR PROPAGATED IT.** Nothing vanished across the reboot. The peer's pre- and post-reboot `ls` agree exactly, and a diff of the mounted extension image against merged /usr shows identical wine file sets. What changed is that somebody RAN wine for the first time after the reboot. The real cause is in _finding_alternatives_never_runs below and it is a GENERAL defect in how the extension is built. Kept rather than deleted because the wrong framing was sent to another session and acted on.",
   "a11y_mechanism": "BOTH AGENTS HAVE NOW RETRACTED THEIR OWN CAUSAL CLAIM, which is the healthy outcome. The peer retracted the strong form of 'a late enable does not retrofit' -- its sequence changed TWO variables between the 0 and the 8 (it set the gsetting AND restarted quickshell), so it is self-consistent but not controlled. katana-final-qual's counter-example stands as a counter-example but its own hypothesis (org.a11y.Status is the gate, the gsetting merely mirrors into it) is unproven. Unit a11y-gate dispatched to settle it with a two-walk experiment whose verdicts are fixed IN ADVANCE in a table, so the result cannot be narrated afterwards. The peer has asked to amend its own file rather than have it corrected for it, and the agent is told not to touch katana-a11y-20260922.md."
+ },
+ "_the_thing_that_blocks_andres_merge": {
+  "headline": "`Installer safety and UI` IS RED ON roadmap/v2.2, DETERMINISTICALLY, 4 OF 4 RUNS -- AND NOBODY HAS EVER SEEN IT.",
+  "failure": "installer-locale: FAIL ...and the console keymap -- want [de] got []",
+  "why_it_is_invisible": "The `changes` path selector leaves installer=false on a roadmap/v2.2 PUSH, and A SKIPPED JOB COUNTS AS SUCCESS. So every push reads green on a job that never ran. A `pull_request` to `main` diffs against main and runs EVERY job.",
+  "consequence": "THE MERGE ANDRE IS BEING ASKED TO APPROVE IN ANDRE-TODO A.4 WILL FAIL ON IT. The one gate he is told is 'the last gate' has an unexamined red behind it. This is the 'gate that runs and inspects nothing' family again, at the worst possible place: the selector makes the whole job invisible rather than making one assertion vacuous.",
+  "ownership": "Found by ci-green-input, explicitly OUTSIDE its bounds, and correctly not fixed by it. Seeded as unit installer-locale. The peer session owns the merge to main and has been told."
+ },
+ "_finding_alternatives_never_runs": {
+  "headline": "apex-pkg builds the extension by EXTRACTING RPMs, and extraction does not run %post. Every package that publishes its binaries through `alternatives` therefore installs 'successfully' into the extension AND DOES NOT WORK.",
+  "diagnosed_by": "the peer session, landed 95c0a798. Checked against the package rather than reasoned: Fedora's wine-core OWNS /usr/bin/wine and /usr/bin/wineserver and creates them in its scriptlets via `alternatives --install`.",
+  "blast_radius_measured_by_the_orchestrator_on_katana_0515": "EXACTLY 12 dangling symlinks in /usr/bin, all wine's, all -> wine, each 4 BYTES (the length of the string 'wine'): msidb msiexec notepad regedit regsvr32 wineboot winecfg wineconsole winedbg winefile winemine winepath. wine32/wine64/wineserver32/wineserver64 are REAL FILES, which is why wine64 --version prints wine-11.0 (Staging) and only RUNNING something fails.",
+  "the_calibration_that_stops_this_being_overstated": "**0 dangling under /etc/alternatives, and java's entries there resolve.** The IMAGE's own alternatives are fine, because the image installs by dnf and runs scriptlets. ONLY EXTENSION-INSTALLED PACKAGES ARE HIT. So the class is real but currently unrealised beyond wine on this machine -- do not write it up as 'java is broken', because on katana it is not.",
+  "why_it_still_deserves_a_unit": "It is invisible to every cheap check: command -v answers, --version prints, ls lists the symlink happily. It surfaces only when something is RUN. Unit pkg-alternatives dispatched with the gate specified as 'the extension contains no dangling symlink that an installed package owns', provable both ways.",
+  "method_note": "THREE CHECKS DISAGREED AND EACH WAS RIGHT ABOUT A DIFFERENT QUESTION. `ls` does not follow symlinks and listed them present; `test -e` does follow and called them missing; `stat -c %s` said 4 bytes, the length of the target string, and that is what gave it away. The mirror-image error was made earlier the same night in the other direction -- concluding wine was ABSENT from `command -v wine`, when the shipped binary is wine64. When a file's existence is the question, say WHICH existence you mean."
  }
 }

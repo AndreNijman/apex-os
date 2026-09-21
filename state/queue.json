@@ -1,6 +1,6 @@
 {
  "_comment": "Ordered dispatch queue for everything not yet done. `after` names dispatch slugs (from dispatch.json) or queue ids that must land first. `conflicts` names slugs whose files overlap — do not run both at once. Six concurrent agents is the ceiling: four agents plus the orchestrator hit the session limit twice on 2026-09-06, and the cap is usage, not wall-clock.",
- "updated": "2026-09-22T04:35+0800",
+ "updated": "2026-09-22T05:25+0800",
  "concurrency_ceiling": 6,
  "units": [
   {
@@ -608,7 +608,8 @@
    "after": [],
    "conflicts": [],
    "note": "CI red on the integration branch: the Package engine job's input-settings and secret-broker assertion steps. Dispatched round 40. Blocks the merge to main, which Andre gates on qualification.",
-   "dispatched": "2026-09-22 round 40"
+   "dispatched": "2026-09-22 round 40",
+   "closed": "CLOSED 2026-09-22 (round 40) -- landed as merge 9fb94886. The one real regression (apex-input) is fixed and green 4/4 in CI; the two flakes are recorded honestly rather than skipped, and a third was found and fixed locally. WHAT CAME OUT OF IT IS BIGGER THAN IT: unit installer-locale, a deterministic red nobody has seen because a skipped job counts as success, which will fail Andre's merge to main. Two follow-ups belong elsewhere and are NOT this unit's: the secret-broker SIGKILL wants an apexd/ unit (the obvious --die-with-parent/PDEATHSIG fix was probed on the L16 and does NOT hold deterministically), and the flake gates need a STATED POLICY, since a 2-in-8 flake is green 75% of the time by itself and four runs cannot show a cure."
   },
   {
    "id": "katana-final-qual",
@@ -648,6 +649,34 @@
    ],
    "note": "Settles what actually gates quickshell's accessibility tree, after two runs agreed on ChildCount=8 across two compositors and disagreed on the mechanism. Two-walk experiment, verdicts fixed in advance. Dispatched round 40. HOLDS KATANA'S SEAT0 EXCLUSIVELY.",
    "dispatched": "2026-09-22 round 40"
+  },
+  {
+   "id": "installer-locale",
+   "after": [],
+   "conflicts": [],
+   "note": "THE BLOCKER ON ANDRE'S MERGE TO MAIN. `Installer safety and UI` is red on roadmap/v2.2 deterministically, 4 of 4 runs -- installer-locale: 'FAIL ...and the console keymap -- want [de] got []'. Invisible because the changes path selector leaves installer=false on a push and a SKIPPED JOB COUNTS AS SUCCESS; a pull_request to main runs every job. Found by ci-green-input, outside its bounds. SEEDED NOT DISPATCHED round 40.",
+   "seeded": "2026-09-22 round 40"
+  },
+  {
+   "id": "secret-broker-sigkill",
+   "after": [],
+   "conflicts": [],
+   "note": "The secret-broker sandbox flake is 'killed by signal 9', waited 0s, 59 bytes of transcript -- not the uid-map denial every prior red claimed. Needs an apexd/ unit. The obvious --die-with-parent/PDEATHSIG follow-up was probed on the L16 and does NOT hold deterministically. SEEDED NOT DISPATCHED round 40.",
+   "seeded": "2026-09-22 round 40"
+  },
+  {
+   "id": "pkg-alternatives",
+   "after": [],
+   "conflicts": [],
+   "note": "apex-pkg extracts RPMs and never runs %post, so every package publishing binaries through `alternatives` installs broken into the extension. 12 dangling symlinks measured on katana, all wine's; 0 dangling under /etc/alternatives because the IMAGE runs scriptlets. Invisible to command -v and --version. Dispatched round 40.",
+   "seeded": "2026-09-22 round 40"
+  },
+  {
+   "id": "migrate-precheck-margins",
+   "after": [],
+   "conflicts": [],
+   "note": "SEEDED NOT DISPATCHED round 40, on the peer's suggestion. katana passes apex-boot-migrate's root-space check with 43 GiB free against 43 GiB needed -- arithmetically correct and practically a coin flip. A refusal with zero headroom may want a stated margin rather than a bare comparison. Applies to the ESP check too, which has 153 MiB of real headroom. Belongs to whoever next owns migrate-preconditions.",
+   "seeded": "2026-09-22 round 40"
   }
  ],
  "_completed_units": {
