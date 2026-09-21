@@ -1,3 +1,9 @@
+> **⏸ PAUSED / ARCHIVED — 2026-09-21.** Development of the Windows app is
+> stopped by Andre's decision, not by any blocker. Nothing here is broken or
+> half-finished. **Read `windows-installer/PAUSED.md` before resuming or
+> building on this**, and do not resume without Andre asking. Several findings
+> in it are facts about Windows and bootc that outlive this tool.
+
 # How a Windows program installs APEX, and why it is not the obvious way
 
 `bootc install` is Linux software. It opens block devices, runs `mkfs`, writes
