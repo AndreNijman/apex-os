@@ -18,6 +18,21 @@
 #    3. What do the first bytes of an encrypted partition look like when read
 #       through \\.\PhysicalDriveN -- the one reading that works on a disk
 #       Windows does not manage at all?
+#    4. **Which PCRs does BitLocker's platform validation profile bind?** TCG
+#       assigns PCR 5 to the GPT partition table. Where a profile binds PCR 5,
+#       ANY GPT change forces a 48-digit recovery prompt on the next Windows
+#       boot -- including merely CREATING APEX's own ESP, not just retyping a
+#       partition. `docs/apex-owns-its-esp.md` makes this must-measure item 5
+#       and says explicitly that this job "runs `manage-bde -status` and
+#       `-protectors -disable` and does not read the profile at all -- adding
+#       that is the first thing it needs." This is that addition. The profile
+#       is read three ways, because no single one is available on every
+#       machine: `manage-bde -protectors -get` (the authoritative per-volume
+#       answer, but only for a TPM protector on an encrypted volume), the
+#       group-policy registry under HKLM\SOFTWARE\Policies\Microsoft\FVE
+#       (which exists whether or not anything is encrypted), and whether the
+#       machine has a TPM at all -- because without one there can be no
+#       platform validation profile to bind anything.
 #
 #  Nothing here is an assertion. It is a measurement whose output the detector
 #  and its unit tests are then written from.
@@ -60,6 +75,95 @@ function Get-RawHex {
     }
 }
 
+# Reads the platform validation profile every way it can be read. Called
+# before and after encryption, because the two can differ: the policy registry
+# is what WOULD be applied, `-protectors -get` is what IS applied to a volume
+# that already has a TPM protector.
+function Dump-PcrProfile {
+    param([string]$Tag, [string[]]$Volumes)
+    Emit "--- PLATFORM VALIDATION PROFILE / PCR BINDING ($Tag) ---"
+
+    # (a) Is there a TPM at all? Without one there is no platform validation
+    #     profile, and PCR 5 cannot be bound by anything on this machine.
+    try {
+        $tpm = Get-WmiObject -Namespace 'root\cimv2\security\microsofttpm' `
+                             -Class Win32_Tpm -ErrorAction Stop
+        if ($tpm) {
+            Emit ("tpm-present: YES  SpecVersion=[{0}] ManufacturerIdTxt=[{1}] IsEnabled=[{2}] IsActivated=[{3}] IsOwned=[{4}]" -f `
+                  $tpm.SpecVersion, $tpm.ManufacturerIdTxt, $tpm.IsEnabled_InitialValue, `
+                  $tpm.IsActivated_InitialValue, $tpm.IsOwned_InitialValue)
+        } else {
+            Emit "tpm-present: NO (WMI class reachable, zero instances)"
+        }
+    } catch {
+        Emit "tpm-present: NO (Win32_Tpm unavailable -- $($_.Exception.Message))"
+    }
+    try {
+        $gt = Get-Tpm -ErrorAction Stop
+        Emit ("get-tpm: TpmPresent=[{0}] TpmReady=[{1}] TpmEnabled=[{2}] TpmActivated=[{3}] TpmOwned=[{4}]" -f `
+              $gt.TpmPresent, $gt.TpmReady, $gt.TpmEnabled, $gt.TpmActivated, $gt.TpmOwned)
+    } catch { Emit "get-tpm: UNAVAILABLE -- $($_.Exception.Message)" }
+
+    # (b) Group policy. These values exist independently of any encrypted
+    #     volume, and are how a fleet turns PCR 5 on. Read every value under
+    #     the key rather than probing names -- a name we do not know about is
+    #     exactly the thing that would make this measurement wrong.
+    foreach ($k in @('HKLM:\SOFTWARE\Policies\Microsoft\FVE',
+                     'HKLM:\SOFTWARE\Microsoft\Windows\CurrentVersion\Policies\FVE',
+                     'HKLM:\SYSTEM\CurrentControlSet\Control\BitLocker')) {
+        if (Test-Path $k) {
+            Emit "policy-key $k EXISTS:"
+            try {
+                $props = Get-ItemProperty -Path $k -ErrorAction Stop
+                foreach ($n in ($props.PSObject.Properties |
+                                Where-Object { $_.Name -notlike 'PS*' })) {
+                    Emit ("  {0} = {1}" -f $n.Name, ($n.Value -join ','))
+                }
+            } catch { Emit "  (could not read: $($_.Exception.Message))" }
+        } else {
+            Emit "policy-key $k ABSENT"
+        }
+    }
+    if (Test-Path 'HKLM:\SOFTWARE\Policies\Microsoft\FVE') {
+        Emit "pcr5-bound-by-policy: see the values above -- a *PlatformValidationProfile* value that lists 5 is what binds it"
+    } else {
+        Emit "pcr5-bound-by-policy: NO POLICY KEY AT ALL -- nothing on this machine configures the profile, so the OS default applies"
+    }
+
+    # (c) The authoritative per-volume answer. `-protectors -get` prints
+    #     "PCR Validation Profile:" followed by the bound PCR numbers, but
+    #     ONLY for a TPM-backed protector on an encrypted volume.
+    foreach ($v in $Volumes) {
+        Emit "--- manage-bde -protectors -get $v ---"
+        $out = (& cmd /c "manage-bde -protectors -get $v 2>&1") | Out-String -Width 200
+        Emit $out
+        $lines = $out -split "`r?`n"
+        $hdr = -1
+        for ($i = 0; $i -lt $lines.Count; $i++) {
+            if ($lines[$i] -match '(?i)PCR Validation Profile') { $hdr = $i; break }
+        }
+        if ($hdr -ge 0) {
+            $nums = @()
+            # Numbers may sit on the header line itself or on the indented
+            # continuation lines under it, several to a line.
+            $tail = $lines[$hdr] -replace '(?i).*PCR Validation Profile:?', ''
+            foreach ($m in [regex]::Matches($tail, '\d+')) { $nums += $m.Value }
+            for ($i = $hdr + 1; $i -lt $lines.Count; $i++) {
+                if ($lines[$i] -notmatch '^\s+\S') { break }
+                if ($lines[$i] -notmatch '^\s*[\d,\s]+$') { break }
+                foreach ($m in [regex]::Matches($lines[$i], '\d+')) { $nums += $m.Value }
+            }
+            Emit ("pcr-profile[$v]: " + ($nums -join ','))
+            Emit ("pcr5-bound[$v]: " + $(if ($nums -contains '5') { 'YES' } else { 'NO' }))
+            if ($nums -contains '5') {
+                Emit "pcr5-WARNING[$v]: this profile binds PCR 5, the GPT partition table. ANY GPT change -- including merely CREATING APEX's own ESP -- forces a recovery prompt on the next Windows boot on this machine."
+            }
+        } else {
+            Emit "pcr-profile[$v]: NOT PRINTED (no TPM-backed protector on this volume)"
+        }
+    }
+}
+
 function Dump-Wmi {
     param([string]$Tag)
     Emit "--- WMI Win32_EncryptableVolume ($Tag) ---"
@@ -95,6 +199,7 @@ if ($phase -eq 1) {
     Emit "--- manage-bde present? ---"
     Emit ("manage-bde: " + (Test-Path "$env:SystemRoot\System32\manage-bde.exe"))
     Dump-Wmi 'before the feature is installed'
+    Dump-PcrProfile 'phase 1, before the BitLocker feature is installed' @('C:')
 
     Emit "--- Install-WindowsFeature BitLocker ---"
     $r = Install-WindowsFeature -Name BitLocker -IncludeAllSubFeature -IncludeManagementTools
@@ -125,6 +230,7 @@ if ($phase -eq 2) {
     Emit ("target-partition: disk=$($part.DiskNumber) offset=$($part.Offset) size=$($part.Size) guid=$($part.Guid)")
 
     Dump-Wmi 'unencrypted'
+    Dump-PcrProfile 'phase 2, feature installed, nothing encrypted yet' @('C:', $L)
     $raw = Get-RawHex -Disk $part.DiskNumber -Offset $part.Offset -Count 512
     if ($raw.ok) {
         Emit "raw-before-oemid: [$(($raw.hex.Substring(6,16)))]  ascii[0..63]: [$($raw.ascii)]"
@@ -153,17 +259,45 @@ if ($phase -eq 2) {
     Emit ((& cmd /c "manage-bde -status $L 2>&1") | Out-String -Width 200)
 
     Dump-Wmi 'encrypted, protection on'
+    Dump-PcrProfile 'phase 2, WINDATA encrypted with a PASSWORD protector' @('C:', $L)
     $raw = Get-RawHex -Disk $part.DiskNumber -Offset $part.Offset -Count 512
     if ($raw.ok) {
         Emit "raw-enc-oemid: [$(($raw.hex.Substring(6,16)))]  ascii[0..63]: [$($raw.ascii)]"
         Emit "raw-enc-sector0: $($raw.hex)"
     } else { Emit "raw-enc: FAILED $($raw.error)" }
 
-    Emit "--- SUSPEND: manage-bde -protectors -disable $L -RebootCount 1 ---"
-    Emit ((& cmd /c "manage-bde -protectors -disable $L -RebootCount 1 2>&1") | Out-String -Width 200)
-    Emit "--- manage-bde -status (suspended) ---"
+    Emit "--- SUSPEND, attempt 1: the OS-volume form, on a DATA volume ---"
+    Emit "    (kept deliberately: the error it returns is itself the measurement)"
+    $suspend1 = (& cmd /c "manage-bde -protectors -disable $L -RebootCount 1 2>&1") | Out-String -Width 200
+    Emit $suspend1
+    if ($suspend1 -match '0x80310028') {
+        Emit "suspend-rebootcount-on-data-volume: REJECTED 0x80310028 (not the operating system drive) -- -RebootCount is an OS-volume-only switch"
+    }
+
+    Emit "--- SUSPEND, attempt 2: the data-volume form, no -RebootCount ---"
+    Emit ((& cmd /c "manage-bde -protectors -disable $L 2>&1") | Out-String -Width 200)
+
+    # Did it actually take? Ask the number, not the English. ProtectionStatus
+    # 1 = on, 0 = off/suspended; it is what the detector will branch on.
+    $psNow = $null
+    try {
+        $inst = Get-WmiObject -Namespace 'root\cimv2\security\MicrosoftVolumeEncryption' `
+                              -Class Win32_EncryptableVolume -ErrorAction Stop |
+                Where-Object { $_.DriveLetter -eq $L }
+        if ($inst) { $psNow = (@($inst)[0]).GetProtectionStatus().ProtectionStatus }
+    } catch { Emit "suspend-verify: could not read ProtectionStatus -- $($_.Exception.Message)" }
+    Emit "suspend-protectionstatus-after: [$psNow]"
+    if ($psNow -eq 0) {
+        Emit "SUSPEND-EFFECTIVE: YES -- ProtectionStatus went 1 -> 0 while the volume stays encrypted"
+        $tag = 'encrypted, protection SUSPENDED (verified: ProtectionStatus 0)'
+    } else {
+        Emit "SUSPEND-EFFECTIVE: NO -- ProtectionStatus is still [$psNow]. The dump below is NOT a suspended volume; do not read it as one."
+        $tag = 'encrypted, suspend attempted and NOT effective (ProtectionStatus still 1)'
+    }
+
+    Emit "--- manage-bde -status (after the suspend attempts) ---"
     Emit ((& cmd /c "manage-bde -status $L 2>&1") | Out-String -Width 200)
-    Dump-Wmi 'encrypted, protection suspended'
+    Dump-Wmi $tag
     $raw = Get-RawHex -Disk $part.DiskNumber -Offset $part.Offset -Count 512
     if ($raw.ok) { Emit "raw-susp-sector0: $($raw.hex)" } else { Emit "raw-susp: FAILED $($raw.error)" }
 
@@ -174,6 +308,13 @@ if ($phase -eq 2) {
         $craw = Get-RawHex -Disk $cpart.DiskNumber -Offset $cpart.Offset -Count 512
         if ($craw.ok) { Emit "raw-C-oemid: [$($craw.hex.Substring(6,16))] ascii: [$($craw.ascii)]" }
     }
+
+    # The last word on must-measure item 5 for THIS guest, stated as a
+    # conclusion so nobody has to re-read the transcript to find it -- and
+    # stated with its limit attached, because a guest with no TPM cannot
+    # answer the question for a machine that has one.
+    Emit "--- CONCLUSION: must-measure item 5 (does BitLocker's profile bind PCR 5?) ---"
+    Dump-PcrProfile 'final' @('C:', $L)
 
     Emit '=== JOB COMPLETE ==='
     exit 0
