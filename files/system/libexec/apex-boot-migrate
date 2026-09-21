@@ -106,6 +106,9 @@ ESP_SLACK_MIB=48
 # mid-copy, and the cost of guessing low is the thing this check exists to
 # avoid.
 ROOT_SLACK_MIB=512
+# Same tally apex-boot-count and apex-mkesp use for every other counted entry
+# on this lineage (docs/boot-v2.md) — not a knob this script reinvents.
+BOOT_TRIES="${APEX_BOOT_TRIES:-3}"
 
 log()    { printf 'apex-boot-migrate: %s\n' "$*" >&2; }
 refuse() { printf 'apex-boot-migrate: REFUSED [%s]\n' "$1" >&2; shift
@@ -620,6 +623,25 @@ print(((b.get("image") or {}).get("imageDigest")) or "")')"
     done
     [ -d "$SYSROOT/boot/grub2" ] || { release_esp; fail "grub-boot-wiped" \
         "The root filesystem's /boot/grub2 is gone — the containment failed."; }
+
+    # ── 6. count the entry, so the health gate this boot rests on is real ────
+    # bootc writes no boot counter (docs/boot-v2.md, "APEX writes no boot
+    # counter, and cannot" — the same fact apex-boot-count exists to fix on
+    # the ordinary update path). Without one, LoaderBootCountPath is never
+    # set, apex-boot-health and systemd-bless-boot both stay condition-
+    # skipped, and confirm's Wants=boot-complete.target is pulling in a
+    # target that is reached for free rather than because anything ran.
+    #
+    # This renames the LIVE entry, not a staged one — unlike an ordinary
+    # `bootc upgrade`, there is no entries.staged/ here for
+    # bootc-finalize-staged to swap in later, so there is nothing for the
+    # rename to need to survive except the one boot that commits or fails
+    # this migration.
+    local counted="${ent%.conf}+${BOOT_TRIES}-0.conf"
+    mv -n "$ent" "$counted" || { release_esp; fail "entry-count-failed" \
+        "Could not rename $(basename "$ent") to carry a boot counter." \
+        "The migration is not committed; re-running is safe."; }
+    log "counted the entry: $(basename "$counted") ($BOOT_TRIES tries)"
 
     echo staged > "$STATE/phase"
     sync
