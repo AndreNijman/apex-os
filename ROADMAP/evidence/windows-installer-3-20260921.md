@@ -451,3 +451,141 @@ The pristine fixtures were never at risk: guests run against qcow2 overlays and
   with both pristine images' headers, but one observation does not establish a
   rule. In particular, the claim that a `FirstUsableLBA=34` disk sees **no**
   relocation is a prediction, not a measurement.
+
+---
+
+# A second ESP: Windows tolerates it, and `bcdboot` does not wander
+
+`windows-installer/lab/jobs/second-esp`, two guest boots (~60 s),
+`APEXLAB-RUN-EXIT 0` on both, `STATUS PASS`, firmware variables **IDENTICAL**.
+Transcript `/var/lab-scratch/winlab/second-esp.log`; host verification
+`windows-installer/lab/jobs/second-esp/hostverify.py`, **9 checks, 0 failures**.
+
+`docs/apex-owns-its-esp.md` must-measure **#2** and **#4**.
+`migrate-preconditions`' card confirms it takes none of the four lab
+measurements, so they are this unit's.
+
+## What was done to the disk
+
+On the disposable overlay of `golden.raw` — a disk **Windows Setup itself
+partitioned**: `diskpart` shrank `C:` by 600 MB (the user's own act in the real
+flow; the tool has no NTFS knowledge and must not grow any), then
+`create partition efi size=500` + `format quick fs=fat32 label=APEXESP`. A
+second ESP now exists at LBA 82 655 232 … 83 679 231, **later** in partition
+order than Windows'.
+
+## #2, the `bcdboot` half: it writes the ESP it booted from, not "the first one"
+
+This is the question worth asking because it is the Windows analogue of what
+`migrate-preconditions` found on the Linux side: `bootc` re-discovers the ESP
+with `find_first_colocated_esp()` on **every** upgrade instead of staying on
+the one it was handed, so an ESP earlier in partition order wins forever. If
+`bcdboot` picked by position too, a second ESP would be a live hazard on both
+sides of the machine.
+
+**It does not.** `bcdboot C:\Windows` with **no `/s`**, two ESPs present,
+exit 0:
+
+| | files added | files changed |
+|---|---|---|
+| **Windows' own ESP** | 0 | **4** — `EFI\Microsoft\Boot\BCD`, `BOOTSTAT.DAT`, `EFI\Microsoft\Recovery\BCD`, `Recovery\BCD.LOG` |
+| **the new ESP** | **0** | 0 — still completely empty |
+
+`bcdedit /enum {bootmgr}` reports `device partition=P:` (Windows' own ESP)
+before and after, and `\Device\HarddiskVolume1` after the reboot. bcdboot
+updated the boot store **in place, in the ESP it came from**, and did not
+scatter a single file into the new one.
+
+**The negative half of that is a real measurement in this run and was not in
+the first one.** The first attempt printed `BCDBOOT-WROTE-SECOND-ESP: NO` off
+an empty reading it could not distinguish from an unreadable path — see the
+defects section below. The access path is now proven usable by creating and
+removing a probe file before the claim is made.
+
+**Limit, and it is the important one:** the second ESP was **later** in
+partition order than Windows'. Position-dependence is exactly what would bite,
+so the case that matters — a new ESP **earlier** in partition order — is
+**not** tested here and cannot be without relocating partitions. Do not read
+this result as "bcdboot is position-independent"; read it as "bcdboot did not
+leave the ESP it booted from."
+
+## #2, tolerance: yes, across a reboot
+
+Phase 2 ran, which is the proof: Windows booted normally with two ESPs on its
+system disk, the layout intact, the installer's own survey clean. Across that
+reboot exactly one file in Windows' ESP changed — `BOOTSTAT.DAT`, which is boot
+statistics.
+
+**The feature-update and repair-install halves of #2 are NOT doable in this
+lab.** There is no update media and no repair image. That part of must-measure
+#2 remains open, and nothing here should be read as covering it.
+
+## #4, restated because as written it cannot hold
+
+"Windows' own boot path byte-identical either side, **GPT included**, proven by
+comparison against a pristine fixture" cannot be literally true once a
+partition is added — adding one changes the GPT by definition. Read as
+*"Windows' own partition entries and Windows' own ESP bytes are unchanged"*,
+which is the property that actually protects the user, and verified on the host
+against pristine `golden.raw`:
+
+- **Windows' ESP entry: completely unchanged** — type, start 2048, end 206847,
+  attributes `0x8000000000000000`, name.
+- **Microsoft Reserved entry: completely unchanged.**
+- **`C:`'s entry changed in `EndingLBA` and nothing else** — 83 884 031 →
+  82 655 231, exactly 600 MiB returned; start, type, attributes and name
+  identical. The shrink moved only the end, as it must.
+- Exactly one partition added, none removed; both rewritten GPT copies
+  self-consistent with correct CRCs and agreeing with each other.
+
+**Windows' ESP *content* is NOT byte-identical: 42 481 of 104 857 600 bytes
+changed (0.041%).** Every one of them is Windows writing its own BCD — the
+guest's file-level manifest names the four files, and two of them changed
+merely from shrinking `C:` and creating a partition, before `bcdboot` was run
+at all. Worth stating plainly, because it is easy to misread the product
+decision: **"APEX never writes Windows' ESP" is a rule about what APEX does. It
+is not a claim that the partition sits still** — Windows rewrites it in
+response to ordinary disk changes, so a design that hashed Windows' ESP and
+expected stability would be building on sand.
+
+## #1 was deliberately NOT attempted
+
+"Does the firmware boot the intended one of two ESPs from an explicit NVRAM
+entry." Telling which of two ESPs actually booted needs `BootCurrent` — a
+volatile variable, absent from the varstore the harness diffs — or a bootloader
+payload distinguishable from Windows' own, which this lab does not have.
+Attempting it with the tools here would produce a confident wrong answer, which
+is worse than a stated gap. **#1 remains open.**
+
+## A prediction from earlier in this round, now measured
+
+The `gpt-write-mechanism` section above found that `SET_DRIVE_LAYOUT_EX`
+relocated fixture-a's primary entry array from LBA 2 to LBA 2016, and reasoned
+that the destination is a function of `FirstUsableLBA` — so a disk Windows
+partitioned (`FirstUsableLBA = 34`) should see **no** relocation, `34 − 32 = 2`.
+That was labelled a prediction, not a measurement.
+
+**It is now measured.** This run had Windows rewrite `golden.raw`'s GPT for real
+— a shrink plus a new partition — and the primary entry array **stayed at LBA
+2**. No relocation, no stale second table. The hazard is confirmed to be scoped
+to disks initialised with a 1 MiB reserve, which is Linux tooling's default and
+**what APEX itself creates**, and not to the Windows-made disks this tool runs
+against.
+
+## Two defects in the job, found by running it — same family, twice
+
+1. It located the new ESP with `Get-Partition | Where DriveLetter -eq 'S'` and
+   printed `SECOND-ESP-CREATED: NO` **about a partition that had been created
+   correctly** and was visible in its own layout dump three lines later.
+   `Get-Partition.DriveLetter` reads blank for an ESP-typed partition even when
+   `diskpart` has assigned a letter — the same class of trap this unit already
+   recorded for `NoDefaultDriveLetter` and `IsHidden`.
+2. Worse: the manifest function returned an empty hashtable both for *"the
+   directory is empty"* and for *"that path does not exist"*, so the job
+   asserted `BCDBOOT-WROTE-SECOND-ESP: NO` from two readings it could not tell
+   apart. It now returns null for an unreadable root, the comparison reports
+   `NOT MEASURED` instead of `UNCHANGED`, and the path is proven writable with
+   a probe file first.
+
+Both are the dominant defect family in this repo: a check that runs, inspects
+nothing, and reports a result.
