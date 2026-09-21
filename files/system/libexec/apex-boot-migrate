@@ -74,6 +74,8 @@
 #  Usage:
 #      apex-boot-migrate status     what phase this machine is in
 #      apex-boot-migrate precheck   can this machine migrate? (writes nothing)
+#      apex-boot-migrate precheck --explain
+#                                   every check, not just the first refusal
 #      apex-boot-migrate stage      write the new path; change no boot variable
 #      apex-boot-migrate commit     the single atomic write (needs a stage)
 #      apex-boot-migrate auto       precheck + stage + commit (what apex update runs)
@@ -86,10 +88,23 @@
 #      APEX_MIGRATE_ESP      an already-mounted ESP, instead of finding one
 #      APEX_MIGRATE_DRYRUN   print the install argv instead of running it
 #      APEX_MIGRATE_STORE    the booted storage backend, instead of asking bootc
+#      APEX_MIGRATE_FAKEROOT prefix for the firmware/image paths a shim cannot fake
+#      APEX_MIGRATE_MOUNTDIR where to mount the ESP privately, instead of /run
 # ─────────────────────────────────────────────────────────────────────────────
 set -uo pipefail
 
 SYSROOT="${APEX_MIGRATE_ROOT:-/sysroot}"
+# A prefix for the paths that describe the IMAGE and the FIRMWARE rather than
+# the disks — /sys/firmware/efi, the SecureBoot variable, the signed-loader
+# marker, /usr/lib/modules. The block-device facts are all reached through
+# lsblk/findmnt/blkid/df/du and a test can shim those on PATH; these four are
+# bare path tests and cannot be shimmed, so the layout gate needs this to
+# describe a machine it is not running on. Empty in production, which leaves
+# every path below exactly as it was written.
+FAKEROOT="${APEX_MIGRATE_FAKEROOT:-}"
+# Where the ESP gets mounted privately. Overridable for the same reason: a
+# test runner is not root and cannot write under /run.
+MOUNTDIR="${APEX_MIGRATE_MOUNTDIR:-/run/apex-boot-migrate}"
 STATE="${APEX_MIGRATE_STATE:-/var/lib/apex/boot-migrate}"
 ESP_OVERRIDE="${APEX_MIGRATE_ESP:-}"
 DRYRUN="${APEX_MIGRATE_DRYRUN:-0}"
@@ -108,7 +123,43 @@ ESP_SLACK_MIB=48
 ROOT_SLACK_MIB=512
 
 log()    { printf 'apex-boot-migrate: %s\n' "$*" >&2; }
-refuse() { printf 'apex-boot-migrate: REFUSED [%s]\n' "$1" >&2; shift
+
+# ── the decision channel ─────────────────────────────────────────────────────
+#
+# apexd reads this engine's EXIT CODE and nothing else — apexd/apex/src/ops.rs,
+# migrate_boot_path(): 0 migrated, 3 nothing to do, 10 refused, anything else
+# failed — and a user reads the prose on stderr. Neither changes here, and the
+# "REFUSED [name]" line keeps its exact shape, because something already parses
+# the shape of this output and a rename would be a silent break.
+#
+# `precheck --explain` ADDS a channel rather than altering one: every check is
+# evaluated instead of the run stopping at the first refusal, and each verdict
+# is recorded as OK, NOTE or REFUSE with a reason.
+#
+# It exists because the short-circuit hides most of the answer. Measured on the
+# L16, 2026-09-21: Secure Boot is on and this image's systemd-boot is unsigned,
+# so `precheck` refuses `secure-boot-unsigned-loader` immediately — having
+# never looked at the ESP, never measured the 1171-against-600 MiB shortfall,
+# and never said a word about BitLocker. Somebody fixing three things at once
+# learns about one of them per round trip, which is how a migration that "has
+# to work for all machines" turns into three weeks of one-at-a-time.
+EXPLAIN=0
+VERDICTS=()
+verdict() {   # $1 = OK|NOTE|REFUSE, $2 = short name, $3.. = the reason
+    local st="$1" name="$2"; shift 2
+    # One line, bounded. The table is a summary and the full prose is what
+    # plain `precheck` prints; a refusal's reason runs to a dozen lines and
+    # pasting all of it into a column turns the table into the thing it exists
+    # to replace.
+    local why; why="$(printf '%s' "$*" | tr -s '[:space:]' ' ')"
+    [ "${#why}" -gt 96 ] && why="${why:0:93}..."
+    VERDICTS+=("$st|$name|$why")
+}
+
+refuse() { local name="$1"; shift
+           verdict REFUSE "$name" "$*"
+           [ "$EXPLAIN" = 1 ] && return 10
+           printf 'apex-boot-migrate: REFUSED [%s]\n' "$name" >&2
            printf '    %s\n' "$@" >&2
            printf '    Nothing was changed. This machine keeps booting the way it does now.\n' >&2
            exit 10; }
@@ -128,17 +179,18 @@ root_source() {
     findmnt -n -o SOURCE --target "$SYSROOT" 2>/dev/null | head -1
 }
 
-root_disk() {
-    local src; src="$(root_source)"
-    [ -n "$src" ] || return 1
-    src="${src%%[*}"          # btrfs prints /dev/nvme0n1p5[/subvol]
-    # Walk up until the parent is a disk. One PKNAME is enough for a plain
-    # partition and WRONG for everything else: on a LUKS root the source is
-    # /dev/mapper/luks-… whose parent is the *partition*, so a single lookup
-    # returns nvme0n1p3, and find_esp then walks a partition's children and
-    # finds nothing. luks-installer is making encryption the default, so that
-    # would be every new machine refusing `no-esp`.
-    local cur="$src" parent type i=0
+# Any block device -> the whole disk it ultimately sits on. Walks up rather
+# than taking one PKNAME, because one lookup is enough for a plain partition
+# and WRONG for everything else: on a LUKS root the source is /dev/mapper/luks-…
+# whose parent is the *partition*, so a single lookup returns nvme0n1p3 and a
+# caller that then scans a partition's children finds nothing. luks-installer
+# is making encryption the default, so that would be every new machine.
+#
+# Names are never stored anywhere: katana's nvme0n1/nvme1n1 reorder across
+# ordinary reboots, so a device name is only ever valid within one run. Every
+# fact that outlives a run is keyed on a PARTUUID.
+disk_of() {   # $1 = any block device -> whole-disk NAME, or non-zero
+    local cur="$1" parent type i=0
     while [ "$i" -lt 8 ]; do
         type="$(lsblk -ndo TYPE "$cur" 2>/dev/null | head -1)"
         [ "$type" = disk ] && { basename "$cur"; return 0; }
@@ -148,6 +200,13 @@ root_disk() {
         i=$(( i + 1 ))
     done
     return 1
+}
+
+root_disk() {
+    local src; src="$(root_source)"
+    [ -n "$src" ] || return 1
+    src="${src%%[*}"          # btrfs prints /dev/nvme0n1p5[/subvol]
+    disk_of "$src"
 }
 
 find_esp() {   # prints the ESP block device
@@ -229,26 +288,124 @@ partuuid_of() {   # $1 = /dev/sdXN
     lsblk -dno PARTUUID "$1" 2>/dev/null | head -1 | tr 'A-Z' 'a-z'
 }
 
+# Every ESP on the root's disk, in the order bootc itself would consider them.
+# This exists to be HONEST about a machine with more than one, and the ordering
+# is not a preference this script gets to have.
+#
+# APEX owns its ESP and never writes Windows' (docs/apex-owns-its-esp.md). That
+# decision is about WHICH partition may be written. This function answers a
+# different question — which one bootc WILL write — and on this path that is not
+# APEX's to choose: `cmd_stage` runs `bootc install to-existing-root`, whose
+# --help takes only [ROOT_PATH]. No ESP argument, no --boot-mount-spec. The
+# caller cannot point it anywhere. So precheck's job is to find out what bootc
+# has already decided and refuse when that collides with the ownership rule.
+# A rule here that differed from bootc's would only mean precheck measured
+# partition A while the install wrote partition B.
+#
+# Read out of bootc's source rather than guessed, at the exact version this
+# machine runs — `bootc --version` is 1.16.10 and sdboot-xbootldr's bootc-src is
+# 3e76c16 / v1.16.10; v1.16.11 is identical in every respect below
+# (crates/blockdev/src/blockdev.rs):
+#
+#   find_first_colocated_esp()  ->  find_colocated_esps()?.remove(0)
+#   find_colocated_esps()       ->  for root in find_all_roots():
+#                                       find_partition_of_esp_optional()
+#   find_partition_of_type()    ->  children.iter().find(|pt| pt == ESP_GUID)
+#
+# `.find()` takes the FIRST matching child and `.remove(0)` takes the FIRST
+# disk's ESP. So: first ESP-typed partition, in partition order, on the first
+# backing disk that has one. Not the biggest, not the one being booted — and
+# not the one the caller mounted either: crates/lib/src/bootc_composefs/boot.rs
+# reaches the ESP at four call sites and all four are
+# `find_first_colocated_esp()`. `boot_mount_spec()` appears in that file only
+# to build a `systemd.mount-extra=…:/boot` karg; it does not steer the loader
+# write. Both `BootSetupType::Upgrade` arms call the same function again, so
+# every later `bootc upgrade` re-walks the GPT — there is no pointer to pin,
+# and ESP preference on this path can only be expressed as partition ORDER.
+#
+# If the first one is too small, bootc will not reach for a later one, and
+# neither may the refusal — it says so instead.
+esp_candidates() {   # one "/dev/NAME PARTUUID SIZE_BYTES" per line, bootc order
+    local disk part t uuid size found=1
+    disk="$(root_disk)" || return 1
+    [ -n "$disk" ] || return 1
+    for part in $(lsblk -lno NAME "/dev/$disk" 2>/dev/null); do
+        [ "$part" = "$disk" ] && continue
+        t="$(lsblk -dno PARTTYPE "/dev/$part" 2>/dev/null | tr 'A-Z' 'a-z')"
+        [ "$t" = "$ESP_TYPE_GUID" ] || continue
+        uuid="$(partuuid_of "/dev/$part")"
+        size="$(lsblk -dnbo SIZE "/dev/$part" 2>/dev/null | head -1)"
+        printf '/dev/%s %s %s\n' "$part" "${uuid:--}" "${size:-0}"
+        found=0
+    done
+    return "$found"
+}
+
+# ── BitLocker ────────────────────────────────────────────────────────────────
+#
+# Asked of libblkid, not of the first sector. util-linux has shipped a
+# BitLocker prober since 2.33 — Fedora 43 carries 2.41.5 and `blkid -k` lists
+# BitLocker here — so `lsblk -o FSTYPE` already names these volumes and a
+# hand-read of the `-FVE-FS-` signature at offset 3 would only re-implement it
+# with fewer cases covered.
+#
+# What the signature does NOT tell you, and why this is a note and not a
+# refusal: *suspending* BitLocker leaves the volume FVE-formatted. Suspension
+# writes a clear key, it does not decrypt and it does not reformat, so the
+# signature is still there afterwards. A refusal keyed on it could therefore
+# never be cleared by the one instruction we would give the user — only a full
+# decrypt clears it — which would make it a permanent refusal on every
+# BitLocker dual-boot machine. That loses the argument docs/boot-v2.md already
+# settled for katana ("a refusal would keep katana on the Windows disk
+# forever") and contradicts "it has to work for all machines".
+bitlocker_volumes() {   # every BitLocker-formatted volume on the machine
+    lsblk -pnro NAME,FSTYPE 2>/dev/null | awk '$2 == "BitLocker" { print $1 }'
+}
+
+# Does the ESP the migration is about to write ALSO carry the Windows loader?
+# This is the whole difference between the two BitLocker shapes. FAT is
+# case-insensitive through the vfat driver, so one spelling is enough.
+windows_loader_on_esp() {
+    [ -n "$esp_mounted_at" ] || return 1
+    [ -e "$esp_mounted_at/EFI/Microsoft/Boot/bootmgfw.efi" ]
+}
+
 esp_mounted_at=""      # set by with_esp
 esp_we_mounted=0
 
-with_esp() {   # mount the ESP read-write somewhere private; idempotent
+# $1 = "ro" or "rw" (default). The mode is not decoration: `precheck` documents
+# itself as writing nothing, and a bare `mount` of a FAT volume is read-write,
+# which sets the dirty bit on the ESP this machine boots from. A precheck that
+# is killed between the mount and the umount then leaves the host's ESP mounted
+# writable with the dirty flag set, and the next firmware or fsck sees a volume
+# that was not cleanly unmounted. Nothing in precheck needs to write, so
+# precheck asks for ro and the promise in its own usage line becomes true.
+with_esp() {   # mount the ESP somewhere private; idempotent
+    local mode="${1:-rw}"
     if [ -n "$ESP_OVERRIDE" ]; then esp_mounted_at="$ESP_OVERRIDE"; return 0; fi
     local dev; dev="$(find_esp)" || return 1
     local here; here="$(findmnt -n -o TARGET -S "$dev" 2>/dev/null | head -1)"
     if [ -n "$here" ]; then esp_mounted_at="$here"; return 0; fi
-    mkdir -p /run/apex-boot-migrate/esp || return 1
-    mount "$dev" /run/apex-boot-migrate/esp || return 1
-    esp_mounted_at=/run/apex-boot-migrate/esp
+    mkdir -p "$MOUNTDIR/esp" || return 1
+    mount -o "$mode" "$dev" "$MOUNTDIR/esp" || return 1
+    esp_mounted_at="$MOUNTDIR/esp"
     esp_we_mounted=1
 }
 
 release_esp() {
     [ "$esp_we_mounted" = 1 ] || return 0
     sync
-    umount /run/apex-boot-migrate/esp 2>/dev/null
+    umount "$MOUNTDIR/esp" 2>/dev/null
     esp_we_mounted=0
 }
+
+# Every exit path, not just the ones somebody remembered. `refuse` is `exit 10`
+# and several refusals fire AFTER with_esp with no release in between — the
+# `no-kernel` one always did — so without this the host's ESP stays mounted
+# under /run after a refusal. release_esp is idempotent and only acts on a
+# mount this process made, so it can never unmount an ESP somebody else had
+# already mounted.
+trap release_esp EXIT
 
 booted_store() {
     # The test hook is here and not around the call sites: the phase logic in
@@ -296,7 +453,7 @@ carried_kargs() {
 
 deployment_kernel_bytes() {   # kernel + initramfs of the booted deployment
     local kd total=0 f
-    kd="$(find /usr/lib/modules -mindepth 1 -maxdepth 1 -type d 2>/dev/null | head -1)"
+    kd="$(find "$FAKEROOT/usr/lib/modules" -mindepth 1 -maxdepth 1 -type d 2>/dev/null | head -1)"
     [ -n "$kd" ] || { echo 0; return; }
     for f in "$kd/vmlinuz" "$kd/initramfs.img"; do
         [ -f "$f" ] && total=$(( total + $(stat -c %s "$f") ))
@@ -312,17 +469,25 @@ cmd_precheck() {
 
     [ "$(id -u)" = 0 ] || refuse "not-root" "This has to run as root."
 
-    [ -d /sys/firmware/efi ] || refuse "not-uefi" \
-        "This machine booted through legacy BIOS, not UEFI." \
-        "systemd-boot is an EFI application; there is nothing for it to be."
+    if [ -d "$FAKEROOT/sys/firmware/efi" ]; then
+        verdict OK "uefi" "booted through UEFI"
+    else
+        refuse "not-uefi" \
+            "This machine booted through legacy BIOS, not UEFI." \
+            "systemd-boot is an EFI application; there is nothing for it to be."
+    fi
 
     if [ "$(booted_store)" != ostreeContainer ]; then
         refuse "already-migrated" \
             "The booted deployment is not on the ostree backend (store: $(booted_store))." \
             "This machine is already on the composefs + systemd-boot path."
+    else
+        verdict OK "on-ostree" "booted store is ostreeContainer, so there is something to migrate"
     fi
 
-    if [ "$(staged_present)" = yes ]; then
+    if [ "$(staged_present)" != yes ]; then
+        verdict OK "no-staged-update" "no ostree deployment is staged for the next boot"
+    else
         refuse "update-staged" \
             "An OS update is already staged for the next boot." \
             "Reboot into it first, then run the update again: migrating and" \
@@ -336,11 +501,17 @@ cmd_precheck() {
         "rsync is not in this image; the migration needs it to carry /etc across."
     command -v podman >/dev/null 2>&1 || refuse "no-podman" \
         "podman is not in this image; the install has to run as a container of the image."
+    command -v mkfs.vfat >/dev/null 2>&1 && command -v rsync >/dev/null 2>&1 &&
+        command -v podman >/dev/null 2>&1 &&
+        verdict OK "tools" "mkfs.vfat, rsync and podman are all in this image"
 
-    bootc install to-existing-root --help 2>/dev/null | grep -q -- --composefs-backend ||
+    if bootc install to-existing-root --help 2>/dev/null | grep -q -- --composefs-backend; then
+        verdict OK "bootc-new-enough" "install to-existing-root has --composefs-backend"
+    else
         refuse "bootc-too-old" \
             "This machine's bootc has no --composefs-backend on install to-existing-root." \
             "The migration needs it. Take an OS update first."
+    fi
 
     # Secure Boot. systemd-boot-unsigned is exactly what its name says, and
     # Fedora's shim does not vouch for it. Committing a machine to a loader its
@@ -353,7 +524,7 @@ cmd_precheck() {
     # on the machine it was written for. The efivarfs read needs `dd bs=1
     # skip=4`; `tail -c +5` cannot read efivarfs at all (apex-boot-health hit
     # the same thing). Byte 5 is the value; the first four are attributes.
-    local sb_var=/sys/firmware/efi/efivars/SecureBoot-8be4df61-93ca-11d2-aa0d-00e098032b8c
+    local sb_var="$FAKEROOT/sys/firmware/efi/efivars/SecureBoot-8be4df61-93ca-11d2-aa0d-00e098032b8c"
     local sb=""
     if [ -e "$sb_var" ]; then
         sb="$(dd if="$sb_var" bs=1 skip=4 count=1 status=none 2>/dev/null | od -An -tu1 | tr -d ' \n')"
@@ -362,8 +533,14 @@ cmd_precheck() {
             "enforces Secure Boot is unknown. Committing a machine to an" \
             "unsigned loader on a guess is how one becomes unbootable."
     fi
+    if [ "$sb" != 1 ]; then
+        verdict OK "secure-boot" "Secure Boot is not enforcing, so an unsigned loader is accepted"
+    fi
     if [ "$sb" = 1 ]; then
-        if [ ! -f /usr/share/apex-os/boot/sdboot-signed ]; then
+        if [ -f "$FAKEROOT/usr/share/apex-os/boot/sdboot-signed" ]; then
+            verdict OK "secure-boot" "Secure Boot is on and this image's systemd-boot is signed"
+        fi
+        if [ ! -f "$FAKEROOT/usr/share/apex-os/boot/sdboot-signed" ]; then
             refuse "secure-boot-unsigned-loader" \
                 "Secure Boot is enabled and this image's systemd-boot is unsigned." \
                 "The firmware would refuse the new loader and the machine would" \
@@ -415,18 +592,89 @@ cmd_precheck() {
             "AND needs room for the new copy on top of it." \
             "docs/update-cost.md, 'Also changed: the one update that" \
             "migrates the boot path'."
+    else
+        verdict OK "root-space" \
+            "$(( root_avail / 1048576 )) GiB free, $(( root_need / 1048576 )) GiB needed"
     fi
 
-    with_esp || refuse "no-esp" \
-        "No EFI System Partition was found on the disk holding the root filesystem."
+    # ── which ESP, and is there one at all ──────────────────────────────────
+    local esp_ok=0
+    if with_esp ro; then
+        esp_ok=1
+        # Name the partition, by PARTUUID, never by device name: katana's
+        # nvme0n1/nvme1n1 swap across ordinary reboots, so "/dev/nvme0n1p1" is
+        # a fact with a shelf life of one boot and a PARTUUID is not.
+        local chosen chosen_uuid ncand
+        chosen="$(find_esp 2>/dev/null)" || chosen=""
+        chosen_uuid="$(partuuid_of "$chosen" 2>/dev/null)"
+        ncand="$(esp_candidates 2>/dev/null | wc -l)"
+        # APEX_MIGRATE_ESP moves where this MEASURES and nothing else. It does
+        # not steer the write: cmd_stage still calls find_esp() for the FAT
+        # volume id, and bootc self-discovers regardless. Saying "overridden"
+        # here claimed a steering that does not exist.
+        verdict OK "esp-choice" \
+            "bootc will write PARTUUID ${chosen_uuid:-unknown} of ${ncand:-0} ESP(s) on the root's disk${ESP_OVERRIDE:+; APEX_MIGRATE_ESP moved this measurement only}"
 
+        # ── may APEX write that ESP at all? ──────────────────────────────
+        #
+        # docs/apex-owns-its-esp.md: APEX owns its own ESP, and Windows' ESP is
+        # read for facts and NEVER written — not "preferably not", and no flag
+        # makes it writable. So the first question about the chosen ESP is not
+        # how big it is. It is whose it is.
+        #
+        # A REFUSAL, not a note, and it passes the test that killed the
+        # BitLocker refusal: it is CLEARABLE. The remedy — an ESP of APEX's own,
+        # earlier in this disk's partition order — is work APEX does, not an
+        # instruction the user could never satisfy. Detection does not become a
+        # permanent sentence.
+        #
+        # It is also not a one-off risk. Both `BootSetupType::Upgrade` arms in
+        # bootc's composefs writer call find_first_colocated_esp() afresh, so a
+        # machine waved through here would write Windows' ESP on every later
+        # `bootc upgrade`, not once at migration time.
+        if windows_loader_on_esp; then
+            refuse "esp-is-windows" \
+                "The ESP this migration would write is Windows' own boot partition." \
+                "It carries EFI/Microsoft/Boot/bootmgfw.efi, and APEX does not write" \
+                "Windows' ESP — docs/apex-owns-its-esp.md. A Windows feature update" \
+                "that grew EFI/Microsoft would reclaim whatever space APEX had" \
+                "squeezed in, and a machine that worked yesterday would fail its" \
+                "next update." \
+                "This is not a size problem, and a bigger ESP does not fix it." \
+                "bootc writes the FIRST ESP-typed partition in partition order on" \
+                "the disk holding the root filesystem, and there is no flag on" \
+                "'install to-existing-root' that overrides it — so this machine" \
+                "needs an ESP of its OWN, earlier in that order, before it can" \
+                "migrate. That partition is APEX's to create, not something to do" \
+                "by hand — and APEX does NOT create it yet. That work is tracked;" \
+                "until it lands there is nothing here for you to do, and nothing" \
+                "you can type that will clear this." \
+                "Until then this machine keeps booting the way it does now, and" \
+                "Windows' boot files are not touched."
+        fi
+    else
+        # Deliberately not softened into "we will use the other disk's ESP".
+        # bootc only ever searches find_all_roots() — the disks backing the
+        # ROOT filesystem — so an ESP on a different disk is not a fallback it
+        # has, and offering one here would describe an install that cannot
+        # happen. katana is the instructive case in the other direction: it
+        # BOOTS from the Windows disk's ESP but its own disk does carry one,
+        # so it lands in the success path below, not here.
+        refuse "no-esp" \
+            "No EFI System Partition was found on the disk holding the root filesystem." \
+            "bootc searches only the disks backing the root filesystem for an ESP," \
+            "so an ESP on any other disk in this machine cannot be used, even if" \
+            "this machine is booting from one right now." \
+            "This machine needs an ESP on its own disk before it can migrate."
+    fi
+
+    if [ "$esp_ok" = 1 ]; then
     # Space. Two deployments plus the staged third is what a steady-state
     # machine needs; refusing here is the whole reason the L16 does not get
     # half a migration.
     local need avail per
     per="$(deployment_kernel_bytes)"
-    [ "$per" -gt 0 ] || refuse "no-kernel" \
-        "Could not measure this deployment's kernel and initramfs under /usr/lib/modules."
+    if [ "$per" -gt 0 ]; then
     # Three, not two. The steady state is booted + rollback, and an update
     # stages a third alongside them — the predecessor measured three
     # directories on the ESP during an upgrade. An ESP sized for two passes
@@ -439,7 +687,6 @@ cmd_precheck() {
     local staged_kib=0
     [ -d "$esp_mounted_at/EFI/Linux" ] && staged_kib="$(du -sk "$esp_mounted_at/EFI/Linux" | awk '{print $1}')"
     if [ "$(( avail + staged_kib ))" -lt "$need" ]; then
-        release_esp
         # If this machine has an XBOOTLDR partition, say what it is and is not
         # worth before anyone spends an evening on it.
         # The status is taken from the command substitution itself, not from a
@@ -458,16 +705,54 @@ cmd_precheck() {
                 "'XBOOTLDR: the Boot Loader Specification allows it, bootc"
                 "does not implement it'.")
         fi
+        # A machine with a second, larger ESP on the same disk is the other
+        # thing everyone tries within a minute of reading this. bootc takes
+        # the FIRST ESP-typed partition in partition order — .find() then
+        # .remove(0) — so a bigger one further down the disk is not reachable
+        # by any flag, and saying nothing here invites somebody to create one
+        # and watch the install ignore it.
+        local nesp othernote=()
+        nesp="$(esp_candidates | wc -l)"
+        if [ "${nesp:-0}" -gt 1 ]; then
+            othernote=(
+                "This disk has $nesp EFI System Partitions and the migration is"
+                "measuring the first one, because that is the one bootc takes —"
+                "it selects by partition order, not by size, and there is no"
+                "flag that changes it. A larger ESP further down this disk"
+                "cannot be used without making it the first one.")
+        fi
+        # The shortfall, in the units the fix is actually made in. The
+        # initramfs is the whole number: 358 of the 374 MiB per deployment on
+        # the L16, and it is multiplied by three here.
+        local short_mib=$(( ( need - avail - staged_kib ) / 1024 ))
+        local per_budget_mib=$(( ( avail + staged_kib - ESP_SLACK_MIB * 1024 ) / 3 / 1024 ))
+        release_esp
         refuse "esp-too-small" \
+            "The ESP has $(( avail / 1024 )) MiB free, needs $(( need / 1024 )) MiB, short by $short_mib MiB." \
             "The EFI System Partition has $(( avail / 1024 )) MiB free and this" \
             "machine needs $(( need / 1024 )) MiB — one deployment's kernel and" \
             "initramfs is $(( per / 1024 / 1024 )) MiB, systemd-boot keeps the" \
             "booted one and the rollback, and an update stages a third" \
             "alongside them." \
-            "An ESP cannot be grown in place without moving the partition after" \
-            "it, so this machine stays on GRUB until its ESP is made bigger." \
+            "Two things close that gap, and only one of them is the user's to do:" \
+            "  * a kernel + initramfs of $per_budget_mib MiB or less would fit this ESP" \
+            "    as it is. Almost all of the current $(( per / 1024 / 1024 )) MiB is the" \
+            "    initramfs, and shrinking it is APEX's job, not yours — it is" \
+            "    tracked as the initramfs slimming work and lands in an image." \
+            "  * a bigger ESP. An ESP cannot be grown in place without moving the" \
+            "    partition after it, so that is a repartition, not a setting." \
+            ${othernote[@]+"${othernote[@]}"} \
             ${xbnote[@]+"${xbnote[@]}"} \
+            "Until one of those happens this machine stays on GRUB and keeps" \
+            "working. Nothing here is a countdown." \
             "docs/boot-v2.md, 'The ESP is the binding constraint'."
+    else
+        verdict OK "esp-space" \
+            "$(( avail / 1024 )) MiB free, $(( need / 1024 )) MiB needed"
+    fi
+    else
+        refuse "no-kernel" \
+            "Could not measure this deployment's kernel and initramfs under /usr/lib/modules."
     fi
 
     [ -f "$esp_mounted_at/EFI/BOOT/BOOTX64.EFI" ] || log \
@@ -486,6 +771,8 @@ cmd_precheck() {
         booted_uuid="$(booted_esp_partuuid)" || booted_uuid=""
         if [ -n "$booted_uuid" ] && [ -n "$target_uuid" ] &&
            [ "$booted_uuid" != "$target_uuid" ]; then
+            verdict NOTE "esp-changes-disk" \
+                "boots from PARTUUID $booted_uuid, will write $target_uuid"
             log "note: this machine BOOTS from the ESP at PARTUUID $booted_uuid,"
             log "      which is not on the disk its root filesystem is on. The"
             log "      migration writes $target_dev (PARTUUID $target_uuid), the ESP on"
@@ -496,7 +783,73 @@ cmd_precheck() {
         fi
     fi
 
+    # ── BitLocker ───────────────────────────────────────────────────────────
+    #
+    # A NOTE, never a refusal, and docs/boot-v2.md carries the reasoning at
+    # length. The short version is that suspending BitLocker — the only thing
+    # we could sensibly ask a user to do — leaves the volume FVE-formatted, so
+    # a refusal keyed on detection could never be cleared by its own remedy.
+    #
+    # The migration itself does not move Windows' PCRs: stage is additive on
+    # the ESP apart from BOOTX64.EFI, which it saves and restores byte for
+    # byte; it writes nothing under \EFI\Microsoft; and it never edits
+    # Windows' own Boot#### entry. The hazard is AFTERWARDS, and it is real:
+    # systemd-boot auto-detects bootmgfw.efi on an ESP it shares and offers
+    # Windows in its menu, and reaching Windows through another loader is what
+    # changes PCR 4 and PCR 7 and asks for the 48-digit key.
+    local bl; bl="$(bitlocker_volumes | tr '\n' ' ')"
+    if [ -n "${bl// /}" ]; then
+        local espdisk="" bldisk="" shared=0 sameddisk=0 v
+        espdisk="$(disk_of "$(find_esp 2>/dev/null)" 2>/dev/null)" || espdisk=""
+        windows_loader_on_esp && shared=1
+        for v in $bl; do
+            bldisk="$(disk_of "$v" 2>/dev/null)" || bldisk=""
+            [ -n "$bldisk" ] && [ "$bldisk" = "$espdisk" ] && sameddisk=1
+        done
+        if [ "$shared" = 1 ]; then
+            # Reachable only under --explain, which evaluates every check
+            # instead of stopping at the first refusal: plain `precheck` has
+            # already refused `esp-is-windows` before reaching here, because
+            # `shared` is the same condition. Kept so the decision table shows
+            # BOTH reasons rather than leaving BitLocker unmentioned on the one
+            # machine shape where it matters most.
+            verdict NOTE "bitlocker-shared-esp" \
+                "BitLocker present, and the ESP bootc would write is Windows' own — see esp-is-windows: ${bl% }"
+            log "note: this machine has BitLocker-protected volumes (${bl% }) AND"
+            log "      the ESP bootc would write is Windows' own. The migration is"
+            log "      refused for that second reason (esp-is-windows), so nothing"
+            log "      here warns about something that is about to happen."
+            log "      It matters for the FIX. Once APEX has an ESP of its own,"
+            log "      systemd-boot sits on a partition with no bootmgfw.efi to"
+            log "      auto-detect, so it cannot offer Windows in its menu — and"
+            log "      reaching Windows through another loader is exactly what"
+            log "      changes PCR 4 and PCR 7 and asks for the 48-digit key."
+            log "      Boot Windows with the power menu's 'Boot into Windows'"
+            log "      button (apex-boot-windows), which arms Windows' OWN firmware"
+            log "      entry for one boot. Have the recovery key to hand."
+        elif [ "$sameddisk" = 1 ]; then
+            verdict NOTE "bitlocker-same-disk" \
+                "BitLocker volume on the disk being written, separate ESP: ${bl% }"
+            log "note: this machine has BitLocker-protected volumes (${bl% }) on the"
+            log "      same disk as the ESP this migration writes, though Windows"
+            log "      does not boot from that ESP. Nothing is written to the"
+            log "      BitLocker volume or to Windows' boot files. Have the recovery"
+            log "      key to hand before the first Windows boot after migrating."
+        else
+            verdict NOTE "bitlocker-other-disk" \
+                "BitLocker present on another disk; no contact: ${bl% }"
+            log "note: this machine has BitLocker-protected volumes (${bl% }), all on"
+            log "      disks this migration does not write. Nothing on them is read"
+            log "      or changed and Windows' own boot entry is left alone."
+        fi
+        # A fact for `stage` to act on, rather than a decision made here.
+        # Turning off systemd-boot's auto-detection of bootmgfw.efi is stage's
+        # to write into loader.conf; precheck's job is to have found out.
+        [ -d "$STATE" ] && printf '%s\n' "${bl% }" > "$STATE/bitlocker" 2>/dev/null
+    fi
+
     release_esp
+    fi
     [ "$quiet" = quiet ] || log "precheck: this machine can migrate safely"
     return 0
 }
@@ -1027,14 +1380,49 @@ cmd_auto() {
     return 0
 }
 
+# ═════════════════════════════════════════════════════════════════════════════
+#  the decision table — every check evaluated, nothing short-circuited
+# ═════════════════════════════════════════════════════════════════════════════
+#
+# Writes nothing and changes nothing; it is `precheck` with the early exits
+# turned off. Exit status is the VERDICT, so a script can branch on it:
+#   0  this machine can migrate
+#   10 at least one check refuses (each one named below)
+# The per-check lines are stable "STATUS  name  reason" triples on stdout, so
+# this is also the machine-readable channel that `REFUSED [...]` never was.
+cmd_explain() {
+    EXPLAIN=1
+    cmd_precheck quiet >/dev/null 2>&1
+    local refused=0 v st name why
+    printf '%-7s %-28s %s\n' STATUS CHECK REASON
+    printf '%-7s %-28s %s\n' ------ ----- ------
+    for v in ${VERDICTS[@]+"${VERDICTS[@]}"}; do
+        st="${v%%|*}"; name="${v#*|}"; why="${name#*|}"; name="${name%%|*}"
+        printf '%-7s %-28s %s\n' "$st" "$name" "$why"
+        [ "$st" = REFUSE ] && refused=1
+    done
+    if [ "$refused" = 1 ]; then
+        printf '\nThis machine stays on GRUB, working. Every REFUSE above has to clear\n'
+        printf 'before it migrates; run this again after any of them changes.\n'
+        return 10
+    fi
+    printf '\nThis machine can migrate. "apex update" will do it, or run\n'
+    printf '"apex-boot-migrate auto" now.\n'
+    return 0
+}
+
 case "${1:-status}" in
     status)   cmd_status ;;
-    precheck) cmd_precheck ;;
+    precheck) case "${2:-}" in
+                  --explain) cmd_explain ;;
+                  '')        cmd_precheck ;;
+                  *) printf 'usage: apex-boot-migrate precheck [--explain]\n' >&2; exit 2 ;;
+              esac ;;
     stage)    cmd_stage ;;
     commit)   cmd_commit ;;
     confirm)  cmd_confirm ;;
     abort)    cmd_abort ;;
     retry)    cmd_retry ;;
     auto)     cmd_auto ;;
-    *) printf 'usage: apex-boot-migrate {status|precheck|stage|commit|confirm|retry|abort|auto}\n' >&2; exit 2 ;;
+    *) printf 'usage: apex-boot-migrate {status|precheck [--explain]|stage|commit|confirm|retry|abort|auto}\n' >&2; exit 2 ;;
 esac

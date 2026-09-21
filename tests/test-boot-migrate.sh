@@ -561,5 +561,86 @@ grep -q 'secure-boot-unknown' "$CODE" \
     && ok "an unreadable SecureBoot variable is a refusal, not a guess" \
     || bad "an unreadable SecureBoot variable is treated as 'off'"
 
+# ═════════════════════════════════════════════════════════════════════════════
+sec "APEX never writes Windows' ESP — behavioural, both ways"
+# Not a grep. These RUN the engine against two fixture ESPs that differ by one
+# file and compare what it decides, so the assertion fails if the refusal is
+# deleted AND fails if it is made unconditional. A grep for the refusal's name
+# would pass in the second case, which is the failure mode this repo keeps
+# finding: a gate that runs and inspects nothing.
+#
+# `precheck --explain` is what makes this possible without root or loopback.
+# It evaluates every check instead of stopping at the first refusal, so an
+# unprivileged runner gets past `not-root` and reaches the ESP checks, and
+# APEX_MIGRATE_ESP points the ESP content test at a directory. The runner is
+# not root, has no /dev/loop-control and may not be on UEFI at all — none of
+# which this needs.
+explain_with_esp() {   # $1 = fixture ESP dir; prints the decision table
+    APEX_MIGRATE_STATE="$TMP/state" \
+    APEX_MIGRATE_ROOT="$TMP/sysroot" \
+    APEX_MIGRATE_ESP="$1" \
+    APEX_MIGRATE_FAKEROOT="$TMP/fakeroot" \
+    APEX_MIGRATE_STORE=ostreeContainer \
+        bash "$MIG" precheck --explain 2>&1
+}
+
+mkdir -p "$TMP/esp-windows/EFI/Microsoft/Boot" "$TMP/esp-own/EFI/BOOT" \
+         "$TMP/fakeroot/usr/lib/modules"
+: > "$TMP/esp-windows/EFI/Microsoft/Boot/bootmgfw.efi"
+: > "$TMP/esp-own/EFI/BOOT/BOOTX64.EFI"
+
+# `|| true`: a refusing precheck exits 10 by design, and under `set -e` the
+# assignment itself would abort this suite before a single assertion ran.
+win_table="$(explain_with_esp "$TMP/esp-windows" || true)"
+own_table="$(explain_with_esp "$TMP/esp-own" || true)"
+
+# The two fixtures differ by exactly one file, so if the verdict does not
+# differ the check is not reading the ESP at all.
+if grep -qE '^REFUSE +esp-is-windows' <<<"$win_table"; then
+    ok "an ESP carrying bootmgfw.efi is REFUSED (esp-is-windows)"
+else
+    bad "an ESP carrying Windows' loader was allowed — APEX must never write it"
+fi
+if grep -qE 'esp-is-windows' <<<"$own_table"; then
+    bad "esp-is-windows fires on an ESP with no Windows loader — it is unconditional, so it proves nothing"
+else
+    ok "an ESP with no Windows loader raises no esp-is-windows verdict"
+fi
+
+# The refusal must be a REFUSE and not a NOTE. A note would let `apex update`
+# carry straight on into the write, which is the whole thing being prevented.
+if grep -qE '^NOTE +esp-is-windows' <<<"$win_table"; then
+    bad "esp-is-windows is a NOTE — the migration would proceed onto Windows' ESP anyway"
+else
+    ok "esp-is-windows is a refusal, not an advisory note"
+fi
+
+# A refusal has to be clearable, or it strands every dual-boot machine forever
+# — the argument that made BitLocker a note. The remedy has to be stated.
+if grep -q 'esp-is-windows' "$CODE" && \
+   awk '/refuse "esp-is-windows"/{p=1} p{print} p && /^        fi/{exit}' "$CODE" \
+     | grep -q 'ESP of its OWN'; then
+    ok "the esp-is-windows refusal names its remedy (an ESP of APEX's own)"
+else
+    bad "the refusal states no remedy, so a user cannot act on it"
+fi
+
+# --explain must evaluate everything. If it ever short-circuits, every
+# assertion above silently stops testing what it says it tests.
+win_checks="$(grep -cE '^(OK|NOTE|REFUSE) ' <<<"$win_table" || true)"
+if [[ "$win_checks" -ge 8 ]]; then
+    ok "precheck --explain evaluates every check ($win_checks verdicts past the first refusal)"
+else
+    bad "precheck --explain stopped early ($win_checks verdicts) — it is short-circuiting again"
+fi
+
+# The decision doc's claim, pinned as an assertion so it cannot drift back:
+# APEX_MIGRATE_ESP does NOT steer bootc, and this file must not say it does.
+if grep -q 'overridden' "$CODE"; then
+    bad "a verdict still calls APEX_MIGRATE_ESP an override of the write — it only moves the measurement"
+else
+    ok "nothing claims APEX_MIGRATE_ESP steers where bootc writes"
+fi
+
 printf '\n%d passed, %d failed\n' "$PASS" "$FAIL"
 [[ "$FAIL" -eq 0 ]]
