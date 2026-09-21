@@ -245,16 +245,104 @@ RUN set -eux; \
         --add plymouth --kver "${KVER}" \
         "/usr/lib/modules/${KVER}/initramfs.img"; \
     test -s "/usr/lib/modules/${KVER}/initramfs.img"; \
-    # The initramfs is the artifact that boots, so it is the artifact checked.
-    # `lsinitrd` lists what actually landed inside; a driver that is configured
-    # but absent here is a black screen on a dGPU-attached panel.
-    # Modules are listed by full path and are compressed, so match the path
-    # segment and allow any suffix: `.../extra/nvidia/nvidia.ko.zst`. Verified
-    # against a real initramfs before this was written, rather than pattern-
-    # matching against an assumption about the filenames.
-    lsinitrd "/usr/lib/modules/${KVER}/initramfs.img" \
-        | grep -E '/nvidia[^/]*\.ko' \
-        || { echo "FATAL: nvidia is not in the shipped initramfs — a dGPU-attached panel would stay black"; exit 1; }; \
+    INITRD="/usr/lib/modules/${KVER}/initramfs.img"; \
+    # ── ONE listing, reused ────────────────────────────────────────────────
+    # Every gate below used to call `lsinitrd` again, and each call
+    # decompresses the whole image. List once into a file and grep the FILE:
+    # a grep on a file cannot take SIGPIPE, so `grep -q` cannot return 141 and
+    # turn a match into a silent pass the way it can at the end of a pipe.
+    lsinitrd "$INITRD" > /tmp/initrd.list; \
+    lsinitrd "$INITRD" -m > /tmp/initrd.mods; \
+    test -s /tmp/initrd.list; \
+    test -s /tmp/initrd.mods; \
+    #
+    # ══ THE ESP BUDGET ════════════════════════════════════════════════════
+    # systemd-boot puts the kernel and initramfs ON the ESP, and `bootc` has
+    # no XBOOTLDR Type #1 support to move them off it. apex-boot-migrate needs
+    # `3 × (vmlinuz + initramfs) + 48 MiB` — booted, rollback, and the one an
+    # update stages alongside them — so a 512 MiB ESP, the normal size on a
+    # Windows dual-boot machine, is what this number has to fit inside.
+    #
+    # 130 MiB per deployment  ->  3 × 130 + 48 = 438 MiB, against roughly
+    # 475 MiB free on a 512 MiB ESP once FAT overhead and Microsoft's own
+    # /EFI/Microsoft are accounted for. Measured on 2026-09-21 the real figure
+    # is 114.6 MiB (98.5 initramfs + 16.1 vmlinuz), so this ceiling leaves
+    # ~15 MiB of headroom for the kernel to grow without failing a build, and
+    # still catches the regression that matters: anything that puts GPU
+    # firmware back in the initramfs adds 100 MiB at a time.
+    #
+    # This is a gate that can fail. The size is printed whether it passes or
+    # not, so the number is in every build log and a slow drift is visible
+    # before it is fatal.
+    BUDGET_MIB=130; \
+    KBYTES="$(stat -c %s "/usr/lib/modules/${KVER}/vmlinuz")"; \
+    IBYTES="$(stat -c %s "$INITRD")"; \
+    PERBYTES=$(( KBYTES + IBYTES )); \
+    echo "ESP budget: vmlinuz $(( KBYTES / 1048576 )) MiB + initramfs $(( IBYTES / 1048576 )) MiB = $(( PERBYTES / 1048576 )) MiB per deployment (ceiling ${BUDGET_MIB} MiB)"; \
+    echo "ESP budget: apex-boot-migrate would need $(( PERBYTES * 3 / 1048576 + 48 )) MiB on the ESP"; \
+    if [ "${PERBYTES}" -gt $(( BUDGET_MIB * 1048576 )) ]; then \
+        echo "FATAL: one deployment is $(( PERBYTES / 1048576 )) MiB, over the ${BUDGET_MIB} MiB ceiling."; \
+        echo "       apex-boot-migrate would refuse every 512 MiB ESP with esp-too-small,"; \
+        echo "       which is the normal ESP size on a Windows dual-boot machine."; \
+        echo "       The usual cause is a driver re-entering the initramfs and dragging"; \
+        echo "       its firmware in with it — see Containerfile.core stage 1f."; \
+        echo "       Biggest things inside, for the triage:"; \
+        sort -k5 -n -r /tmp/initrd.list | head -20; \
+        exit 1; \
+    fi; \
+    #
+    # ══ WHY THE BUDGET HOLDS: the four things that must NOT be in there ════
+    # Each of these is a gate that fails both ways — it is satisfied by an
+    # absence, so re-adding the driver fails the build rather than quietly
+    # costing every user their migration.
+    if grep -qE 'usr/lib/firmware/(nvidia|amdgpu|i915|xe|radeon)/' /tmp/initrd.list; then \
+        echo "FATAL: GPU firmware is back in the initramfs. That alone was 239 MiB of"; \
+        echo "       the 358 MiB this image used to ship, and it is there because some"; \
+        echo "       driver was re-added: dracut installs the firmware of every driver"; \
+        echo "       it installs. Check add_drivers in 99-nvidia-dracut.conf."; \
+        grep -E 'usr/lib/firmware/(nvidia|amdgpu|i915|xe|radeon)/' /tmp/initrd.list | head -10; \
+        exit 1; \
+    fi; \
+    if grep -qE '/(nouveau|amdgpu|i915|xe|radeon|nvidia|nvidia_modeset|nvidia_drm|nvidia_uvm)\.ko' /tmp/initrd.list; then \
+        echo "FATAL: a KMS driver is in the initramfs. Worse than the size: a KMS driver"; \
+        echo "       calls drm_aperture_remove_conflicting_pci_framebuffers() early in"; \
+        echo "       probe, which evicts simpledrm BEFORE it loads its firmware — so a"; \
+        echo "       driver here without its firmware is a BLACK SCREEN at the LUKS"; \
+        echo "       passphrase prompt, not merely a plain one."; \
+        grep -E '/(nouveau|amdgpu|i915|xe|radeon|nvidia|nvidia_modeset|nvidia_drm|nvidia_uvm)\.ko' /tmp/initrd.list; \
+        exit 1; \
+    fi; \
+    if grep -qE 'kernel/drivers/net/ethernet/' /tmp/initrd.list; then \
+        echo "FATAL: ethernet drivers are in the initramfs. APEX roots are local block"; \
+        echo "       devices; 23 MiB of =drivers/net exists only to mount a root over a"; \
+        echo "       network. omit_dracutmodules in 99-nvidia-dracut.conf has regressed."; \
+        exit 1; \
+    fi; \
+    #
+    # ══ AND THE POSITIVE HALF: what draws the passphrase prompt instead ════
+    # Removing every KMS driver is only safe because the firmware framebuffer
+    # console is built INTO this kernel. Containerfile.kernel asserts these
+    # against the config it built; this asserts them against the config that
+    # actually shipped in THIS image, which is the one that boots.
+    KCONF="/usr/lib/modules/${KVER}/config"; \
+    test -s "${KCONF}" \
+        || { echo "FATAL: no kernel config at ${KCONF} — cannot prove simpledrm is built in"; exit 1; }; \
+    for opt in CONFIG_DRM CONFIG_DRM_SIMPLEDRM CONFIG_SYSFB_SIMPLEFB \
+               CONFIG_DRM_FBDEV_EMULATION CONFIG_FRAMEBUFFER_CONSOLE; do \
+        grep -q "^${opt}=y" "${KCONF}" \
+            || { echo "FATAL: ${opt} is not =y in the shipped kernel. Nothing would draw"; \
+                 echo "       the LUKS passphrase prompt: this initramfs deliberately"; \
+                 echo "       carries no KMS driver and relies on simpledrm binding the"; \
+                 echo "       framebuffer UEFI's GOP set up."; exit 1; }; \
+    done; \
+    echo "initramfs: simpledrm is built into the kernel — the unlock prompt has a console"; \
+    # Plymouth must have survived the omissions. Its dracut module depends on
+    # `drm`, which is still installed — only the DRIVERS were omitted — and a
+    # silently-dropped plymouth would look identical to a working build.
+    grep -qE 'usr/lib(64)?/plymouth' /tmp/initrd.list \
+        || { echo "FATAL: the plymouth engine is not in the shipped initramfs"; exit 1; }; \
+    grep -qE 'plymouth/themes/apex-os-chartreuse' /tmp/initrd.list \
+        || { echo "FATAL: the APEX plymouth theme is not in the shipped initramfs"; exit 1; }; \
     # ── the disk-unlock chain, checked in the artifact that boots ──────────
     # This is the LAST dracut run of the build (see the tier's header), so it
     # is the only place these can be checked: an assertion before it inspects
@@ -270,22 +358,21 @@ RUN set -eux; \
     #                         whose passphrase uses a key that moved.
     # The keymap check names a NON-us map on purpose: `us` is the kernel
     # built-in and would be there even if the whole keymap tree were missing.
-    INITRD="/usr/lib/modules/${KVER}/initramfs.img"; \
-    lsinitrd "$INITRD" | grep -qE 'usr/bin/systemd-cryptsetup' \
+    grep -qE 'usr/bin/systemd-cryptsetup' /tmp/initrd.list \
         || { echo "FATAL: systemd-cryptsetup is not in the shipped initramfs — an encrypted root could never be opened"; exit 1; }; \
-    lsinitrd "$INITRD" -m | tr ' ' '\n' | grep -qx 'crypt' \
+    tr ' ' '\n' < /tmp/initrd.mods | grep -qx 'crypt' \
         || { echo "FATAL: dracut's crypt module is not in the shipped initramfs — rd.luks.* would be ignored"; exit 1; }; \
-    lsinitrd "$INITRD" | grep -qE 'libcryptsetup-token-systemd-tpm2\.so' \
+    grep -qE 'libcryptsetup-token-systemd-tpm2\.so' /tmp/initrd.list \
         || { echo "FATAL: the systemd-tpm2 token plugin is not in the shipped initramfs — a TPM keyslot would be unusable"; exit 1; }; \
-    lsinitrd "$INITRD" | grep -qE 'kbd/keymaps/.*/de\.map' \
+    grep -qE 'kbd/keymaps/.*/de\.map' /tmp/initrd.list \
         || { echo "FATAL: the console keymaps are not in the shipped initramfs — every unlock prompt would be a US one"; exit 1; }; \
     # The hint module. A dracut module whose check() is never called, or whose
     # install() silently failed, leaves NO trace and no error — the build would
     # look identical. So both halves are named: the program, and the symlink
     # that is the only reason systemd ever runs it.
-    lsinitrd "$INITRD" | grep -qE 'usr/bin/apex-unlock-hint' \
+    grep -qE 'usr/bin/apex-unlock-hint' /tmp/initrd.list \
         || { echo "FATAL: apex-unlock-hint is not in the shipped initramfs — the unlock prompt could not say which keyboard it is using"; exit 1; }; \
-    lsinitrd "$INITRD" | grep -qE 'initrd\.target\.wants/apex-unlock-hint\.service' \
+    grep -qE 'initrd\.target\.wants/apex-unlock-hint\.service' /tmp/initrd.list \
         || { echo "FATAL: apex-unlock-hint.service is in the initramfs but nothing pulls it in — it would never run"; exit 1; }; \
     #
     # The per-machine keymap channel that survives a signed UKI. Same module,
@@ -295,11 +382,12 @@ RUN set -eux; \
     # ran at initrd.target would set a keymap that had already been loaded.
     # A wrong .wants directory here is a silent no-op that only shows up as a
     # locked-out owner, so the directory is named in the assertion.
-    lsinitrd "$INITRD" | grep -qE 'usr/bin/apex-vconsole-credential' \
+    grep -qE 'usr/bin/apex-vconsole-credential' /tmp/initrd.list \
         || { echo "FATAL: apex-vconsole-credential is not in the shipped initramfs — a UKI machine could not be told its keyboard layout"; exit 1; }; \
-    lsinitrd "$INITRD" | grep -qE 'sysinit\.target\.wants/apex-vconsole-credential\.service' \
+    grep -qE 'sysinit\.target\.wants/apex-vconsole-credential\.service' /tmp/initrd.list \
         || { echo "FATAL: apex-vconsole-credential.service is not pulled in by sysinit.target.wants — it would run after the keymap was already loaded, or never"; exit 1; }; \
-    echo "initramfs: plymouth theme + nvidia drivers + the disk-unlock chain present"
+    rm -f /tmp/initrd.list /tmp/initrd.mods; \
+    echo "initramfs: plymouth theme + the disk-unlock chain present, inside the ESP budget"
 
 # Kernel args for the graphical splash. `quiet splash` per the theme's own
 # README (files/branding/plymouth/README.md). NOTE: `quiet` raises the console
