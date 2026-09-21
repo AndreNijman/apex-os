@@ -1,7 +1,7 @@
 {
  "_comment": "Live dispatch table. The orchestrator writes this at every dispatch and every landing. resume.sh reads it. agent_id is only useful while the session that spawned it lives; after a restart, dispatch a fresh agent with the card instead.",
- "updated": "2026-09-21T11:55+0800",
- "_round": "Round 37. Orchestrator pid 2694 (interactive session, Andre at the keyboard). Round 36's pid 14601 is DEAD (kill -0 fails) and its six agents are gone -- their worktrees and branches are intact and were reconciled by hand this round. RATE LIMIT EVENT: the first round-37 dispatch of six agents ALL failed within seconds with HTTP 429 'weekly limit, resets Sep 25 9pm AWST' on the old account. Andre ran /login and the account changed; re-dispatched after. If you are reading this and the agents below are dead again, check for 429 before assuming the work failed. A block inhibitor (handle-lid-switch:sleep:idle, who=apex-roadmap-orchestrator-r37) is held.",
+ "updated": "2026-09-21T12:06+0800",
+ "_round": "Round 37 ENDED AT 2026-09-21T12:06+0800 -- Andre said 'ok stop, shutting down, save everything'. The six agents listed below were RUNNING when the machine went down; they are DEAD now. DO NOT message them. Dispatch fresh ones and hand each its card, per CLAUDE.md. A WIP snapshot was fired immediately before shutdown: 18 worktrees + roadmap-state saved to refs/wip on the remote, so every agent's uncommitted work is recoverable there. Each agent's worktree and branch are also intact on disk. roadmap/v2.2 (apex-os) = 738b241a, pushed. apex-shell = 9567586, untouched this round.",
  "_landed_this_round": [
   {
    "merge": "ff921909",
@@ -16,6 +16,13 @@
    "at": "2026-09-21T11:55+0800",
    "what": "A staged guest scenario running the shipped apex-luks-enroll live in a guest's dracut pre-mount hook, against a TPM whose PCR 7 was just extended by a real Secure-Boot-enforcing UEFI chain. Closes L-003's biggest gap: every earlier scenario read SB state from a --probe-root fixture or bound PCR 7 to a value the test itself chose.",
    "why_now": "Landed so the luks-boot agent (L-002) builds on it rather than re-deriving the swtpm startup-clear constraint. That agent was messaged."
+  },
+  {
+   "merge": "738b241a",
+   "branch": "fix/ci-discovery-checks",
+   "at": "2026-09-21T12:06+0800",
+   "what": "Three checkers that reported success while inspecting nothing. (1) check-suites-run-in-ci.sh discovered test-*.sh only, so every check-*.sh was invisible to it -- itself included. Now {test,check}-*.sh; coverage 93 -> 101 suites. (2) That hid tests/check-no-conflict-markers.sh, wired into NO workflow since it was written -- the gate created after a merge replay shipped <<<<<<< into apex-shell's IpcManager.qml, a QML parse error that stopped the shell loading at all. Wired into pr-validation.yml. (3) Wiring it revealed it could not search: `git grep ... 2>/dev/null || true` printed PASS exit 0 on a tree holding a REAL unresolved marker, because git grep only sees tracked files AND because CI checkout falls back to a tarball with no .git, where the command fails and || true turns that into success. Now git-or-grep with a NAMED exit-2 refusal if neither engine runs.",
+   "evidence": "Five arms demonstrated: new check-*.sh unrun -> FAIL named; exempt line for a run suite -> FAIL 'delete their lines'; tarball + real marker -> FAIL exit 1 (was PASS exit 0); tarball, marker removed -> PASS 'searched with grep'; repo + untracked marker -> FAIL exit 1 (was PASS exit 0); clean repo -> PASS 'searched with git'."
   }
  ],
  "_status_recorded_this_round": "P2-004 partial and P2-003 partial, both with the landing prepended to the EXISTING evidence rather than replacing it -- set-status.py has no append flag and a straight write would have erased 33,626 and 15,073 characters of prior rounds. Verified after writing: P2-003 33626 -> 34270 chars, P2-004 15073 -> 15694, file re-parses, 128 tasks, counts unchanged at 92 done / 34 partial / 0 todo / 2 blocked. P2-003 explicitly records that the landing carried NOTHING for that row, rather than letting a merge sha imply progress it did not make. SECOND WRITE: P2-004 partial again for the round-33 landing, prepended and verified 19,523 -> 20,334 characters. P2-003 deliberately NOT rewritten -- the round-33 agent had already recorded that the round carried nothing for that row, and a second 'landed nothing' note would be padding. THIRD WRITE: P1-060, P1-055, P1-057 partial and P1-052 done for the Android landing, each prepended and each verified at exactly +558 characters (22,671->23,229 / 9,527->10,085 / 8,454->9,012 / 7,522->8,080). Counts unchanged at 92/34/0/2 of 128 after every write this round. FOURTH WRITE: P1-060 partial and P1-052 done for the relay landing, prepended and verified at +623 each (28,347->28,970 and 10,285->10,908). Counts still 92/34/0/2 of 128.",
@@ -399,5 +406,17 @@
   "unit": "focus-switcher (already landed)",
   "finding": "Andre's SUPER+arrow bug is a DOUBLE BIND, not a warp failure. hyprlang's `unbind` matches the key literal EXACTLY, so apex-shell's generated `unbind = SUPER, LEFT` never removed his seed config's `bind = $mainMod, left`. Both stayed live, Hyprland fired both, and with two windows the second movefocus WRAPS back to the origin -- which reads as the key doing nothing. NINE chords were doubled on his session, not four: movefocus x4, movewindow x4 (swap and swap back), and SUPER+Print (grimblast AND screenshot.sh at once). Measured: single movefocus l -> cursor 482,617 (the target's middle, so the warp works); double -> 1437,328, where it started. cursor:no_warps reads int:0 set:false, already the default.",
   "status": "tests/test-apex-hypr-focus.sh ALREADY asserts exactly one bind per arrow combo and its header names this defect -- the shipped fix is correct and this is a live confirmation of it, not a new defect. apex-hypr-migrate was checked too and does NOT reintroduce it: convert_bind compares on key.upper() against APEX_DEFAULT_BINDS and drops the lowercase user bind; keybindings.lua:45 uppercases in the canonical combo key. The case-sensitivity trap is confined to hyprlang's unbind, which the Lua path never uses. Andre has no image carrying any of this, so the nine duplicate lines in his ~/.config/hypr/hyprland.conf were commented out BY HAND (backup .bak-dupbinds-20260921) and hyprctl reload run: 0 duplicated chords after. He confirmed 'fixed'. Full write-up appended to ROADMAP/state/agents/focus-switcher.md; trap saved to memory as hyprlang-unbind-is-case-sensitive."
+ },
+ "_shutdown_state": {
+  "at": "2026-09-21T12:06+0800",
+  "wip_snapshot": "FIRED at 12:06:29 before shutdown. 18 saved, 1 skipped mid-operation, 0 ignored-only. refs/wip/roadmap-state carries 137 files.",
+  "inhibitor": "apex-roadmap-orchestrator-r37 block inhibitor was released at shutdown.",
+  "next_round_should": [
+   "Run ROADMAP/resume.sh -f FIRST.",
+   "Re-dispatch all six agents below with fresh agents + their cards. kernel-akmods is the highest priority on the whole board: it is the reason no image has shipped.",
+   "Check refs/wip for each agent's uncommitted work BEFORE assuming a worktree is complete -- they were killed mid-flight, so their cards may lag their commits.",
+   "luks-enroll (L-003) was deliberately NOT dispatched this round, one slot short of the ceiling. Its guest PCR7 scenario landed as 34132080, so re-scope it against that rather than the old card.",
+   "The Pixel 10a was NOT connected, so the signed-APK install in _android_install_pending is still pending."
+  ]
  }
 }
