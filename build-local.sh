@@ -103,8 +103,16 @@ REV="$(git rev-parse HEAD 2>/dev/null || echo unknown)"
 CORE_IMG=localhost/apex-os-core:latest
 # The kernel is its own tier now (docs/update-cost.md, "The fourth tier").
 # Containerfile.core consumes it by name and has NO COPR fallback, so a local
-# core build needs this image to exist first. The default in Containerfile.core
-# is this exact name.
+# core build needs this image to exist first.
+#
+# THIS IS NOT Containerfile.core's DEFAULT any more, and the difference matters.
+# The default there is the digest of the kernel published to GHCR by
+# kernel-build.yml, because CI has no hand-built kernel image and a default
+# naming one stopped every image build in the project. build_core() below
+# therefore has to keep passing `--build-arg APEX_KERNEL_IMAGE="$KERNEL_IMG"`:
+# drop that override and a local core build would silently install the
+# REGISTRY's kernel instead of the one just compiled here.
+# tests/check-kernel-image-pin.sh asserts both halves.
 KERNEL_IMG=localhost/apex-kernel:local
 
 # ── The shell ref, resolved rather than named ────────────────────────────────
@@ -327,6 +335,19 @@ build_core() {
         echo "== core == reusing existing $CORE_IMG (pass --force-core to rebuild)"
         return 0
     fi
+    # Milliseconds, and it guards the one line whose failure costs a 45-minute
+    # local build: `FROM ${APEX_KERNEL_IMAGE}`. The override below means the
+    # DEFAULT in Containerfile.core cannot break a local build -- but the other
+    # half of that same line can and did: an ARG declared after the first FROM
+    # is invisible to every FROM including its own, so `FROM ${APEX_KERNEL_IMAGE}`
+    # expanded empty HERE too, with a freshly built kernel image sitting right
+    # there and --build-arg passed correctly. CI grew this gate in the same
+    # change; a local build should not have to be the one that finds out.
+    #
+    # Inside build_core() rather than at the top of the file on purpose:
+    # tests/test-build-local-shell-ref.sh copies THIS SCRIPT alone into a
+    # throwaway repo with no tests/ directory and runs it with a bogus target.
+    ./tests/check-kernel-image-pin.sh
     build_kernel
     echo "== core == (this is the slow one, ~45 min)"
     sudo podman build --isolation=chroot \
