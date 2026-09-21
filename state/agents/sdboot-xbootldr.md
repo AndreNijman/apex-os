@@ -179,11 +179,14 @@ though at a 120 MiB initramfs a second APEX-owned ESP need only be ~512 MiB.
    `store/mod.rs:396`, `status.rs:408`, `finalize.rs:149`/`delete.rs:159`, all
    keyed off the same `boot_dir` decision. Watch bootc for a PR touching
    `esp_subdir`. Do **not** carry it as an APEX fork.
-2. **Does `find_vmlinuz_initrd_duplicate` ever fire for APEX?** If the initramfs
-   were byte-reproducible across image builds, an update that does not change
-   the kernel would cost **zero** additional ESP and `per*3` would stop being
-   the binding number. Nobody has checked; dracut is not reproducible by
-   default. Worth more than any partition layout. For `initramfs-slim`.
+2. **Does an APEX update ever leave the initramfs byte-identical?**
+   `sdboot-migrate` already measured `find_vmlinuz_initrd_duplicate` working
+   both ways (it dedupes when kernel+initramfs are unchanged, writes a second
+   directory when the initramfs moves). What nobody has checked is whether an
+   APEX image update ever hits the first case — dracut is not reproducible by
+   default. If it were made so, an update that does not change the kernel would
+   cost **zero** additional ESP and `per*3` would stop being the binding number.
+   Worth more than any partition layout. For `initramfs-slim`/`kernel-build`.
 3. **`apex-os:daily` ships no `rsync`** — measured in the guest, the first
    refusal a real APEX machine gets. Fixed by the next image build
    (`Containerfile.base` asserts it on `roadmap/v2.2`); until then, expect
