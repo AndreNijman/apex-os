@@ -27,25 +27,60 @@ conclusion is WRONG — do not revive it.
 
 ## NEXT
 
-- Copy `files/system/units/apex-boot-migrate-confirm.service` from the worktree
-  into /var/lab-scratch/sdboot-migrate-2/, write `act-migrate-3.sh` (act-migrate.sh
-  + the new `precheck --explain` verb), `./setctl.sh act-migrate-3.sh
-  /var/tmp/apex-work/wt-sdboot-migrate-3/files/system/libexec/apex-boot-migrate`,
-  then boot run A (512 MiB refusal) with:
-  `sudo /var/tmp/apex-work/wt-sdboot-migrate-3/tests/lab/nvram-guard --label apexmig-a --
+- WAIT for `systemctl --user is-active sdb3-install-a` to go inactive, then
+  `tail /var/lab-scratch/sdboot-migrate-3/install-a.log` for `install rc=0` AND
+  loop-mount `apexmig-a.img` p2 to confirm the ESP is NOT empty this time (see
+  FOUND — a complete GPT proved nothing). Then:
+  `cd /var/lab-scratch/sdboot-migrate-2 && ./setctl.sh act-migrate-3.sh
+   /var/tmp/apex-work/wt-sdboot-migrate-3/files/system/libexec/apex-boot-migrate`
+  and boot run A under `systemd-run --user` (never nohup) via
+  `/var/lab-scratch/sdboot-migrate-3/run-boot-a.sh`, which wraps:
+  `sudo -n /var/tmp/apex-work/wt-sdboot-migrate-3/tests/lab/nvram-guard --label apexmig-a --
    podman run --rm --device /dev/kvm -v /var/lab-scratch/sdboot-migrate-2:/work
    localhost/apex-bootlab -c '/work/boot-mig.sh /work/apexmig-a.img
    /work/apexmig-a-3.serial 1800 --ctl /work/ctl.img'`
-  under `systemd-run --user` (never nohup).
+  Expect `REFUSED [esp-too-small]`.
+
+### Guest bookkeeping — the persistent-NVRAM rig makes boot ORDER matter
+
+`boot-mig.sh` keeps one `VARS` file per guest and `lab-run.sh` counts boots in
+`/var/lib/labstage`, so every boot of a disk is a step in a sequence.
+
+| guest | boot | action on ctl.img | done? |
+| --- | --- | --- | --- |
+| apexmig-a (512 MiB ESP) | 1 | `act-migrate-3.sh` | not yet |
+| apexmig-b (2 GiB ESP) | 1 | `act-prep-3.sh` | disk not built |
+| apexmig-b | 2 | `act-unit-3.sh` | — |
+| apexmig-b | 3 | `act-check-3.sh` (the migrated boot) | — |
 
 ## DONE
 
 - Orientation. Worktree `/var/tmp/apex-work/wt-sdboot-migrate-3` created on
   branch `task/sdboot-migrate-3` from `origin/roadmap/v2.2` @ `f3b1b3d4`.
+- Lab scripts for both runs written into `/var/lab-scratch/sdboot-migrate-2/`
+  (the rig dir, reused as `/work`), all suffixed `-3`: `act-migrate-3.sh`,
+  `act-prep-3.sh`, `act-unit-3.sh`, `act-check-3.sh`, plus a copy of the
+  worktree's `apex-boot-migrate-confirm.service`. This unit's own outputs and
+  launchers are in `/var/lab-scratch/sdboot-migrate-3/`.
 
 ## IN PROGRESS
 
-- nothing committed yet.
+- **Run A's `bootc install` is running** as user unit `sdb3-install-a`
+  (`systemctl --user is-active sdb3-install-a`), log
+  `/var/lab-scratch/sdboot-migrate-3/install-a.log`, wrapper
+  `/var/lab-scratch/sdboot-migrate-3/run-install-a.sh`. It goes through
+  `tests/lab/bootc-install-lab` → `nvram-guard` → `--generic-image`.
+- **The item-3 splice is written and UNCOMMITTED** in
+  `files/system/libexec/apex-boot-migrate`: a new `count_staged_entry()` just
+  above `cmd_stage()`, a `BOOT_TRIES` constant after `ROOT_SLACK_MIB`, and a
+  one-line call in `cmd_stage` right after the `grub-boot-wiped` check. It is
+  NOT the predecessor's patch — that one no longer applies — and it differs
+  from it in one way that matters: the rename is verified by looking at the
+  filesystem (`[ ! -e "$counted" ] || [ -e "$ent" ]`) instead of trusting
+  `mv`'s exit status, because `mv` on FAT under a confined domain can report
+  success and move nothing. `bash -n` clean, `shellcheck` adds no new finding,
+  and `tests/test-boot-migrate.sh` is **83 passed, 0 failed** with it in.
+  It stays uncommitted until run B's migrated boot says whether blessing works.
 
 ## FOUND
 

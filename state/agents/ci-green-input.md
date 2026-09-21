@@ -10,18 +10,30 @@ Dispatched round 39; re-dispatched round 40, 2026-09-22.
 
 ## NEXT
 
-- Edit `tests/test-apex-input.sh`: extract the shipped `NIRI_BIN=` line into
-  `${WORK}/niri-bin-line.sh`, source it from `run_inc` before `$INC_BLOCK`,
-  assert it is exactly one line and that it sits BEFORE the 6a marker, and add
-  an "nothing unbound" assertion on `$out`. Then re-run the suite alone.
+- secret-broker. First, is it a flake or a regression?
+  `gh run list --workflow pr-validation.yml --branch roadmap/v2.2 --limit 15`,
+  then for each run whose `Package engine` job actually RAN, read its
+  `secret-broker: N passed, M failed` line. If it was green at an earlier SHA
+  on the same test code, bisect `<green>..e02561fb` over `apexd/`,
+  `tests/test-secret-broker.sh`, `tests/in-login-session.sh`. In parallel,
+  reproduce locally ALONE under `systemd-run --user` with
+  `APEX_REQUIRE_SANDBOX=1` (cold cargo build in this worktree — minutes).
 
 ## DONE
+
+- **apex-input is green and pushed: `cd3c06b6` on `origin/task/ci-green-input`.**
+  `112 passed, 0 failed, 0 skipped` run alone (was 101/8/0). Suite-only change;
+  the shipped provisioner is untouched and was never broken.
+- Mutation-tested both new invariants rather than assumed: deleting the
+  `NIRI_BIN=` line -> `100 passed, 12 failed` including all three new
+  assertions; moving it after its first use -> `111 passed, 1 failed`, exactly
+  the ordering assertion.
 
 ## IN PROGRESS
 
 - Worktree reset to `f3b1b3d4` (current origin/roadmap/v2.2). Nothing committed.
-- apex-input fix designed (see NEXT). It touches the SUITE only — the shipped
-  provisioner is correct.
+- secret-broker: diagnosed only as far as "the sandbox came up and the script
+  stalled after its first line". Nothing written.
 
 ## FOUND
 

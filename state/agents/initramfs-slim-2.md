@@ -10,14 +10,17 @@ Dispatched round 40, 2026-09-22 ~03:30 AWST, by the autoresume orchestrator.
 
 ## NEXT
 
-- Find two `build-image` runs whose apex-tier parent (base) digest is the same,
-  pull ONLY the dracut layer blob of each from ghcr (not the 15 GB image), and
-  compare the two `initramfs.img` byte for byte. That is item 5 and it is also
-  the verification of a claim ALREADY LANDED in `Containerfile.apex:~240`:
-  "unchanged theme + unchanged kernel yield a byte-identical initramfs and the
-  layer digest stops moving."
+- Write `ROADMAP/evidence/initramfs-slim2-20260922.md` in
+  /var/tmp/apex-work/wt-initramfs-slim-2 with the six measurements below, then
+  fix the two stale claims in `Containerfile.apex` (the "375.2 -> 114.6 MiB"
+  comment and the "layer digest stops moving" sentence at ~line 240), commit,
+  push, mark LANDABLE.
 
 ## DONE
+
+- **Item 5 (cross-BUILD reproducibility) is ANSWERED and it splits in two.**
+  All measurements below are on this machine today, recorded in
+  `/var/lab-scratch/initramfs-slim-2/`.
 
 ## IN PROGRESS
 
@@ -73,6 +76,94 @@ the only one genuinely open, and only its cross-BUILD half — round 39 measured
 run-to-run in one chroot and lab-vs-image faithfulness, and said in the
 evidence file, correctly, "what this does not prove: cross-host
 bit-reproducibility".
+
+### ITEM 5 — the answer, measured
+
+**Content: reproducible. Layer: not.** Two independent
+`podman build --no-cache --layers=false` runs from the *same* parent
+(`ghcr.io/andrenijman/apex-os:core-68ca7094…`), running the exact
+`Containerfile.apex` dracut stanza (`/var/lab-scratch/initramfs-slim-2/repro/`):
+
+| | build a | build b |
+|---|---|---|
+| `initramfs.img` sha256 | `4569c3b0…d881` | `4569c3b0…d881` |
+| bytes | 88,934,458 | 88,934,458 |
+| `cmp` | — | **byte-identical** |
+| image last layer | `42760fdc…b285` | `a096af77…fb60` — **DIFFERENT** |
+| `initramfs.img` mtime | 03:32:33 | 03:33:03 |
+
+So **`find_vmlinuz_initrd_duplicate` CAN fire** (bootc digests content), and the
+landed sentence in `Containerfile.apex:~240` — *"unchanged theme + unchanged
+kernel yield a byte-identical initramfs and the layer digest stops moving"* — is
+**half true**: the initramfs half is right, the layer half is wrong. The layer
+moves because the tar records `initramfs.img`'s mtime. There is no
+`--timestamp` and no `SOURCE_DATE_EPOCH` in `.github/workflows/build-image.yml`.
+
+**One flag closes it, demonstrated:** two more `--no-cache` builds with
+`podman build --timestamp 0` gave the **same last layer** `0c81bf74…53ec` *and*
+the same image id `d920817c…57af` both times. Stated as a lever, not a
+recommendation — `--timestamp` rewrites every mtime in the tier and its
+interaction with ostree/bootc is untested.
+
+### ITEM 5, the practical half — it has never fired, and the registry proves it
+
+14 published `apex-<sha>` tags inspected with `skopeo inspect --raw` (no pulls;
+manifests cached in `/var/lab-scratch/initramfs-slim-2/manifests/`):
+
+* the tier is built `--layers=false` (`build-image.yml:1339`) so **the whole of
+  `Containerfile.apex` is ONE layer**;
+* **14 of 14 have a distinct final layer digest** — no APEX update has ever
+  reused the previous one;
+* every one of the 14 sits on **its own** `base-<same sha>`, so no two apex
+  builds have ever shared a parent — dedup never had the chance;
+* the fat-era layers are not even the same SIZE as each other (358.1, 358.2,
+  359.0, 359.4, 359.5 MiB), so the content differed, not just the timestamps.
+
+**Answer for `sdboot-xbootldr` NEXT #2, in one line:** an APEX update has never
+left the initramfs byte-identical and never will while every build rebuilds
+`base`, but the initramfs itself IS bit-reproducible from an unchanged parent,
+so the lever is "stop rebuilding base when nothing changed", not "make dracut
+deterministic" — that part already works.
+
+### A 275 MiB-per-update download win nobody claimed
+
+Same registry data: the apex-tier layer is **84.5 MiB compressed at
+`apex-44c9a5cb`** against **358-360 MiB for all 13 earlier builds**. Because
+the tier is one squashed layer and its digest moves every build, every APEX
+machine re-downloads that layer on every update. The slimming therefore takes
+**~275 MiB off every single `bootc upgrade`**, which is a `docs/update-cost.md`
+number and is not in the evidence file.
+
+### The ESP claim is no longer arithmetic — katana has three deployments on disk
+
+The landed evidence says "No real 512 MiB ESP was filled … arithmetic over
+measured file sizes, not an observed three-deployment ESP". It is now observed.
+katana is booted on **exactly this image** (`bootc status`: image
+`ghcr.io/andrenijman/apex-os:apex-44c9a5cb…`, digest `sha256:06ba23c3…`,
+timestamp 2026-09-21T17:42:03Z) and carries three deployments:
+
+```
+101M  /boot/ostree/default-2e8ac7c8…   <- slim, this build
+376M  /boot/ostree/default-ed5f1247…   <- fat
+376M  /boot/ostree/default-93133f9a…   <- fat
+```
+
+Exact shipped bytes read off katana: `initramfs.img` **88,935,408 B**,
+`vmlinuz` **16,906,312 B** → **105,841,720 B = 100.94 MiB per deployment**,
+`need = 3 x 100.94 + 48 = 351 MiB`. katana's own ESP is `nvme1n1p2`,
+**512 MiB** → **fits with 161 MiB spare**. Against `migrate-preconditions`'
+ceilings (katana 154 MiB, L16 180 MiB) both clear.
+
+### `/root` is a dangling symlink in the image, and dracut says FAILED then exits 0
+
+Cause found, not guessed: in `core-68ca7094`, `/root -> var/roothome` and
+`/var/roothome` **does not exist** (bootc puts it in `/var`, which is empty in
+the image). So `dracut-install -f /root` fails, dracut prints
+`dracut[E]: FAILED: …` — and returns **0**. Round 39's lab chroot bind-mounted
+`/var`, which is exactly why it recorded `var/roothome` as an "extra entry" and
+never saw this. Harmless (nothing needs `/root` in an initramfs) but it means
+**dracut's exit status does not cover this class of failure**; the budget
+predicate is what actually catches a bad initramfs.
 
 ## BLOCKED ON
 

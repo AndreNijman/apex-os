@@ -130,13 +130,11 @@ machine. Say so; do not proxy them and grade them green.
 
 ## NEXT
 
-- Item 1 Row C on katana: `sudo scxctl start -s scx_rusty` (loader path), read
-  `/sys/kernel/sched_ext/state` + `root/ops`, then `sudo apex game start` and
-  assert apexd chose `switch` (journal must have NO 'no scx scheduler running').
-  Then C2: attach a scheduler by running `/usr/bin/scx_rustland` DIRECTLY
-  (bypasses scx_loader, so kernel says enabled and the loader disagrees) and
-  assert the single named-verb retry fires. Script pattern:
-  `/var/lab/scratch/katana-final-qual/rowAB.sh` (arm the kfq-deadman timer).
+- Item 2 (P2-005/006/007): run the 6 booted-machine lines off `apex devices all`
+  on katana (the criterion is what the TOOL prints, not raw nmcli), plus
+  `apex devices network/print/scan/share`. Do NOT run checklist step 5
+  (hotspot) — katana's only link is `wlo1` and a hotspot severs ssh; grade it
+  could-not-run. Do not modify any 802.1X profile. Then item 3 (session).
 
 ## DONE
 
@@ -162,6 +160,20 @@ machine. Say so; do not proxy them and grade them green.
   exactly this string verbatim and said `scx_ops_matches()` wants to know.
   Fix: also accept `<name>_<buildid>`. No scx scheduler name is another's
   prefix-plus-underscore, so this cannot collide.
+- **NEW DEFECT, two parts, in the `switch` branch — measured at 50 ms.**
+  A `switch` on katana is ~1.42 s of teardown-and-reattach and `scxctl` returns
+  162 ms in: `enabled(rusty)` -> `disabling` @+0.129s -> `disabled` @+0.183s ->
+  `enabled(lavd)` @+1.547s.
+  (a) `scx_settle_until(|s| Enabled{..})` in `apexd-core/src/syswriter.rs:752`
+  is satisfied by the scheduler being REPLACED — it confirms a state that was
+  already true before the command. The 2 s budget is never spent. On a switch
+  the predicate must be enabled AND `root/ops` == the requested scheduler.
+  (b) `scx.observed` (`apexd/src/game.rs:479`) is a second, LATER read and
+  lands in the disabled trough, so `apex game status` reported
+  `scx_state : not loaded` / "nothing is attached" about a live `scx_lavd`
+  session. A false negative — the mirror of the false positive §5c removed.
+  (a) cannot be fixed without the `scx_ops_matches` fix above, or the new
+  predicate can never become true.
 - 26 of 73 IRQ affinity writes are refused EPERM on katana even as root
   (managed IRQs). Reported honestly by apexd (`irqs_refused: 26`), not a
   defect — recorded so the next reader does not chase it.
