@@ -240,6 +240,17 @@ dependencies {
 
 tasks.withType<Test>().configureEach {
     useJUnitPlatform()
+    // What `:core` already does, and for a reason this module has now paid
+    // for. CI run 35584033343 failed here and all the log said was
+    // `AssertionFailedError at RelayDiallerTest.kt:143` — a line number and no
+    // value. Whether that was 19 (a race) or 0 (a real leak) is the entire
+    // diagnosis, and it took re-running the test on a laptop to learn which.
+    // A gate that cannot say what it saw is most of the way to a gate nobody
+    // reads.
+    testLogging {
+        events("failed")
+        exceptionFormat = org.gradle.api.tasks.testing.logging.TestExceptionFormat.FULL
+    }
 }
 
 // ── Is the release artefact actually signed? ─────────────────────────────────
