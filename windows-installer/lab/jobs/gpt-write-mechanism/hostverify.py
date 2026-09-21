@@ -49,13 +49,14 @@ def parse_gpt(path, lba):
     hcrc = struct.unpack_from('<I', h, 16)[0]
     my   = struct.unpack_from('<Q', h, 24)[0]
     alt  = struct.unpack_from('<Q', h, 32)[0]
+    first = struct.unpack_from('<Q', h, 40)[0]
     elba = struct.unpack_from('<Q', h, 72)[0]
     n    = struct.unpack_from('<I', h, 80)[0]
     esz  = struct.unpack_from('<I', h, 84)[0]
     ecrc = struct.unpack_from('<I', h, 88)[0]
     hz = bytearray(h); hz[16:20] = b'\0\0\0\0'
     ents = rd(path, elba * SEC, n * esz)
-    return dict(my=my, alt=alt, elba=elba, n=n, esz=esz,
+    return dict(my=my, alt=alt, elba=elba, n=n, esz=esz, first=first,
                 hcrc=hcrc, hcrc_calc=crc32(bytes(hz[:hs])),
                 ecrc=ecrc, ecrc_calc=crc32(ents), ents=ents, raw=h)
 
@@ -192,10 +193,22 @@ check(len(d) + len(d2) > 0 and not in_p1 and not in_p3,
 
 # The relocation, stated as its own finding rather than buried in a byte list.
 moved = pre_pri['elba'] != post_pri['elba']
-check(True, 'DID THE PRIMARY ENTRY ARRAY MOVE?',
-      f"YES — LBA {pre_pri['elba']} -> {post_pri['elba']}. SET_DRIVE_LAYOUT_EX "
-      f"relocated it; the raw mechanism left it where it was"
-      if moved else 'no')
+note(f"PRIMARY ENTRY ARRAY: LBA {pre_pri['elba']} -> {post_pri['elba']} "
+     f"({'MOVED by SET_DRIVE_LAYOUT_EX' if moved else 'not moved'})")
+# WHY it moved, which decides whether the hazard applies to real machines at
+# all: Windows appears to park the array so that it ENDS at FirstUsableLBA.
+# fixture-a's FirstUsableLBA is 2048 (a 1 MiB reserve, what sgdisk/sfdisk and
+# therefore Linux tooling default to), so 2048-32 = 2016. A disk Windows Setup
+# partitioned itself has FirstUsableLBA 34, so 34-32 = 2 and the array would
+# land back where it started. This is a falsifiable rule, so it is checked.
+arr_sectors = post_pri['n'] * post_pri['esz'] // SEC
+note(f"FirstUsableLBA = {post_pri['first']}, array is {arr_sectors} sectors")
+check(post_pri['elba'] + arr_sectors == post_pri['first'],
+      'the relocated array ends exactly at FirstUsableLBA',
+      f"{post_pri['elba']} + {arr_sectors} == {post_pri['first']} — so the "
+      f"destination is a function of FirstUsableLBA, not a fixed LBA. On a "
+      f"disk with FirstUsableLBA 34 the same rule yields LBA 2, i.e. no move "
+      f"and no stale table")
 if moved:
     # What is left behind at the old location? If the old array is still there,
     # anything that reads LBA 2 directly instead of honouring the header's
@@ -230,6 +243,11 @@ note(f'guest-written extents on the system disk: {len(sext)}, '
 GPT_PRI = (0, 34 * SEC)
 ssize = os.path.getsize(SYP)
 GPT_BAK = (ssize - 33 * SEC, ssize)
+sys_pri = parse_gpt(SYP, 1)
+note(f"golden.raw (partitioned by Windows Setup): FirstUsableLBA = "
+     f"{sys_pri['first']}, PartitionEntryLBA = {sys_pri['elba']} — the rule "
+     f"above predicts {sys_pri['first'] - arr_sectors} for this disk, i.e. "
+     f"{'NO relocation' if sys_pri['first'] - arr_sectors == sys_pri['elba'] else 'a relocation'}")
 for nm, r in (('primary GPT', GPT_PRI), ('backup GPT', GPT_BAK)):
     dd = diff_ranges(SY, SYP, r[0], r[1] - r[0])
     check(not dd, f'system disk {nm} byte-identical to pristine golden.raw',

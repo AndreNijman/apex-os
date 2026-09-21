@@ -213,11 +213,17 @@ Which is safer is one guest boot to find out.
 > - The raw mechanism's stale-view prediction **holds**, and
 >   `IOCTL_DISK_UPDATE_PROPERTIES` (`0x00070140`) fixes it (`ok=True err=0`).
 > - **`SET_DRIVE_LAYOUT_EX` relocated the primary entry array from LBA 2 to
->   LBA 2016 and left the old array at LBA 2 untouched.** Two partition tables
->   that disagree now sit in the primary GPT area, and the stale one is at the
->   LBA that hardcoded GPT readers look at. That is its real price, and it is
->   not what "the kernel maintains it for you" sounds like. The raw mechanism
->   edits in place and leaves exactly one table.
+>   LBA 2016 and left the old array at LBA 2 untouched** — two partition tables
+>   that disagree in the primary GPT area, the stale one at the LBA hardcoded
+>   GPT readers use. The raw mechanism edits in place and leaves one table.
+>   **Where it relocates to is a function of `FirstUsableLBA`**: the array is
+>   parked to END at it (`2016 + 32 == 2048`, checked). The lab fixtures are
+>   `sgdisk`-made with a 1 MiB reserve, `FirstUsableLBA = 2048`; `golden.raw`,
+>   partitioned by **Windows Setup itself**, has `FirstUsableLBA = 34`, where
+>   the same rule yields LBA 2 and **no relocation at all**. So this hazard
+>   does not bite a disk Windows made — it bites disks made by Linux tooling,
+>   **which is what APEX itself creates**. The `FirstUsableLBA=34` row is a
+>   prediction from one measurement, not a second measurement.
 > - **Invariant 3 is exercised, not just specified**: both copies saved to a
 >   33 792-byte file before the change, restored afterwards, byte-exact.
 > - If `SET_DRIVE_LAYOUT_EX` ever wins, `0x0007C054` and `0x00070140` have to
