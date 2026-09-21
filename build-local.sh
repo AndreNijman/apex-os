@@ -103,8 +103,16 @@ REV="$(git rev-parse HEAD 2>/dev/null || echo unknown)"
 CORE_IMG=localhost/apex-os-core:latest
 # The kernel is its own tier now (docs/update-cost.md, "The fourth tier").
 # Containerfile.core consumes it by name and has NO COPR fallback, so a local
-# core build needs this image to exist first. The default in Containerfile.core
-# is this exact name.
+# core build needs this image to exist first.
+#
+# THIS IS NOT Containerfile.core's DEFAULT any more, and the difference matters.
+# The default there is the digest of the kernel published to GHCR by
+# kernel-build.yml, because CI has no hand-built kernel image and a default
+# naming one stopped every image build in the project. build_core() below
+# therefore has to keep passing `--build-arg APEX_KERNEL_IMAGE="$KERNEL_IMG"`:
+# drop that override and a local core build would silently install the
+# REGISTRY's kernel instead of the one just compiled here.
+# tests/check-kernel-image-pin.sh asserts both halves.
 KERNEL_IMG=localhost/apex-kernel:local
 
 # ── The shell ref, resolved rather than named ────────────────────────────────
