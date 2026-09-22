@@ -29,6 +29,8 @@ import com.apexos.remote.core.agent.SystemGrant
 import com.apexos.remote.core.agent.WorktreeStatus
 import com.apexos.remote.core.agent.Hello
 import com.apexos.remote.core.agent.MachineLink
+import com.apexos.remote.core.agent.Push
+import com.apexos.remote.push.PushRegistrar
 import com.apexos.remote.core.Pairing
 import com.apexos.remote.core.PairingException
 import com.apexos.remote.core.PairingOffer
@@ -585,8 +587,58 @@ class RemoteViewModel(application: Application) : AndroidViewModel(application) 
                 )
             }
             startPolling(machine)
+            registerForPush(machine)
         } catch (e: Exception) {
             _state.update { it.copy(busy = null, failure = describeConnectFailure(machine, e)) }
+        }
+    }
+
+    /**
+     * Arrange for this machine to be able to wake this phone (P1-058).
+     *
+     * ## Why it is here, at the end of a successful connection
+     *
+     * It is the only moment that has all three things it needs at once: a
+     * distributor can be asked for an endpoint from anywhere, but telling the
+     * machine needs the Noise channel, and the Noise channel needs the device
+     * key — which is behind a per-use biometric gate that was satisfied a few
+     * lines above and cannot be satisfied by a `BroadcastReceiver` woken at
+     * three in the morning.
+     *
+     * ## It must never turn a working connection into a failure
+     *
+     * Push is an improvement on the poll loop, not a replacement for it, and
+     * every way this can go wrong leaves the app exactly as useful as it was
+     * before push existed. So nothing here touches `failure`, and each outcome
+     * is deliberate:
+     *
+     * * no distributor installed — the commonest case on a fresh phone, and
+     *   not an error. The user is told in Settings, not here.
+     * * a machine too old to know the verb — `apex-remoted` forwards it to
+     *   `apex-agentd`, which answers `bad_request`, which [Agentd.isTooOld]
+     *   recognises. Also not an error: that machine polls, as every machine
+     *   did before.
+     * * anything else — the endpoint is simply not recorded as sent, so the
+     *   next connection tries again. Retrying here would spend a round trip
+     *   per attempt on a screen nobody is waiting on.
+     */
+    private suspend fun registerForPush(machine: PairedMachine) {
+        val context = getApplication<Application>()
+        runCatching {
+            withContext(Dispatchers.IO) {
+                PushRegistrar.registerIfNeeded(context, machine)
+                // Re-read: `registerIfNeeded` may have just written a record,
+                // and a distributor may have delivered an endpoint since this
+                // machine was loaded onto the screen. Acting on the stale copy
+                // would send an endpoint the phone has already replaced.
+                val current = repository.load().find(machine.deviceId) ?: return@withContext
+                val endpoint = Push.endpointToSend(current) ?: return@withContext
+                val key = current.push?.key ?: return@withContext
+                val link = links[machine.deviceId] ?: return@withContext
+                link.pushRegister(endpoint, key)
+                // Only now, and only for the endpoint that was actually sent.
+                PushRegistrar.sent(context, current, endpoint)
+            }
         }
     }
 
@@ -1513,6 +1565,22 @@ class RemoteViewModel(application: Application) : AndroidViewModel(application) 
     }
 
     fun forget(machine: PairedMachine) = viewModelScope.launch {
+        // Push first, while the connection and the stored record still exist.
+        //
+        // Three parties hold state about waking this phone and forgetting the
+        // machine has to end all three. The desktop drops its registration on
+        // revoke by itself (`control.rs`), but a machine forgotten from this
+        // side may never be told — it may be off, or on another network — so
+        // the distributor and the push server would go on holding a live
+        // subscription to a phone that will never read it. `PushRegistrar`
+        // unregisters with the distributor; the round trip below is
+        // best-effort and its failure changes nothing here.
+        runCatching {
+            withContext(Dispatchers.IO) {
+                links[machine.deviceId]?.pushUnregister()
+            }
+        }
+        PushRegistrar.forget(getApplication<Application>(), machine)
         val store = repository.forget(machine)
         _state.update {
             it.copy(

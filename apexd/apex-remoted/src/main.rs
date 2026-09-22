@@ -31,6 +31,7 @@ mod discovery;
 mod net;
 mod peer;
 mod proxy;
+mod push;
 mod relay;
 mod serve;
 mod state;
@@ -216,6 +217,26 @@ fn run(args: &[String]) -> Result<(), String> {
                  reachable on this network only: {e}"
             ),
         }
+    }
+
+    // Push notifications (P1-058). Started unconditionally rather than only
+    // when something is registered: a phone registers over a connection this
+    // process has to be already serving, and a watcher started at that moment
+    // would have an empty map and would therefore treat the machine's whole
+    // current state as a first poll — which is right — but would also have
+    // missed nothing, because the first poll raises nothing either way. What
+    // running it from the start buys is that a transition happening two
+    // seconds after a phone registers is an edge this watcher has both sides
+    // of.
+    //
+    // It costs one `list` and one `requests` on a Unix socket every four
+    // seconds, and a `worktrees` every minute, on a machine with an agent
+    // runtime already running. `state.push_is_empty()` skips the delivery
+    // half entirely when nobody is registered.
+    {
+        let state = Arc::clone(&state);
+        let agentd = agentd.clone();
+        std::thread::spawn(move || push::supervise(state, agentd));
     }
 
     // On the local network, for as long as this process runs. Deliberately

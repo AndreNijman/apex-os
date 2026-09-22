@@ -1167,3 +1167,144 @@ fn a_channel_onto_a_session_that_does_not_exist_is_refused_with_the_daemons_own_
     // The connection is still usable: a refused channel is not a fatal error.
     assert_eq!(session.call(r#"{"cmd":"list"}"#)["reply"], "sessions");
 }
+
+// ─────────────────────────────────────────────────────────────────────────────
+//  Push registration (P1-058)
+// ─────────────────────────────────────────────────────────────────────────────
+
+/// Where a harness keeps its two stores.
+fn stores(h: &Harness) -> (PathBuf, PathBuf) {
+    let remote = h.root.join("state").join("apex").join("remote");
+    (remote.join("devices.json"), remote.join("push.json"))
+}
+
+#[test]
+fn a_phone_registers_for_push_over_the_real_session_and_the_key_lands_in_its_own_file() {
+    // `push::control` is unit-tested against a `State`. What that cannot say is
+    // whether the verb ever REACHES it: `serve.rs` is where the interception
+    // lives, and everything else on that channel is forwarded verbatim to
+    // `apex-agentd`, which has never heard of a push endpoint. A phone talking
+    // to a build where the seam is missing gets `bad_request` and silently
+    // falls back to polling — the failure this suite exists to catch, because
+    // nothing on either side says a word about it.
+    let h = harness!("push");
+    let Some(offer) = open_offer(&h) else { return };
+    let device = Device::new();
+    assert_eq!(device.pair(&h, &offer, "pixel-8")["ok"], true);
+    let mut session = device.connect(&h).expect("a session");
+
+    let key = "AAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAM";
+    let ok = session.call(&format!(
+        r#"{{"cmd":"push_register","endpoint":"https://ntfy.sh/upAbCdEf","key":"{key}"}}"#
+    ));
+    assert_eq!(ok["reply"], "ok", "the push verb did not reach apex-remoted: {ok}");
+
+    let (devices, push) = stores(&h);
+    let stored = read_when_it_appears(&push).expect("push.json was never written");
+    assert!(stored.contains("https://ntfy.sh/upAbCdEf"), "{stored}");
+    assert!(stored.contains(key), "{stored}");
+
+    // 0600 and its own file. `device.rs` asserts `devices.json` holds no
+    // secret, and a registration key is one — so it must be neither in that
+    // file nor readable by the rest of the machine.
+    use std::os::unix::fs::PermissionsExt;
+    let mode = std::fs::metadata(&push).expect("stat").permissions().mode() & 0o777;
+    assert_eq!(mode, 0o600, "push.json is mode {mode:o}");
+    let device_store = std::fs::read_to_string(&devices).expect("devices.json");
+    assert!(
+        !device_store.contains(key),
+        "the registration key was written into devices.json: {device_store}"
+    );
+
+    // Unregistering is idempotent and empties it.
+    assert_eq!(session.call(r#"{"cmd":"push_unregister"}"#)["reply"], "ok");
+    assert_eq!(session.call(r#"{"cmd":"push_unregister"}"#)["reply"], "ok");
+    let after = std::fs::read_to_string(&push).expect("push.json");
+    assert!(!after.contains("ntfy.sh"), "the registration survived unregister: {after}");
+
+    // Everything else on the channel still goes to the daemon untouched.
+    assert_eq!(session.call(r#"{"cmd":"list"}"#)["reply"], "sessions");
+}
+
+#[test]
+fn a_push_endpoint_the_machine_cannot_use_is_refused_and_nothing_is_stored() {
+    // Refused at the machine as well as at the phone. The phone checks first
+    // so it does not burn a round trip, but a client that skipped the check —
+    // or an older one — must not be able to make this machine post an alert in
+    // the clear, and the endpoint URL is the capability to notify that phone.
+    let h = harness!("push-refuse");
+    let Some(offer) = open_offer(&h) else { return };
+    let device = Device::new();
+    assert_eq!(device.pair(&h, &offer, "pixel-8")["ok"], true);
+    let mut session = device.connect(&h).expect("a session");
+
+    for bad in [
+        r#"{"cmd":"push_register","endpoint":"http://ntfy.sh/upA","key":"AAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAM"}"#,
+        r#"{"cmd":"push_register","endpoint":"https://ntfy.sh/upA","key":"AAAA"}"#,
+        r#"{"cmd":"push_register","endpoint":"","key":"AAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAM"}"#,
+    ] {
+        let reply = session.call(bad);
+        assert_eq!(reply["reply"], "error", "{bad} was accepted: {reply}");
+        // And the sentence says which of the two was wrong, because the user
+        // reading it has to know whether to change a distributor or re-pair.
+        assert!(
+            reply["message"].as_str().is_some_and(|m| !m.is_empty()),
+            "{reply}"
+        );
+    }
+    let (_, push) = stores(&h);
+    let stored = std::fs::read_to_string(&push).unwrap_or_default();
+    assert!(!stored.contains("ntfy.sh"), "a refused endpoint was stored: {stored}");
+}
+
+#[test]
+fn revoking_a_device_also_stops_it_being_woken() {
+    // The one direction of "revoke, eventually" that survives losing the
+    // connection. Push needs no connection by construction, so a registration
+    // that outlived the pairing would go on waking a phone the owner threw off
+    // this machine — and dropping the live socket, which is what revoke did
+    // before, would not touch it.
+    let h = harness!("push-revoke");
+    let Some(offer) = open_offer(&h) else { return };
+    let device = Device::new();
+    assert_eq!(device.pair(&h, &offer, "lost-phone")["ok"], true);
+    let mut session = device.connect(&h).expect("a session");
+    let key = "AAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAM";
+    assert_eq!(
+        session.call(&format!(
+            r#"{{"cmd":"push_register","endpoint":"https://ntfy.sh/upLost","key":"{key}"}}"#
+        ))["reply"],
+        "ok"
+    );
+    let (_, push) = stores(&h);
+    assert!(
+        read_when_it_appears(&push).expect("push.json").contains("upLost"),
+        "the registration was not stored, so revoking it proves nothing"
+    );
+
+    assert_eq!(h.control(r#"{"cmd":"revoke","device":"lost-phone"}"#)["reply"], "ok");
+    let after = std::fs::read_to_string(&push).expect("push.json");
+    assert!(
+        !after.contains("upLost"),
+        "a revoked phone is still registered for push: {after}"
+    );
+}
+
+/// Read a file the daemon writes, once it is there.
+///
+/// The reply is sent after the store is written, so this should not have to
+/// wait — but asserting on a file another process writes is the one place a
+/// zero-length read means "not yet" rather than "empty", and a flake here
+/// would be read as a defect in the code under test.
+fn read_when_it_appears(path: &std::path::Path) -> Option<String> {
+    let deadline = Instant::now() + Duration::from_secs(5);
+    while Instant::now() < deadline {
+        if let Ok(text) = std::fs::read_to_string(path) {
+            if !text.trim().is_empty() {
+                return Some(text);
+            }
+        }
+        std::thread::sleep(Duration::from_millis(20));
+    }
+    None
+}

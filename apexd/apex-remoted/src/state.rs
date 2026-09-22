@@ -13,6 +13,7 @@ use std::sync::{Arc, Mutex};
 use apex_remote_core::device::{DeviceStore, StoreError};
 use apex_remote_core::identity::Identity;
 use apex_remote_core::pairing::Offer;
+use apex_remote_core::push::PushStore;
 use apex_remote_core::rendezvous::{Connection, Path as RemotePath};
 
 use crate::relay::Sources;
@@ -77,6 +78,9 @@ pub struct State {
     pub relay_sources: Sources,
     /// Where the device store lives.
     pub store_path: PathBuf,
+    /// Where the push registrations live: a **different** file, because they
+    /// carry a secret and `devices.json` is asserted not to.
+    pub push_path: PathBuf,
     /// How often an open connection is measured.
     pub ping_interval: std::time::Duration,
     devices: Mutex<DeviceStore>,
@@ -84,6 +88,7 @@ pub struct State {
     /// survived a restart would be one the owner did not ask to survive.
     pub offer: Mutex<Option<Offer>>,
     live: Mutex<Vec<Live>>,
+    push: Mutex<PushStore>,
 }
 
 impl State {
@@ -100,6 +105,25 @@ impl State {
         ping_interval: std::time::Duration,
     ) -> Result<Arc<State>, StoreError> {
         let devices = DeviceStore::load(&store_path)?;
+        // Beside the device store, and derived from it rather than passed in,
+        // so the two cannot end up in different directories when a test or a
+        // second daemon relocates one of them.
+        let push_path = store_path
+            .parent()
+            .map(|d| d.join("push.json"))
+            .unwrap_or_else(|| PathBuf::from("push.json"));
+        // A registration store that will not parse is NOT fatal, unlike a
+        // device store that will not parse: the worst case is that push
+        // notifications stop until a phone re-registers, and refusing to start
+        // the whole service over it would take LAN remote control down too.
+        let push = PushStore::load(&push_path).unwrap_or_else(|e| {
+            eprintln!(
+                "apex-remoted: {} is unreadable ({e}); push registrations start empty and a \
+                 phone will re-register on its next connection",
+                push_path.display()
+            );
+            PushStore::default()
+        });
         Ok(Arc::new(State {
             identity,
             machine,
@@ -107,11 +131,13 @@ impl State {
             bound,
             relay,
             store_path,
+            push_path,
             ping_interval,
             relay_sources: Sources::default(),
             devices: Mutex::new(devices),
             offer: Mutex::new(None),
             live: Mutex::new(Vec::new()),
+            push: Mutex::new(push),
         }))
     }
 
@@ -156,6 +182,98 @@ impl State {
     }
 
 
+
+
+    /// The push registrations, locked.
+    pub fn push_store(&self) -> std::sync::MutexGuard<'_, PushStore> {
+        // A poisoned lock here means a thread panicked holding it. Recovering
+        // the guard is right rather than propagating: the alternative is that
+        // one panic in a delivery turns push off for the life of the daemon,
+        // and the data behind the lock is a map that is written whole.
+        self.push.lock().unwrap_or_else(|e| e.into_inner())
+    }
+
+    /// Whether anything is registered at all.
+    ///
+    /// Checked before the watcher does any work, so a machine nobody has
+    /// registered a phone with costs one map lookup per poll.
+    pub fn push_is_empty(&self) -> bool {
+        self.push_store().registrations.is_empty()
+    }
+
+    /// Record a device's endpoint and key. The device id comes from the
+    /// handshake and never from the request body.
+    pub fn push_register(
+        &self,
+        device_id: &str,
+        endpoint: &str,
+        key: &str,
+        now_ms: u64,
+    ) -> Result<(), apex_remote_core::push::PushError> {
+        let mut store = self.push_store();
+        store.register(device_id, endpoint, key, now_ms)?;
+        self.persist_push(&store);
+        Ok(())
+    }
+
+    /// Forget a device's registration. Called on revoke as well as on
+    /// unregister — a revoked phone must stop being notified, and a
+    /// registration that outlived the pairing would keep waking a device the
+    /// owner threw off this machine.
+    pub fn push_forget(&self, device_id: &str) -> bool {
+        let mut store = self.push_store();
+        let gone = store.forget(device_id);
+        if gone {
+            self.persist_push(&store);
+        }
+        gone
+    }
+
+    /// Draw the next sequence number for a device, persisting it.
+    ///
+    /// Persisted on every draw rather than at shutdown, because the phone's
+    /// replay guard is "a sequence greater than the last I saw" and a daemon
+    /// that was killed would otherwise rewind and have every envelope it sent
+    /// afterwards correctly ignored.
+    pub fn push_next_seq(&self, device_id: &str) -> Option<u64> {
+        let mut store = self.push_store();
+        let seq = store.next_seq(device_id)?;
+        self.persist_push(&store);
+        Some(seq)
+    }
+
+    /// Record a delivery that worked.
+    pub fn push_delivered(&self, device_id: &str) {
+        let mut store = self.push_store();
+        if let Some(r) = store.registrations.get_mut(device_id) {
+            if r.failures == 0 {
+                return;
+            }
+            r.failures = 0;
+            self.persist_push(&store);
+        }
+    }
+
+    /// Record a delivery that did not, and answer how many in a row that is.
+    pub fn push_failed(&self, device_id: &str) -> u32 {
+        let mut store = self.push_store();
+        let Some(r) = store.registrations.get_mut(device_id) else {
+            return 0;
+        };
+        r.failures = r.failures.saturating_add(1);
+        let n = r.failures;
+        self.persist_push(&store);
+        n
+    }
+
+    fn persist_push(&self, store: &PushStore) {
+        if let Err(e) = store.save(&self.push_path) {
+            eprintln!(
+                "apex-remoted: could not write {}: {e}",
+                self.push_path.display()
+            );
+        }
+    }
 
     /// End every connection a device is holding.
     ///

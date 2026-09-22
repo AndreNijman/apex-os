@@ -305,6 +305,11 @@ fn revoke(state: &State, device: &str) -> Reply {
     // is what stops it reconnecting; this is what ends the connection it
     // already has, and without it "revoke" would mean "revoke, eventually".
     state.drop_connections_for(&revoked.id);
+    // And it must stop being *notified*. A push registration that outlived the
+    // pairing would go on waking a phone the owner threw off this machine —
+    // the one direction of "revoke, eventually" that survives losing the
+    // connection, because push needs no connection by construction.
+    state.push_forget(&revoked.id);
     Reply::Ok
 }
 

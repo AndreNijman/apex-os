@@ -22,6 +22,15 @@ rand = "0.9.5"
 sha1 = "0.10.7"
 sha2 = "0.10.9"
 
+# The AEAD that seals a push envelope (P1-058). Already in the lock through
+# `snow`'s default resolver, so naming it here adds no package to the tree and
+# nothing to the build: `cargo tree` and the package count are unchanged. It is
+# named rather than reached through snow because a push envelope is not a Noise
+# message — it has no handshake, no session and no ordering — and borrowing a
+# transport state to encrypt one would be using a stateful protocol object for
+# a stateless job.
+chacha20poly1305 = "0.10.1"
+
 # TLS, so that `wss://` is a relay this client can actually dial.
 #
 # `ROADMAP/design/P1-052-relay.md` §5.1 costed three ways to reach an

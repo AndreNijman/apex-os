@@ -40,7 +40,7 @@ use std::net::{TcpListener, TcpStream};
 use std::path::{Path, PathBuf};
 use std::process::Command;
 use std::sync::Arc;
-use std::time::Duration;
+use std::time::{Duration, Instant};
 
 use apex_remote_core::tls::{TlsError, Trust};
 use rustls::pki_types::pem::PemObject;
@@ -515,4 +515,195 @@ fn the_name_checked_is_the_relays_name_and_not_the_address_that_was_dialled() {
         panic!("the address dialled was accepted as the name to verify");
     };
     assert!(e.certificate().is_some(), "{e}");
+}
+
+// ─────────────────────────────────────────────────────────────────────────────
+//  A push delivery over a real TLS connection (P1-058)
+// ─────────────────────────────────────────────────────────────────────────────
+
+/// A server that reads one HTTP request and answers with one status.
+///
+/// Deliberately **not** the echo server above: a push delivery is a
+/// request/response, and an echo would hand the client its own request back —
+/// which happens to start with `POST`, so a client that parsed a status line
+/// carelessly would read `POST` as a code and the test would pass for the
+/// wrong reason.
+struct PushServer {
+    port: u16,
+    seen: Arc<std::sync::Mutex<Vec<Vec<u8>>>>,
+}
+
+impl PushServer {
+    fn answering(cert: &Path, key: &Path, status: &'static str) -> PushServer {
+        let certs: Vec<CertificateDer<'static>> = CertificateDer::pem_file_iter(cert)
+            .expect("read cert")
+            .collect::<Result<_, _>>()
+            .expect("parse cert");
+        let key = PrivateKeyDer::from_pem_file(key).expect("read key");
+        let config = Arc::new(
+            ServerConfig::builder_with_provider(Arc::new(
+                rustls::crypto::ring::default_provider(),
+            ))
+            .with_safe_default_protocol_versions()
+            .expect("versions")
+            .with_no_client_auth()
+            .with_single_cert(certs, key)
+            .expect("server config"),
+        );
+        let listener = TcpListener::bind(("127.0.0.1", 0)).expect("bind loopback");
+        let port = listener.local_addr().expect("addr").port();
+        let seen: Arc<std::sync::Mutex<Vec<Vec<u8>>>> = Arc::new(std::sync::Mutex::new(Vec::new()));
+        let recorded = Arc::clone(&seen);
+        std::thread::spawn(move || {
+            for stream in listener.incoming().flatten() {
+                let config = Arc::clone(&config);
+                let recorded = Arc::clone(&recorded);
+                std::thread::spawn(move || {
+                    let Ok(conn) = ServerConnection::new(config) else { return };
+                    let mut tls = StreamOwned::new(conn, stream);
+                    // Read the headers, then exactly the body the client said
+                    // it would send. Reading to EOF would wait for a close the
+                    // client does not perform until it has its answer.
+                    let mut head = Vec::new();
+                    let mut byte = [0u8; 1];
+                    while !head.ends_with(b"\r\n\r\n") && head.len() < 8192 {
+                        match tls.read(&mut byte) {
+                            Ok(0) | Err(_) => return,
+                            Ok(_) => head.push(byte[0]),
+                        }
+                    }
+                    let len: usize = String::from_utf8_lossy(&head)
+                        .lines()
+                        .find_map(|l| l.strip_prefix("Content-Length: ").map(str::to_string))
+                        .and_then(|v| v.trim().parse().ok())
+                        .unwrap_or(0);
+                    let mut body = vec![0u8; len];
+                    if tls.read_exact(&mut body).is_err() {
+                        return;
+                    }
+                    let mut whole = head;
+                    whole.extend_from_slice(&body);
+                    recorded.lock().expect("lock").push(whole);
+                    let _ = tls.write_all(status.as_bytes());
+                    let _ = tls.flush();
+                });
+            }
+        });
+        PushServer { port, seen }
+    }
+}
+
+#[test]
+fn a_push_envelope_is_delivered_over_tls_and_the_server_sees_only_ciphertext() {
+    // The whole delivery path with nothing doubled out: a real certificate
+    // this suite minted, a real `rustls` client, a real server, and the real
+    // request builder. What the server records is exactly what a push
+    // provider's operator would be able to keep.
+    use apex_remote_core::push::{Adapter, Body, Delivery, Endpoint, Envelope, Kind, ENVELOPE_LEN};
+
+    let scratch = Scratch::new("push");
+    let ca = mint_ca(&scratch, "ca", "apex push test CA");
+    let leaf = mint_leaf(&scratch, "leaf", NAME, &ca, None);
+    let server = PushServer::answering(&leaf.1, &leaf.0, "HTTP/1.1 200 OK\r\n\r\n");
+    let trust = Trust::from_pem_file(&ca.1).expect("trust the minted CA");
+
+    let key = [11u8; 32];
+    let body = Body {
+        kind: Kind::Permission,
+        adapter: Adapter::Claude,
+        session: 7,
+        started: 1_726_000_000,
+        seq: 3,
+    };
+    let envelope = Envelope::seal(&key, &body).expect("seal");
+    // The endpoint names the relay's certificate name; the socket goes to
+    // loopback, exactly as a real one would go to a CDN address.
+    let endpoint = Endpoint {
+        host: NAME.to_string(),
+        port: server.port,
+        target: "/upAbCdEf123".into(),
+    };
+    let socket = TcpStream::connect(("127.0.0.1", server.port)).expect("connect");
+    socket
+        .set_read_timeout(Some(Duration::from_secs(10)))
+        .expect("timeout");
+    let (mut reader, mut writer) = trust
+        .connect(socket.try_clone().expect("clone"), NAME)
+        .expect("TLS to the push server");
+    let got = apex_remote_core::push::exchange(&mut reader, &mut writer, &endpoint, &envelope)
+        .expect("deliver");
+    assert_eq!(got, Delivery::Accepted);
+
+    // What the operator has.
+    let deadline = Instant::now() + Duration::from_secs(10);
+    let seen = loop {
+        let seen = server.seen.lock().expect("lock").clone();
+        if !seen.is_empty() || Instant::now() > deadline {
+            break seen;
+        }
+        std::thread::sleep(Duration::from_millis(20));
+    };
+    assert_eq!(seen.len(), 1, "the push server saw {} requests", seen.len());
+    let whole = &seen[0];
+    let text = String::from_utf8_lossy(whole);
+    assert!(text.starts_with("POST /upAbCdEf123 HTTP/1.1\r\n"), "{text}");
+    assert!(text.contains(&format!("Host: {NAME}:{}\r\n", server.port)), "{text}");
+    assert_eq!(&whole[whole.len() - ENVELOPE_LEN..], envelope.as_bytes());
+
+    // And the body it holds is opaque to it. The plaintext's own bytes are
+    // asserted absent rather than a sentinel: those are the actual values the
+    // envelope describes, and finding any of them would mean the sealing did
+    // nothing.
+    let plain = body.pack();
+    assert!(
+        !whole.windows(plain.len()).any(|w| w == plain),
+        "the push server received the plaintext"
+    );
+    for word in ["claude", "permission", "waiting", "session"] {
+        assert!(
+            !text.to_ascii_lowercase().contains(word),
+            "the request said {word:?}, which names what happened"
+        );
+    }
+    // Opening it needs the key the server never had.
+    let opened = Envelope::open(&key, &whole[whole.len() - ENVELOPE_LEN..]).expect("open");
+    assert_eq!(opened, body);
+}
+
+#[test]
+fn a_push_server_that_has_forgotten_the_subscription_says_so_over_tls() {
+    use apex_remote_core::push::{Adapter, Body, Delivery, Endpoint, Envelope, Kind};
+
+    let scratch = Scratch::new("push-gone");
+    let ca = mint_ca(&scratch, "ca", "apex push test CA");
+    let leaf = mint_leaf(&scratch, "leaf", NAME, &ca, None);
+    let server = PushServer::answering(&leaf.1, &leaf.0, "HTTP/1.1 410 Gone\r\n\r\n");
+    let trust = Trust::from_pem_file(&ca.1).expect("trust");
+    let envelope = Envelope::seal(
+        &[11u8; 32],
+        &Body {
+            kind: Kind::Waiting,
+            adapter: Adapter::Claude,
+            session: 1,
+            started: 1,
+            seq: 1,
+        },
+    )
+    .expect("seal");
+    let endpoint = Endpoint {
+        host: NAME.to_string(),
+        port: server.port,
+        target: "/gone".into(),
+    };
+    let socket = TcpStream::connect(("127.0.0.1", server.port)).expect("connect");
+    socket
+        .set_read_timeout(Some(Duration::from_secs(10)))
+        .expect("timeout");
+    let (mut reader, mut writer) = trust.connect(socket, NAME).expect("TLS");
+    assert_eq!(
+        apex_remote_core::push::exchange(&mut reader, &mut writer, &endpoint, &envelope)
+            .expect("exchange"),
+        Delivery::Gone,
+        "410 must retire the registration rather than be retried for ever"
+    );
 }
