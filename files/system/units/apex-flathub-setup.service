@@ -11,6 +11,8 @@
 # /etc/flatpak/flathub.flatpakrepo carries Flathub's URL + GPG key, so no remote
 # repo definition needs fetching (only network to actually install apps later).
 [Unit]
+StartLimitIntervalSec=20min
+StartLimitBurst=10
 Description=APEX-OS: register the Flathub Flatpak remote (first boot)
 Documentation=https://flathub.org
 After=network-online.target
@@ -26,9 +28,23 @@ ExecStart=/usr/bin/flatpak remote-add --if-not-exists --system flathub /etc/flat
 # Stamp only on success (remote-add above); co-located with flatpak state,
 # which remote-add has just created.
 ExecStartPost=/usr/bin/touch /var/lib/flatpak/.apex-flathub-added
-# A missing network or transient failure should not wedge the boot; the unit
-# retries on the next boot because the stamp is only written on success.
-SuccessExitStatus=0
+# Retry inside this boot rather than only on the next one.
+#
+# `SuccessExitStatus=0` used to sit here, with a comment claiming it stopped a
+# networkless boot from wedging. It never did anything: 0 is already success by
+# definition, so the line was a no-op and the unit simply entered `failed` the
+# moment remote-add did. A laptop that associates with Wi-Fi a few
+# seconds after network-online.target fires — which that target permits, since
+# it means "a network is configured", not "the internet answers" — therefore
+# showed `Failed Units: 1` in every login greeting until the next reboot, for a
+# background download of an optional application.
+#
+# Type=oneshot accepts Restart=on-failure (only always/on-success are refused),
+# so the transient case now resolves itself. The burst is bounded: ten tries a
+# minute apart, then stop. The stamp is still written only on success, so a
+# genuinely offline machine installs on a later boot exactly as before.
+Restart=on-failure
+RestartSec=60s
 
 [Install]
 WantedBy=multi-user.target

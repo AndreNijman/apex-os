@@ -28,6 +28,8 @@
 # stamp keeps the unit quiet after the first success. The stamp is written ONLY
 # on success, so a boot with no network retries on the next one.
 [Unit]
+StartLimitIntervalSec=20min
+StartLimitBurst=10
 Description=APEX-OS: install the shipped Flatpak applications (first boot)
 Documentation=https://zen-browser.app
 After=network-online.target apex-flathub-setup.service
@@ -41,9 +43,23 @@ Type=oneshot
 RemainAfterExit=yes
 ExecStart=/usr/bin/flatpak install --system --assumeyes --noninteractive flathub app.zen_browser.zen
 ExecStartPost=/usr/bin/touch /var/lib/flatpak/.apex-flatpaks-installed
-# A first boot without network must not wedge, and must not stamp: the unit
-# runs again next boot and installs then.
-SuccessExitStatus=0
+# Retry inside this boot rather than only on the next one.
+#
+# `SuccessExitStatus=0` used to sit here, with a comment claiming it stopped a
+# networkless boot from wedging. It never did anything: 0 is already success by
+# definition, so the line was a no-op and the unit simply entered `failed` the
+# moment the download did. A laptop that associates with Wi-Fi a few
+# seconds after network-online.target fires — which that target permits, since
+# it means "a network is configured", not "the internet answers" — therefore
+# showed `Failed Units: 1` in every login greeting until the next reboot, for a
+# background download of an optional application.
+#
+# Type=oneshot accepts Restart=on-failure (only always/on-success are refused),
+# so the transient case now resolves itself. The burst is bounded: ten tries a
+# minute apart, then stop. The stamp is still written only on success, so a
+# genuinely offline machine installs on a later boot exactly as before.
+Restart=on-failure
+RestartSec=60s
 
 [Install]
 WantedBy=multi-user.target
