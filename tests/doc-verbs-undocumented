@@ -102,7 +102,6 @@ apex shell voice
 apex shell list
 apex shell ipc
 
-apex resolve
 
 apex env create
 apex env info
