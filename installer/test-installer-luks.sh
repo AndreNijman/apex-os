@@ -53,6 +53,16 @@ SCRATCH_IMAGE="localhost/apex-luks-probe:test"
 ENGINE_IMAGE=""
 scratch_made=0
 cleanup() {
+    # The netinstall section attaches loop devices and imports a throwaway
+    # image. Both are released on the happy path, but a run that dies in the
+    # middle would otherwise leave a loop device holding a 40 GiB file open and
+    # an image in root podman storage — and the next run would then pick a
+    # DIFFERENT loop number and leak again. Belt and braces, and harmless when
+    # the variables were never set.
+    [ -n "${LOOP_BIG:-}" ]   && sudo -n losetup -d "${LOOP_BIG}"   >/dev/null 2>&1
+    [ -n "${LOOP_SMALL:-}" ] && sudo -n losetup -d "${LOOP_SMALL}" >/dev/null 2>&1
+    rm -f "${NETIMG_BIG:-}" "${NETIMG_SMALL:-}" 2>/dev/null
+    [ "${nohelper_made:-0}" = 1 ] && sudo -n podman rmi -f "${NOHELPER_IMAGE:-}" >/dev/null 2>&1
     rm -rf "$WORK"
     [ "$scratch_made" = 1 ] && sudo -n podman rmi -f "$SCRATCH_IMAGE" >/dev/null 2>&1
     return 0
@@ -383,6 +393,584 @@ if [ -n "$LOOPDEV" ]; then
 else
     echo "SKIP  dry-run cases (need losetup and an engine image)"
 fi
+
+echo
+echo "── the ENCRYPTED NETWORK install, and the disk it stages onto ─────────"
+# ═══ WHY THIS SECTION EXISTS ═══
+#
+# `installer/apex-install:74` sets NETINSTALL=0 and only raises it when
+# /usr/lib/apex-installer/netinstall exists, so on any developer machine or CI
+# runner every assertion above this line runs the OFFLINE engine. Until this
+# section landed, NO suite that touches encryption had ever set
+# APEX_NETINSTALL, which left two pieces of the engine with zero coverage of
+# any kind:
+#
+#   * the deferred enrolment-helper check (the `elif NETINSTALL=1 &&
+#     STAGE_ON_TARGET=1` arm). It exists because on that one path the image has
+#     not been downloaded yet, so asking `podman run "$IMAGE" test -x …` would
+#     refuse a perfectly good image. Nothing proved the deferral happened, and
+#     nothing proved the same answers are still REFUSED when the image really
+#     is there and really lacks the helper.
+#   * the encrypted branch's staging fallback: stage_setup inside the freshly
+#     created LUKS volume, the download into it, and the re-check that has to
+#     run after the wipe but before bootc writes a byte.
+#
+# installer/test-installer-live-paths.sh does set APEX_NETINSTALL, but only for
+# the two UNENCRYPTED paths, and it is in tests/suites-not-in-ci.txt.
+#
+# ═══ HOW THIS IS MADE HERMETIC, AND WHY THAT IS NOT A DODGE ═══
+#
+# A network install's first act is net_diagnose() — `ip route show default`
+# then `getent hosts ghcr.io` — and its second, on the staging fallback, is
+# `skopeo inspect --raw docker://…`. Letting those reach the real world would
+# make this suite's verdict a property of the runner's network and of whether
+# a tag happens to be published, which is the same hermeticity defect the
+# keymap fixture above was written to remove.
+#
+# So three commands are SHIMMED on PATH, and each shim is the narrowest thing
+# that will do: `ip` answers only `route show default` and execs the real
+# binary for anything else, `getent` answers only `hosts ghcr.io` and execs the
+# real binary for anything else, and `skopeo` answers `inspect` and REFUSES
+# every other subcommand with exit 99. That last one is the point: `skopeo
+# copy` is how the 5.8 GB download happens, so a dry run that ever reached it
+# would fail loudly here instead of quietly pulling an image. Every shim
+# appends its argv to a log, and the log is ASSERTED — one inspect, no copy —
+# so "the shim was consulted" is measured rather than assumed.
+#
+# sudo has `Defaults secure_path` on this machine, so `sudo -n PATH=… engine`
+# does not work: PATH is replaced. `sudo -n env PATH=… engine` does — env is
+# found through secure_path and then sets PATH for the engine it execs.
+NET_SHIM="$WORK/net-shim"
+SHIMLOG="$WORK/net-shim.log"
+mkdir -p "$NET_SHIM"
+: > "$SHIMLOG"
+REAL_IP=$(command -v ip 2>/dev/null || echo /usr/sbin/ip)
+REAL_GETENT=$(command -v getent 2>/dev/null || echo /usr/bin/getent)
+cat > "$NET_SHIM/ip" <<EOF
+#!/bin/sh
+echo "ip \$*" >> "$SHIMLOG"
+case "\$*" in
+  "route show default") echo "default via 192.0.2.1 dev apex-test-shim proto static"; exit 0 ;;
+esac
+exec $REAL_IP "\$@"
+EOF
+cat > "$NET_SHIM/getent" <<EOF
+#!/bin/sh
+echo "getent \$*" >> "$SHIMLOG"
+case "\$*" in
+  "hosts ghcr.io") echo "192.0.2.10 ghcr.io"; exit 0 ;;
+esac
+exec $REAL_GETENT "\$@"
+EOF
+cat > "$NET_SHIM/skopeo" <<EOF
+#!/bin/sh
+echo "skopeo \$*" >> "$SHIMLOG"
+case "\${1:-}" in
+  inspect) echo '{}'; exit 0 ;;
+esac
+echo "SHIM-REFUSED \$*" >> "$SHIMLOG"
+exit 99
+EOF
+chmod 755 "$NET_SHIM/ip" "$NET_SHIM/getent" "$NET_SHIM/skopeo"
+
+# sudo's secure_path, verbatim, so the engine still finds every real tool.
+NET_PATH="$NET_SHIM:/usr/local/sbin:/usr/local/bin:/usr/sbin:/usr/bin:/sbin:/bin"
+net_run() {   # $1 = engine, $2.. = env assignments. Reads $ANS.
+    local eng="$1"; shift
+    sudo -n env "PATH=$NET_PATH" "$@" "$eng" --headless "$ANS" 2>&1 </dev/null
+}
+# The engine truncates its own log at every start, so this reads THIS run's.
+#
+# `grep -c` PRINTS 0 and RETURNS 1 when nothing matches, so the obvious
+# `grep -c … || echo 0` emits TWO lines and every `= 0` comparison against it
+# is false — which reads as "the shim was never called" on exactly the runs
+# where it was not supposed to be. head -1 keeps grep's own count and the
+# ${n:-0} covers a missing file.
+_count_lines() {  # $1 = pattern, $2 = file, $3 = 1 to read it as root
+    local n
+    if [ "${3:-0}" = 1 ]; then n=$(sudo -n grep -c -- "$1" "$2" 2>/dev/null | head -1)
+    else                       n=$(grep -c -- "$1" "$2" 2>/dev/null | head -1); fi
+    printf '%s' "${n:-0}"
+}
+net_log_has() { _count_lines "$1" /var/log/apex-install.log 1; }
+shim_count()  { _count_lines "$1" "$SHIMLOG" 0; }
+
+# ── an image that provably does NOT carry the enrolment helper ──────────────
+# ensure_engine_image() above prefers localhost/apex-os:daily when the machine
+# has one, and a real APEX-OS image DOES contain /usr/libexec/apex-luks-enroll.
+# The two cases below turn on an image that does not, so they get their own
+# empty-tar image rather than inheriting a choice that would make them pass or
+# fail depending on what is in this machine's podman storage.
+NOHELPER_IMAGE="localhost/apex-luks-nohelper:test"
+nohelper_made=0
+if [ "$ENGINE_RUNNABLE" = 1 ]; then
+    _nh=$(mktemp "$WORK/empty-nh.XXXXXX.tar")
+    if tar -cf "$_nh" -T /dev/null 2>/dev/null \
+       && sudo -n podman import -q "$_nh" "$NOHELPER_IMAGE" >/dev/null 2>&1; then
+        nohelper_made=1
+    fi
+    rm -f "$_nh"
+fi
+
+# ── the two loop-backed targets ─────────────────────────────────────────────
+# SPARSE FILES, and the dry run writes nothing to either — which is itself
+# asserted with blkid below, on both, after the runs.
+#
+# /var/lab-scratch is where this machine keeps lab images; /tmp is a 15 GB
+# tmpfs on 29 GB of RAM and a CI runner has no /var/lab-scratch at all, so the
+# location is chosen and not assumed.
+NETLOOPDIR="${APEX_LOOP_DIR:-/var/lab-scratch}"
+{ [ -d "$NETLOOPDIR" ] && [ -w "$NETLOOPDIR" ]; } || NETLOOPDIR="$WORK"
+NOSCRATCH="$WORK/no-such-scratch-volume"   # deliberately never created
+LOOP_BIG=""; LOOP_SMALL=""; NETIMG_BIG=""; NETIMG_SMALL=""
+net_release() {
+    [ -n "$LOOP_BIG" ]   && sudo -n losetup -d "$LOOP_BIG"   2>/dev/null
+    [ -n "$LOOP_SMALL" ] && sudo -n losetup -d "$LOOP_SMALL" 2>/dev/null
+    rm -f "$NETIMG_BIG" "$NETIMG_SMALL" 2>/dev/null
+    [ "$nohelper_made" = 1 ] && sudo -n podman rmi -f "$NOHELPER_IMAGE" >/dev/null 2>&1
+    return 0
+}
+if [ "$ENGINE_RUNNABLE" = 1 ] && [ "$nohelper_made" = 1 ] && command -v losetup >/dev/null 2>&1; then
+    # 40 GiB is the smallest disk the engine's own staging budget accepts:
+    # stage_budget_kb wants NEED_SCRATCH_GB (22) + STAGE_RESERVE_GB (15) after
+    # the 2 GiB margin the raw-size check subtracts. 20 GiB is comfortably
+    # under it, which is what makes the refusal case a refusal.
+    NETIMG_BIG=$(mktemp "$NETLOOPDIR/apex-luks-net-big.XXXXXX.img")
+    NETIMG_SMALL=$(mktemp "$NETLOOPDIR/apex-luks-net-small.XXXXXX.img")
+    truncate -s 40G "$NETIMG_BIG"   2>/dev/null && LOOP_BIG=$(sudo -n losetup -fP --show "$NETIMG_BIG" 2>/dev/null || true)
+    truncate -s 20G "$NETIMG_SMALL" 2>/dev/null && LOOP_SMALL=$(sudo -n losetup -fP --show "$NETIMG_SMALL" 2>/dev/null || true)
+fi
+
+net_answers() {  # $1 = disk
+    printf '%s\n' "mode=disk" "disk=$1" "username=bob" "password=pw" \
+        "hostname=apex" "encrypt=yes" "lukspass=correct horse 9" "keymap=us" > "$ANS"
+}
+
+if [ -n "$LOOP_BIG" ] && [ -n "$LOOP_SMALL" ]; then
+    # ── 1. too small for the fallback, and refused while intact ────────────
+    # The ONLY moment this can be said safely. On this path the download and
+    # the destruction are the same step, so a disk that cannot hold both has
+    # to be refused before the partition table goes — the shipped v1.0.0
+    # installer asked the same question inside stage_setup, i.e. after mkfs.
+    : > "$SHIMLOG"
+    net_answers "$LOOP_SMALL"
+    out=$(net_run "$ENGINE" APEX_NETINSTALL=1 APEX_DRY_RUN=1 \
+                  APEX_TARGET_IMAGE="$NOHELPER_IMAGE" APEX_SCRATCH_CANDIDATES="$NOSCRATCH")
+    if [[ "$out" == *"too small to install APEX-OS over the network"* ]]; then
+        ok "netinstall+encrypt: a target too small to stage onto is refused"
+    else
+        bad "netinstall+encrypt: a target too small to stage onto is refused" \
+            "$(printf '%s' "$out" | tail -2 | tr '\n' ' ')"
+    fi
+    if [[ "$out" == *"Nothing has been erased"* ]] && [ "$(shim_count '^skopeo inspect')" = 0 ]; then
+        ok "…and it says so before the disk OR the registry is touched" "no skopeo call was made"
+    else
+        bad "…and it says so before the disk OR the registry is touched" \
+            "erased-claim=$(printf '%s' "$out" | grep -c 'Nothing has been erased') skopeo=$(shim_count '^skopeo inspect')"
+    fi
+    if [ -z "$(sudo -n blkid -p "$LOOP_SMALL" 2>/dev/null || true)" ]; then
+        ok "…and the refused disk has nothing on it"
+    else
+        bad "…and the refused disk has nothing on it" "blkid sees something on $LOOP_SMALL"
+    fi
+
+    # MUTATION. Take the raw-size question away and the same 20 GiB disk must
+    # stop being refused — it then walks into the staging fallback, which is
+    # exactly the "erased for nothing" outcome the check exists to prevent.
+    NETMUT="$WORK/mutant-netsize"
+    cp "$ENGINE" "$NETMUT"; chmod 755 "$NETMUT"
+    sed -i 's|if ! stage_budget_kb "\$_tsize_kb" >/dev/null; then|if false; then|' "$NETMUT"
+    if cmp -s "$ENGINE" "$NETMUT"; then
+        bad "mutant: the pre-wipe size check" "the sed program matched no line"
+    elif ! bash -n "$NETMUT" 2>/dev/null; then
+        bad "mutant: the pre-wipe size check" "the mutant does not parse"
+    else
+        mout=$(net_run "$NETMUT" APEX_NETINSTALL=1 APEX_DRY_RUN=1 \
+                       APEX_TARGET_IMAGE="$NOHELPER_IMAGE" APEX_SCRATCH_CANDIDATES="$NOSCRATCH")
+        if [[ "$mout" == *"too small to install APEX-OS over the network"* ]]; then
+            bad "mutant: the pre-wipe size check" "the refusal survived its own deletion"
+        else
+            ok "mutant: the pre-wipe size check" "removed -> a 20 GiB disk would be staged onto"
+        fi
+    fi
+    rm -f "$NETMUT"
+
+    # ── 2. the deferred enrolment-helper check ─────────────────────────────
+    # Same answers, same missing helper, a disk that IS big enough. The image
+    # has not arrived yet, so the question must be DEFERRED rather than asked
+    # against an empty store — and the run must reach the dry-run stop.
+    : > "$SHIMLOG"
+    net_answers "$LOOP_BIG"
+    out=$(net_run "$ENGINE" APEX_NETINSTALL=1 APEX_DRY_RUN=1 \
+                  APEX_TARGET_IMAGE="$NOHELPER_IMAGE" APEX_SCRATCH_CANDIDATES="$NOSCRATCH")
+    if [[ "$out" == *"APEX-INSTALL-DRYRUN-OK"* ]]; then
+        ok "netinstall+encrypt: no scratch volume reaches the dry-run stop"
+    else
+        bad "netinstall+encrypt: no scratch volume reaches the dry-run stop" \
+            "$(printf '%s' "$out" | tail -3 | tr '\n' ' ')"
+    fi
+    # The note the engine prints ONLY on the staging-on-target path. Without
+    # it the case above could be passing through the ordinary whole-disk path
+    # and proving nothing about the fallback.
+    if [[ "$out" == *"downloads onto it as it goes"* ]]; then
+        ok "…by the on-target staging fallback, which says so" "pick_scratch answered @target"
+    else
+        bad "…by the on-target staging fallback, which says so" "no staging note in the output"
+    fi
+    if [ "$(net_log_has 'enrolment-helper check deferred')" != 0 ]; then
+        ok "…and the helper check is deferred, not answered from an empty store"
+    else
+        bad "…and the helper check is deferred, not answered from an empty store" \
+            "no deferral line in /var/log/apex-install.log"
+    fi
+    if [ -z "$(sudo -n blkid -p "$LOOP_BIG" 2>/dev/null || true)" ]; then
+        ok "…and the dry run wrote nothing to the 40 GiB target"
+    else
+        bad "…and the dry run wrote nothing to the 40 GiB target" "blkid sees something on $LOOP_BIG"
+    fi
+    # The shim log is what turns all of the above from "it did not crash" into
+    # a measurement: the reachability probe really ran, and the 5.8 GB download
+    # really did not.
+    if [ "$(shim_count '^skopeo inspect')" = 1 ] && [ "$(shim_count '^skopeo copy')" = 0 ]; then
+        ok "…having checked the registry is reachable and downloaded nothing" \
+           "1 inspect, 0 copy"
+    else
+        bad "…having checked the registry is reachable and downloaded nothing" \
+            "inspect=$(shim_count '^skopeo inspect') copy=$(shim_count '^skopeo copy')"
+    fi
+    if [ "$(shim_count '^ip route show default')" != 0 ] && [ "$(shim_count '^getent hosts ghcr.io')" != 0 ]; then
+        ok "…and the network diagnosis ran through the shim, not this machine" \
+           "so this case is hermetic"
+    else
+        bad "…and the network diagnosis ran through the shim, not this machine" \
+            "ip=$(shim_count '^ip route show default') getent=$(shim_count '^getent hosts ghcr.io')"
+    fi
+
+    # ── 3. the control: the deferral is a DEFERRAL, not a free pass ────────
+    # Identical answers and the identical helper-less image, with the network
+    # install turned off. The image is present locally, so the question CAN be
+    # answered, and it must be answered `no` — by name.
+    out=$(net_run "$ENGINE" APEX_NETINSTALL=0 APEX_DRY_RUN=1 \
+                  APEX_IMAGE="$NOHELPER_IMAGE" APEX_SCRATCH_CANDIDATES="$NOSCRATCH")
+    # It must ALSO not print the staging note: that note is what the case above
+    # reads to prove the fallback was taken, and a note the engine prints on
+    # every path would prove nothing.
+    if [[ "$out" == *"/usr/libexec/apex-luks-enroll"* ]] && [[ "$out" != *"downloads onto it as it goes"* ]]; then
+        ok "the same image offline IS refused, by name" "the deferral is not a free pass"
+    else
+        bad "the same image offline IS refused, by name" \
+            "$(printf '%s' "$out" | tail -2 | tr '\n' ' ')"
+    fi
+
+    # MUTATION. Delete the deferral arm and the netinstall run must behave like
+    # the offline one: `podman run` against a store that holds nothing, and a
+    # refusal naming the helper. That is what makes the case above a test of
+    # the arm and not of something else letting it through.
+    DEFMUT="$WORK/mutant-defer"
+    cp "$ENGINE" "$DEFMUT"; chmod 755 "$DEFMUT"
+    sed -i 's|elif \[ "\${NETINSTALL:-0}" = 1 \] && \[ "\${STAGE_ON_TARGET:-0}" = 1 \]; then|elif false; then|' "$DEFMUT"
+    if cmp -s "$ENGINE" "$DEFMUT"; then
+        bad "mutant: the deferred helper check" "the sed program matched no line"
+    elif ! bash -n "$DEFMUT" 2>/dev/null; then
+        bad "mutant: the deferred helper check" "the mutant does not parse"
+    else
+        net_answers "$LOOP_BIG"
+        mout=$(net_run "$DEFMUT" APEX_NETINSTALL=1 APEX_DRY_RUN=1 \
+                       APEX_TARGET_IMAGE="$NOHELPER_IMAGE" APEX_SCRATCH_CANDIDATES="$NOSCRATCH")
+        if [[ "$mout" == *"/usr/libexec/apex-luks-enroll"* ]]; then
+            ok "mutant: the deferred helper check" "arm removed -> the not-yet-downloaded image is refused"
+        else
+            bad "mutant: the deferred helper check" \
+                "$(printf '%s' "$mout" | tail -2 | tr '\n' ' ')"
+        fi
+    fi
+    rm -f "$DEFMUT"
+
+    # CONTROL for the two "wrote nothing" assertions. They are measurements
+    # only if blkid would have SAID something had there been something to say.
+    # The small loop is this suite's own sparse file and is finished with, so
+    # put a filesystem on it and require it to be reported.
+    sudo -n mkfs.ext4 -q -F "$LOOP_SMALL" >/dev/null 2>&1
+    if [ -n "$(sudo -n blkid -p "$LOOP_SMALL" 2>/dev/null || true)" ]; then
+        ok "…and blkid would have seen a write if there had been one" "control: mkfs is reported"
+    else
+        bad "…and blkid would have seen a write if there had been one" \
+            "blkid reported nothing even after mkfs — the two 'wrote nothing' cases prove nothing"
+    fi
+else
+    bad "netinstall+encrypt cases could not run" \
+        "engine=$ENGINE_RUNNABLE nohelper=$nohelper_made loops='$LOOP_BIG' '$LOOP_SMALL'"
+fi
+net_release
+
+echo
+echo "── staging really lands on a real filesystem, and really lets go ──────"
+# installer/test-installer.sh already runs stage_setup with losetup, mkfs.xfs
+# and mount STUBBED OUT — which proves the sparse file is unlinked and nothing
+# else. The claim that matters on the encrypted path is the one the stubs make
+# unaskable: that what gets mounted is a REAL filesystem on a REAL loop device
+# and never the RAM overlay. So this runs the shipped stage_setup for real.
+#
+# It is a file under /var/lab-scratch (or $WORK), never a block device, and
+# stage_teardown is asserted to give the loop device back — a leaked one holds
+# a writable fd on the target filesystem and is what stops the NEXT install
+# unmounting it at all.
+STAGE_FNS="$WORK/stage-fns.sh"
+sed -n '/^scratch_fs_ok()/,/^}/p;/^pick_scratch()/,/^}/p;/^stage_budget_kb()/,/^}/p;/^stage_setup()/,/^}/p;/^stage_teardown()/,/^}/p' \
+    "$ENGINE" > "$STAGE_FNS"
+# stage_probe FNS-FILE OUT-FILE — run the shipped stage_setup/stage_teardown
+# for real against a loop-backed xfs on a file, and write what it built as
+# key=value lines. Factored out so the mutant below runs the IDENTICAL probe.
+stage_probe() {
+    local STAGEROOT="$NETLOOPDIR/apex-luks-stage-probe.$$"
+    sudo -n mkdir -p "$STAGEROOT" 2>/dev/null
+    # The redirect at the end of this command is THIS shell's, into $WORK, on
+    # purpose: the probe runs as root but its output has to be readable by the
+    # assertions below without another sudo.
+    # shellcheck disable=SC2024
+    sudo -n env "STAGE_FNS=$1" "STAGEROOT=$STAGEROOT" bash -c '
+        set -u
+        LOG=/dev/null
+        log() { :; }
+        NEED_SCRATCH_GB=1
+        # A 3 GB ceiling whatever this machine has free: the file is sparse and
+        # mkfs.xfs writes only metadata, so this costs a few MB on disk.
+        _avail_gb=$(df -PBG "$STAGEROOT" | awk "NR==2{gsub(/G/,\"\",\$4); print \$4+0}")
+        STAGE_RESERVE_GB=$(( _avail_gb - 3 ))
+        [ "$STAGE_RESERVE_GB" -ge 1 ] || STAGE_RESERVE_GB=1
+        STAGE_DIR=/run/apex-stage-probe-$$
+        . "$STAGE_FNS"
+        stage_setup "$STAGEROOT" >/dev/null 2>&1 || { echo "SETUP-FAILED"; exit 0; }
+        printf "fstype=%s\n" "$(findmnt -no FSTYPE "$STAGE_MNT" 2>/dev/null)"
+        printf "source=%s\n" "$(findmnt -no SOURCE "$STAGE_MNT" 2>/dev/null)"
+        printf "dfsrc=%s\n"  "$(df -PT "$STAGE_MNT" 2>/dev/null | awk "NR==2{print \$2}")"
+        printf "backing=%s\n" "$( [ -e "$STAGEROOT/.apex-stage.img" ] && echo present || echo unlinked )"
+        printf "tmpdir=%s\n" "$STAGE_TMPDIR"
+        printf "bootcargs=%s\n" "${STAGE_BOOTC_ARGS[*]}"
+        _loop="$STAGE_LOOP"
+        stage_teardown
+        printf "released=%s\n" "$( losetup -a 2>/dev/null | grep -c "^$_loop:" )"
+        printf "tmpdirunset=%s\n" "${TMPDIR-<unset>}"
+        rmdir "$STAGE_DIR" 2>/dev/null || true
+    ' > "$2" 2>&1
+    sudo -n rm -rf "$STAGEROOT" 2>/dev/null
+}
+if ! grep -q '^stage_setup()' "$STAGE_FNS"; then
+    bad "the staging functions could not be read out of the engine" "$ENGINE"
+elif ! sudo -n true 2>/dev/null || ! command -v mkfs.xfs >/dev/null 2>&1; then
+    bad "staging could not be measured here" "needs passwordless sudo and mkfs.xfs"
+else
+    STAGE_OUT="$WORK/stage-real.txt"
+    stage_probe "$STAGE_FNS" "$STAGE_OUT"
+    _sv() { sed -n "s/^$1=//p" "$STAGE_OUT" | tail -1; }
+    if grep -q SETUP-FAILED "$STAGE_OUT"; then
+        bad "stage_setup builds a real staging filesystem" "$(tr '\n' ' ' < "$STAGE_OUT")"
+        bad "…on a loop device and not on a tmpfs" "stage_setup did not complete"
+        bad "…with TMPDIR redirected into it" "stage_setup did not complete"
+        bad "…and stage_teardown gives the loop device back" "stage_setup did not complete"
+    else
+        if [ "$(_sv fstype)" = xfs ] && [ "$(_sv backing)" = unlinked ]; then
+            ok "stage_setup builds a real staging filesystem" "xfs, backing file unlinked"
+        else
+            bad "stage_setup builds a real staging filesystem" \
+                "fstype=$(_sv fstype) backing=$(_sv backing)"
+        fi
+        case "$(_sv source):$(_sv dfsrc)" in
+            /dev/loop*:xfs) ok "…on a loop device and not on a tmpfs" "$(_sv source)" ;;
+            *) bad "…on a loop device and not on a tmpfs" "source=$(_sv source) df-type=$(_sv dfsrc)" ;;
+        esac
+        case "$(_sv tmpdir)" in
+            /run/apex-stage-probe-*/tmp)
+                if [ "$(_sv bootcargs)" = "--skip-finalize" ]; then
+                    ok "…with TMPDIR redirected into it" "and bootc gets --skip-finalize"
+                else
+                    bad "…with TMPDIR redirected into it" "bootcargs='$(_sv bootcargs)'"
+                fi ;;
+            *) bad "…with TMPDIR redirected into it" "TMPDIR=$(_sv tmpdir)" ;;
+        esac
+        if [ "$(_sv released)" = 0 ] && [ "$(_sv tmpdirunset)" = "<unset>" ]; then
+            ok "…and stage_teardown gives the loop device back" "and unsets TMPDIR"
+        else
+            bad "…and stage_teardown gives the loop device back" \
+                "still-attached=$(_sv released) TMPDIR=$(_sv tmpdirunset)"
+        fi
+    fi
+fi
+
+# MUTATION for the filesystem the store lands on. xfs is not decoration: ext4
+# fixes its inode count at mkfs time and the measured failure was `mkdir: no
+# space left on device` 5 GB in, with 35 GB of free BLOCKS. So the assertion
+# above has to be reading the REAL mounted type and not a string. Swap the mkfs
+# in a copy of the functions and the identical probe must report the other one.
+if grep -q '^stage_setup()' "$STAGE_FNS" && sudo -n true 2>/dev/null; then
+    STAGE_MUT="$WORK/stage-fns-mutant.sh"
+    sed 's/mkfs\.xfs -q -f/mkfs.ext4 -q -F/' "$STAGE_FNS" > "$STAGE_MUT"
+    if cmp -s "$STAGE_FNS" "$STAGE_MUT"; then
+        bad "mutant: the staging filesystem" "the sed program matched no line"
+    else
+        STAGE_MUT_OUT="$WORK/stage-mutant.txt"
+        stage_probe "$STAGE_MUT" "$STAGE_MUT_OUT"
+        _mv() { sed -n "s/^$1=//p" "$STAGE_MUT_OUT" | tail -1; }
+        if [ "$(_mv fstype)" = ext4 ]; then
+            ok "mutant: the staging filesystem" "mkfs swapped -> the probe reports ext4, not xfs"
+        else
+            bad "mutant: the staging filesystem" \
+                "got fstype='$(_mv fstype)' with mkfs.ext4 substituted — the xfs assertion reads nothing"
+        fi
+    fi
+    rm -f "$STAGE_MUT"
+else
+    bad "mutant: the staging filesystem" "the probe could not run"
+fi
+
+# MUTATION for the rule the whole staging design rests on. Delete the line that
+# refuses a RAM filesystem and pick_scratch must start choosing one — which is
+# the bug 63857891 fixed, reproduced on demand.
+TMPFSMUT="$WORK/mutant-tmpfs"
+sed 's/    tmpfs|ramfs|devtmpfs|overlay|squashfs|iso9660|"") return 1 ;;/    "") return 1 ;;/' \
+    "$ENGINE" > "$TMPFSMUT"
+if cmp -s "$ENGINE" "$TMPFSMUT"; then
+    bad "mutant: the RAM-filesystem refusal" "the sed program matched no line"
+else
+    _tm=$(mktemp "$WORK/tmpfs-fns.XXXXXX")
+    sed -n '/^scratch_fs_ok()/,/^}/p;/^pick_scratch()/,/^}/p' "$TMPFSMUT" > "$_tm"
+    mkdir -p /dev/shm/apex-luks-tmpfs-probe 2>/dev/null
+    mout=$(
+        set +u
+        # All three are read by scratch_fs_ok and pick_scratch, which are
+        # sourced out of the mutated engine just below.
+        # shellcheck disable=SC2034
+        NEED_SCRATCH_GB=1
+        # shellcheck disable=SC2034
+        STAGE_TARGET='@target'
+        # shellcheck disable=SC2034
+        DISK=/dev/sdz
+        # shellcheck disable=SC1090
+        . "$_tm"
+        APEX_SCRATCH_CANDIDATES="/dev/shm/apex-luks-tmpfs-probe" pick_scratch 2>/dev/null
+    )
+    rmdir /dev/shm/apex-luks-tmpfs-probe 2>/dev/null
+    rm -f "$_tm"
+    case "$mout" in
+        /dev/shm/*) ok "mutant: the RAM-filesystem refusal" "removed -> pick_scratch chose $mout" ;;
+        *)          bad "mutant: the RAM-filesystem refusal" "got '${mout:-<empty>}' with the refusal gone" ;;
+    esac
+fi
+rm -f "$TMPFSMUT"
+
+echo
+echo "── the order the encrypted path does things in ────────────────────────"
+# ═══ THE ASSERTION THAT CANNOT BE MADE ANY OTHER WAY ═══
+#
+# APEX_DRY_RUN stops the engine immediately before the first destructive
+# command, which is ~300 lines ABOVE everything the encrypted branch does. So
+# no dry run can reach stage_setup-inside-LUKS, the download into it, or the
+# deferred re-check — and the only two things that can are a real encrypted
+# install (installer/test-installer-luks-live.sh, not in CI, and it does not
+# run the netinstall path) and a reading of the source.
+#
+# This reads the source, the same way the privileged-call-site scan above does,
+# and asks one question a comment in the engine already answers for itself:
+# on the path where the image "downloads onto the target", does everything that
+# NEEDS the image happen after it arrives?
+enc_scan() {   # $1 = engine file
+    awk '
+      /cryptsetup luksFormat "\$\{LUKS_FMT\[@\]\}"/ && !luksfmt { luksfmt = NR }
+      /"\$IMAGE" "\$LUKS_ENROLL_PATH"/ && !enrol { enrol = NR }
+      luksfmt && /netinstall_fetch_into "\$STAGE_MNT"/ && !fetch { fetch = NR }
+      /\[ "\$luks_helper_checked" = 0 \] && ! luks_helper_ok/ && !recheck { recheck = NR }
+      recheck && /bootc install to-filesystem/ && !bootc { bootc = NR }
+      END { printf "luksfmt=%d enrol=%d fetch=%d recheck=%d bootc=%d\n", luksfmt, enrol, fetch, recheck, bootc }
+    ' "$1"
+}
+encline=$(enc_scan "$ENGINE")
+e_enrol=$(printf '%s\n' "$encline" | tr ' ' '\n' | sed -n 's/^enrol=//p')
+e_fetch=$(printf '%s\n' "$encline" | tr ' ' '\n' | sed -n 's/^fetch=//p')
+e_recheck=$(printf '%s\n' "$encline" | tr ' ' '\n' | sed -n 's/^recheck=//p')
+e_bootc=$(printf '%s\n' "$encline" | tr ' ' '\n' | sed -n 's/^bootc=//p')
+if [ "${e_enrol:-0}" = 0 ] || [ "${e_fetch:-0}" = 0 ] || [ "${e_recheck:-0}" = 0 ] || [ "${e_bootc:-0}" = 0 ]; then
+    bad "the encrypted branch's order could be read" "$encline"
+    bad "the enrolment helper runs only once the image exists" "could not read the order"
+else
+    ok "the encrypted branch's order could be read" "$encline"
+    # This one holds today, and is the property the deferral was written for:
+    # the re-check sits between the download and the first byte bootc writes,
+    # so a bad image is caught with the volume still empty.
+    if [ "$e_fetch" -lt "$e_recheck" ] && [ "$e_recheck" -lt "$e_bootc" ]; then
+        ok "the deferred re-check sits between the download and the write" \
+           "fetch=$e_fetch recheck=$e_recheck bootc=$e_bootc"
+    else
+        bad "the deferred re-check sits between the download and the write" "$encline"
+    fi
+    # ═══ THIS ONE IS EXPECTED TO BE RED ON roadmap/v2.2 @ 280b6cb35 ═══
+    # It is not a flake and it is not a harness problem. On the encrypted
+    # staging fallback IMAGE is the REGISTRY ref and PODMAN_STORE is still
+    # empty — netinstall_fetch_into is what sets it — yet the enrolment helper
+    # is invoked as `podman run "$IMAGE" "$LUKS_ENROLL_PATH"` ~70 lines BEFORE
+    # that download. On a live ISO that podman run pulls ~15 GB into the
+    # default containers-storage, i.e. the RAM overlay the entire staging
+    # design exists to avoid, on the one machine shape the fallback was added
+    # for. The engine's own comment at the deferral says the check is "deferred
+    # to the encrypted branch, which asks the moment the image exists" — the
+    # check moved, the enrolment call it depends on did not.
+    if [ "$e_enrol" -gt "$e_fetch" ]; then
+        ok "the enrolment helper runs only once the image exists" \
+           "enrol=$e_enrol fetch=$e_fetch"
+    else
+        bad "the enrolment helper runs only once the image exists" \
+            "enrol=$e_enrol runs BEFORE fetch=$e_fetch: on the netinstall fallback that podman run pulls the image into RAM-backed default storage. See the comment above this assertion."
+    fi
+fi
+
+# THE SCAN IS NOT A TAUTOLOGY, and on a red assertion that has to be shown
+# rather than claimed. A copy of the engine with the enrolment block MOVED to
+# after the staging block must make the same scan say yes. This is a probe,
+# not a proposed patch: it is never written back, and whether the enrolment
+# belongs after mkfs.btrfs is a decision for whoever fixes this.
+ORDPROBE="$WORK/engine-reordered"
+cp "$ENGINE" "$ORDPROBE"
+if python3 - "$ORDPROBE" <<'PY' 2>/dev/null
+import sys
+p = sys.argv[1]
+lines = open(p, encoding="utf-8").read().split("\n")
+try:
+    note = next(i for i, l in enumerate(lines) if l.strip() == 'note "Creating the recovery key …"')
+except StopIteration:
+    sys.exit(1)
+start = max(i for i in range(note) if lines[i] == '  if [ "${rc:-0}" = 0 ]; then')
+end = next(i for i in range(start + 1, len(lines)) if lines[i] == '  fi')
+try:
+    rec = next(i for i, l in enumerate(lines) if '[ "$luks_helper_checked" = 0 ]' in l)
+except StopIteration:
+    sys.exit(1)
+close = next(i for i in range(rec + 1, len(lines)) if lines[i] == '  fi')
+if not (start > close):
+    block = lines[start:end + 1]
+    del lines[start:end + 1]
+    close -= (end + 1 - start)
+    lines[close + 1:close + 1] = block
+    open(p, "w", encoding="utf-8").write("\n".join(lines))
+    sys.exit(0)
+sys.exit(1)
+PY
+then
+    if ! bash -n "$ORDPROBE" 2>/dev/null; then
+        bad "the order scan can also say yes" "the reordered probe does not parse"
+    else
+        probeline=$(enc_scan "$ORDPROBE")
+        p_enrol=$(printf '%s\n' "$probeline" | tr ' ' '\n' | sed -n 's/^enrol=//p')
+        p_fetch=$(printf '%s\n' "$probeline" | tr ' ' '\n' | sed -n 's/^fetch=//p')
+        if [ "${p_enrol:-0}" -gt "${p_fetch:-0}" ] && [ "${p_fetch:-0}" != 0 ]; then
+            ok "the order scan can also say yes" "moved enrolment after the fetch -> $probeline"
+        else
+            bad "the order scan can also say yes" "$probeline — the scan may be measuring nothing"
+        fi
+    fi
+else
+    bad "the order scan can also say yes" "could not build the reordered probe"
+fi
+rm -f "$ORDPROBE"
+
 
 echo
 echo
