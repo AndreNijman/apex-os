@@ -1538,6 +1538,82 @@ RUN set -eux; \
     test ! -g /usr/libexec/apex-user; \
     echo "apex-user installed: add makes a standard account"
 
+# ── fast user switching (P2-016 criterion 1) ─────────────────────────────────
+#
+# Two rounds of P2-016 measured per-account isolation on a real second account.
+# The SWITCHING half had no surface at all: greetd runs one session on one VT,
+# and switching users meant logging out. These three files are that surface.
+#
+# apex-switch-user decides (activate an existing session, or open a login
+# screen) and needs no privilege. apex-switch-greeter starts a SECOND greetd
+# instance on a spare VT and does, so it is reached through one argument-free
+# NOPASSWD sudoers rule. The unit is the instance greetd runs in.
+#
+# The thing this stanza is really guarding is greetd.service. It is
+# display-manager.service and it is the machine's only way in; a switch greeter
+# that could be enabled, pulled in by a target, or answer to
+# display-manager.service would be a second thing racing for VT 1.
+COPY --chmod=0755 files/system/libexec/apex-switch-user /usr/libexec/apex-switch-user
+COPY --chmod=0755 files/system/libexec/apex-switch-greeter /usr/libexec/apex-switch-greeter
+COPY files/system/units/apex-switch-greeter@.service \
+     /usr/lib/systemd/system/apex-switch-greeter@.service
+COPY files/system/sudoers/apex-switch-greeter /etc/sudoers.d/050-apex-switch-greeter
+RUN set -eux; \
+    bash -n /usr/libexec/apex-switch-user; \
+    bash -n /usr/libexec/apex-switch-greeter; \
+    : '── the unit cannot become the login path ──'; \
+    if grep -qE '^\[Install\]' /usr/lib/systemd/system/apex-switch-greeter@.service \
+        ; then echo "FATAL: the switch greeter can be enabled"; exit 1; fi; \
+    if grep -qE '^Alias=' /usr/lib/systemd/system/apex-switch-greeter@.service \
+        ; then echo "FATAL: the switch greeter aliases something"; exit 1; fi; \
+    grep -qE '^ConditionPathExists=/run/apex-switch-greeter/%i\.toml$' \
+        /usr/lib/systemd/system/apex-switch-greeter@.service; \
+    grep -qE '^Conflicts=getty@tty%i\.service$' \
+        /usr/lib/systemd/system/apex-switch-greeter@.service; \
+    grep -qE '^Restart=no$' /usr/lib/systemd/system/apex-switch-greeter@.service; \
+    : 'greetd is what the unit execs, and this is the image that has to have'; \
+    : 'it. A unit pointing at an absent binary would fail at the one moment'; \
+    : 'nobody can debug it: when somebody asked to switch user.'; \
+    test -x /usr/bin/greetd; \
+    : 'and it is enabled nowhere'; \
+    test -z "$(ls -d /etc/systemd/system/*.wants/apex-switch-greeter@* \
+                     /usr/lib/systemd/system/*.wants/apex-switch-greeter@* 2>/dev/null)"; \
+    : '── the sudoers grant ──'; \
+    chown root:root /etc/sudoers.d/050-apex-switch-greeter; \
+    chmod 0440 /etc/sudoers.d/050-apex-switch-greeter; \
+    visudo -cf /etc/sudoers.d/050-apex-switch-greeter; \
+    : 'ALL, not %wheel: a STANDARD account being able to switch users is the'; \
+    : 'criterion. A grant restricted to wheel would mean only administrators'; \
+    : 'can share the machine.'; \
+    grep -qE '^ALL ALL=\(root\) NOPASSWD: /usr/libexec/apex-switch-greeter ""$' \
+        /etc/sudoers.d/050-apex-switch-greeter; \
+    : 'the empty string is the whole grant: the helper takes no arguments'; \
+    : 'because an argument is a thing the caller chooses.'; \
+    if grep -qE '^[^#]*%wheel' /etc/sudoers.d/050-apex-switch-greeter \
+        ; then echo "FATAL: only administrators could switch users"; exit 1; fi; \
+    : '── the fences that make the grant safe ──'; \
+    grep -qE '^[^#]*only the session currently at the keyboard may open a login screen' \
+        /usr/libexec/apex-switch-greeter; \
+    grep -qE '^[^#]*APEX_SWITCH_GREETER_TOOLS is set and this is running as root' \
+        /usr/libexec/apex-switch-greeter; \
+    grep -qE '^[^#]*APEX_SWITCH_TOOLS is set and this is running as root' \
+        /usr/libexec/apex-switch-user; \
+    : 'the lock is WAITED for. `loginctl lock-session` is a request; LockedHint'; \
+    : 'is the answer, and this repository has a standing record of that hint'; \
+    : 'answering no on a session that was locked. A switch that ran first'; \
+    : 'would hand the next person an unlocked desktop.'; \
+    grep -qE '^[^#]*hint="\$\(prop "\$\(session_blob "\$id"\)" LockedHint\)"' \
+        /usr/libexec/apex-switch-user; \
+    test ! -u /usr/libexec/apex-switch-user; \
+    test ! -g /usr/libexec/apex-switch-greeter; \
+    : '── the SHIPPED login config is not a kiosk, checked on the real image ──'; \
+    : 'Both engines refuse to switch on a machine whose greetd runs a real'; \
+    : "account's session instead of the greeter. That refusal is read off the"; \
+    : 'live config, so it is only correct if the greeter user really is a'; \
+    : 'system account here.'; \
+    test "$(id -u greetd)" -lt 1000; \
+    echo "fast user switching installed: engine, helper, unit, sudoers"
+
 COPY files/system/libexec/apex-boot-windows /usr/libexec/apex-boot-windows
 COPY files/system/sudoers/apex-boot-windows /etc/sudoers.d/020-apex-boot-windows
 RUN set -eux; \

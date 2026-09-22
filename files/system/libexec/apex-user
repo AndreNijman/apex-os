@@ -91,6 +91,7 @@ usage: $PROG list [--json]
        $PROG add <name> [--admin] [--comment TEXT] [--plan]
        $PROG rm <name> [--keep-home] [--plan]
        $PROG guest enable|disable|status [<name>]
+       $PROG switch list|to <name>|greeter
 
 An account added here is STANDARD unless --admin is given: it can use the
 desktop, hold its own credentials and run its own agent, and it cannot approve
@@ -491,6 +492,14 @@ case "$verb" in
     add)   cmd_add   "$@" ;;
     rm)    cmd_rm    "$@" ;;
     guest) cmd_guest "$@" ;;
+    # switch is a DIFFERENT engine, execed rather than reimplemented here.
+    # Everything above this line changes the machine and needs root; switching
+    # users changes only which session holds the seat and must work for a
+    # standard account with no privilege at all. Keeping them in one file would
+    # mean one require_root, one set of test overrides and one blast radius for
+    # two operations that share nothing but a noun. `apex user switch` is the
+    # CLI surface because that is where a person looks for it.
+    switch) exec "${APEX_SWITCH_ENGINE:-/usr/libexec/apex-switch-user}" "$@" ;;
     ''|-h|--help|help) usage ;;
     *) log "unknown verb '$verb'"; usage ;;
 esac
