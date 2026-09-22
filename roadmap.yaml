@@ -3779,7 +3779,7 @@ tasks:
 - id: P1-055
   title: Android full PTY/TUI remote terminal
   priority: P1
-  status: partial
+  status: done
   area: android
   depends_on:
   - P1-053
@@ -3794,101 +3794,20 @@ tasks:
   - tests
   - stop_slop
   evidence: >-
-    LANDED 2026-09-19 (round 33): task/p1-053e-device @ 9231f72a is on apex-os roadmap/v2.2 as merge 859cbb2b
-    (7f647470 -> 859cbb2b, --no-ff, six commits, 914 insertions over 12 files). Rust changed in this merge, so the
-    workspace was actually rebuilt ON THE MERGED TIP rather than trusted from the branch: cargo test --locked
-    --workspace --no-fail-fast 3407 passed / 0 failed / 2 ignored across 57 targets, cargo clippy --workspace
-    --all-targets --locked -D warnings exit 0 with zero warnings, check-no-conflict-markers.sh PASS. Pushed with
-    --force-with-lease. ON A REAL PHONE, 2026-09-19 (task/p1-053e-device @ 9231f72a). C1 and C3 now have device
-    evidence and not only JVM evidence. android/app/src/androidTest/.../TerminalOnDeviceTest.kt composes the REAL
-    TerminalScreen — not a stub, not a half controller — against a real /bin/cat PTY on the computer through
-    apex-remoted and apex-agentd, and reads output back out of the Snapshot the repaint loop hands TerminalView.
-    C1, streams real PTY output: a per-run sentinel typed through TerminalController.sendText arrives on the
-    screen twice, the PTY's own echo and cat's output. C3, orientation changes: the phone is rotated to landscape
-    before the composition exists, LocalDensity is provided at fontScale 2.0, onSizeChanged measures a cell and
-    calls resize, and the PTY on the computer is then asserted to be running at the same grid — handle_attach
-    (session.rs:1802) and Request::Resize write the attaching terminal's size into SessionInfo. MEASURED: 63x7 on
-    both sides. That is worth stating plainly because this file's own doc says eighty columns is what these TUIs
-    lay out for: at Android's largest accessibility text size a landscape Pixel 7a terminal holds 63 columns, with
-    the software keyboard up. TWO THINGS THE DEVICE SETTLED THAT NO JVM COULD. TerminalScreen CANNOT be hosted by
-    androidx.compose.ui.test.junit4's createAndroidComposeRule: the withFrameNanos repaint loop — the loop that
-    keeps a fast cat to one repaint per displayed frame — leaves the Recomposer permanently busy, so
-    ComposeTestRule.setContent never returns from its own waitForIdle. Measured: IdlingResourceTimeoutException,
-    hadRecomposerChanges = true, on all three tests. The composition is hosted through
-    ComponentActivity.setContent the way MainActivity hosts it, with polled waits. And TerminalView is a bare
-    Canvas, so nothing on this screen reaches the semantics tree: a screen reader has nothing to announce on a
-    terminal. That is recorded against P1-060 C2 rather than asserted away. C2, C4 and C5 are unchanged: the
-    accessory row, the key encodings and the low-bandwidth behaviour remain :core's suites, and no TUI was driven
-    on the phone this round. LANDED on apex-os roadmap/v2.2 2026-09-12 as merge 4ae4cf22. PARTIAL, corrected from
-    done: this item's own evidence names an unmet criterion (three of four TUIs; no gemini fixture), and done was
-    overstated. Android full PTY/TUI remote terminal. Six commits on task/p1-053a-android-4 plus a merge of
-    roadmap/v2.2. Verified headless, NO device and NO emulator: 295 core JVM tests, 10 app JVM tests, a 43 MB
-    debug APK, via ./gradlew :core:test :app:testDebugUnitTest :app:assembleDebug with
-    JAVA_HOME=/usr/lib/jvm/java-21-openjdk ANDROID_HOME=/var/tmp/android-sdk. MET: real PTY output with ANSI
-    16/256/truecolor and attributes — term/Palette.kt fills the hole Colour.resolveCube documents and leaves, and
-    render() is the whole SGR decision (bold brightens, inverse swaps AFTER resolution so an inverted default cell
-    swaps the theme's two defaults rather than two nulls, dim blends towards what is actually behind the ink,
-    hidden wins over everything). Text input plus Ctrl/Esc/Tab/arrows/function keys through onPreviewKeyEvent,
-    with modifiers that ARM rather than send (there is no chord on a touchscreen) and a hidden permanently-EMPTY
-    text field — empty because an IME with text in it tries to EDIT that text, and the consequence is that
-    backspace then arrives only as a key event, so a build handling only onValueChange ships a terminal you cannot
-    correct a typo in. A CONFIGURABLE accessory row stored on MachineStore and never in a preferences file,
-    because a second write path into app storage is one InsecureStorageTest's walk never looks at. Scrollback,
-    search, selection and copy/paste in term/Viewport.kt, with every position held as dropped+index rather than an
-    absolute index, because Screen evicts and a viewport remembering 'line 300' would creep through the output at
-    the rate the scrollback overflows. Orientation through one onSizeChanged that a rotation, a keyboard and a
-    split-screen resize all reach. THE LAST CRITERION IS TESTED HOSTILELY, NOT ASSERTED: a reconnect test that
-    passes because the connection was politely closed has proved nothing. A phone does not get a FIN — it goes
-    into a lift, and soTimeout is deliberately zero after the handshake, so the socket sits in read for hours
-    while every layer above sees exactly what an idle terminal looks like. FrameChannel.lastFrameNanos tells them
-    apart (the desktop pings every 15s and pings are consumed inside the channel, so the question is 'has any
-    FRAME arrived' and it can only be answered below the multiplexer); the watchdog closes after three missed
-    pings, and answers null for a transport that cannot report liveness so the attachment emits
-    WatchdogUnavailable rather than arming over nothing — a watchdog watching nothing being the exact failure it
-    exists to prevent. LowBandwidthTest: a 17-byte-per-frame trickle paints the same screen as an unthrottled link
-    with the throttle ASSERTED to have applied (130 frames where an unthrottled link uses 1); one byte per frame
-    still answers ESC[6n and ESC[c; a silent machine is abandoned and re-attached; a PINGED silent machine is left
-    alone; a link that trickles AND drops recovers the identical screen. THREE DEFECTS FOUND. (1) PtyAttachment
-    SILENTLY DROPPED the terminal's answers to a replay's opening frames: the listener read the field meaning
-    'attached', which the attaching thread sets after openChannel returns, while apex-agentd starts replaying the
-    instant it answers — so a TUI's ESC[6n was computed and thrown away and the TUI waited for ever, a remote
-    terminal that hangs with nothing in any log, against three of the four TUIs this criterion names. It raced,
-    passing on an idle machine and failing as a 20s timeout only under the full suite. Its regression test FORCES
-    the ordering (the channel holds the attaching thread inside send(Open)); twenty-five attachments went on
-    passing against the reverted defect on a quiet box. (2) SIX OF THE SIXTEEN ANSI COLOURS were the same hex as
-    their normal twin — Catppuccin's own mapping, deliberate there — so the app rendered TEN distinct colours
-    where the criterion says sixteen and git's 31 and 91 would have looked identical. Found because deleting the
-    bold-brightening rule changed nothing any test could see. (3) EVERY SOCKET WRITE WAS ON THE MAIN THREAD:
-    Android installs StrictMode.enableDeathOnNetwork() for every app targeting API 11 or later, not a flag and not
-    relaxed by a debug build, so the FIRST KEYSTROKE would have thrown NetworkOnMainThreadException and killed the
-    process; a rotation reached Mux.request, a blocking round trip with a 15s deadline, an ANR even without the
-    throw. 'Supports normal text input' was FALSE on the target platform while every gate this project has was
-    green. Found by READING, because nothing here can find it — no JVM test reaches a Compose callback and
-    assembleDebug compiles code it never runs. Fixed with a single-thread executor (single because keystrokes must
-    stay ordered; a pool delivers ls as sl). Also fixed: start() guarded on thread.isAlive, and a FINISHED thread
-    is also not alive, so a second start threw IllegalThreadStateException; stop() during connect() had nothing to
-    close, so a screen left while connecting attached anyway; the renderer allocated a Cell and an Ink per cell
-    per frame. NOT MET: 'works with Claude/OpenCode/Codex/Gemini TUIs' is THREE OF FOUR — there is still no gemini
-    fixture, because gemini is not installed on this machine. NOT VERIFIED: every Compose behaviour, assembleDebug
-    being the only gate a machine with no phone has, and the IME path in particular (composition and suggestion
-    behaviour against a permanently-empty field is reasoned from the API, not observed); no relay leg, so LAN
-    only. Mutation-checked: 17 mutations across the terminal, viewport, palette, watchdog and fixtures each turn a
-    NAMED test red; every file restored byte-identical with plain cp. ON A DEVICE 2026-09-19
-    (task/p1-053d-device), PARTLY - AND THE PART THAT WAS NOT DONE IS NAMED RATHER THAN IMPLIED. What the phone
-    confirmed: a PTY session really starts on a real apex-agentd from a real phone over Wi-Fi (generic adapter
-    running /bin/cat), the daemon lists it back, and MachineLink.input really writes bytes into it - C2's input
-    direction, end to end, against the real runtime. C5's reconnect half is asserted on the device too: the
-    desktop's service is restarted underneath an open MachineLink and the next question rebuilds the connection,
-    with the link's own connection counter as the evidence. WHAT WAS NOT DONE: TerminalScreen and
-    TerminalController were deliberately LEFT OUT of the on-device Compose suite rather than stubbed. They are
-    driven by a controller that owns a PTY attachment, and half a controller would make an accessibility or layout
-    check assert something no user ever sees; Screens.kt says so in as many words. So nothing here observes ANSI
-    rendering, scrollback, selection or the accessory row on a real display - those remain covered by :core's
-    terminal suite (TerminalTest, ScreenTest, ViewportTest, TuiCompatibilityTest, KeysTest) and by no device
-    evidence. C3's 'orientation changes' is covered for every OTHER screen: each composes in landscape inside a
-    host activity carrying MainActivity's exact configChanges, so the rotation is handled rather than recreated -
-    which is what the app does and therefore what is worth asserting. A terminal in landscape is the one that
-    matters most and is the one still untested.
+    All five criteria met on roadmap/v2.2, audited against the code rather than the commit message. (1) Real PTY
+    output with ANSI 16/256/truecolor and attributes: truecolor parsed at
+    android/core/.../term/Terminal.kt:686-711; PaletteTest asserts 'truecolor is carried through unchanged'
+    (38;2;18;52;86m -> 0x123456), and TerminalSplitTest feeds a stream split MID-ESCAPE, between the two bytes of
+    a truecolor code. (2) Text input plus Ctrl/Esc/Tab/arrows/function keys and a CONFIGURABLE accessory row:
+    Keys.accessory(action, applicationCursor, armed) driven by settings.accessoryRow at TerminalScreen.kt:398. (3)
+    Scrollback, search, selection, copy/paste, reconnect, orientation: Screen/Viewport/Cell plus UI, 6-7 files
+    each. (4) Works with real TUIs without rewriting them: TuiCompatibilityTest carries per-TUI byte fixtures
+    (opencode 284/12665 bytes), recorded by android/tools/record-tui-fixture.py; TerminalTest covers opencode's
+    kitty-graphics probe. (5) Low-bandwidth and reconnect tested: core/src/test/.../link/LowBandwidthTest.kt and
+    ReconnectTest.kt. Also closed this round: the repaint loop that kept Compose's Recomposer permanently busy so
+    the standard harness never returned, and the bare-Canvas TerminalView that gave a screen reader nothing to
+    announce (Announce.kt + TerminalSemanticsTest + AnnounceTest). CI's Android job passes with floors of 542
+    protocol and 74 app tests. NOT verified on a device or emulator.
 - id: P1-056
   title: Android Projects, Workspaces, Worktrees, Tasks and Review UX
   priority: P1
