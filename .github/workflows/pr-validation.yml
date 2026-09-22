@@ -1972,6 +1972,23 @@ jobs:
         if: ${{ !cancelled() }}
         run: ./tests/test-apex-pkg.sh
 
+      # The .deb route. Anthropic publishes Claude Desktop for Linux as a .deb
+      # and nothing else, so this is how it stops being hand-unpacked into
+      # /usr/local with a per-app update timer. The suite builds its own .deb
+      # fixtures with ar and tar — no network, no root, nothing installed — and
+      # asserts the refusals that keep a Debian package from breaking a Fedora
+      # image: maintainer scripts never run (a sentinel file proves it), a
+      # payload outside /usr and /opt, a shared library in a linker search path
+      # or a Debian multiarch directory, a package whose only entry point would
+      # have been created by its postinst, and a path the image already owns.
+      # Its last leg runs the engine's extract_debs for real inside a
+      # throwaway Fedora container, because PKG_ROOT is a readonly constant
+      # pointing at /var/lib/apex; that leg skips out loud where podman or the
+      # network is absent.
+      - name: Run .deb package assertions
+        if: ${{ !cancelled() }}
+        run: ./tests/test-apex-deb.sh
+
       # The per-login provisioner edits files that belong to the user. These
       # extract its self-healing blocks from the shipped script and run them
       # against throwaway HOMEs, asserting the repairs happen once and nothing
@@ -3148,7 +3165,8 @@ jobs:
             files/system/libexec/apex-vm \
             files/system/libexec/apex-screen-reader \
             tests/test-apex-recover.sh \
-            tests/test-apex-pkg.sh tests/test-apex-firstrun.sh \
+            tests/test-apex-pkg.sh tests/test-apex-deb.sh \
+            tests/test-apex-firstrun.sh \
             tests/test-labwc-keybinds.sh tests/test-apex-env.sh \
             tests/test-apex-resolve.sh tests/test-apex-blueprint.sh \
             tests/test-apex-modes.sh tests/test-apex-plugin.sh \

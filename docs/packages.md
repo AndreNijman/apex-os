@@ -3,14 +3,17 @@
 ```bash
 sudo apex install android-tools           # a package from the repositories
 sudo apex install ~/Downloads/vendor.rpm  # an .rpm file you downloaded
+sudo apex install --allow-unsigned ~/Downloads/app.deb   # a Debian package
 sudo apex remove android-tools
 apex search wireshark
 apex pkg list
 ```
 
 That is the whole interface. It works for ordinary Fedora packages — CLI tools,
-libraries, development toolchains, GUI applications, fonts, services — and for a
-local `.rpm` file, and it does **not** stop the OS from updating.
+libraries, development toolchains, GUI applications, fonts, services — for a
+local `.rpm` file, and for a local `.deb` file (the format some vendors, Claude
+Desktop among them, publish for Linux and nothing else), and it does **not**
+stop the OS from updating.
 
 ## Why this is not `rpm-ostree install`
 
@@ -147,6 +150,126 @@ program is installed under `/opt` with a working `.desktop` entry, but the short
 command name may be missing from `PATH`. Check with `apex pkg info` what was
 installed and call the real path, or use the Flatpak if the vendor ships one.
 
+## Installing a local `.deb` file
+
+```bash
+sudo apex install --allow-unsigned ~/Downloads/claude-desktop_1.17282.0_amd64.deb
+apex pkg list
+sudo apex remove claude-desktop
+```
+
+Some software ships for Linux as a Debian package and as nothing else. Claude
+Desktop is the one that forced this: Anthropic publishes an apt repository and
+no RPM at all — five `rpm`/`yum` prefixes under `downloads.claude.ai` answer
+404 — so before this existed the only way to have it on APEX was to unpack the
+`.deb` into `/usr/local` by hand and run a per-application update timer beside
+the OS's own. Electron applications are packaged this way constantly.
+
+A `.deb` therefore goes through the **same** pipeline as everything else: the
+same system extension, the same cache under `/var/lib/apex/pkg`, the same
+requested-package list, the same `apex pkg rollback`. `apex update` rebuilds it
+with everything else, and if a later APEX image starts shipping the same
+application the extension copy is dropped rather than left shadowing it.
+
+### APEX does not talk to apt
+
+There is no apt client here. APEX **fetches no `.deb`**, resolves no Debian
+dependency graph, tracks no Debian suite and knows nothing about
+`sources.list`. `apex install ./thing.deb` installs a file you already have, and
+that is the whole feature. Adding a repository client would mean maintaining a
+second package database, a second signing-trust store and a second release
+cadence, and none of those has a rollback story that composes with bootc.
+
+### Its maintainer scripts are never run
+
+dpkg executes `preinst`, `postinst`, `prerm` and `postrm` as root. APEX runs
+none of them, and the install says so, naming the ones it skipped. They assume
+dpkg, apt and a Debian filesystem — Claude Desktop's own `postinst` writes an
+apt source and an AppArmor profile, and that apt source would be exactly the
+per-application update channel APEX's design forbids.
+
+That has a cost, and it is refused rather than hidden. A package whose program
+exists only because its `postinst` creates it is **not installed at all**:
+
+```text
+apex-pkg: error: refusing 'PacketTracer': it ships no program APEX can start —
+no executable in /usr/bin and no desktop entry whose Exec is a path the package
+ships. Its entry point is created by a maintainer script (preinst postinst
+prerm postrm), and APEX never runs those
+```
+
+A half-installed package that reports success is worse. `apex install wine`
+once did precisely that through the RPM path — twelve `/usr/bin` entries
+shipped as dangling symlinks, `/usr/bin/wine` absent, and the install printed
+"done".
+
+### Its dependencies are reported, never resolved
+
+`libgtk-3-0` is not a Fedora package name and no mapping between the two is
+honest, so APEX does not invent one. The `Depends:` line is printed before you
+accept the package, printed again as a warning when it installs, and recorded
+in `apex pkg info`:
+
+```text
+apex-pkg: warning: 'claude-desktop': APEX resolved none of its Debian
+dependencies (libgtk-3-0, libnotify4, libnss3, xdg-utils, …). Debian package
+names do not exist on Fedora; anything APEX-OS does not already provide under
+another name is yours to install
+```
+
+In practice a bundled Electron application needs nothing that a desktop APEX
+install does not already have. A package that genuinely needs a library is
+yours to install with `apex install` first.
+
+### Signatures: there are none, and saying otherwise would be a lie
+
+Every `.deb` needs `--allow-unsigned`. That is not laxity; it is the honest
+reading of Debian's trust model, which signs the apt **index** a package is
+downloaded through and not the package file. Detach the file from that chain —
+download it from a website, copy it off a USB stick — and nothing is left to
+check. Some vendors embed a `debsigs` `_gpgorigin` member; APEX carries no deb
+keyring and no policy saying which key may sign what, so it does not treat one
+as verification either.
+
+The acceptance is recorded against that file's exact bytes under
+`/var/lib/apex/pkg/deb`, exactly as it is for an RPM, so `apex pkg list` and
+`apex pkg verify` keep saying which packages APEX never vouched for.
+
+(The image build does verify Claude Desktop, by reconstructing the whole apt
+chain with the signing-key fingerprint pinned in this repository. That takes a
+network fetch and twenty lines of `Containerfile.core`; it is not something a
+file on your disk can be put back into.)
+
+### Where the payload may land
+
+A system extension merges `/usr` and `/opt`, so those are the only two
+hierarchies a `.deb` may write. Everything else is refused by name:
+
+| Refused | Reason |
+|---|---|
+| Anything outside `/usr` and `/opt` (`/etc`, `/var`, …) | a system extension merges nothing else, and a Debian conffile's whole lifecycle is dpkg's |
+| A shared library in `/usr/lib`, `/usr/lib64`, `/lib`, `/lib64` | a Debian build of a library in front of the image's own is unrecoverable without a rollback |
+| Anything in a Debian multiarch directory (`/usr/lib/x86_64-linux-gnu`) | Fedora's linker never looks there, and moving it to `/usr/lib64` is the row above |
+| Kernel modules and firmware | they need an initramfs and a real deployment |
+| A symlink pointing out of `/usr` and `/opt` | it cannot resolve once merged, and it is how an archive escapes its own tree |
+| A path APEX-OS already provides | an extension may not shadow the image — that is an OS update |
+| An `i386` package on `x86_64` | half a Debian 32-bit userspace is worse than a refusal |
+
+A library under the package's **own** directory is fine and is what most
+`.deb`s actually ship: `/usr/lib/claude-desktop/libEGL.so` is found by that
+application's RPATH and by nothing else.
+
+### Ownership, for a format the rpmdb cannot see
+
+`apex-pkg` normally decides whether a path belongs to the OS by asking the
+rpmdb. That question has no answer for a `.deb`, and it has no answer for
+Claude Desktop **as the image ships it** either, because the image installs it
+with `cp -a` rather than from an RPM. So the `.deb` route asks the booted
+ostree deployment instead — the pristine image tree, files and all — and not
+the running `/usr`, which is an overlay carrying the extension being rebuilt.
+What each `.deb` contributed is written to `/var/lib/apex/pkg/deb/NAME.files`,
+which is the `rpm -qf` equivalent for those paths.
+
 ## OS upgrades
 
 An extension records the OS version it was built for, and systemd refuses to
@@ -206,6 +329,8 @@ so the OS can update again. Reboot afterwards to drop the layered deployment.
 | A **newer** version of something the image ships | that is an OS update, not a package install |
 | Anything already in the image | already provided; nothing to do |
 | An `.rpm` built for another architecture | it cannot run here |
+| A `.deb` whose entry point only its `postinst` would create | APEX never runs maintainer scripts, so the program would not exist |
+| A `.deb` shipping outside `/usr` and `/opt`, or a library into a linker path | see the `.deb` section above |
 | An `.rpm` no trusted key covers | unless you pass `--allow-unsigned` for that file |
 | A file that is not an RPM, is unreadable, or is a directory | refused by name, before anything is copied |
 
@@ -226,6 +351,7 @@ image — open an issue.
 |---|---|
 | `apex install PKG…` | add packages (`--no-weak-deps`, `--enable-repo=REPO`) |
 | `apex install FILE.rpm` | add a local RPM file (`--allow-unsigned` if no trusted key covers it) |
+| `apex install FILE.deb` | add a local Debian package (`--allow-unsigned` always; see above) |
 | `apex remove PKG…` | remove packages (a local one by its package name) |
 | `apex search TERM…` | search the repositories |
 | `apex repo list` | list enabled and disabled RPM repositories |
