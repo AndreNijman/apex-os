@@ -361,6 +361,27 @@ zellij_build() {
     rm -f "$zerrf"
     if [ "$zlanded" = 1 ]; then return 0; fi
 
+    # ── WHOSE FAULT WAS IT ──────────────────────────────────────────────────
+    #
+    # The comment above records the measurement that matters here: on a GitHub
+    # runner all twelve sends returned rc=0 with empty stderr and the server
+    # discarded every one. That is an environment that cannot do what zellij
+    # documents, and it is NOT a defect in this engine — the same four reds
+    # appeared against a byte-identical apex-mux and a byte-identical suite.
+    #
+    # Nothing downstream could tell the two apart, because both ended in one
+    # `die`. So a caller was told "apex-mux is broken" by a machine where
+    # zellij is. Exit 3 now means specifically: every send was ACCEPTED
+    # (rc=0, no stderr) and every one was DISCARDED. Any send that actually
+    # errored keeps the ordinary failure, because that is a real fault and must
+    # stay one.
+    #
+    # The diagnostic below prints either way. Exit 3 changes who is blamed, not
+    # how loudly it fails.
+    zaccepted=1
+    case "$zrec" in *"rc=0  "*) : ;; *) zaccepted=0 ;; esac
+    printf '%s\n' "$zrec" | grep -qE 'rc=[1-9]' && zaccepted=0
+
     printf 'apex-mux: what each send reported —%s\n' "$zrec" >&2
     printf 'apex-mux: zellij list-sessions —\n' >&2
     zellij list-sessions 2>&1 | sed 's/^/    /' >&2 || :
@@ -370,6 +391,11 @@ zellij_build() {
     printf 'apex-mux: the tabs this session DOES have —\n' >&2
     zellij --session "$session" action dump-layout 2>&1 \
         | grep -E 'tab name=|^(error|Error)' | head -20 | sed 's/^/    /' >&2 || :
+    if [ "$zaccepted" = 1 ]; then
+        printf 'apex-mux: every send was accepted (rc=0, no stderr) and every one was discarded.\n' >&2
+        printf 'apex-mux: that is this machine'"'"'s zellij, not apex-mux. Exiting 3.\n' >&2
+        exit 3
+    fi
     die "the zellij layout never became a tab in session '$session'"
 }
 
