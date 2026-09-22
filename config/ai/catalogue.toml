@@ -1,0 +1,113 @@
+# APEX-OS model catalogue (roadmap §14).
+#
+# Installed to /usr/share/apexos/ai/catalogue.toml. This file is the ONLY place
+# a model name becomes a digest, and it is image content rather than something
+# fetched — which is the whole of §14's provenance story.
+#
+# WHY IT IS NOT DOWNLOADED
+# "Content-address and verify by digest" proves that the bytes which arrived
+# match the digest they were compared against. It proves nothing about what you
+# asked for if the name -> digest mapping came over the same network as the
+# file. So the mapping ships inside the image, which is cosign-signed,
+# digest-pinned in CI, carries its source revision, and rolls back with the OS.
+# The trust anchor for a model is therefore the same one as for the kernel.
+#
+# The alternatives, for the record:
+#   * a remote index — the digest check becomes decorative, because whoever
+#     serves the index serves the digest;
+#   * trust on first use — every verification after the first would pass while
+#     proving only that the file had not changed since a moment nobody watched.
+# Neither ships. A model outside this file needs an explicit
+# `--url … --digest sha256:…`, which is the user vouching for it, and
+# `apex ai models` keeps saying so for the life of that model.
+#
+# HOW TO ADD AN ENTRY
+# Every field is required except `note`, and `apexd_core::ai::Catalogue`
+# validates all of them at parse time — a bad entry is a build failure, not a
+# runtime surprise, because a user cannot fix image content.
+#
+#   digest         `sha256:` + 64 lowercase hex. Get it with:
+#                    curl -fL <url> | sha256sum
+#   weights_mib    the file's size on disk, which is also approximately the
+#                  VRAM the weights occupy.
+#   layers         repeating transformer blocks — what `llama-server -ngl`
+#                  counts. Printed by llama-server at load as
+#                  "n_layer = N". NOT the total tensor count.
+#   kv_mib_per_1k  KV cache cost in MiB per 1024 tokens of context, for this
+#                  architecture at this build's default cache precision. A
+#                  declared per-model constant rather than a formula, because
+#                  computing it needs n_kv_heads, head_dim and the cache type,
+#                  none of which are knowable without parsing the GGUF — and a
+#                  formula that guessed them would produce a confident wrong
+#                  number instead of an honest table entry.
+#   runtime        `llama.cpp` is the only value this build launches.
+#
+# EVERY NUMBER BELOW WAS READ OFF THE FILE, NOT OFF A MODEL CARD.
+#
+# An entry is a promise that a specific multi-gigabyte file at a specific URL
+# has a specific digest, and that its layer count and KV cost are the measured
+# ones. None of that can be asserted from documentation, and transcribing it
+# would put four unverified numbers into the one file whose entire purpose is
+# being the thing you can trust. The first symptom would be `apex ai pull`
+# refusing the model with a digest mismatch, or `plan_fit` planning an offload
+# against a layer count that is not real.
+#
+# So each entry is added by someone who has downloaded the file, hashed it, and
+# read the header. For the entry below that was done on 2026-09-03: the file
+# fetched whole (1,117,320,768 bytes), `sha256sum` run over it, and the GGUF
+# header parsed for `qwen2.block_count`, `qwen2.context_length`,
+# `attention.head_count`, `attention.head_count_kv` and
+# `attention.key_length`/`value_length`.
+#
+# `kv_mib_per_1k` is computed from those, not estimated:
+#
+#     head_count_kv x (key_length + value_length) x 2 bytes x block_count
+#       = 2 x (128 + 128) x 2 x 28  = 28,672 bytes per token
+#       = 28 MiB per 1024 tokens at f16, llama.cpp's default cache type
+#
+# K and V are separate tensors, so both are charged. At the model's full 32,768
+# context that is ~896 MiB of cache on top of the weights, which is why
+# `plan_fit` charges context separately from `weights_mib`.
+#
+# A model outside this file still needs an explicit `--url … --digest sha256:…`,
+# which is the user vouching for it, and `apex ai models` keeps saying so for
+# the life of that model.
+
+version = 1
+
+# Example of a complete entry, kept commented so the file is empty rather than
+# wrong. Fill in the digest and the two measured numbers before uncommenting.
+#
+# [model.qwen3-coder-7b]
+# title = "Qwen3 Coder 7B Instruct"
+# url = "https://huggingface.co/…/qwen3-coder-7b-instruct-q4_k_m.gguf"
+# digest = "sha256:0000000000000000000000000000000000000000000000000000000000000000"
+# weights_mib = 4400
+# layers = 28
+# kv_mib_per_1k = 28
+# max_context = 32768
+# quant = "Q4_K_M"
+# license = "Apache-2.0"
+# runtime = "llama.cpp"
+# note = "code-focused; fits an 8 GiB card fully offloaded at 8k context"
+
+# ── Qwen2.5 Coder 1.5B Instruct, Q4_K_M ──────────────────────────────────────
+# Measured on the katana, 2026-09-03. GGUF v3, architecture `qwen2`, 339
+# tensors, `general.file_type` 15 — which is llama.cpp's Q4_K_M, agreeing with
+# the filename rather than being taken from it.
+#
+# Chosen as the first entry because it is small enough to verify end to end in
+# minutes and still a real coding model: 28 layers fully offloadable on any
+# card with ~2 GiB free at 8k context, and it runs on CPU at a usable speed.
+[model.qwen25-coder]
+title = "Qwen2.5 Coder 1.5B Instruct"
+url = "https://huggingface.co/Qwen/Qwen2.5-Coder-1.5B-Instruct-GGUF/resolve/main/qwen2.5-coder-1.5b-instruct-q4_k_m.gguf"
+digest = "sha256:cc324af070c2ecbfd324a30884d2f951a7ff756aba85cb811a6ec436933bb046"
+weights_mib = 1065
+layers = 28
+kv_mib_per_1k = 28
+max_context = 32768
+quant = "Q4_K_M"
+license = "Apache-2.0"
+runtime = "llama.cpp"
+note = "1.5B code model; 28 layers fit any card with ~2 GiB free at 8k context"

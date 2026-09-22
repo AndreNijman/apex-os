@@ -49,9 +49,20 @@ The image is now built in three tiers instead of two:
 
 | Tier | File | Contents | Rebuilds when |
 |------|------|----------|---------------|
-| **core** | `Containerfile.core` | kernel + MOK signing, firmware, desktop/greeter stack, scx, Bazaar, codecs, baked apps, printing, input methods, fonts, dev toolchain, zsh/starship, awww/matugen/yazi, OS branding & locale | `Containerfile.core` or `kernel/**` changes · `force_core` · the weekly cron finds a **new** `fedora-bootc` digest |
+| **kernel** | `Containerfile.kernel` | the kernel itself, compiled from pinned source with a pinned `dwarves` | `kernel/**` changes — i.e. `kernel/kernel.pin` moves |
+| **core** | `Containerfile.core` | kernel *install* + MOK signing, firmware, desktop/greeter stack, scx, Bazaar, codecs, baked apps, printing, input methods, fonts, dev toolchain, zsh/starship, awww/matugen/yazi, OS branding & locale | `Containerfile.core` or `kernel/**` changes · `force_core` · the weekly cron finds a **new** `fedora-bootc` digest |
 | **base** | `Containerfile.base` | apexd + apex CLI, sysprofiles, D-Bus/polkit/units, every `files/**` COPY, the vendored APEX Shell | `Containerfile.base`, `apexd/**`, `config/**`, `files/**` change, or core rebuilt |
-| **flavor** | `Containerfile.daily` / `.gaming` | edition stamp, mesa leg, Plymouth theme, GPU stack | every run |
+| **image** | `Containerfile.apex` | edition stamp, gaming-session files, Plymouth theme, final initramfs | every run |
+
+The GPU stack, the Mesa leg and `power-profiles-daemon` used to sit in the
+flavor tier. They are in `core` now, and that is a download change, not a
+tidiness one: measured on the published `:daily` manifest, its flavor tier was
+342 MiB over six layers, of which **67 MiB was two `dnf` transactions**
+(`power-profiles-daemon`, and the Terra Mesa `distro-sync`) whose only real
+content was a rewritten ~200 MB sqlite rpmdb. Every push shipped those to every
+machine. In `core` they are inside a digest-pinned parent nobody re-downloads,
+so collapsing three images into one — while *adding* the NVIDIA driver to every
+machine — made the per-update download smaller, not larger.
 
 The base is built `FROM ghcr.io/andrenijman/apex-os:core@sha256:…`. **A digest-pinned `FROM` reuses
 the parent's layer descriptors verbatim** — the derived manifest lists the same
@@ -60,6 +71,185 @@ digests, so `bootc` recognises blobs it already has and downloads none of them.
 That is the whole mechanism. It needs no build cache and no registry cache, and
 it cannot silently stop working: if the core digest moves, the layers move; if
 it does not, they do not.
+
+### The one row that rebuilds every run got 275 MiB smaller
+
+The `image` row above is the only tier that rebuilds on every single run, and it
+is built `--layers=false` — one squashed layer for the whole of
+`Containerfile.apex`. Its digest therefore moves every build and **every machine
+re-downloads all of it on every update**. Measured with `skopeo inspect --raw`
+across all 14 published `apex-<sha>` tags (manifests only, nothing pulled):
+
+| apex-tier layer, compressed | |
+|---|---|
+| the 13 builds up to 2026-09-21 | **358.1 – 359.5 MiB** |
+| `apex-44c9a5cb`, first with the slim initramfs | **84.5 MiB** |
+
+**~275 MiB off every `bootc upgrade`**, for free, as a side effect of
+`initramfs-slim`. It is the cheapest recurring win on this page, because unlike
+core it is paid by every machine every time.
+
+Two things that measurement also settled, both in
+`ROADMAP/evidence/initramfs-slim2-20260922.md`:
+
+* **The initramfs itself is bit-reproducible** — two `podman build --no-cache`
+  runs from the same parent produce the same 88,934,458 bytes, `cmp` clean. So
+  bootc's `find_vmlinuz_initrd_duplicate`, which digests content, *can* make a
+  second deployment cost zero extra ESP.
+* **It has never had the chance.** Every one of the 14 published images sits on
+  its own `base-<same sha>`; no two APEX image builds have ever shared a
+  parent. The
+  lever for both the ESP cost and this download is *"do not rebuild `base` when
+  nothing in it changed"* — not anything to do with dracut.
+
+### The fourth tier: the kernel
+
+APEX builds its own kernel (`ROADMAP/evidence/kernel-build-20260920.md` says
+why — every kernel it shipped before was unable to load a sched-ext scheduler).
+That compile is ~45 minutes, and the obvious place for it is `core`, because
+the rule below says anything that compiles a third-party program goes there.
+
+It is not in `core`, for a reason this document is the right place to record:
+**`core` is built with no layer cache.** There is no `--cache-from` any more and
+scheduled and forced runs pass `--no-cache` outright. So a kernel compile inside
+`core` is paid in full on every `core` rebuild — and the "Rebuilds when" column
+above says `core` rebuilds for a `Containerfile.core` edit, a `force_core`, or a
+new `fedora-bootc` digest. None of those are kernel changes.
+
+The cost that matters is not the 45 minutes, though. It is that each of those
+rebuilds would produce a **different kernel binary**: new `vmlinuz`, new
+modules, new BTF, akmods rebuilt against it and re-signed — all as a side effect
+of an edit that had nothing to do with the kernel, with nothing tying the kernel
+to its own inputs. `kernel/kernel.pin` exists so that the kernel moves when the
+kernel's inputs move and at no other time.
+
+So the kernel uses the same mechanism `base` uses to consume `core`: a
+separately published image, pinned by digest. `Containerfile.core` keeps the
+`dnf` transaction that *installs* the RPMs — which is what the rule below is
+actually about — and gets them from the kernel image:
+
+```dockerfile
+ARG APEX_KERNEL_IMAGE=localhost/apex-kernel:local
+FROM ${APEX_KERNEL_IMAGE} AS kernel-rpms
+…
+COPY --from=kernel-rpms /rpms     /tmp/apex-kernel-rpms
+COPY --from=kernel-rpms /manifest /tmp/apex-kernel-manifest
+```
+
+**The fleet download cost is unchanged.** `core` moving is a full multi-gigabyte
+download either way; the kernel image itself is never pulled by a user, only by
+the `core` build. What changes is that `core` stops moving for kernel reasons
+and the kernel stops moving for `core` reasons.
+
+Two things cross this new tier boundary and must survive any future edit, in the
+same way `/usr/lib/apex-kver` crosses core→gaming: the manifest's `btf_scx`
+verdict, which `core` refuses to install without, and its `kver`, which `core`
+checks against the kernel that actually landed in the rpmdb. Both are copied to
+`/usr/share/apex-os/kernel/` so a running machine can answer what it is booting
+and what built its BTF.
+
+#### What owning the kernel obliges us to, permanently
+
+This is the half of the decision that is not a build cost, and it is the half
+that outlives whoever took it.
+
+Before, security updates arrived by themselves: CachyOS tagged a release, the
+COPR rebuilt `kernel-cachyos`, and APEX picked it up on the next `force_core`.
+Nobody had to do anything. Now `KERNEL_TAG` and `KERNEL_SRC_SHA256` in
+`kernel/kernel.pin` decide which kernel APEX ships, and they move when a person
+moves them.
+
+The failure mode is quiet, which is what makes it dangerous. **An unbumped pin
+is a kernel that stops receiving security fixes while every gate in this
+repository stays green.** The sha256 still verifies — against the old tarball.
+The BTF gate still passes — the old kernel's BTF is still fine. CI is all
+ticks. Green here means "this is the kernel you pinned"; it has never meant
+"this kernel is current", and no other check in the repository can tell the
+difference.
+
+So the obligation is not "remember to bump the kernel". It is a mechanism:
+
+* **`tests/check-kernel-drift.sh`** asks whether each pinned input is still
+  current — is there a newer stable `cachyos-7.2.x` tag (the security-update
+  question), has the pinned `dwarves` moved in or out of Fedora, do all five
+  pinned URLs still resolve. It has **three** outcomes, not two: `0` no drift,
+  `1` drift, `2` a lookup could not be performed — which is neither a pass nor
+  drift, and fails.
+* **`.github/workflows/kernel-drift.yml`** runs it weekly, on every change to
+  the pin, and on demand; it keeps a single issue open until the pin is current
+  again. It compiles nothing.
+
+Two things that check is *not*, so nobody relies on it for them. It does not
+tell you a CVE exists — it tells you CachyOS has tagged something you are not
+on. And it cannot tell you a kernel you already pinned has become unsafe; only
+a newer tag can do that.
+
+Bumping the pin costs a ~45-minute kernel-tier rebuild and then a `core`
+rebuild, which is the usual ~5 GB to the fleet. That is the real recurring
+price of owning the kernel, and it is per security update, not per year.
+
+#### The CI question this tier cannot answer for itself
+
+**Nothing builds the kernel image in CI yet, and it needs a decision rather
+than an implementation.** `.github/workflows/build-image.yml` needs a `kernel`
+job that runs before `core` and passes its digest as
+`--build-arg APEX_KERNEL_IMAGE=…@sha256:…`. Writing that job is an afternoon.
+Running it is the problem:
+
+> **The build tree is ~100 GB** — measured, not estimated: `/var` on the
+> development machine went 552 GB free to 453 GB during the compile. **A hosted
+> GitHub runner has 14 GB.**
+
+So this is not "slower on a hosted runner", it is *cannot run on one at all*,
+before the CPU argument starts. The two realistic options, with what each
+actually costs:
+
+| option | what it costs | what it changes about the product |
+|---|---|---|
+| **Self-hosted runner on katana** | 20 cores and podman are already there, so the compile is roughly what it is locally. Needs ≥120 GB free on katana's `/var`, which is *tight* — check before committing. Adds a machine the release path depends on being up, and a self-hosted runner executing untrusted PR code is its own security decision. | Nothing. Same kernel, same config. |
+| **Restructure the spec to build far fewer modules** (`_build_minimal 1` plus a `modprobed.db`) | Brings the tree within a hosted runner's disk. | **Changes what hardware the kernel supports**, because the module set is built from one machine's `modprobed.db`. That is a product decision about which machines APEX boots on, not a CI optimisation. |
+
+##### ANSWERED 2026-09-20: the self-hosted runner, and the disk objection went away
+
+Andre chose the first option and paid for it properly rather than squeezing it
+in. The objection in that row — *"needs ≥120 GB free on katana's `/var`, which
+is tight"* — was not just tight, it was **false**: katana's `/var` had **51 GB**
+free, so the build could not have run there at all. It does not use `/var` any
+more.
+
+Katana's second drive was repartitioned: the `games` filesystem shrank from
+1362 GiB to 862 GiB (it was 5 % used) and the freed 500 GiB became a partition
+mounted at **`/var/lab`**, which is where the runner's work directory and its
+container storage live. 484 GB free. The Windows, ESP and recovery partitions
+on that disk were not touched — `ROADMAP/evidence/katana-runner-20260920.md`
+has the before/after tables, the GPT backup location, and the integrity proof.
+
+So the standing costs of this choice, stated rather than implied:
+
+* **GitHub Actions minutes for this tier: zero.** The compile runs on hardware
+  Andre already owns, at `-j$(nproc)` = 20 rather than the 12 the tier was
+  measured at.
+* **A release now depends on katana being up**, which is the cost this table
+  exists to make visible. It has moved from "somebody's laptop, by hand" to
+  "a named machine, automatically" — better, not free.
+* **The security decision that row flagged was made, not skipped.** `apex-os`
+  is public, so fork pull requests are untrusted code. They never reach the
+  runner: the repository requires approval for **all** external contributors,
+  and every self-hosted job additionally refuses a PR whose head is a fork.
+  Fork PRs keep getting full CI on `ubuntu-24.04`. The runner is ephemeral and
+  runs as an unprivileged user that cannot read Andre's home or reach his LAN,
+  and a probe workflow asserts all of that on every change rather than trusting
+  it. Details, including what is *not* covered, are in the evidence file.
+
+`.github/workflows/kernel-build.yml` is what runs there. **It is a proof, not
+yet the producer**: it builds `localhost/apex-kernel:ci` and publishes nothing,
+while `Containerfile.core` still consumes
+`ghcr.io/andrenijman/apex-os:kernel@sha256:…`. Closing that last gap needs a
+`packages: write` token and a `podman login` on the runner — deliberately not
+done here, because handing a registry push credential to a build host is its
+own decision. **Until it is, `core` is still pointed at a hand-built kernel
+image with `--build-arg`, and a green kernel-build run does not mean the kernel
+tier ships from CI.**
 
 ### The rule for new content
 
@@ -79,6 +269,82 @@ Two contracts cross the tier boundary and must survive any future edit:
 `/usr/lib/apex-kver` (core → the gaming NVIDIA akmod) and
 `/usr/share/apex-os/secureboot/kernel-signed` (core → base and flavor
 verification). Both are plain files under `/usr`, and CI asserts both.
+
+### What the AI apps added
+
+The two desktop AI apps (`docs/packages.md`) are third-party downloads, so by
+the rule above they belong in `core` — and they are the largest single addition
+that tier has taken. Measured in a scratch `fedora-bootc:43` container:
+**1.3 GB for `/usr/lib/chatgpt` and 548 MB for `/usr/lib/claude-desktop`**,
+~1.9 GB of payload before compression.
+
+This is a real tension, stated plainly rather than left to be discovered: the
+product decision says an app version bump is an image rebuild, and a core
+rebuild is a multi-gigabyte download for every machine on the fleet. The
+consequence is that these apps' versions move when core moves, and not on the
+vendors' own release cadence. Pushing them up a tier to make bumps cheaper is
+not available — a `dnf` transaction above `core` puts an rpmdb-sized layer into
+every user's next update, which is the problem this whole document is about.
+
+### What the systemd-boot pivot added
+
+The smallest thing `core` has taken, recorded because the pivot sounds
+expensive and the packages are not what makes it so. Measured with
+`dnf5 install --assumeno` inside `ghcr.io/andrenijman/apex-os:daily`:
+
+```
+Installing:  systemd-boot-unsigned  248.9 KiB
+             systemd-ukify           99.9 KiB
+Installing dependencies: python3-cffi, python3-cryptography, python3-pefile,
+             python3-ply, python3-pycparser, python3-zstandard
+Total size of inbound packages is 3 MiB. … 12 MiB extra will be used.
+```
+
+`checkpolicy`, `policycoreutils` and `python3-setools` were **already
+installed** — they are named in the same transaction only to make the
+dependency explicit, the way `efibootmgr` is, so a future change that drops
+them fails the build instead of turning the boot blessing into a silent
+rollback loop.
+
+The `apex_sdboot` SELinux module is the other half. `semodule -N -i` grows
+`/etc/selinux` by **466 bytes**, but rewrites `policy.35`, which is **3.8 MB**,
+and an OCI layer carries a changed file whole. That is why the module is
+compiled in `core` and not in the files tier: 4 MB once, rather than 4 MB in
+every thin-tier update.
+
+`systemd-boot-unsigned` has to be in the shipped image and cannot be a
+build-only tool like `sbsigntools`: `bootc install --bootloader systemd` copies
+the loader **out of the image being installed**. With the package absent, bootc
+printed "Installing bootloader via systemd-boot", exited 0, and produced an ESP
+with an empty `/EFI/systemd/` and no loader binary anywhere — an unbootable
+disk from a successful install.
+
+### What the screen reader added
+
+The other end of the same scale, and worth recording next to the AI apps
+precisely because it is the opposite case. P2-003's acceptance line names a
+screen reader, and until `Containerfile.core`'s `5a-a11y` stanza there was none
+in the image. Measured the same way — `dnf5 install --assumeno orca` inside
+`ghcr.io/andrenijman/apex-os:daily`:
+
+    Installing:            orca              21.3 MiB
+    Installing dependencies:
+                           brlapi            594.9 KiB
+                           python3-brlapi    324.7 KiB
+                           python3-louis      43.4 KiB
+                           python3-pyatspi   414.5 KiB
+    Total download 4 MiB · 23 MiB installed
+
+**23 MiB against the AI apps' 1.9 GB**, in the same tier, for the component
+without which a blind user cannot use the machine at all. Nothing in that
+transaction pulls `speech-dispatcher` or `espeak-ng`, which is the image's own
+rpmdb confirming they were already present as transitive dependencies of gtk4
+and Qt — so the delta really is just the reader.
+
+The rule this illustrates: the tier argument is about DOWNLOAD SIZE PER UPDATE,
+not about whether a thing is worth shipping. A 23 MiB addition to core costs the
+fleet nothing measurable; a 1.3 GB one is what makes the tension above worth
+writing down.
 
 ### The weekly rebuild
 
@@ -164,6 +430,29 @@ shells out to `apex tier` as the session user, and mutations go through apexd's
 polkit-authorised D-Bus API — which is how an unprivileged desktop is supposed
 to change power state. Gating those would break the desktop's power controls in
 order to improve an error message.
+
+## Also changed: the one update that migrates the boot path
+
+`apex update` on a machine still booting GRUB runs the in-place move to
+composefs + systemd-boot **instead of** `bootc upgrade` (docs/boot-v2.md,
+"Migrating a machine that already exists"). Two things about its cost, because
+this document exists so that nobody has to find them out on a full disk:
+
+* **It downloads nothing.** The migration deploys the digest the machine is
+  already running, and the install has to run as a container of that image, so
+  the image is copied out of bootc's own storage with `bootc image
+  copy-to-storage` — local, no registry round trip. That copy is deleted as
+  soon as the install succeeds.
+* **It roughly doubles the image's footprint on disk, and leaves it that way.**
+  The ostree repo and deployment stay — that is the recovery path — and
+  `/composefs` is a second copy of the same content. Nothing in the migration
+  deletes the old one, deliberately: a machine that can still boot GRUB is a
+  machine that cannot be bricked by this change. Reclaiming it is a later,
+  separate decision, and until it is taken a migrated APEX machine carries
+  about 15 GB it did not carry before.
+
+That is a disk cost, not a download cost, so it does not move the numbers above
+— but on katana, whose `/var` is tight, it is the number that matters.
 
 ## CI build time — what was measured, and what actually helped
 

@@ -1,0 +1,3184 @@
+#!/usr/bin/env bash
+# ─────────────────────────────────────────────────────────────────────────────
+#  run-scenarios — the boot v2 VM harness. §22 migration step 2, "prototype
+#  composefs/systemd-boot in CI and virtual machines".
+#
+#  Every scenario boots a real guest under Secure-Boot-enforcing OVMF and
+#  asserts on what came out of the guest's serial port and on what the
+#  bootloader wrote back into the ESP. Nothing here asserts that a build
+#  command exited 0.
+#
+#  Three rules the assertions follow, each of which this project has been
+#  bitten by:
+#
+#  1. A marker must be read from the SERIAL LOG and nowhere else. The UKI, the
+#     staged ESP and the guest init script all contain the marker string, so a
+#     grep over the work directory would pass with no guest having run.
+#  2. A run counts as a boot only when qemu exited 0 under -no-reboot. Marker
+#     present + timeout kill means the guest printed and then hung, which §22
+#     refuses to count as a successful update.
+#  3. Counts are EXACT. `-ge` once let 20 of 68 dropped bindings pass a test
+#     called "it generates every binding it can".
+#
+#  Usage: run-scenarios [--work DIR] [SCENARIO ...]
+#         run-scenarios --list
+# ─────────────────────────────────────────────────────────────────────────────
+set -euo pipefail
+HERE="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
+# shellcheck source=files/scripts/boot-v2/lib.sh
+. "$HERE/lib.sh"
+
+WORK="${APEX_BOOTLAB_WORK:-/work/out}"
+SCENARIOS=()
+LIST=0
+while [[ $# -gt 0 ]]; do
+    case "$1" in
+        --work) WORK="$2"; shift 2;;
+        --list) LIST=1; shift;;
+        --*) die "unknown option $1";;
+        *) SCENARIOS+=("$1"); shift;;
+    esac
+done
+
+ALL=(prereq signed-uki reproducible negative-unsigned negative-foreign
+     negative-tampered entry-layout boot-counting
+     # L-003, the SHIPPED enrolment path. These need swtpm and cryptsetup and
+     # nothing else — no staged root, no UKI, no guest — so they belong in the
+     # default run rather than behind a name somebody has to remember.
+     enroll-sb-on enroll-sb-off enroll-no-tpm enroll-bare-policy)
+# Scenarios needing something the container cannot produce for itself. Kept OUT
+# of ALL so a default run cannot silently skip them and still report success:
+# they are requested by name and hard-fail when their input is missing.
+STAGED=(apex-image luks-tpm luks-tpm-clear luks-firmware-change
+        luks-firmware-code luks-no-tpm luks-s3 luks-pcr7 luks-pcr7-signed)
+if (( LIST )); then printf '%s\n' "${ALL[@]}" "${STAGED[@]}"; exit 0; fi
+(( ${#SCENARIOS[@]} )) || SCENARIOS=("${ALL[@]}")
+
+# ── the summary line is not optional ────────────────────────────────────────
+#
+# MEASURED 2026-09-14: `run-scenarios --work <dir-with-no-staged-root> luks-tpm`
+# printed its refusal and stopped, and the run produced NO
+# `== boot-v2 VM harness: N passed, M failed ==` line at all. The exit status
+# was 1, so a caller that checks `$?` was told — but a caller reading the log,
+# which is how every one of these runs is actually read, saw a transcript with
+# no verdict in it. "A gate that runs and inspects nothing" is the dominant
+# defect family in this repository; a gate that inspects everything and then
+# reports nothing is the same defect read from the other end.
+#
+# So the summary is printed from an EXIT trap and therefore survives `die`,
+# an unset variable and a `set -e` abort inside a scenario. An abort with no
+# recorded failure is itself recorded as a failure, because a run that stopped
+# early has not passed — that is the case the old code reported as silence.
+#
+# A SIGNAL IS NOT COVERED BY THE EXIT TRAP ALONE, AND THE COMMENT THAT SAID IT
+# WAS COST A ROUND. MEASURED 2026-09-18: two detached runs were SIGTERM'd
+# mid-scenario (containers later-r5-s3-fw2025 / later-r5-s3-nosmm, both killed
+# at 15:01:38.115602736 and both recorded Exited (143)). bash DOES run the EXIT
+# trap on an untrapped SIGTERM, but `$?` inside it reads 0 — nothing had failed
+# yet — so the `rc != 0` branch below never fired and each log ended:
+#
+#     == boot-v2 VM harness: 6 passed, 0 failed ==
+#
+# for a run killed part-way through its second boot, with the s3 assertions
+# never reached. The exit status was still 143, so `$?` callers were told; the
+# LOG, which this whole block exists because it is how these runs are actually
+# read, said PASS. Reproduced in isolation before fixing, not theorised.
+#
+# So the signals are trapped by name and recorded. A killed run now prints a
+# FAIL line and can never read as green from either end.
+BOOTV2_SUMMARY_PRINTED=0
+BOOTV2_SIGNAL=""
+bootv2_on_signal() {
+    BOOTV2_SIGNAL="$1"
+    exit $(( 128 + $2 ))
+}
+trap 'bootv2_on_signal TERM 15' TERM
+trap 'bootv2_on_signal INT 2' INT
+trap 'bootv2_on_signal HUP 1' HUP
+bootv2_report() {
+    local rc=$?
+    (( BOOTV2_SUMMARY_PRINTED )) && return
+    BOOTV2_SUMMARY_PRINTED=1
+    if [[ -n "$BOOTV2_SIGNAL" ]]; then
+        bad "the harness was KILLED by SIG$BOOTV2_SIGNAL part-way through: the scenarios above are INCOMPLETE and the counts below are a transcript, not a verdict"
+    elif (( rc != 0 )) && (( BOOTV2_FAIL == 0 )); then
+        bad "the harness aborted with exit status $rc before finishing: the scenarios above are INCOMPLETE"
+    fi
+    bootv2_summary "boot-v2 VM harness" || true
+    (( rc != 0 )) || rc=$(( BOOTV2_FAIL == 0 ? 0 : 1 ))
+    exit "$rc"
+}
+trap bootv2_report EXIT
+
+KVER="$(cat /etc/apex-bootlab-kver 2>/dev/null || true)"
+[[ -n "$KVER" ]] || die "/etc/apex-bootlab-kver missing — not running inside the boot lab image"
+LAB_KERNEL="/usr/lib/modules/$KVER/vmlinuz"
+KEYS="$WORK/keys"
+CMDLINE_BASE="console=ttyS0,115200 earlyprintk=serial,ttyS0,115200"
+
+mkdir -p "$WORK"
+
+# ── shared fixtures ─────────────────────────────────────────────────────────
+fixtures() {
+    [[ -d "$KEYS" ]] && return 0
+    "$HERE/apex-sb-keys" "$KEYS" >/dev/null
+    "$HERE/apex-sb-vars" --cert "$KEYS/sb/cert.der" --output "$WORK/vars-apex.tmpl.fd" >/dev/null
+    "$HERE/apex-guest-micro" "$WORK/micro.cpio.gz" >/dev/null
+}
+
+# A fresh writable varstore per scenario: EFI variables persist inside the
+# file, and a scenario inheriting another's LoaderEntryDefault or BootOrder
+# would make the results depend on execution order.
+fresh_vars() { cp "$WORK/vars-apex.tmpl.fd" "$1"; }
+
+mkuki() {  # mkuki OUT ENTRY_ID [--unsigned|--foreign|extra args...]
+    local out="$1" id="$2"; shift 2
+    local -a args=(
+        --output "$out"
+        --kernel "$LAB_KERNEL" --initrd "$WORK/micro.cpio.gz" --allow-no-ucode
+        --cmdline "$CMDLINE_BASE apex.bootlab.entry=$id"
+        --deployment "$id" --variant bootlab
+    )
+    case "${1:-}" in
+        --unsigned) shift ;;
+        --foreign)  shift; args+=(--sb-key "$KEYS/foreign/key.pem" --sb-cert "$KEYS/foreign/cert.pem") ;;
+        *)          args+=(--sb-key "$KEYS/sb/key.pem" --sb-cert "$KEYS/sb/cert.pem") ;;
+    esac
+    "$HERE/apex-mkuki" "${args[@]}" "$@" >/dev/null
+}
+
+# List the type #2 entry filenames the bootloader currently sees, read back out
+# of the disk image AFTER the boot rather than from our staging copy.
+esp_linux_entries() {
+    local disk="$1"
+    esp_disk_readback "$disk" "$disk.after"
+    mdir -i "$disk.after" -b ::/EFI/Linux 2>/dev/null \
+        | sed 's|^::/EFI/Linux/||' | sed 's/\r$//' | grep -i '\.efi$' | sort
+}
+
+esp_loader_entries() {
+    local disk="$1"
+    esp_disk_readback "$disk" "$disk.after"
+    mdir -i "$disk.after" -b ::/loader/entries 2>/dev/null \
+        | sed 's|^::/loader/entries/||' | sed 's/\r$//' | grep -i '\.conf$' | sort
+}
+
+# ── scenarios ───────────────────────────────────────────────────────────────
+
+scenario_prereq() {
+    log "prereq: the lab has what every other scenario assumes"
+    [[ -f "$LAB_KERNEL" ]] && ok "lab kernel $KVER" || bad "no lab kernel at $LAB_KERNEL"
+    local f; f="$(ovmf_code_secboot)";      ok "SB firmware $f"
+    f="$(ovmf_vars_template)";              ok "pristine varstore template $f"
+    f="$(sd_boot_efi)";                     ok "systemd-boot $f"
+    f="$(sd_stub_efi)";                     ok "sd-stub $f"
+    # KVM makes the difference between a 6-second boot and a 40-second one, but
+    # it is not a hard requirement: qemu falls back to TCG and the assertions
+    # are identical. Report which one ran, because "it passed" means different
+    # things at different speeds and a CI timeout is the usual symptom.
+    if [[ -r /dev/kvm ]]; then ok "acceleration: kvm"; else ok "acceleration: tcg (no /dev/kvm)"; fi
+}
+
+scenario_signed_uki() {
+    log "signed-uki: an APEX-signed UKI boots under Secure Boot enforcing"
+    fixtures
+    mkuki "$WORK/uki-good.efi" good
+    local disk="$WORK/disk-signed.img" vars="$WORK/vars-signed.fd" ser="$WORK/serial-signed.log"
+    "$HERE/apex-mkesp" --disk "$disk" --size 96 \
+        --sb-key "$KEYS/sb/key.pem" --sb-cert "$KEYS/sb/cert.pem" \
+        --uki "good:0:$WORK/uki-good.efi" --default 'apex-good*' >/dev/null
+    fresh_vars "$vars"
+
+    local rc=0
+    vm_boot --disk "$disk" --vars "$vars" --name signed --serial "$ser" --timeout 120 || rc=$?
+    assert_eq 0 "$rc" "qemu exit status (clean guest poweroff)"
+    assert_serial_has "$ser" "APEX-BOOTLAB: userspace-reached"
+    assert_serial_has "$ser" "APEX-BOOTLAB: clean-poweroff"
+    # The command line inside the signed image is the one the kernel received.
+    # This is the property that makes a UKI worth having: on the GRUB/BLS path
+    # the cmdline is unsigned and unmeasured.
+    assert_serial_has "$ser" "apex.bootlab.entry=good"
+    # sd-boot ran and identified itself, so the boot went through the loader we
+    # signed rather than the firmware loading the UKI directly.
+    assert_serial_has "$ser" "APEX-BOOTLAB: efivar LoaderEntrySelected=apex-good.efi"
+    assert_serial_has "$ser" "APEX-BOOTLAB: efivar StubInfo=systemd-stub"
+}
+
+scenario_reproducible() {
+    log "reproducible: the same inputs and SOURCE_DATE_EPOCH give the same bytes"
+    fixtures
+
+    # ── The UKI PAYLOAD is reproducible. The SIGNATURE is not, and cannot be ──
+    #
+    # This scenario used to build two SIGNED UKIs and assert byte equality. It
+    # passed, then failed on a later CI run whose only changes were to
+    # documentation — because `sbsign` records a signing time in the PKCS#7
+    # structure, so two signings of identical input match only when they land
+    # in the same second.
+    #
+    # Measured directly rather than inferred: signing one unmodified
+    # linuxx64.efi.stub twice, two seconds apart, with one key, produced
+    # sha256 c266048303a17056… and 66d64b06a66db973…. There is no sbsign flag
+    # that removes the timestamp.
+    #
+    # So the assertion moves to the artifact whose bytes SOURCE_DATE_EPOCH
+    # actually controls — the unsigned UKI — and the signature gets the
+    # assertion that is true of it: that it verifies, every time. Claiming
+    # byte-identical signed output would be claiming a property Authenticode
+    # does not have.
+    local a="$WORK/repro-1.efi" b="$WORK/repro-2.efi"
+    SOURCE_DATE_EPOCH=1700000000 mkuki "$a" repro --unsigned
+    SOURCE_DATE_EPOCH=1700000000 mkuki "$b" repro --unsigned
+    local ha hb
+    ha="$(sha256sum <"$a" | cut -d' ' -f1)"
+    hb="$(sha256sum <"$b" | cut -d' ' -f1)"
+    assert_eq "$ha" "$hb" "sha256 of two identical UNSIGNED UKI builds"
+
+    # And a different epoch must produce different bytes, otherwise the check
+    # above would pass even if SOURCE_DATE_EPOCH were being ignored and the
+    # timestamp were hardcoded.
+    local c="$WORK/repro-3.efi" hc
+    SOURCE_DATE_EPOCH=1600000000 mkuki "$c" repro --unsigned
+    hc="$(sha256sum <"$c" | cut -d' ' -f1)"
+    if [[ "$ha" == "$hc" ]]; then
+        bad "SOURCE_DATE_EPOCH has no effect on the output — reproducibility is not being controlled"
+    else
+        ok "a different SOURCE_DATE_EPOCH changes the bytes"
+    fi
+
+    # The signed artifact: two independent builds, both of which must verify.
+    # This is what "produced reproducibly" can mean for a signed PE, and it is
+    # not weaker than it sounds — the payload equality above plus a valid
+    # signature over it is the whole of what a verifier checks.
+    local s1="$WORK/repro-signed-1.efi" s2="$WORK/repro-signed-2.efi"
+    SOURCE_DATE_EPOCH=1700000000 mkuki "$s1" repro
+    SOURCE_DATE_EPOCH=1700000000 mkuki "$s2" repro
+    local vok=1
+    for s in "$s1" "$s2"; do
+        sbverify --cert "$KEYS/sb/cert.pem" "$s" >/dev/null 2>&1 || vok=0
+    done
+    if [[ "$vok" == 1 ]]; then
+        ok "both signed builds verify against the APEX certificate"
+    else
+        bad "both signed builds verify against the APEX certificate"
+    fi
+
+    # And say out loud whether the signed bytes matched this time, without
+    # asserting it either way — a run where they happen to match must not be
+    # read as evidence that they always will.
+    if [[ "$(sha256sum <"$s1" | cut -d' ' -f1)" == "$(sha256sum <"$s2" | cut -d' ' -f1)" ]]; then
+        log "  (the two signed builds happened to land in the same second)"
+    else
+        log "  (the two signed builds differ, as expected: sbsign timestamps)"
+    fi
+}
+
+# One helper for all three negative controls: the difference between them is
+# only how the UKI was (not) signed, and the expected outcome is identical.
+# Extra arguments after the UKI are passed through to vm_boot. The three
+# negative controls supply none; the firmware-code scenario supplies `--code`,
+# because "this firmware refuses an unsigned image" is the only check worth
+# anything on a Secure Boot build somebody handed the lab from outside.
+negative_boot() {
+    local name="$1" uki="$2"; shift 2
+    local disk="$WORK/disk-$name.img" vars="$WORK/vars-$name.fd" ser="$WORK/serial-$name.log"
+    "$HERE/apex-mkesp" --disk "$disk" --size 96 \
+        --sb-key "$KEYS/sb/key.pem" --sb-cert "$KEYS/sb/cert.pem" \
+        --uki "$name:0:$uki" --default "apex-$name*" >/dev/null
+    fresh_vars "$vars"
+    local rc=0
+    # A short timeout: the firmware refusing an image is immediate. sd-boot
+    # then has nothing bootable and sits at its menu, so the timeout kill IS
+    # the expected outcome here and the marker's absence is the assertion.
+    vm_boot --disk "$disk" --vars "$vars" --name "$name" --serial "$ser" --timeout 45 "$@" || rc=$?
+    assert_serial_lacks "$ser" "APEX-BOOTLAB: userspace-reached"
+    if (( rc == 0 )); then
+        bad "$name: the guest powered off cleanly, so something booted"
+    else
+        ok "$name: no guest reached userspace (qemu rc=$rc)"
+    fi
+}
+
+scenario_negative_unsigned() {
+    log "negative-unsigned: an unsigned UKI is refused by the firmware"
+    fixtures
+    mkuki "$WORK/uki-unsigned.efi" unsigned --unsigned
+    # Prove the mutant is really unsigned. A negative control that "passed"
+    # because the artifact was never built is a documented failure in this
+    # project; so is one that passed because the artifact was accidentally fine.
+    if sbverify --cert "$KEYS/sb/cert.pem" "$WORK/uki-unsigned.efi" >/dev/null 2>&1; then
+        bad "the 'unsigned' UKI verifies against the APEX certificate — the control is void"
+        return
+    fi
+    ok "the unsigned UKI does not verify against the APEX certificate"
+    negative_boot unsigned "$WORK/uki-unsigned.efi"
+}
+
+scenario_negative_foreign() {
+    log "negative-foreign: a UKI signed by an unenrolled key is refused"
+    fixtures
+    mkuki "$WORK/uki-foreign.efi" foreign --foreign
+    # This control is the stronger one: it proves the firmware is CHECKING the
+    # signature against db, not merely checking that a signature exists.
+    if ! sbverify --cert "$KEYS/foreign/cert.pem" "$WORK/uki-foreign.efi" >/dev/null 2>&1; then
+        bad "the foreign UKI is not signed by the foreign key — the control is void"
+        return
+    fi
+    ok "the foreign UKI is validly signed, by a key that is not in db"
+    if sbverify --cert "$KEYS/sb/cert.pem" "$WORK/uki-foreign.efi" >/dev/null 2>&1; then
+        bad "the foreign UKI also verifies against the APEX certificate — the control is void"
+        return
+    fi
+    ok "the foreign UKI does not verify against the APEX certificate"
+    negative_boot foreign "$WORK/uki-foreign.efi"
+}
+
+scenario_negative_tampered() {
+    log "negative-tampered: editing the signed command line breaks the boot"
+    fixtures
+    mkuki "$WORK/uki-tampered.efi" tampered
+    local victim="$WORK/uki-tampered.efi"
+    # Flip one byte inside .cmdline. This is the attack a UKI exists to stop:
+    # on the GRUB/BLS path the command line is a text file anyone with the ESP
+    # can edit, and `init=/bin/sh` or a changed composefs digest would be
+    # accepted. Here it must invalidate the whole image.
+    local off before after
+    off="$(python3 - "$victim" <<'PY'
+import sys, pefile
+pe = pefile.PE(sys.argv[1], fast_load=True)
+s = next(x for x in pe.sections if x.Name.rstrip(b'\x00') == b'.cmdline')
+print(s.PointerToRawData)
+PY
+)"
+    before="$(sha256sum <"$victim" | cut -d' ' -f1)"
+    printf 'X' | dd of="$victim" bs=1 seek="$off" conv=notrunc status=none
+    after="$(sha256sum <"$victim" | cut -d' ' -f1)"
+    # Verify the mutant exists AND differs before concluding anything was
+    # caught. A `dd` that errored, or an offset of 0, would leave the original
+    # in place and the scenario would "catch" a UKI that was never mutated.
+    if [[ "$before" == "$after" ]]; then
+        bad "the tampered UKI is byte-identical to the original — the mutation did not happen"
+        return
+    fi
+    ok "the tampered UKI differs from the signed original (offset $off)"
+    if sbverify --cert "$KEYS/sb/cert.pem" "$victim" >/dev/null 2>&1; then
+        bad "sbverify still accepts the tampered UKI"
+        return
+    fi
+    ok "sbverify rejects the tampered UKI"
+    negative_boot tampered "$victim"
+}
+
+scenario_entry_layout() {
+    log "entry-layout: which entry types does systemd-boot 258 apply the tally to?"
+    fixtures
+    # §22 asks for APEX-owned EFI paths; systemd-boot hardcodes \\EFI\\Linux for
+    # UKI discovery. Rather than read that out of the source, this scenario
+    # measures it, because the boot-counting deliverable rests on the answer:
+    # a layout that satisfies "APEX-owned paths" and loses the tally would read
+    # as implementing §22 while removing its step 4.
+    #
+    # MEASURED, systemd-boot 258.10-1.fc43, OVMF secboot, 2026-09-03:
+    #   type #2  /EFI/Linux/apex-t2+3-0.efi         -> renamed to +2-1   ✓
+    #   type #1  /loader/entries/apex-t1+3-0.conf   -> NOT renamed
+    #            with `efi /EFI/APEX/uki/apex-t1.efi`  (the entry booted fine)
+    #   type #1  /loader/entries/apex-t3+3-0.conf   -> renamed to +2-1   ✓
+    #            with `linux /EFI/APEX/uki/apex-t3.efi`
+    #
+    # So the tally is not a property of the entry type: it is skipped for
+    # entries whose target is named with the `efi` key, and applied for `linux`
+    # and for type #2 UKIs. Both working layouts are therefore available, and
+    # the choice is a real decision rather than a constraint. apex-mkesp
+    # defaults to type #2 — see the header comment there for why, and for what
+    # the type #1 alternative would cost.
+    #
+    # All three halves are asserted, including the negative one. If a future
+    # systemd starts counting `efi` entries, this fails and whoever sees it
+    # re-reads this comment instead of rediscovering the difference.
+    mkuki "$WORK/uki-t2.efi" t2
+    mkuki "$WORK/uki-t1.efi" t1
+    mkuki "$WORK/uki-t3.efi" t3
+    local disk="$WORK/disk-layout.img" vars="$WORK/vars-layout.fd"
+
+    # (a) type #2, /EFI/Linux, tally 3
+    "$HERE/apex-mkesp" --disk "$disk" --size 96 \
+        --sb-key "$KEYS/sb/key.pem" --sb-cert "$KEYS/sb/cert.pem" \
+        --uki "t2:3:$WORK/uki-t2.efi" --default 'apex-t2*' >/dev/null
+    fresh_vars "$vars"
+    local rc=0
+    vm_boot --disk "$disk" --vars "$vars" --name layout-t2 \
+            --serial "$WORK/serial-layout-t2.log" --timeout 120 || rc=$?
+    assert_eq 0 "$rc" "type #2 entry: clean poweroff"
+    assert_serial_has "$WORK/serial-layout-t2.log" "apex.bootlab.entry=t2"
+    assert_eq "apex-t2+2-1.efi " "$(esp_linux_entries "$disk" | tr '\n' ' ')" \
+              "type #2 filename after one boot"
+
+    # (b) and (c) type #1 -> /EFI/APEX/uki/, with each of the two keys that can
+    # name a PE image. Both must boot (so the APEX-owned path is reachable) and
+    # neither is expected to be counted.
+    local key
+    for key in efi linux; do
+        local id flag want
+        if [[ "$key" == efi ]]; then
+            id=t1; flag=--type1;       want="apex-t1+3-0.conf "   # not counted
+        else
+            id=t3; flag=--type1-linux; want="apex-t3+2-1.conf "   # counted
+        fi
+        "$HERE/apex-mkesp" --disk "$disk" --size 96 \
+            --sb-key "$KEYS/sb/key.pem" --sb-cert "$KEYS/sb/cert.pem" \
+            "$flag" "$id:3:$WORK/uki-$id.efi" --default "apex-$id*" >/dev/null
+        fresh_vars "$vars"
+        rc=0
+        vm_boot --disk "$disk" --vars "$vars" --name "layout-$key" \
+                --serial "$WORK/serial-layout-$key.log" --timeout 120 || rc=$?
+        assert_eq 0 "$rc" "type #1 ($key) entry: clean poweroff"
+        assert_serial_has "$WORK/serial-layout-$key.log" "apex.bootlab.entry=$id"
+        assert_eq "$want" "$(esp_loader_entries "$disk" | tr '\n' ' ')" \
+                  "type #1 ($key) filename after one boot"
+    done
+}
+
+scenario_boot_counting() {
+    log "boot-counting: the tally walks down and the loader falls back to the previous entry"
+    fixtures
+    # The shape of a real APEX rollback:
+    #   apex-new   the deployment just installed, tally +3-0. Nothing blesses
+    #              it, because the micro guest is not a systemd guest — which
+    #              is exactly what a deployment that never finishes booting
+    #              looks like to the bootloader.
+    #   apex-good  the previous deployment, NO tally. A blessed entry has no
+    #              +N-M suffix at all, so it is always eligible.
+    # This is the upstream mechanism and not an APEX invention. It has to be:
+    # the counter must be decremented by something that runs BEFORE the kernel,
+    # since the boots it needs to count are the ones that never reach
+    # userspace. Nothing in userspace can count those.
+    mkuki "$WORK/uki-new.efi"  new
+    mkuki "$WORK/uki-good.efi" good
+    local disk="$WORK/disk-count.img" vars="$WORK/vars-count.fd"
+    "$HERE/apex-mkesp" --disk "$disk" --size 128 \
+        --sb-key "$KEYS/sb/key.pem" --sb-cert "$KEYS/sb/cert.pem" \
+        --uki "new:3:$WORK/uki-new.efi" \
+        --uki "good:0:$WORK/uki-good.efi" >/dev/null
+    fresh_vars "$vars"
+
+    # Exactly two entries. A run that produced one would let every "it fell
+    # back to the other entry" assertion pass vacuously.
+    local n; n="$(esp_linux_entries "$disk" | wc -l)"
+    assert_eq 2 "$n" "entries in /EFI/Linux before any boot"
+    assert_eq "apex-good.efi apex-new+3-0.efi " "$(esp_linux_entries "$disk" | tr '\n' ' ')" \
+        "staged entry filenames"
+
+    # Walk the tally down. Each step asserts the EXACT filename pair, in both
+    # directions: the counted entry decrements and the blessed entry never
+    # grows a suffix.
+    local -a expect=(
+        "apex-good.efi apex-new+2-1.efi "
+        "apex-good.efi apex-new+1-2.efi "
+        "apex-good.efi apex-new+0-3.efi "
+    )
+    local -a expect_entry=(new new new)
+    local i
+    for i in 0 1 2; do
+        vm_boot --disk "$disk" --vars "$vars" --name "count-$i" \
+                --serial "$WORK/serial-count-$i.log" --timeout 120 || true
+        assert_eq "${expect[$i]}" "$(esp_linux_entries "$disk" | tr '\n' ' ')" \
+                  "filenames after boot $((i + 1))"
+        assert_serial_has "$WORK/serial-count-$i.log" "apex.bootlab.entry=${expect_entry[$i]}"
+    done
+
+    # Tally exhausted. The next boot must select the OTHER entry — the previous
+    # known-good deployment — and the exhausted entry must keep its +0-3
+    # suffix so the state is visible to `apex boot status` afterwards.
+    vm_boot --disk "$disk" --vars "$vars" --name count-fallback \
+            --serial "$WORK/serial-count-fallback.log" --timeout 120 || true
+    assert_serial_has "$WORK/serial-count-fallback.log" "apex.bootlab.entry=good"
+    assert_serial_has "$WORK/serial-count-fallback.log" \
+        "APEX-BOOTLAB: efivar LoaderEntrySelected=apex-good.efi"
+    assert_eq "apex-good.efi apex-new+0-3.efi " "$(esp_linux_entries "$disk" | tr '\n' ' ')" \
+        "filenames after the fallback boot"
+    # And the fallback must be stable: a machine that alternated between a
+    # broken deployment and a good one every other boot would be worse than
+    # one that just stayed broken.
+    vm_boot --disk "$disk" --vars "$vars" --name count-fallback2 \
+            --serial "$WORK/serial-count-fallback2.log" --timeout 120 || true
+    assert_serial_has "$WORK/serial-count-fallback2.log" "apex.bootlab.entry=good"
+}
+
+# ── scenarios needing a staged APEX root (see apex-stage-root) ──────────────
+
+scenario_apex_image() {
+    log "apex-image: a UKI built from a real APEX kernel and the real APEX initramfs"
+    fixtures
+    local root="$WORK/apex-root"
+    # Hard-fail rather than skip. This is the scenario that substantiates
+    # "produced reproducibly from an APEX image"; a version of it that quietly
+    # passed without the image would be worse than not having it.
+    [[ -d "$root" ]] || die "no staged APEX root at $root.
+    Run, on an APEX host:
+      sudo files/scripts/boot-v2/apex-stage-root --output <workdir>/out/apex-root
+    Reading /usr/lib/modules/<kver>/initramfs.img needs root; it is mode 0600."
+
+    local kver
+    kver="$(find "$root/usr/lib/modules" -mindepth 1 -maxdepth 1 -type d -printf '%f\n')"
+    info "staged kernel $kver"
+
+    # A dracut hook, delivered as a second initramfs archive rather than by
+    # rebuilding the APEX initramfs. The kernel concatenates initrd images and
+    # later archives overlay earlier ones, so this adds one file to a 369 MB
+    # image the boot lab never has to regenerate — and, more importantly, the
+    # image under test stays byte-identical to the one on the machine.
+    #
+    # The path is var/lib/dracut/hooks/pre-mount and NOT usr/lib/dracut/hooks:
+    # in this initramfs the latter is a symlink to ../../../var/lib/dracut/hooks,
+    # and a cpio that created usr/lib/dracut/hooks as a real directory would
+    # shadow the symlink and lose every hook already in it.
+    local hookdir="$WORK/hook/var/lib/dracut/hooks/pre-mount"
+    rm -rf "$WORK/hook"; mkdir -p "$hookdir"
+    cat > "$hookdir/50-apex-vmprobe.sh" <<'HOOK'
+#!/bin/sh
+# APEX boot-lab probe. Runs inside the REAL APEX initramfs, at dracut's
+# pre-mount hook point — after udev has settled and the modules are loaded,
+# before it tries to find a root filesystem the boot lab's disk does not have.
+#
+# Getting a line out of a dracut hook onto the serial port took three
+# attempts, and each failure looked like "the UKI did not boot":
+#
+#   1. `echo` — dracut-pre-mount.service is StandardOutput=syslog, so it
+#      landed in the journal of a machine that was about to power off.
+#   2. /dev/kmsg with no priority prefix — Fedora builds the kernel with
+#      CONFIG_CONSOLE_LOGLEVEL_DEFAULT=4, so an unprefixed (KERN_WARNING)
+#      message is filtered off the console. The same filtering is why the
+#      kernel's own KERN_INFO "Command line:" line is absent from the log.
+#   3. Both of the below.
+#
+# /dev/console goes through the tty layer to every registered console with no
+# printk filtering; the `<0>` kmsg write is the belt to that braces, and also
+# timestamps the marker in the log so the ordering is legible.
+say() {
+    printf 'APEX-BOOTLAB: %s\n' "$*" > /dev/console 2>/dev/null || true
+    printf '<0>APEX-BOOTLAB: %s\n' "$*" > /dev/kmsg 2>/dev/null || true
+}
+say "apex-initramfs-reached"
+say "cmdline=$(cat /proc/cmdline)"
+say "initramfs-release=$(tr '\n' ' ' < /etc/initrd-release 2>/dev/null)"
+say "clean-poweroff"
+# The guest must power off rather than continue into a root-device search that
+# would time out: a timeout kill is not a successful boot, and this harness
+# refuses to count one.
+poweroff -f 2>/dev/null || reboot -f -p 2>/dev/null || echo o > /proc/sysrq-trigger
+HOOK
+    chmod 0755 "$hookdir/50-apex-vmprobe.sh"
+    ( cd "$WORK/hook" && find . -print0 | cpio --null -o -H newc --quiet ) \
+        > "$WORK/apex-hook.cpio"
+    [[ -s "$WORK/apex-hook.cpio" ]] || { bad "the hook cpio is empty"; return; }
+    ok "built a $(stat -c %s "$WORK/apex-hook.cpio")-byte dracut pre-mount addendum"
+
+    # No --allow-no-ucode. A dracut initramfs prepends an uncompressed cpio of
+    # kernel/x86/microcode/*, and apex-mkuki must find it: this is the
+    # assertion that §22's "microcode in the UKI" is satisfied on the real
+    # image rather than waved through.
+    local uki="$WORK/uki-apex.efi"
+    "$HERE/apex-mkuki" --output "$uki" --from-root "$root" \
+        --cmdline "$CMDLINE_BASE apex.bootlab.entry=apeximage rd.timeout=10 plymouth.enable=0 rd.plymouth=0" \
+        --deployment apeximage --variant gaming \
+        --sb-key "$KEYS/sb/key.pem" --sb-cert "$KEYS/sb/cert.pem" \
+        --extra-initrd "$WORK/apex-hook.cpio" >/dev/null \
+        || { bad "apex-mkuki failed on the real APEX root"; return; }
+
+    # The metadata must describe the APEX image, not the lab. Read back out of
+    # the PE section table of the signed artifact.
+    local meta
+    meta="$(python3 "$HERE/pe-section.py" "$uki" .apexinf)"
+    local got
+    got="$(python3 -c 'import json,sys;print(json.loads(sys.argv[1])["kernelVersion"])' "$meta")"
+    assert_eq "$kver" "$got" ".apexinf kernelVersion matches the staged APEX kernel"
+    got="$(python3 -c 'import json,sys;print(json.loads(sys.argv[1])["microcode"])' "$meta")"
+    assert_eq "embedded-in-initrd" "$got" ".apexinf microcode state"
+    got="$(python3 -c 'import json,sys;print(json.loads(sys.argv[1])["variant"])' "$meta")"
+    assert_eq "gaming" "$got" ".apexinf variant"
+    # The .osrel section comes from the APEX image, which is what makes the
+    # boot menu and `bootctl list` say APEX-OS instead of Fedora.
+    if python3 "$HERE/pe-section.py" "$uki" .osrel | grep -qi 'APEX'; then
+        ok ".osrel names APEX rather than the boot lab's own os-release"
+    else
+        bad ".osrel does not mention APEX — the wrong os-release was embedded"
+    fi
+
+    local disk="$WORK/disk-apex.img" vars="$WORK/vars-apex-image.fd"
+    local ser="$WORK/serial-apex-image.log"
+    # 1 GiB: the UKI is ~390 MB, and an ESP too small fails at mcopy rather
+    # than at boot, which is at least an honest failure.
+    "$HERE/apex-mkesp" --disk "$disk" --size 1024 \
+        --sb-key "$KEYS/sb/key.pem" --sb-cert "$KEYS/sb/cert.pem" \
+        --uki "apeximage:0:$uki" --default 'apex-apeximage*' >/dev/null
+    fresh_vars "$vars"
+    local rc=0
+    # More RAM and a longer timeout than the micro guest: this initramfs is
+    # 369 MB and the kernel copies it before it runs.
+    vm_boot --disk "$disk" --vars "$vars" --name apex-image --serial "$ser" \
+            --mem 4096 --timeout 240 || rc=$?
+    assert_eq 0 "$rc" "qemu exit status (clean guest poweroff)"
+    assert_serial_has "$ser" "APEX-BOOTLAB: apex-initramfs-reached"
+    assert_serial_has "$ser" "APEX-BOOTLAB: clean-poweroff"
+    assert_serial_has "$ser" "apex.bootlab.entry=apeximage"
+    # sd-stub's own banner, printed by the stub before it hands control to the
+    # kernel. This is stronger evidence than reading the StubInfo EFI variable
+    # back from userspace — that assertion belongs to the micro guest, which
+    # mounts efivarfs itself; here the line is emitted by the stub, and it
+    # names the image, so it proves both that a UKI stub ran AND that the
+    # .osrel inside it came from APEX.
+    assert_serial_has "$ser" "Booting initrd of "
+    if grep -aq 'Booting initrd of.*APEX-OS' "$ser"; then
+        ok "sd-stub announced an APEX-OS initrd"
+    else
+        bad "sd-stub's banner does not name APEX-OS: $(grep -ao 'Booting initrd of[^\r]*' "$ser" | head -1)"
+    fi
+    # The real initramfs identifies itself. A synthetic guest could not produce
+    # this line, so it is what distinguishes "the APEX initramfs ran" from "an
+    # initramfs ran".
+    assert_serial_has "$ser" 'APEX-BOOTLAB: initramfs-release=NAME="APEX-OS"'
+}
+
+# ═════════════════════════════════════════════════════════════════════════════
+#  Shared LUKS/TPM fixtures
+#
+#  Four scenarios need the same five things — a staged APEX root, an enrolled
+#  volume, a dracut hook cpio, a signed UKI carrying a PCR policy, and a boot
+#  that attaches a persistent software TPM. They were inline in the first one.
+#  Extracted rather than copied, because the alternative is four drifting
+#  copies of the fixture that decides what every assertion in this file means.
+#
+#  The extraction is a behaviour-preserving refactor of a scenario that was
+#  measured green (21 passed, 0 failed) immediately before it, and measured
+#  green again immediately after. That is stated because "I refactored the
+#  thing the tests run through" is exactly the change that deserves a control.
+# ═════════════════════════════════════════════════════════════════════════════
+
+LUKS_ROOT=""      # the staged APEX root, whose initramfs is the guest userspace
+LUKS_STATE=""     # the swtpm state directory the enrolment and every boot share
+LUKS_IMG=""       # the volume under test, attached to the guest as /dev/vdb
+LUKS_RECOVERY=""  # the file holding the recovery key systemd-cryptenroll printed
+
+# The REAL APEX initramfs, and the refusal that explains why a synthetic one
+# would not do.
+luks_require_root() {
+    fixtures
+    LUKS_ROOT="$WORK/apex-root"
+    [[ -d "$LUKS_ROOT" ]] || die "no staged APEX root at $LUKS_ROOT.
+    Run, on an APEX host:
+      sudo files/scripts/boot-v2/apex-stage-root --output <workdir>/out/apex-root
+    These scenarios need the REAL APEX initramfs: its dracut module list is what
+    provides systemd-cryptsetup, systemd-pcrphase, libcryptsetup and the
+    libtss2 stack. A synthetic guest would prove nothing about the image APEX
+    actually ships."
+}
+
+# luks_enroll TAG — a fresh LUKS2 volume bound to a fresh software TPM.
+#
+# The SAME state directory is then handed to qemu, which is what makes the
+# sealed object reachable from the guest: a key sealed to one TPM's SRK cannot
+# be unsealed by a different TPM, and that failure is indistinguishable from a
+# broken PCR policy in the guest's logs.
+luks_enroll() {
+    local tag="$1"
+    LUKS_STATE="$WORK/tpm-$tag"
+    LUKS_IMG="$WORK/luks-$tag.img"
+    rm -rf "$LUKS_STATE"
+    LUKS_RECOVERY="$("$HERE/apex-luks-enroll" --image "$LUKS_IMG" \
+        --tpm-state "$LUKS_STATE" --pcr-pubkey "$KEYS/pcr/pub.pem" 2>/dev/null | tail -1)" \
+        || { bad "apex-luks-enroll failed for '$tag'"; return 1; }
+    [[ -s "$LUKS_RECOVERY" ]] || { bad "no recovery key at $LUKS_RECOVERY"; return 1; }
+    ok "enrolled a systemd-tpm2 public-key token and a recovery key ($tag)"
+}
+
+# luks_hook OUT WITH_RECOVERY — the dracut pre-mount hook cpio.
+luks_hook() {
+    local out="$1" with_recovery="$2"
+    local d="$WORK/luks-hook-build"
+    rm -rf "$d"
+    mkdir -p "$d/var/lib/dracut/hooks/pre-mount"
+    install -m 0755 "$HERE/guest-luks-probe.sh" \
+        "$d/var/lib/dracut/hooks/pre-mount/50-apex-luks-probe.sh"
+    if [[ "$with_recovery" == yes ]]; then
+        # Baked into the initrd, which is inside the signed UKI, so it is
+        # covered by the same Secure Boot signature as the kernel. That is
+        # acceptable for an ephemeral lab key and for nothing else: a real
+        # recovery key is shown to the user once and stored by them, which is
+        # the whole point of it being a recovery key.
+        install -m 0400 "$LUKS_RECOVERY" "$d/apex-bootlab-recovery-key"
+    fi
+    ( cd "$d" && find . -print0 | cpio --null -o -H newc --quiet ) > "$out"
+    [[ -s "$out" ]] || die "empty hook cpio at $out"
+}
+
+# luks_uki NAME PCR_KEY HOOK_CPIO EXTRA_CMDLINE — a signed UKI with a signed
+# PCR 11 policy, built from the real APEX root.
+#
+# --pcrpkey stays the REAL public key even when PCR_KEY is the foreign one.
+# That is deliberate: it isolates a refusal to the SIGNATURE. If the embedded
+# public key were swapped too, the refusal could equally be "the key in the
+# image is not the enrolled one", and the test would not distinguish a policy
+# check from a key-identity check.
+luks_uki() {
+    local name="$1" pcrkey="$2" hook="$3" extra="$4"
+    "$HERE/apex-mkuki" --output "$WORK/uki-luks-$name.efi" --from-root "$LUKS_ROOT" \
+        --cmdline "$CMDLINE_BASE apex.bootlab.entry=luks$name $extra rd.timeout=10 plymouth.enable=0 rd.plymouth=0" \
+        --deployment "luks$name" --variant gaming \
+        --sb-key "$KEYS/sb/key.pem" --sb-cert "$KEYS/sb/cert.pem" \
+        --pcr-key "$pcrkey" --pcr-pubkey "$KEYS/pcr/pub.pem" \
+        --extra-initrd "$hook" >/dev/null \
+        || { bad "apex-mkuki failed for the '$name' LUKS UKI"; return 1; }
+    # The measured-boot sections must actually be there. apex-mkuki checks this
+    # itself, but the check is repeated because these UKIs are the only ones in
+    # the suite that carry them, and a silent regression would turn every
+    # assertion below into a test of the recovery path.
+    if python3 "$HERE/pe-section.py" "$WORK/uki-luks-$name.efi" .pcrsig >/dev/null 2>&1; then
+        ok "$name UKI carries a .pcrsig section"
+    else
+        bad "$name UKI has no .pcrsig section"
+    fi
+}
+
+# luks_boot NAME [--vars FILE] [extra vm_boot args...] — prints the qemu exit
+# status, so a caller can assert on a clean poweroff without `set -e` taking
+# the decision away from it.
+#
+# A fresh writable varstore per boot unless the caller names one: EFI variables
+# persist inside the file, so a boot inheriting another's BootOrder would make
+# results depend on execution order. The firmware-change scenario is the one
+# caller that supplies its own, because a modified varstore IS its subject.
+luks_boot() {
+    local n="$1"; shift
+    local disk="$WORK/disk-luks-$n.img"
+    local vars="$WORK/vars-luks-$n.fd"
+    local ser="$WORK/serial-luks-$n.log"
+    local rc=0 vars_src="" no_tpm=0
+    if [[ "${1:-}" == --vars ]]; then vars_src="$2"; shift 2; fi
+    # NO TPM AT ALL, which is a different guest from "a TPM that refuses".
+    # vm_boot attaches no tpm-tis device, so /dev/tpmrm0 never appears and
+    # sd-stub has nothing to measure into. Only luks-no-tpm passes this.
+    if [[ "${1:-}" == --no-tpm ]]; then no_tpm=1; shift; fi
+
+    "$HERE/apex-mkesp" --disk "$disk" --size 1024 \
+        --sb-key "$KEYS/sb/key.pem" --sb-cert "$KEYS/sb/cert.pem" \
+        --uki "luks$n:0:$WORK/uki-luks-$n.efi" --default "apex-luks$n*" >/dev/null
+    if [[ -n "$vars_src" ]]; then cp "$vars_src" "$vars"; else fresh_vars "$vars"; fi
+
+    local -a tpm_arg=(--tpm-state "$LUKS_STATE")
+    (( no_tpm )) && tpm_arg=()
+    vm_boot --disk "$disk" --vars "$vars" --name "luks-$n" --serial "$ser" \
+            ${tpm_arg[@]+"${tpm_arg[@]}"} --extra-disk "$LUKS_IMG" \
+            --mem 4096 --timeout 240 "$@" || rc=$?
+    printf '%s\n' "$rc"
+}
+
+# luks_serial_field SERIAL FIELD — one APEX-BOOTLAB field out of a serial log.
+# Reads the serial log and nothing else: the UKI, the ESP and the hook cpio all
+# contain these strings, so a grep over the work directory would find them with
+# no guest having run.
+#
+# THE `|| true` IS LOAD-BEARING. This file runs under `set -euo pipefail`, so a
+# grep that matches nothing fails the pipeline, fails the assignment
+# `x="$(luks_serial_field ...)"`, and kills the whole run. Every caller here
+# treats an absent field as a value — luks-s3 has an explicit `""` branch that
+# records COULD-NOT-RUN — and none of them ever got to see it: measured
+# 2026-09-14, the s3 scenario aborted at exactly that assignment and its
+# remaining nine assertions, including the entire suspend arm, never ran. A
+# field that is not there is an answer, and the caller decides what it means.
+luks_serial_field() {
+    grep -ao "APEX-BOOTLAB: $2=[^ ]*" "$1" 2>/dev/null | head -1 | cut -d= -f2- | tr -d '\r' || true
+}
+
+# The systemd-tpm2 sealed blob out of a LUKS2 header, or `<none>`.
+#
+# This is the field that identifies WHICH TPM state a volume is bound to: it is
+# the sealed object wrapped by a key derived from the Storage Primary Seed, so a
+# clear followed by a real re-enrolment must change it and a re-enrolment that
+# quietly did nothing cannot. Every other field in the token — type, PCR set,
+# public key, policy hash — is identical either way.
+luks_tpm2_blob() {
+    python3 - "$1" <<'PY' 2>/dev/null || printf '<none>\n'
+import json, subprocess, sys
+out = subprocess.run(["cryptsetup", "luksDump", "--dump-json-metadata", sys.argv[1]],
+                     capture_output=True, check=True, text=True).stdout
+blobs = [t["tpm2-blob"] for t in json.loads(out).get("tokens", {}).values()
+         if t.get("type") == "systemd-tpm2" and t.get("tpm2-blob")]
+print(blobs[0] if len(blobs) == 1 else "<none>")
+PY
+}
+
+# A 64-hex-character digest that is not the all-zero one an uninitialised PCR
+# bank reports. Both halves matter: an empty capture would pass a bare
+# "not zeros" test, and the first version of this check matched [0-9a-f]
+# against a value sysfs prints in UPPERCASE.
+luks_pcr_is_real() {
+    [[ "$1" =~ ^[[:xdigit:]]{64}$ && "$1" != "$(printf '0%.0s' {1..64})" ]]
+}
+
+scenario_luks_tpm() {
+    log "luks-tpm: measured boot and TPM-bound LUKS2, opt-in (§22 step 5)"
+    luks_require_root
+    local root="$LUKS_ROOT"
+
+    # ── enrol, host-side, against a software TPM ───────────────────────────
+    luks_enroll luks || return
+    local tpmstate="$LUKS_STATE" luks="$LUKS_IMG" recovery="$LUKS_RECOVERY"
+
+    # ── three UKIs: same kernel, three different policy situations ─────────
+    #   good    signed by the PCR key, cmdline A
+    #   update  signed by the PCR key, cmdline B. A different cmdline changes
+    #           PCR 11 exactly as a new kernel would, because sd-stub measures
+    #           the .cmdline section into it — so this is a faithful stand-in
+    #           for a legitimate kernel update, and it is the whole reason for
+    #           choosing a signed policy over a value-bound one.
+    #   foreign signed by the OTHER PCR key. The measured state is fine; the
+    #           signature over it is not, which is the "measured state does not
+    #           match" case that must refuse.
+    local hook_common="$WORK/luks-hook"
+    build_luks_hook() {  # build_luks_hook OUT_CPIO WITH_RECOVERY
+        local out="$1" with_recovery="$2"
+        rm -rf "$hook_common"
+        mkdir -p "$hook_common/var/lib/dracut/hooks/pre-mount"
+        install -m 0755 "$HERE/guest-luks-probe.sh" \
+            "$hook_common/var/lib/dracut/hooks/pre-mount/50-apex-luks-probe.sh"
+        if [[ "$with_recovery" == yes ]]; then
+            # Baked into the initrd, which is inside the signed UKI, so it is
+            # covered by the same Secure Boot signature as the kernel. That is
+            # acceptable for an ephemeral lab key and for nothing else: a real
+            # recovery key is shown to the user once and stored by them, which
+            # is the whole point of it being a recovery key.
+            install -m 0400 "$recovery" "$hook_common/apex-bootlab-recovery-key"
+        fi
+        ( cd "$hook_common" && find . -print0 | cpio --null -o -H newc --quiet ) > "$out"
+        [[ -s "$out" ]] || die "empty hook cpio at $out"
+    }
+
+    local -a specs=(
+        "good:$KEYS/pcr/key.pem:$KEYS/pcr/pub.pem:no:unlock"
+        "update:$KEYS/pcr/key.pem:$KEYS/pcr/pub.pem:no:update"
+        "foreign:$KEYS/foreign/key.pem:$KEYS/pcr/pub.pem:yes:refuse"
+    )
+    local spec name pcrkey pcrpub recov mode
+    for spec in "${specs[@]}"; do
+        IFS=: read -r name pcrkey pcrpub recov mode <<<"$spec"
+        build_luks_hook "$WORK/luks-hook-$name.cpio" "$recov"
+        # --pcrpkey stays the REAL public key even for the foreign UKI. That is
+        # deliberate: it isolates the failure to the SIGNATURE. If the embedded
+        # public key were swapped too, the refusal could equally be "the key in
+        # the image is not the enrolled one", and the test would not
+        # distinguish a policy check from a key-identity check.
+        "$HERE/apex-mkuki" --output "$WORK/uki-luks-$name.efi" --from-root "$root" \
+            --cmdline "$CMDLINE_BASE apex.bootlab.entry=luks$name apex.bootlab.luks=$mode rd.timeout=10 plymouth.enable=0 rd.plymouth=0" \
+            --deployment "luks$name" --variant gaming \
+            --sb-key "$KEYS/sb/key.pem" --sb-cert "$KEYS/sb/cert.pem" \
+            --pcr-key "$pcrkey" --pcr-pubkey "$pcrpub" \
+            --extra-initrd "$WORK/luks-hook-$name.cpio" >/dev/null \
+            || { bad "apex-mkuki failed for the '$name' LUKS UKI"; return; }
+        # The measured-boot sections must actually be there. apex-mkuki checks
+        # this itself, but the check is repeated here because these three UKIs
+        # are the only ones in the suite that carry them and a silent regression
+        # would turn every assertion below into a test of the recovery path.
+        if python3 "$HERE/pe-section.py" "$WORK/uki-luks-$name.efi" .pcrsig >/dev/null 2>&1; then
+            ok "$name UKI carries a .pcrsig section"
+        else
+            bad "$name UKI has no .pcrsig section"
+        fi
+    done
+
+    # The three signatures must differ from one another, or the scenario is
+    # three copies of one test.
+    local h_good h_update h_foreign
+    h_good="$(python3 "$HERE/pe-section.py" "$WORK/uki-luks-good.efi" .pcrsig | sha256sum | cut -d' ' -f1)"
+    h_update="$(python3 "$HERE/pe-section.py" "$WORK/uki-luks-update.efi" .pcrsig | sha256sum | cut -d' ' -f1)"
+    h_foreign="$(python3 "$HERE/pe-section.py" "$WORK/uki-luks-foreign.efi" .pcrsig | sha256sum | cut -d' ' -f1)"
+    [[ "$h_good" != "$h_update" ]] \
+        && ok "the 'update' UKI has a different PCR signature (its PCR 11 differs)" \
+        || bad "the 'good' and 'update' UKIs have identical .pcrsig — the kernel-update case is vacuous"
+    [[ "$h_good" != "$h_foreign" ]] \
+        && ok "the 'foreign' UKI has a different PCR signature" \
+        || bad "the 'good' and 'foreign' UKIs have identical .pcrsig — the refusal case is vacuous"
+
+    boot_luks() {  # boot_luks NAME
+        # One `local` per line. `local n="$1" disk="...$n..."` does NOT work:
+        # bash expands every word of the command before performing any of the
+        # assignments, so $n is still unset in the second one — and under
+        # `set -u` that aborts the whole suite three scenarios in, after eight
+        # minutes of UKI builds.
+        local n="$1"
+        local disk="$WORK/disk-luks-$n.img"
+        local vars="$WORK/vars-luks-$n.fd"
+        local ser="$WORK/serial-luks-$n.log"
+        local rc=0
+        "$HERE/apex-mkesp" --disk "$disk" --size 1024 \
+            --sb-key "$KEYS/sb/key.pem" --sb-cert "$KEYS/sb/cert.pem" \
+            --uki "luks$n:0:$WORK/uki-luks-$n.efi" --default "apex-luks$n*" >/dev/null
+        fresh_vars "$vars"
+        vm_boot --disk "$disk" --vars "$vars" --name "luks-$n" --serial "$ser" \
+                --tpm-state "$tpmstate" --extra-disk "$luks" \
+                --mem 4096 --timeout 240 || rc=$?
+        printf '%s\n' "$rc"
+    }
+
+    # ── boot 1: the enrolled state unlocks ─────────────────────────────────
+    local rc ser
+    rc="$(boot_luks good)"; ser="$WORK/serial-luks-good.log"
+    assert_eq 0 "$rc" "good: clean guest poweroff"
+    assert_serial_has "$ser" "APEX-BOOTLAB: apex-initramfs-reached"
+    assert_serial_has "$ser" "APEX-BOOTLAB: tpm-device=present"
+    assert_serial_has "$ser" "APEX-BOOTLAB: pcr-signature=/run/systemd/tpm2-pcr-signature.json"
+    assert_serial_has "$ser" "APEX-BOOTLAB: tpm-unlock=SUCCESS"
+    assert_serial_has "$ser" "APEX-BOOTLAB: plaintext-marker=written"
+    # PCR 11 must be a real measurement, not the zeros an uninitialised bank
+    # reports. Without this the unlock could be succeeding against an
+    # effectively unenforced policy, which systemd warns about at enrol time.
+    local pcr11
+    pcr11="$(grep -ao 'APEX-BOOTLAB: pcr11=[[:xdigit:]]*' "$ser" | head -1 | cut -d= -f2)"
+    # 64 hex characters, and not the all-zero digest an uninitialised PCR bank
+    # reports. Both halves matter: an empty capture would pass a "not zeros"
+    # test, and the first version of this assertion did exactly that because it
+    # matched [0-9a-f] against a value sysfs prints in UPPERCASE.
+    if [[ "$pcr11" =~ ^[[:xdigit:]]{64}$ && "$pcr11" != "$(printf '0%.0s' {1..64})" ]]; then
+        ok "PCR 11 was extended by the boot ($pcr11)"
+    else
+        bad "PCR 11 is absent or all zeros ('$pcr11') — nothing measured this boot"
+    fi
+
+    # ── boot 2: a changed PCR 11, same signing key. THE hard requirement ───
+    rc="$(boot_luks update)"; ser="$WORK/serial-luks-update.log"
+    assert_eq 0 "$rc" "update: clean guest poweroff"
+    assert_serial_has "$ser" "APEX-BOOTLAB: tpm-unlock=SUCCESS"
+    # Same volume, and it really decrypted: the marker boot 1 wrote is read
+    # back through the mapper device after the measured state changed.
+    assert_serial_has "$ser" "APEX-BOOTLAB: plaintext-marker=found"
+    local pcr11b
+    pcr11b="$(grep -ao 'APEX-BOOTLAB: pcr11=[[:xdigit:]]*' "$ser" | head -1 | cut -d= -f2)"
+    if [[ -n "$pcr11b" && "$pcr11b" != "$pcr11" ]]; then
+        ok "PCR 11 changed between the two boots, and the same keyslot still opened"
+    else
+        bad "PCR 11 did not change ('$pcr11b' == '$pcr11') — the kernel-update case proves nothing"
+    fi
+
+    # ── boot 3: a signature the enrolled key did not make ──────────────────
+    rc="$(boot_luks foreign)"; ser="$WORK/serial-luks-foreign.log"
+    assert_eq 0 "$rc" "foreign: clean guest poweroff"
+    assert_serial_has "$ser" "APEX-BOOTLAB: tpm-unlock=REFUSED"
+    assert_serial_lacks "$ser" "APEX-BOOTLAB: tpm-unlock=SUCCESS"
+    # And recoverable in the SAME boot that was refused.
+    assert_serial_has "$ser" "APEX-BOOTLAB: recovery-unlock=SUCCESS"
+}
+
+# ── TPM clear, and the whole recovery procedure ─────────────────────────────
+#
+# L-001's "TPM clear" and "recovery key paths" criteria, asked as one question,
+# because they are one question: after the TPM is cleared, can the user get
+# their data back AND get back to a working machine?
+#
+# A recovery test that has never been seen to fail is not a recovery test. So
+# the break is performed, and OBSERVED, before anything is recovered:
+#
+#   boot 1   the enrolled state unlocks and writes a marker
+#   snapshot the volume and the TPM state are copied, so the break is
+#            reversible and so "it broke" can be told apart from "it was never
+#            working"
+#   CLEAR    a real TPM2_Clear over the platform hierarchy — the command a
+#            firmware setup menu issues — and the seed change is then observed
+#            independently, through the TPM's own key derivation
+#   boot 2   the SAME UKI, the SAME volume: the unlock must now be REFUSED, and
+#            the recovery key must work IN THAT SAME BOOT
+#   re-enrol using ONLY the recovery key as the credential, because that is all
+#            a user who followed the instructions still has
+#   boot 3   unlocks again, and the marker from boot 1 is still there — the
+#            data survived the whole round trip, which is the claim that makes
+#            encryption-by-default survivable at all
+#
+# Step 3 is the half nobody tests. "The recovery key opens the volume" leaves
+# the user with a machine that prompts for a 71-character string on every boot,
+# for ever. The procedure is not finished until the TPM works again.
+scenario_luks_tpm_clear() {
+    log "luks-tpm-clear: a cleared TPM, and the recovery procedure back to a working one"
+    luks_require_root
+    luks_enroll clear || return
+
+    # One UKI for all three boots. The whole point is that the ONLY thing that
+    # changes between boot 1 and boot 2 is the TPM: same kernel, same command
+    # line, same .pcrsig, therefore the same PCR 11. If the UKI differed, a
+    # refusal could be the PCR policy rather than the clear.
+    luks_hook "$WORK/luks-hook-clear.cpio" yes
+    luks_uki clear "$KEYS/pcr/key.pem" "$WORK/luks-hook-clear.cpio" \
+        "apex.bootlab.luks=clear" || return
+
+    # ── boot 1: the enrolled state works ───────────────────────────────────
+    local rc ser
+    rc="$(luks_boot clear)"; ser="$WORK/serial-luks-clear.log"
+    assert_eq 0 "$rc" "before the clear: clean guest poweroff"
+    assert_serial_has "$ser" "APEX-BOOTLAB: tpm-unlock=SUCCESS"
+    assert_serial_has "$ser" "APEX-BOOTLAB: plaintext-marker=written"
+    local pcr11_before; pcr11_before="$(luks_serial_field "$ser" pcr11)"
+    if luks_pcr_is_real "$pcr11_before"; then
+        ok "PCR 11 was extended by the first boot ($pcr11_before)"
+    else
+        bad "PCR 11 is absent or all zeros ('$pcr11_before') — nothing measured this boot"
+    fi
+    cp "$ser" "$WORK/serial-luks-clear-before.log"
+
+    # ── the snapshot ───────────────────────────────────────────────────────
+    # Disk and TPM state together, which is the pairing that matters: a
+    # snapshot of the volume alone would restore a header whose sealed object
+    # the TPM no longer has. Taken with cp because vm_boot drives qemu
+    # directly; it is the same guarantee a libvirt disk+nvram snapshot gives.
+    cp "$LUKS_IMG" "$WORK/luks-clear.img.snapshot"
+    rm -rf "$WORK/tpm-clear.snapshot"
+    cp -a "$LUKS_STATE" "$WORK/tpm-clear.snapshot"
+    if [[ -s "$WORK/luks-clear.img.snapshot" && -d "$WORK/tpm-clear.snapshot" ]]; then
+        ok "snapshotted the volume and the TPM state together before breaking anything"
+    else
+        bad "the pre-clear snapshot was not written"
+        return
+    fi
+
+    # ── the break, and the independent observation that it happened ────────
+    local srk_before srk_after
+    srk_before="$(swtpm_session "$LUKS_STATE" srk-before swtpm_owner_primary_name)"
+    # -c p is the PLATFORM hierarchy. On a real machine only firmware can use
+    # it, which is exactly who issues a TPM clear; the OS cannot. The lockout
+    # hierarchy is tried second only so a swtpm build that disabled the
+    # platform one reports a reason instead of a bare failure.
+    local cleared=0
+    if swtpm_session "$LUKS_STATE" clear-p \
+         bash -c 'tpm2_clear -T "$SWTPM_TCTI" -c p >/dev/null 2>&1'; then
+        cleared=1; ok "TPM2_Clear accepted over the platform hierarchy"
+    elif swtpm_session "$LUKS_STATE" clear-l \
+           bash -c 'tpm2_clear -T "$SWTPM_TCTI" -c l >/dev/null 2>&1'; then
+        cleared=1; ok "TPM2_Clear accepted over the lockout hierarchy"
+    else
+        bad "TPM2_Clear was refused over both the platform and lockout hierarchies"
+    fi
+    srk_after="$(swtpm_session "$LUKS_STATE" srk-after swtpm_owner_primary_name)"
+    info "owner primary before $srk_before"
+    info "owner primary after  $srk_after"
+    # The control on the break itself. Without this, a `tpm2_clear` that
+    # silently did nothing would be followed by an unlock that still worked,
+    # and the scenario would report a recovery path that was never needed.
+    if [[ "$srk_before" == "<unreadable>" || "$srk_after" == "<unreadable>" ]]; then
+        bad "could not read an owner primary name, so the clear cannot be confirmed"
+    elif [[ "$srk_before" != "$srk_after" ]]; then
+        ok "the Storage Primary Seed really rotated: the owner primary's name changed"
+    else
+        bad "the owner primary name is unchanged ('$srk_before') — the TPM was NOT cleared, so everything below would prove nothing"
+    fi
+    (( cleared )) || return
+
+    # ── boot 2: the break is visible to the guest, and survivable ──────────
+    rc="$(luks_boot clear)"; ser="$WORK/serial-luks-clear.log"
+    assert_eq 0 "$rc" "after the clear: clean guest poweroff"
+    assert_serial_has  "$ser" "APEX-BOOTLAB: tpm-unlock=REFUSED"
+    assert_serial_lacks "$ser" "APEX-BOOTLAB: tpm-unlock=SUCCESS"
+    # The same boot. "It refuses" and "it is recoverable" as two green checks
+    # that never met would not be the property a user needs.
+    assert_serial_has  "$ser" "APEX-BOOTLAB: recovery-unlock=SUCCESS"
+    # AND WITH THE DATA. A mapper appearing says the recovery key satisfied a
+    # keyslot; the marker written through the TPM path before the clear says
+    # the user got their disk back. The guest probe emits this line on every
+    # recovery-key unlock, and this scenario read it for two rounds without
+    # asserting on it.
+    assert_serial_has  "$ser" "APEX-BOOTLAB: recovery-marker=found"
+    assert_serial_lacks "$ser" "APEX-BOOTLAB: recovery-marker=absent"
+    # And the UKI really is the same one: PCR 11 unchanged proves the refusal
+    # is about the TPM's seeds, not about a different measurement.
+    local pcr11_after; pcr11_after="$(luks_serial_field "$ser" pcr11)"
+    if [[ -n "$pcr11_after" && "$pcr11_after" == "$pcr11_before" ]]; then
+        ok "PCR 11 is unchanged across the clear, so the refusal is the TPM and not the measurement"
+    else
+        bad "PCR 11 moved ('$pcr11_before' -> '$pcr11_after') — the refusal cannot be attributed to the clear"
+    fi
+    cp "$ser" "$WORK/serial-luks-clear-broken.log"
+
+    # ── the recovery, with only what the user still has ────────────────────
+    #
+    # PASSWORD is the RECOVERY KEY, not the lab passphrase. That is the whole
+    # point: a user who did what they were told has the recovery key and
+    # nothing else, and a re-enrolment that needed the original passphrase
+    # would be a procedure they cannot perform.
+    #
+    # TWO INVOCATIONS, AND THE REASON IS A MEASURED DEFECT IN THE OBVIOUS ONE.
+    #
+    # The natural incantation — and the one this scenario was written with —
+    # is a single `systemd-cryptenroll --wipe-slot=tpm2 --tpm2-device=... `.
+    # MEASURED 2026-09-14, systemd 258.10-1.fc43, against a genuinely cleared
+    # TPM: it prints
+    #
+    #     This PCR set is already enrolled, executing no operation.
+    #
+    # and EXITS 0. systemd de-duplicates against the token already in the
+    # header before it considers the wipe, so on a cleared TPM the whole
+    # command is a no-op that reports success. The header keeps the old blob,
+    # sealed to the destroyed seed, and the next boot fails exactly as it did
+    # before the "recovery". That is the recovery procedure a user would be
+    # told to run, and it silently does nothing.
+    #
+    # Wiping FIRST removes the token the de-duplication matches against, so the
+    # enrolment that follows has nothing to consider itself equal to. The wipe
+    # still has to happen in the same procedure — leaving the dead keyslot
+    # behind would grow one stale token per clear, and a header with two
+    # systemd-tpm2 tokens is a header whose behaviour depends on which one
+    # cryptsetup tries first.
+    local reenrolled=0 blob_before blob_after
+    blob_before="$(luks_tpm2_blob "$LUKS_IMG")"
+    if swtpm_session "$LUKS_STATE" reenrol bash -c '
+            PASSWORD="$(cat "$1")" systemd-cryptenroll \
+                --wipe-slot=tpm2 "$3" >/dev/null 2>&1 &&
+            PASSWORD="$(cat "$1")" systemd-cryptenroll \
+                --tpm2-device="$SWTPM_TCTI" \
+                --tpm2-public-key="$2" \
+                --tpm2-public-key-pcrs=11 \
+                "$3" >/dev/null 2>&1' _ \
+            "$LUKS_RECOVERY" "$KEYS/pcr/pub.pem" "$LUKS_IMG"; then
+        reenrolled=1
+        ok "re-enrolled a TPM2 keyslot using ONLY the recovery key as the credential"
+    else
+        bad "re-enrolment with the recovery key failed — the recovery path does not lead back to a working TPM unlock"
+    fi
+
+    # THE CONTROL ON THE RE-ENROLMENT ITSELF, and the one whose absence let the
+    # first run of this scenario call a no-op a success. Counting tokens cannot
+    # see this: the de-duplicating no-op leaves exactly one systemd-tpm2 token
+    # with a public-key policy over PCR 11, which is character for character
+    # what a correct re-enrolment leaves. The sealed BLOB is the only field that
+    # has to differ, because it is wrapped by a seed that no longer exists.
+    blob_after="$(luks_tpm2_blob "$LUKS_IMG")"
+    if [[ "$blob_before" == "<none>" || "$blob_after" == "<none>" ]]; then
+        bad "could not read a systemd-tpm2 blob out of the header (before='$blob_before' after='$blob_after')"
+    elif [[ "$blob_before" != "$blob_after" ]]; then
+        ok "the sealed blob was really replaced, so the enrolment was not a de-duplicated no-op"
+    else
+        bad "the sealed blob is UNCHANGED across the re-enrolment — systemd reported success and wrote nothing, so the header is still bound to the destroyed seed"
+    fi
+
+    # Exactly one systemd-tpm2 token, still with a public-key policy. A wipe
+    # that orphaned the old token, or a re-enrolment that fell back to binding
+    # a PCR VALUE, would both leave a volume that breaks on the next kernel.
+    if (( reenrolled )); then
+        local tokens
+        tokens="$(python3 - "$LUKS_IMG" <<'PY'
+import json, subprocess, sys
+out = subprocess.run(["cryptsetup", "luksDump", "--dump-json-metadata", sys.argv[1]],
+                     capture_output=True, check=True, text=True).stdout
+tokens = json.loads(out).get("tokens", {})
+tpm2 = [t for t in tokens.values() if t.get("type") == "systemd-tpm2"]
+rec  = [t for t in tokens.values() if t.get("type") == "systemd-recovery"]
+print(f"tpm2={len(tpm2)} recovery={len(rec)} "
+      f"pubkey={'yes' if (tpm2 and tpm2[0].get('tpm2_pubkey')) else 'no'} "
+      f"pcrs={tpm2[0].get('tpm2_pubkey_pcrs') if tpm2 else None}")
+PY
+)" || tokens="<unreadable>"
+        info "tokens after re-enrolment: $tokens"
+        if [[ "$tokens" == "tpm2=1 recovery=1 pubkey=yes pcrs=[11]" ]]; then
+            ok "the header carries exactly one systemd-tpm2 token, still bound to the signing key"
+        else
+            bad "after re-enrolment the header is '$tokens', expected 'tpm2=1 recovery=1 pubkey=yes pcrs=[11]'"
+        fi
+    fi
+
+    # ── boot 3: back to a working machine, with the data intact ────────────
+    rc="$(luks_boot clear)"; ser="$WORK/serial-luks-clear.log"
+    assert_eq 0 "$rc" "after re-enrolment: clean guest poweroff"
+    assert_serial_has "$ser" "APEX-BOOTLAB: tpm-unlock=SUCCESS"
+    # The marker written in boot 1, read back after a clear and a re-enrolment.
+    # This is the difference between "the volume opens" and "the user's data
+    # came through the whole procedure".
+    assert_serial_has "$ser" "APEX-BOOTLAB: plaintext-marker=found"
+    cp "$ser" "$WORK/serial-luks-clear-recovered.log"
+}
+
+# ── a firmware change that must NOT break the unlock ────────────────────────
+#
+# L-001's "firmware update" criterion. APEX's policy binds PCR 11 — the UKI and
+# the boot phase — through a signature, and binds nothing in PCR 0-7. The claim
+# is therefore that a firmware state change leaves the unlock working, and that
+# is precisely the claim a user meets after an fwupd run.
+#
+# THE CONTROL IS THE WHOLE SCENARIO. "The firmware changed and nothing broke"
+# is worth nothing on its own: a lab that never changed the firmware at all
+# reports exactly the same green. So a SECOND volume rides along on /dev/vdc,
+# bound BY VALUE to PCR 7. Before the change both unlock. After it, the by-value
+# one must refuse and APEX's must not. One boot, two volumes, opposite results —
+# that is the difference between measuring a property and asserting a wish.
+#
+# WHAT THE FIRMWARE CHANGE IS, precisely. Fedora ships a real UEFI revocation
+# list at /usr/share/edk2/ovmf/DBXUpdate-*.x64.bin, and applying one is exactly
+# what `fwupdmgr` does on real hardware — the most common firmware-adjacent
+# update a user will ever receive. It is appended to the guest's variable store
+# with virt-fw-vars, keeping the APEX certificate in db so the signed UKI still
+# boots. The firmware extends PCR 7 with dbx, so PCR 7 moves and PCR 11 does not.
+#
+# SAID PRECISELY, because the criterion deserves it: this moves PCR 7, the
+# Secure Boot policy register. It does NOT move PCR 0, the firmware code
+# measurement, because the firmware binary is the same one. See the
+# could-not-run below.
+# The size of the dbx variable inside an OVMF varstore, or 0 if it holds none.
+#
+# `virt-fw-vars --print` writes one line per variable, "dbx : blob: N bytes",
+# with its INFO chatter on the same stream; the parse is anchored on the whole
+# line so `dbxDefault` or a value containing the word cannot satisfy it, and a
+# parse that matched nothing prints 0 rather than an empty string — the caller
+# does arithmetic on this, and an empty string in `(( ))` is 0 silently.
+varstore_dbx_bytes() {
+    virt-fw-vars --input "$1" --print 2>/dev/null \
+        | sed -n 's/^[[:space:]]*dbx[[:space:]]*:[[:space:]]*blob:[[:space:]]*\([0-9][0-9]*\)[[:space:]]*bytes[[:space:]]*$/\1/p' \
+        | head -1 | grep -E '^[0-9]+$' || printf '0\n'
+}
+
+scenario_luks_firmware_change() {
+    log "luks-firmware-change: a dbx update moves the firmware state; the PCR 11 policy must not care"
+    luks_require_root
+    luks_enroll fw || return
+
+    luks_hook "$WORK/luks-hook-fw.cpio" yes
+    luks_uki fw "$KEYS/pcr/key.pem" "$WORK/luks-hook-fw.cpio" \
+        "apex.bootlab.luks=fw apex.bootlab.control=1" || return
+
+    # ── boot A: learn PCR 7 ────────────────────────────────────────────────
+    # The control volume has to be sealed to the PCR 7 value the guest will
+    # actually present. A bare --tpm2-pcrs=7 seals to the value the TPM holds
+    # at ENROLMENT time, which on a freshly started emulator is unmeasured — so
+    # the control would refuse before anything was changed, and would look like
+    # a working control while proving nothing.
+    local rc ser
+    rc="$(luks_boot fw)"; ser="$WORK/serial-luks-fw.log"
+    assert_eq 0 "$rc" "baseline: clean guest poweroff"
+    assert_serial_has "$ser" "APEX-BOOTLAB: tpm-unlock=SUCCESS"
+    # No /dev/vdc yet, and the guest says so rather than staying silent.
+    assert_serial_has "$ser" "APEX-BOOTLAB: control-unlock=<no /dev/vdc attached>"
+    local pcr7_a pcr11_a
+    pcr7_a="$(luks_serial_field "$ser" pcr7)"
+    pcr11_a="$(luks_serial_field "$ser" pcr11)"
+    if luks_pcr_is_real "$pcr7_a"; then
+        ok "the guest reported a real PCR 7 ($pcr7_a)"
+    else
+        bad "PCR 7 is absent or all zeros ('$pcr7_a') — a by-value control cannot be sealed to it"
+        return
+    fi
+    cp "$ser" "$WORK/serial-luks-fw-learn.log"
+
+    # ── the control volume, bound BY VALUE to that PCR 7 ───────────────────
+    # Built here rather than through apex-luks-enroll, deliberately: that script
+    # refuses anything but the APEX shape (exactly one systemd-tpm2 token with a
+    # public-key policy on PCR 11), and it should keep refusing. This volume is
+    # an instrument, not a product path. It gets no recovery key either — a
+    # fallback would hide the refusal that is the entire point of it.
+    local ctl="$WORK/luks-fw-control.img"
+    rm -f "$ctl"
+    truncate -s 32M "$ctl"
+    printf '%s' apex-bootlab-passphrase | cryptsetup luksFormat --type luks2 \
+        --batch-mode --pbkdf pbkdf2 --pbkdf-force-iterations 1000 \
+        --label APEXCTLLAB "$ctl" - >/dev/null 2>&1 \
+        || { bad "could not create the by-value control volume"; return; }
+    # PCR 7 in sysfs is uppercase hex; systemd-cryptenroll wants lowercase.
+    local pcr7_lc; pcr7_lc="$(tr 'A-F' 'a-f' <<<"$pcr7_a")"
+    if swtpm_session "$LUKS_STATE" ctl-enrol bash -c '
+            PASSWORD=apex-bootlab-passphrase systemd-cryptenroll \
+                --tpm2-device="$SWTPM_TCTI" \
+                --tpm2-pcrs="7:sha256=$1" \
+                "$2" >/dev/null 2>&1' _ "$pcr7_lc" "$ctl"; then
+        ok "control volume enrolled, bound BY VALUE to PCR 7=$pcr7_lc"
+    else
+        bad "could not enrol the by-value control volume — without it the firmware change proves nothing"
+        return
+    fi
+
+    # ── boot B: both unlock. THE CONTROL IS VALID. ─────────────────────────
+    rc="$(luks_boot fw --extra-disk "$ctl")"; ser="$WORK/serial-luks-fw.log"
+    assert_eq 0 "$rc" "control check: clean guest poweroff"
+    assert_serial_has "$ser" "APEX-BOOTLAB: tpm-unlock=SUCCESS"
+    assert_serial_has "$ser" "APEX-BOOTLAB: control-unlock=SUCCESS"
+    local pcr7_b pcr11_b
+    pcr7_b="$(luks_serial_field "$ser" pcr7)"
+    pcr11_b="$(luks_serial_field "$ser" pcr11)"
+    cp "$ser" "$WORK/serial-luks-fw-before.log"
+
+    # ── the firmware change ────────────────────────────────────────────────
+    local dbx="" cand
+    for cand in /usr/share/edk2/ovmf/DBXUpdate-*.x64.bin; do
+        [[ -f "$cand" ]] && { dbx="$cand"; break; }
+    done
+    if [[ -z "$dbx" ]]; then
+        # Never a pass and never a failure: the lab image did not ship the
+        # input, which says nothing at all about APEX's policy.
+        cannot "no DBXUpdate-*.x64.bin in this lab image, so no firmware-state change could be applied"
+        return
+    fi
+    info "applying the UEFI revocation list $dbx"
+    local vars_fw="$WORK/vars-luks-fw-updated.fd"
+    # THE BASELINE IS A SECOND COPY OF THE SAME TEMPLATE, and that is the whole
+    # correction here. This compared against $WORK/vars-luks-fw.fd — the
+    # varstore two guests had already booted from, into which OVMF and
+    # systemd-boot write BootOrder, LoaderEntryDefault and their own bookkeeping
+    # every time. It differs from a fresh template whether or not a dbx update
+    # was ever applied, so the comparison was true by construction and the ok
+    # line below was unconditional. Two copies of one template differ in exactly
+    # the one operation performed between them.
+    local vars_pristine="$WORK/vars-luks-fw-pristine.fd"
+    fresh_vars "$vars_pristine"
+    fresh_vars "$vars_fw"
+    virt-fw-vars --input "$vars_fw" --output "$vars_fw" --add-dbx "$dbx" >/dev/null 2>&1 \
+        || { bad "virt-fw-vars could not append the dbx update"; return; }
+    # The varstore really changed. A no-op edit would leave PCR 7 alone and the
+    # control would keep unlocking, which would read as "APEX's policy survived"
+    # while nothing had happened.
+    if files_same "$vars_pristine" "$vars_fw"; then
+        bad "the variable store is byte-identical after the dbx update — nothing was applied"
+        return
+    fi
+    # And the bytes that moved are IN dbx. "The file changed" is satisfied by a
+    # timestamp, a re-serialisation or a variable this scenario has no interest
+    # in; the claim under test is that the REVOCATION LIST grew, because that is
+    # what PCR 7 measures. virt-fw-vars' own template already carries a dummy
+    # dbx entry, so the assertion is growth and not appearance.
+    local dbx_before dbx_after
+    dbx_before="$(varstore_dbx_bytes "$vars_pristine")"
+    dbx_after="$(varstore_dbx_bytes "$vars_fw")"
+    if (( dbx_after > dbx_before )); then
+        ok "the guest's dbx grew from $dbx_before to $dbx_after bytes ($(basename "$dbx"))"
+    else
+        bad "dbx went $dbx_before -> $dbx_after bytes: the revocation list did not grow, so whatever changed in the varstore is not the variable PCR 7 measures"
+        return
+    fi
+
+    # ── boot C: the firmware state moved. Only the control may break. ──────
+    rc="$(luks_boot fw --vars "$vars_fw" --extra-disk "$ctl")"
+    ser="$WORK/serial-luks-fw.log"
+    assert_eq 0 "$rc" "after the firmware change: clean guest poweroff"
+    local pcr7_c pcr11_c
+    pcr7_c="$(luks_serial_field "$ser" pcr7)"
+    pcr11_c="$(luks_serial_field "$ser" pcr11)"
+
+    # 1. The firmware state really moved, measured by the firmware itself.
+    if [[ -n "$pcr7_b" && -n "$pcr7_c" && "$pcr7_b" != "$pcr7_c" ]]; then
+        ok "PCR 7 changed across the update ($pcr7_b -> $pcr7_c)"
+    else
+        bad "PCR 7 did not change ('$pcr7_b' -> '$pcr7_c') — the firmware change was not measured, so nothing below is meaningful"
+        return
+    fi
+    # 2. And the UKI did not, so the two are isolated.
+    if [[ -n "$pcr11_b" && "$pcr11_b" == "$pcr11_c" ]]; then
+        ok "PCR 11 is unchanged, so the only thing that moved is the firmware state"
+    else
+        bad "PCR 11 moved too ('$pcr11_b' -> '$pcr11_c') — the firmware change was not isolated"
+    fi
+    # 3. THE RESULT. Opposite outcomes, same boot, same TPM.
+    assert_serial_has  "$ser" "APEX-BOOTLAB: tpm-unlock=SUCCESS"
+    assert_serial_has  "$ser" "APEX-BOOTLAB: control-unlock=REFUSED"
+    assert_serial_lacks "$ser" "APEX-BOOTLAB: control-unlock=SUCCESS"
+    # 4. Still the same volume, still decrypting.
+    assert_serial_has "$ser" "APEX-BOOTLAB: plaintext-marker=found"
+    cp "$ser" "$WORK/serial-luks-fw-after.log"
+
+    # The limitation, recorded in the run rather than only in a comment, so it
+    # reaches whoever reads the log rather than only whoever reads the source.
+    # PCR 0 is not this scenario's subject and never was: a dbx update moves
+    # PCR 7, the Secure Boot POLICY register. Which register was NOT exercised
+    # is said in the run rather than only in a comment, so it reaches whoever
+    # reads the log — and it now names the scenario that does exercise it
+    # instead of describing a limit as though nothing could be done about it.
+    cannot "PCR 0 (the firmware CODE measurement) was not changed by this scenario: a dbx update moves PCR 7, the Secure Boot POLICY register, and not PCR 0. Moving PCR 0 needs a second OVMF build differing ONLY in code, which this lab image does not ship — its OVMF_CODE_4M.qcow2 and OVMF_CODE_4M.secboot.qcow2 are one edk2 revision built with and without Secure Boot enforcement. The luks-firmware-code scenario does it with a second build supplied through \$APEX_BOOTLAB_FW_ALT."
+    info "pcr11 stayed $pcr11_a across the whole scenario"
+}
+
+# ── the firmware CODE changes: PCR 0 ────────────────────────────────────────
+#
+# THE LIMIT THIS SCENARIO EXISTS TO REMOVE. luks-firmware-change moves PCR 7,
+# the Secure Boot POLICY register, with Fedora's real revocation list, and ends
+# by recording in the run that PCR 0 — the firmware CODE measurement — was not
+# moved, because moving it needs two firmware images differing in code and in
+# nothing else, and the lab image ships one edk2 revision.
+#
+# One build supplied from outside removes exactly that limit and nothing else:
+# $APEX_BOOTLAB_FW_ALT. The shape here is the PCR 7 scenario's on purpose —
+# learn the value, bind a control volume to it BY VALUE, change the thing,
+# require opposite outcomes in one boot — so the two read as one argument about
+# two registers rather than as two unrelated experiments.
+#
+# DIRECTION: THE OLDER FIRMWARE FIRST. Boots A and B run the supplied build and
+# boot C runs the one the lab image ships, so what is under test is a firmware
+# UPDATE — L-001's word, and the event a user actually meets. It also leaves
+# the run standing on the same firmware as every other scenario here.
+#
+# THE SUPPLIED BUILD IS NOT TRUSTED, and two of its properties are established
+# before any conclusion rests on it:
+#
+#   * it is a DIFFERENT edk2 revision, read out of the binary rather than off
+#     the filename. This unit's own scratch directory holds the trap: a build
+#     with Secure Boot and SMM compiled out, saved as `OVMF_CODE_4M.secboot.fd`.
+#   * it ENFORCES Secure Boot, proved the only way that means anything — an
+#     unsigned UKI is booted under it and the firmware must refuse. Without
+#     that, a build with SECURE_BOOT_ENABLE compiled out would move PCR 0
+#     (different code, so it must) and this scenario would report "a firmware
+#     update did not break the policy" about a firmware that had stopped
+#     checking signatures at all.
+#
+# WHAT IT STILL IS NOT. An OVMF binary swap is not a vendor UEFI capsule: no
+# microcode, no ACPI tables, no option ROMs, no management engine. It moves the
+# register a capsule moves, which is what APEX's policy has to survive, and the
+# write-up in docs/boot-v2.md says so rather than letting this scenario imply
+# otherwise.
+scenario_luks_firmware_code() {
+    log "luks-firmware-code: the firmware CODE changes (PCR 0); the PCR 11 policy must not care"
+    luks_require_root
+
+    # ── the second firmware build ──────────────────────────────────────────
+    # Three ways to not have one, and they are different facts about the run.
+    local alt="" rc_alt=0
+    alt="$(ovmf_code_alt)" || rc_alt=$?
+    local howto="Supply one with APEX_BOOTLAB_FW_ALT=<path to a 4 MB Secure Boot OVMF_CODE, .fd or .qcow2> — a DIFFERENT edk2 revision from the lab image's. Fedora's older build works and is what this was measured with: fetch edk2-ovmf-20250812-18.fc43.noarch.rpm from Koji, extract usr/share/edk2/ovmf/OVMF_CODE_4M.secboot.qcow2 (sha256 37e9fe553ee3a002f117fa92b41e17a64775ce7de29a3a845b724772fe8e14ac), whose raw conversion is sha256 7c9dd1fe76a922a0a36f943ea77c33ffd4b9ee2c548d563654d727e344b1931f."
+    case "$rc_alt" in
+        0) ;;
+        1) cannot "PCR 0 was not exercised: no second firmware build was named. $howto"; return ;;
+        2) cannot "PCR 0 was not exercised: APEX_BOOTLAB_FW_ALT='${APEX_BOOTLAB_FW_ALT:-}' is not a file. $howto"; return ;;
+        *) cannot "PCR 0 was not exercised: APEX_BOOTLAB_FW_ALT='${APEX_BOOTLAB_FW_ALT:-}' could not be converted to a raw image. $howto"; return ;;
+    esac
+
+    local def id_alt id_def
+    def="$(ovmf_code_secboot)"
+    id_alt="$(ovmf_build_id "$alt")"
+    id_def="$(ovmf_build_id "$def")"
+    if [[ -z "$id_alt" || -z "$id_def" ]]; then
+        # Never a failure: an unidentifiable firmware has disproved nothing
+        # about APEX. It has, however, made the experiment unreadable.
+        cannot "PCR 0 was not exercised: no edk2 revision string could be read out of $(basename "$alt") ('${id_alt:-<none>}') or $(basename "$def") ('${id_def:-<none>}'), so 'two different builds' could not be established from the binaries"
+        return
+    fi
+    if [[ "$id_alt" == "$id_def" ]]; then
+        bad "both firmware images are the same edk2 revision ($id_def) — a PCR 0 change measured across them would be measuring something other than the firmware code"
+        return
+    fi
+    ok "two distinct edk2 revisions: $id_alt (supplied) and $id_def (lab image)"
+
+    # ── and the supplied one really enforces Secure Boot ───────────────────
+    fixtures
+    mkuki "$WORK/uki-unsigned-altfw.efi" unsignedaltfw --unsigned
+    if sbverify --cert "$KEYS/sb/cert.pem" "$WORK/uki-unsigned-altfw.efi" >/dev/null 2>&1; then
+        bad "the 'unsigned' UKI verifies against the APEX certificate — the Secure Boot check on the supplied firmware is void"
+        return
+    fi
+    ok "the unsigned UKI does not verify against the APEX certificate"
+    local fail_before="$BOOTV2_FAIL"
+    negative_boot unsigned-altfw "$WORK/uki-unsigned-altfw.efi" --code "$alt"
+    if (( BOOTV2_FAIL > fail_before )); then
+        bad "the supplied firmware $id_alt did not refuse an unsigned UKI, so it is not enforcing Secure Boot: every result below would confound 'the code changed' with 'the checking stopped'"
+        return
+    fi
+    ok "the supplied firmware $id_alt enforces Secure Boot"
+
+    luks_enroll fwc || return
+    luks_hook "$WORK/luks-hook-fwc.cpio" yes
+    luks_uki fwc "$KEYS/pcr/key.pem" "$WORK/luks-hook-fwc.cpio" \
+        "apex.bootlab.luks=fwc apex.bootlab.control=1" || return
+
+    # ── boot A on the SUPPLIED firmware: learn PCR 0 ───────────────────────
+    # Same reasoning as the PCR 7 control: a bare --tpm2-pcrs=0 seals to what
+    # the TPM holds at ENROLMENT time, which on a freshly started emulator is
+    # unmeasured, so the control would refuse before anything changed and would
+    # look like a working control while proving nothing.
+    local rc ser
+    rc="$(luks_boot fwc --code "$alt")"; ser="$WORK/serial-luks-fwc.log"
+    assert_eq 0 "$rc" "baseline on $id_alt: clean guest poweroff"
+    assert_serial_has "$ser" "APEX-BOOTLAB: tpm-unlock=SUCCESS"
+    assert_serial_has "$ser" "APEX-BOOTLAB: control-unlock=<no /dev/vdc attached>"
+    local pcr0_a pcr7_a pcr11_a
+    pcr0_a="$(luks_serial_field "$ser" pcr0)"
+    pcr7_a="$(luks_serial_field "$ser" pcr7)"
+    pcr11_a="$(luks_serial_field "$ser" pcr11)"
+    if luks_pcr_is_real "$pcr0_a"; then
+        ok "the guest reported a real PCR 0 ($pcr0_a)"
+    else
+        bad "PCR 0 is absent or all zeros ('$pcr0_a') — a by-value control cannot be sealed to it"
+        return
+    fi
+    cp "$ser" "$WORK/serial-luks-fwc-learn.log"
+
+    # ── the control volume, bound BY VALUE to that PCR 0 ───────────────────
+    # Built here rather than through apex-luks-enroll for the same reason the
+    # PCR 7 control is: that script refuses anything but the APEX shape, and it
+    # should keep refusing. No recovery key either — a fallback would hide the
+    # refusal that is the entire point of the instrument.
+    local ctl="$WORK/luks-fwc-control.img"
+    rm -f "$ctl"
+    truncate -s 32M "$ctl"
+    printf '%s' apex-bootlab-passphrase | cryptsetup luksFormat --type luks2 \
+        --batch-mode --pbkdf pbkdf2 --pbkdf-force-iterations 1000 \
+        --label APEXCTLLAB "$ctl" - >/dev/null 2>&1 \
+        || { bad "could not create the by-value control volume"; return; }
+    local pcr0_lc; pcr0_lc="$(tr 'A-F' 'a-f' <<<"$pcr0_a")"
+    if swtpm_session "$LUKS_STATE" ctl-enrol bash -c '
+            PASSWORD=apex-bootlab-passphrase systemd-cryptenroll \
+                --tpm2-device="$SWTPM_TCTI" \
+                --tpm2-pcrs="0:sha256=$1" \
+                "$2" >/dev/null 2>&1' _ "$pcr0_lc" "$ctl"; then
+        ok "control volume enrolled, bound BY VALUE to PCR 0=$pcr0_lc"
+    else
+        bad "could not enrol the by-value control volume — without it the firmware change proves nothing"
+        return
+    fi
+
+    # ── boot B, still on the supplied firmware: both unlock ────────────────
+    rc="$(luks_boot fwc --code "$alt" --extra-disk "$ctl")"; ser="$WORK/serial-luks-fwc.log"
+    assert_eq 0 "$rc" "control check on $id_alt: clean guest poweroff"
+    assert_serial_has "$ser" "APEX-BOOTLAB: tpm-unlock=SUCCESS"
+    assert_serial_has "$ser" "APEX-BOOTLAB: control-unlock=SUCCESS"
+    local pcr0_b pcr7_b pcr11_b
+    pcr0_b="$(luks_serial_field "$ser" pcr0)"
+    pcr7_b="$(luks_serial_field "$ser" pcr7)"
+    pcr11_b="$(luks_serial_field "$ser" pcr11)"
+    cp "$ser" "$WORK/serial-luks-fwc-before.log"
+
+    # ── boot C: THE FIRMWARE UPDATE. Only the control may break. ───────────
+    # No --code, so this is the lab image's own firmware. The varstore is a
+    # fresh copy of the same template as the two boots above, so the Secure
+    # Boot keys, SecureBootEnable and dbx are identical and the only thing that
+    # differs between boot B and boot C is the firmware binary.
+    rc="$(luks_boot fwc --extra-disk "$ctl")"; ser="$WORK/serial-luks-fwc.log"
+    assert_eq 0 "$rc" "after the firmware update to $id_def: clean guest poweroff"
+    local pcr0_c pcr7_c pcr11_c
+    pcr0_c="$(luks_serial_field "$ser" pcr0)"
+    pcr7_c="$(luks_serial_field "$ser" pcr7)"
+    pcr11_c="$(luks_serial_field "$ser" pcr11)"
+
+    # 1. The firmware code really moved, measured by the firmware itself.
+    if [[ -n "$pcr0_b" && -n "$pcr0_c" && "$pcr0_b" != "$pcr0_c" ]]; then
+        ok "PCR 0 changed across the firmware update ($pcr0_b -> $pcr0_c)"
+    else
+        bad "PCR 0 did not change ('$pcr0_b' -> '$pcr0_c') — the firmware code change was not measured, so nothing below is meaningful"
+        return
+    fi
+    # 2. And the UKI did not, so the two are isolated.
+    if [[ -n "$pcr11_b" && "$pcr11_b" == "$pcr11_c" ]]; then
+        ok "PCR 11 is unchanged, so the only thing that moved is the firmware code"
+    else
+        bad "PCR 11 moved too ('$pcr11_b' -> '$pcr11_c') — the firmware change was not isolated"
+    fi
+    # 3. PCR 7 IS REPORTED AND ASSERTED ON BY NOBODY. Whether two edk2
+    #    revisions measure the same Secure Boot policy into PCR 7 is a fact
+    #    about edk2, not about APEX: if it moved, that is a real finding about
+    #    what a vendor firmware update does to a by-value PCR 7 binding, and it
+    #    belongs in the log rather than in a verdict this scenario is not
+    #    entitled to reach. The control here is bound to PCR 0 alone, so its
+    #    refusal below is attributable either way.
+    if [[ "$pcr7_b" == "$pcr7_c" ]]; then
+        info "pcr7 is identical across the two edk2 revisions ($pcr7_c)"
+    else
+        info "pcr7 ALSO moved across the two edk2 revisions ($pcr7_b -> $pcr7_c): same varstore, same keys, different firmware — a by-value PCR 7 binding would break on a firmware update too"
+    fi
+    # 4. THE RESULT. Opposite outcomes, same boot, same TPM.
+    assert_serial_has  "$ser" "APEX-BOOTLAB: tpm-unlock=SUCCESS"
+    assert_serial_has  "$ser" "APEX-BOOTLAB: control-unlock=REFUSED"
+    assert_serial_lacks "$ser" "APEX-BOOTLAB: control-unlock=SUCCESS"
+    # 5. Still the same volume, still decrypting. The marker was written on
+    #    boot A, through the TPM path, under the OTHER firmware.
+    assert_serial_has "$ser" "APEX-BOOTLAB: plaintext-marker=found"
+    cp "$ser" "$WORK/serial-luks-fwc-after.log"
+
+    info "pcr0 went $pcr0_a -> $pcr0_b (unchanged, same firmware) -> $pcr0_c"
+    info "pcr11 stayed $pcr11_a across the whole scenario"
+    # The honest boundary of what was just shown, in the run and not only here.
+    cannot "this was an OVMF binary swap, not a vendor UEFI capsule: no microcode update, no ACPI table change, no option ROM and no management-engine firmware moved with it. It changes the register a capsule changes, on an emulated TPM."
+}
+
+# ── the TPM is gone ─────────────────────────────────────────────────────────
+#
+# L-002's acceptance is that an encryption default "does not strand users
+# across qualified hardware/recovery cases", and the case with no scenario was
+# the one with no TPM answering at all. It is not exotic: a TPM switched off in
+# firmware setup, a board replaced under warranty, a disk moved to another
+# machine, a fTPM a BIOS update reset. Every other LUKS scenario here boots
+# with a working software TPM and varies what it will agree to unseal.
+#
+# WHAT THIS DOES NOT MODEL, said plainly because the scenario's name invites
+# the wrong reading: a machine that has NEVER had a TPM cannot enrol a
+# systemd-tpm2 token in the first place, so it never reaches this boot. That is
+# a question about the installer and about apex-luks-enroll, not about the
+# unlock path, and docs/boot-v2.md answers it separately. What runs here is a
+# volume enrolled on a machine with a TPM, booted on one without.
+#
+# THE PAIR IS THE POINT. The same volume, the same UKI, the same recovery key,
+# booted twice, with the TPM device as the only difference: once it unlocks
+# through the TPM and writes the marker, once there is no TPM and the recovery
+# key has to produce the same plaintext. Without the first arm, "the recovery
+# key opened it" would be a string nobody had seen absent.
+#
+# AND THE BOOT MUST END. A guest that hangs waiting for a TPM that will never
+# answer has stranded the user just as thoroughly as one that refuses with no
+# fallback, so the qemu exit status is asserted and not merely reported: 0 is a
+# guest that powered itself off, 137 is the harness killing a hung one.
+scenario_luks_no_tpm() {
+    log "luks-no-tpm: the TPM is gone; the recovery key must produce the same disk"
+    luks_require_root
+    luks_enroll notpm || return
+
+    luks_hook "$WORK/luks-hook-notpm.cpio" yes
+    luks_uki notpm "$KEYS/pcr/key.pem" "$WORK/luks-hook-notpm.cpio" \
+        "apex.bootlab.luks=notpm" || return
+
+    # ── boot A: the TPM is there. The positive control. ────────────────────
+    local rc ser
+    rc="$(luks_boot notpm)"; ser="$WORK/serial-luks-notpm.log"
+    assert_eq 0 "$rc" "with a TPM: clean guest poweroff"
+    assert_serial_has "$ser" "APEX-BOOTLAB: tpm-device=present"
+    assert_serial_has "$ser" "APEX-BOOTLAB: tpm-unlock=SUCCESS"
+    # The marker is written HERE, through the TPM path. Everything the second
+    # boot claims about recovering the user's data rests on that.
+    assert_serial_has "$ser" "APEX-BOOTLAB: plaintext-marker=written"
+    cp "$ser" "$WORK/serial-luks-notpm-with-tpm.log"
+
+    # ── boot B: no TPM device at all ───────────────────────────────────────
+    rc="$(luks_boot notpm --no-tpm)"; ser="$WORK/serial-luks-notpm.log"
+    # The guest reached userspace. Without this, every assertion below would be
+    # satisfied by a boot that never happened.
+    assert_serial_has "$ser" "APEX-BOOTLAB: apex-initramfs-reached"
+    # 1. There really is no TPM, reported by the guest and not by the lab.
+    assert_serial_has "$ser" "APEX-BOOTLAB: tpm-device=absent"
+    assert_serial_lacks "$ser" "APEX-BOOTLAB: tpm-device=present"
+    # 2. The TPM unlock is refused rather than hanging or silently succeeding.
+    assert_serial_has "$ser" "APEX-BOOTLAB: tpm-unlock=REFUSED"
+    assert_serial_lacks "$ser" "APEX-BOOTLAB: tpm-unlock=SUCCESS"
+    # 3. And the user gets in, in that same boot.
+    assert_serial_has "$ser" "APEX-BOOTLAB: recovery-unlock=SUCCESS"
+    assert_serial_lacks "$ser" "APEX-BOOTLAB: recovery-unlock=FAILED"
+    # 4. WITH THEIR DATA. A mapper appearing says a keyslot was satisfied; the
+    #    marker written through the TPM path on boot A says it is the same
+    #    disk, decrypted.
+    assert_serial_has "$ser" "APEX-BOOTLAB: recovery-marker=found"
+    assert_serial_lacks "$ser" "APEX-BOOTLAB: recovery-marker=absent"
+    # 5. The boot ENDED. See the header: a hang strands the user too.
+    assert_eq 0 "$rc" "with no TPM: the guest powered off rather than hanging"
+    cp "$ser" "$WORK/serial-luks-notpm-no-tpm.log"
+
+    # What the guest saw of the measured state with no TPM, recorded because it
+    # is the reason the signed PCR 11 policy cannot help here: there is nothing
+    # to measure into and nothing to unseal from.
+    info "with no TPM the guest read pcr11='$(luks_serial_field "$ser" pcr11)' and pcr0='$(luks_serial_field "$ser" pcr0)'"
+    cannot "a machine that never had a TPM is not modelled by this scenario: it could not enrol a systemd-tpm2 token at all, so it never reaches either boot above. That is a question about the installer and apex-luks-enroll, and this scenario does not answer it."
+}
+
+# ── suspend to RAM with the volume open ─────────────────────────────────────
+#
+# L-001's "suspend/resume" criterion. Two questions that can fail separately,
+# and the second is the one real hardware gets wrong:
+#
+#   * does the OPEN volume survive S3? The master key lives in kernel memory
+#     across a suspend, so this is really "did dm-crypt come back".
+#   * does the TPM answer again afterwards? swtpm and real silicon both have to
+#     survive the Shutdown(STATE)/Startup(STATE) pair, and vendor firmware bugs
+#     in exactly that pair are why this criterion is on L-001's list.
+#
+# TWO OBSERVERS, neither of which is the lab's own bookkeeping. The guest reads
+# its own /sys/power/suspend_stats/success before and after; qemu is asked
+# separately, over QMP, whether the machine was ever `suspended`. A guest that
+# printed "resumed" without suspending is contradicted by qemu, and a QMP record
+# claiming a suspend nobody experienced is contradicted by the counter.
+#
+# AND THE MUTATION. The same UKI, the same volume, the same TPM, with qemu's S3
+# support turned off — which is qemu's own q35 default. The guest must then NOT
+# report a resume. Without that arm, `s3=resumed` would be a string nobody has
+# ever seen absent, and this file's own header says what that is worth.
+
+# luks_s3_other_witnesses WAKEJSON OVMFLOG — one line naming what the two
+# witnesses OTHER than the guest's serial field say. Used only to make a
+# could-not-run precise; it asserts nothing itself, so it must never fail the
+# run and must stay readable when either file is missing.
+luks_s3_other_witnesses() {
+    local wake="$1" ovmf="$2" qmp="no QMP record" fw="no OVMF log"
+    if [[ -s "$wake" ]]; then
+        qmp="$(python3 -c '
+import json,sys
+try:
+    d = json.load(open(sys.argv[1]))
+except Exception as e:
+    print("QMP record unreadable (%s)" % e); raise SystemExit(0)
+s, w, r = d.get("suspended_seen"), d.get("wakeup_sent"), d.get("resumed_seen")
+if s and w and r:
+    print("but qemu DID see it suspend and resume (suspended/woken/resumed all true, woke_at %s)" % d.get("woke_at"))
+elif s:
+    print("qemu saw it suspend but not resume (wakeup_sent=%s, resumed_seen=%s)" % (w, r))
+else:
+    print("qemu never saw it suspend (suspended_seen=%s)" % s)
+' "$wake" 2>/dev/null)" || qmp="QMP record unreadable"
+        [[ -n "$qmp" ]] || qmp="QMP record unreadable"
+    fi
+    if [[ -s "$ovmf" ]]; then
+        # Only what follows the S3 resume banner: a cold-boot ASSERT is a
+        # different bug and naming it here would misdirect the reader.
+        local a
+        a="$(awk '/SEC: S3 resume/{s=1} s && /^ASSERT /{print; exit}' "$ovmf" 2>/dev/null)"
+        if [[ -n "$a" ]]; then
+            fw="and the firmware stopped on the S3 resume path: ${a}"
+        elif grep -q 'SEC: S3 resume' "$ovmf" 2>/dev/null; then
+            fw="the firmware did reach 'SEC: S3 resume' and did not assert"
+        else
+            fw="the firmware never reached 'SEC: S3 resume'"
+        fi
+    fi
+    printf '%s %s' "$qmp" "$fw"
+}
+
+scenario_luks_s3() {
+    log "luks-s3: suspend to RAM with the encrypted volume open, and the TPM afterwards"
+    luks_require_root
+    luks_enroll s3 || return
+
+    luks_hook "$WORK/luks-hook-s3.cpio" yes
+    luks_uki s3 "$KEYS/pcr/key.pem" "$WORK/luks-hook-s3.cpio" \
+        "apex.bootlab.luks=s3 apex.bootlab.s3=1" || return
+
+    # ── the mutation first, so a green positive cannot be read alone ───────
+    #
+    # Deliberately before the real one. A negative control run afterwards is a
+    # control somebody can delete without noticing; run first, its absence is
+    # visible in the log the moment it stops happening.
+    local rc ser
+    rc="$(luks_boot s3)"; ser="$WORK/serial-luks-s3.log"
+    assert_eq 0 "$rc" "no-S3 control: clean guest poweroff"
+    assert_serial_has  "$ser" "APEX-BOOTLAB: tpm-unlock=SUCCESS"
+    assert_serial_lacks "$ser" "APEX-BOOTLAB: s3=resumed"
+    local s3_control; s3_control="$(luks_serial_field "$ser" s3)"
+    info "no-S3 control reported s3=$s3_control"
+    # NAMED, not merely non-empty. The first execution of this scenario hung
+    # here: with qemu's S3 off the kernel still offers `mem`, which quietly
+    # means s2idle, so the guest suspended to idle in the arm meant to prove it
+    # could not suspend and nothing existed to wake it. The control's answer is
+    # now a specific string — the guest looked for `deep` in
+    # /sys/power/mem_sleep, did not find it and did not suspend — and any other
+    # answer, including a suspend that somehow happened, is a failure rather
+    # than a pass for being non-empty.
+    case "$s3_control" in
+        NO-DEEP-SLEEP)
+            ok "with qemu's S3 off the guest found no deep sleep state to enter and did not suspend" ;;
+        "")
+            bad "the no-S3 control reported no s3 field at all — the probe did not reach its suspend path, so the positive below is unconstrained" ;;
+        *)
+            bad "the no-S3 control reported s3=$s3_control, which is neither a refusal to enter S3 nor an expected state for a guest with S3 disabled" ;;
+    esac
+    cp "$ser" "$WORK/serial-luks-s3-control.log"
+
+    # ── the real one ───────────────────────────────────────────────────────
+    rc="$(luks_boot s3 --s3)"; ser="$WORK/serial-luks-s3.log"
+    local wake="$WORK/serial-luks-s3.wake.json"
+    local s3_field; s3_field="$(luks_serial_field "$ser" s3)"
+
+    # A kernel that will not suspend has disproved nothing about LUKS. It is
+    # recorded as could-not-run, with the reason the guest gave, and the
+    # scenario stops rather than asserting on a resume that never happened.
+    #
+    # AND THE GUEST IS NOT THE ONLY WITNESS. Until 2026-09-18 these two
+    # branches reported "the guest reported no s3 field at all" and stopped,
+    # while TWO other witnesses sat unread in the same directory — and they
+    # contradicted the message. MEASURED, container later-r6-s3-nosmm: the
+    # QMP record said suspended_seen/wakeup_sent/resumed_seen all true (the
+    # guest suspended at 107.656 s and was woken at 108.161 s), and the OVMF
+    # log named the actual stop, an `ASSERT MemoryServices.c(203)` on the S3
+    # resume path that deadloops a DEBUG build until the timeout kill. The
+    # guest said nothing because the FIRMWARE never handed control back, not
+    # because it declined to suspend. A could-not-run that misnames its own
+    # cause sends the next round after the wrong thing, so both witnesses are
+    # read into the reason here.
+    case "$s3_field" in
+        resumed*)
+            ok "the guest suspended to RAM and came back (s3=$s3_field)" ;;
+        ""|*)
+            local why
+            if [[ "$s3_field" == "" ]]; then
+                why="the guest reported no s3 field at all"
+            else
+                why="the guest could not suspend: s3=$s3_field"
+            fi
+            why="$why; $(luks_s3_other_witnesses "$wake" "${ser%.log}.ovmf.log")"
+            cannot "$why; serial log $ser"
+            cp "$ser" "$WORK/serial-luks-s3-attempt.log"; return ;;
+    esac
+    assert_eq 0 "$rc" "S3: clean guest poweroff"
+
+    # The second observer. qemu's view, with no access to the guest's story.
+    if [[ -s "$wake" ]]; then
+        local seen
+        seen="$(python3 -c 'import json,sys; d=json.load(open(sys.argv[1])); print("%s %s %s" % (d.get("suspended_seen"), d.get("wakeup_sent"), d.get("resumed_seen")))' "$wake" 2>/dev/null)" \
+            || seen="<unreadable>"
+        info "qmp observer: suspended/woken/resumed = $seen"
+        if [[ "$seen" == "True True True" ]]; then
+            ok "qemu independently saw the guest suspend, be woken and run again"
+        else
+            bad "the QMP observer recorded '$seen', which does not corroborate the guest's resume"
+        fi
+    else
+        bad "no QMP record at $wake — the guest's resume has only one witness"
+    fi
+
+    # The two things a user cares about, separately.
+    assert_serial_has "$ser" "APEX-BOOTLAB: tpm-unlock=SUCCESS"
+    assert_serial_has "$ser" "APEX-BOOTLAB: post-resume-marker=found"
+    assert_serial_lacks "$ser" "APEX-BOOTLAB: post-resume-marker=LOST"
+    assert_serial_has "$ser" "APEX-BOOTLAB: post-resume-tpm-unlock=SUCCESS"
+    assert_serial_lacks "$ser" "APEX-BOOTLAB: post-resume-tpm-unlock=REFUSED"
+    # And the same marker again through a mapper created AFTER the resume, so
+    # the plaintext came off the disk rather than out of the page cache of a
+    # device that had been open since before the sleep.
+    assert_serial_has "$ser" "APEX-BOOTLAB: post-resume-reattach-marker=found"
+    assert_serial_lacks "$ser" "APEX-BOOTLAB: post-resume-reattach-marker=LOST"
+    # It really was S3 and not suspend-to-idle: the guest selected `deep` by
+    # name and printed what /sys/power/mem_sleep then held.
+    assert_serial_has "$ser" "APEX-BOOTLAB: s3-mode=deep"
+    cp "$ser" "$WORK/serial-luks-s3-resumed.log"
+}
+
+# ═════════════════════════════════════════════════════════════════════════════
+#  L-003, PCR 7 IN BOOT — the one host-side testing cannot reach
+#
+#  Every enroll-* scenario below reads Secure Boot state from a --probe-root
+#  FIXTURE. luks-firmware-change's own control volume binds PCR 7 to a VALUE
+#  IT CHOSE, via `--tpm2-pcrs="7:sha256=<value>"` — a lab-only syntax the
+#  shipped script never uses; its header says so ("Built here rather than
+#  through apex-luks-enroll, deliberately... an instrument, not a product
+#  path"). Neither exercises the bare, LIVE-READ `--tpm2-pcrs=7` the shipped
+#  script's probe_pcr7 actually runs, against a TPM whose PCR 7 was just
+#  extended by a REAL Secure-Boot-enforcing (v)UEFI chain.
+#
+#  It has to run INSIDE a guest, and it has to enrol WHILE THAT GUEST'S BOOT IS
+#  STILL THE LIVE PROCESS. TPM PCRs are volatile: swtpm's
+#  `--flags startup-clear` resets them on every fresh `swtpm socket` start,
+#  same as real hardware resets them on every power cycle. PCR 7 is
+#  REPRODUCIBLE across separate boots — it measures the SecureBoot variable and
+#  the CERTIFICATE that verified each loaded image, not the image itself, so
+#  the same firmware + same enrolled keys + same signing cert produce the same
+#  PCR 7 every time — which is what lets an EARLIER, SEPARATE enrolment still
+#  unseal on a LATER boot (boot B below). But enrolling in the first place
+#  needs to READ a live PCR 7, and the only place that value exists outside a
+#  real firmware boot is inside a guest that has just finished one; a host-side
+#  process cannot reach in — QEMU is the sole client on swtpm's data socket for
+#  the guest's whole lifetime.
+#
+#  So guest-luks-enroll.sh, systemd-cryptenroll, python3 (the shipped script's
+#  own tpm2_report/token_types/keyslot_count parse `cryptsetup luksDump
+#  --dump-json-metadata` with it) and od (efivar_byte5) all travel via
+#  --extra-initrd: none of the four ships in the generic dracut initramfs,
+#  measured absent with lsinitrd against a root staged straight off katana's
+#  own live install, not assumed.
+# ═════════════════════════════════════════════════════════════════════════════
+
+# install_real HOOKDIR SRC_ABS_PATH [MODE] — copy an absolute host path into a
+# hook payload tree, normalising /lib64, /lib, /bin, /sbin to their usr/...
+# targets first.
+#
+# This initramfs is usrmerged (`lib64 -> usr/lib64`, `bin -> usr/bin`, measured
+# with lsinitrd). `ldd` reports some resolved paths as /lib64/X and others as
+# /usr/lib64/X depending on how glibc's loader walked the symlink, and a cpio
+# entry that creates /lib64 as a REAL DIRECTORY shadows that symlink and takes
+# every library the initramfs already had down with it — apex-image's hook
+# comment documents the identical trap for usr/lib/dracut/hooks. Normalising
+# every path here, rather than trusting whatever ldd printed, is what avoids it.
+install_real() {
+    local hookdir="$1" src="$2" mode="${3:-0755}" dst="$2"
+    case "$dst" in
+        /lib64/*) dst="/usr/lib64/${dst#/lib64/}" ;;
+        /lib/*)   dst="/usr/lib/${dst#/lib/}" ;;
+        /bin/*)   dst="/usr/bin/${dst#/bin/}" ;;
+        /sbin/*)  dst="/usr/sbin/${dst#/sbin/}" ;;
+    esac
+    install -D -m "$mode" "$src" "$hookdir$dst"
+}
+
+# build_pcr7_enroll_bundle HOOKDIR PASSPHRASE_FILE — the payload common to any
+# UKI that has to run the REAL shipped apex-luks-enroll inside a guest: the
+# script itself, python3 plus the exact stdlib closure `import json` needs
+# (discovered by actually importing it with site disabled and reading
+# sys.modules back — not by guessing which files a json.dumps needs), every
+# external command the shipped script invokes that the generic APEX initramfs
+# does NOT carry, and a hook that runs it against /dev/vdb.
+#
+# THE COMMAND LIST WAS DERIVED, NOT GUESSED, AND GUESSING COST A BOOT. The
+# first real run of this scenario (2026-09-21) died at `enroll-exit=127` on a
+# missing `/usr/bin/env` — the shipped script's `#!/usr/bin/env bash` — while
+# the bundle shipped only systemd-cryptenroll and od. The list below is the
+# intersection of (a) every token in command position in
+# files/system/libexec/apex-luks-enroll that names a real executable, against
+# (b) the actual `usr/bin`+`usr/sbin` inventory of a real APEX initramfs read
+# with lsinitrd. Note that lsinitrd prints symlinks as `usr/bin/awk -> gawk`,
+# so an inventory built from the LAST field silently loses every symlinked
+# name — `awk` and the whole `tpm2_*` family read as absent when they are
+# present. Match on the `usr/bin/<name>` field, not on `$NF`.
+#
+# Present in the initramfs, therefore deliberately NOT bundled: awk (→gawk),
+# basename, cat, chmod, cryptsetup, grep, mktemp, mv, readlink, rm, sed, tr,
+# and tpm2_getcap (a symlink into the one `tpm2` multicall binary).
+#
+# PYTHONHOME/LD_LIBRARY_PATH are not set anywhere in the guest for this: it is
+# unnecessary because every file lands at the SAME absolute path a real
+# install uses (usr/bin/python3, usr/lib64/pythonX.Y/...), which is exactly
+# where python3 looks for its own stdlib relative to argv[0]. Verified
+# standalone, isolated with an artificial prefix (which is what DID need the
+# env vars), before this function was written.
+build_pcr7_enroll_bundle() {
+    local hookdir="$1" passfile="$2"
+    rm -rf "$hookdir"
+    mkdir -p "$hookdir/var/lib/dracut/hooks/pre-mount" "$hookdir/usr/libexec"
+    install -m 0755 "$HERE/guest-luks-enroll.sh" \
+        "$hookdir/var/lib/dracut/hooks/pre-mount/50-apex-luks-enroll.sh"
+    install -m 0400 "$passfile" "$hookdir/apex-bootlab-passphrase"
+    install -m 0755 "$HERE/../../system/libexec/apex-luks-enroll" \
+        "$hookdir/usr/libexec/apex-luks-enroll"
+
+    # These are present on the boot lab's OWN /usr (this scenario runs inside
+    # the apex-bootlab container, which carries the same
+    # systemd/cryptsetup/coreutils stack the APEX image does) and absent from
+    # the STAGED APEX INITRAMFS. The two are different things; this project has
+    # been bitten before by conflating a build box's tools with a guest's.
+    #
+    #   env      the shipped script's shebang (#!/usr/bin/env bash) AND its
+    #            `env "${getcap_env[@]}" tpm2_getcap` call. Without it the
+    #            kernel cannot start the script at all and reports ENOENT
+    #            against a file that is right there.
+    #   dirname  dirname "$RECOVERY_OUT" — runs before anything is enrolled,
+    #            so a bundle missing this fails the recovery key, not the TPM.
+    #   wc       wc -c on the generated recovery key, its length check.
+    #   head     head -3 of the enrolment stderr, the failure report.
+    #   od       od -An -tu1 -j4 -N1 on the SecureBoot efivar (efivar_byte5).
+    #   systemd-cryptenroll   the thing under test.
+    local bin path
+    for bin in systemd-cryptenroll od env dirname wc head; do
+        path="$(command -v "$bin")" || die "the boot lab container has no $bin to bundle"
+        install_real "$hookdir" "$path" 0755
+        # ldd for EVERY bundled binary, not just systemd-cryptenroll: a
+        # coreutils binary needs only ld-linux + libc (both already in the
+        # initramfs, so these copies are redundant rather than wrong), but
+        # deriving it per binary means the next tool added here cannot arrive
+        # without its libraries.
+        local lib
+        for lib in $(ldd "$path" 2>/dev/null \
+                     | awk '/=>/{print $3} !/=>/{if ($1 ~ /^\//) print $1}'); do
+            [[ -f "$lib" ]] || continue
+            install_real "$hookdir" "$lib" 0755
+        done
+    done
+
+    local py pylib pyver pymods f
+    py="$(command -v python3)" || die "the boot lab container has no python3 to bundle"
+    install_real "$hookdir" "$py" 0755
+    pylib="$(ldd "$py" | awk '/libpython/{print $3}')"
+    [[ -n "$pylib" ]] || die "could not find python3's own shared library to bundle"
+    install_real "$hookdir" "$pylib" 0755
+    pyver="$(python3 -c 'import sys; print(f"{sys.version_info.major}.{sys.version_info.minor}")')"
+    pymods="$(python3 -S -c '
+import json, sys
+for m in sys.modules.values():
+    f = getattr(m, "__file__", None)
+    if f: print(f)
+')"
+    [[ -n "$pymods" ]] || die "python3 -S -c \"import json\" produced no module file list"
+    while IFS= read -r f; do
+        [[ -f "$f" ]] || continue
+        install_real "$hookdir" "$f" 0644
+    done <<<"$pymods"
+
+    ( cd "$hookdir" && find . -print0 | cpio --null -o -H newc --quiet )
+    info "PCR7 enrolment bundle: apex-luks-enroll, systemd-cryptenroll, python3 $pyver + json, od, env, dirname, wc, head"
+}
+
+scenario_luks_pcr7() {
+    log "luks-pcr7: L-003, the in-BOOT half of the PCR 7 binding"
+    luks_require_root
+    local root="$LUKS_ROOT"
+
+    # ── the volume, host-side, with a KNOWN passphrase the guest presents via
+    #    --unlock-key-file ───────────────────────────────────────────────────
+    local img="$WORK/luks-pcr7.img"
+    enroll_volume "$img"
+
+    # ── boot A: enrol, live, inside the guest, against THIS boot's own real
+    #    PCR 7. No --pcr-key/--pcr-pubkey on the UKI: sd-stub still measures
+    #    (this UKI is Secure-Boot-signed) but publishes no
+    #    tpm2-pcr-public-key.pem, so probe_signed_pcr11's readability check
+    #    fails and policy_select falls through to pcr7 — that fallthrough, not
+    #    a --policy flag forcing it, is the property under test. A machine
+    #    without the systemd-boot pivot is in exactly this state today. ──────
+    build_pcr7_enroll_bundle "$WORK/luks-pcr7-hook-a" "$ENROLL_KEYFILE" \
+        > "$WORK/luks-pcr7-hook-a.cpio"
+    [[ -s "$WORK/luks-pcr7-hook-a.cpio" ]] || { bad "empty PCR7 enrolment bundle"; return; }
+    "$HERE/apex-mkuki" --output "$WORK/uki-pcr7-a.efi" --from-root "$root" \
+        --cmdline "$CMDLINE_BASE apex.bootlab.entry=pcr7a rd.timeout=10 plymouth.enable=0 rd.plymouth=0" \
+        --deployment pcr7a --variant gaming \
+        --sb-key "$KEYS/sb/key.pem" --sb-cert "$KEYS/sb/cert.pem" \
+        --extra-initrd "$WORK/luks-pcr7-hook-a.cpio" >/dev/null \
+        || { bad "apex-mkuki failed for the PCR7 enrolment UKI"; return; }
+
+    local state="$WORK/tpm-pcr7"
+    rm -rf "$state"
+    local disk="$WORK/disk-pcr7-a.img" vars="$WORK/vars-pcr7-a.fd" ser="$WORK/serial-pcr7-a.log" rc=0
+    "$HERE/apex-mkesp" --disk "$disk" --size 1024 \
+        --sb-key "$KEYS/sb/key.pem" --sb-cert "$KEYS/sb/cert.pem" \
+        --uki "pcr7a:0:$WORK/uki-pcr7-a.efi" --default 'apex-pcr7a*' >/dev/null
+    fresh_vars "$vars"
+    vm_boot --disk "$disk" --vars "$vars" --name pcr7-enrol --serial "$ser" \
+            --tpm-state "$state" --extra-disk "$img" \
+            --mem 4096 --timeout 300 || rc=$?
+    assert_eq 0 "$rc" "pcr7 enrol boot: clean guest poweroff"
+    assert_serial_has "$ser" "APEX-BOOTLAB: apex-initramfs-reached"
+    assert_serial_has "$ser" "APEX-BOOTLAB: have-systemd-cryptenroll=yes"
+    assert_serial_has "$ser" "APEX-BOOTLAB: have-apex-luks-enroll=yes"
+    assert_serial_has "$ser" "APEX-BOOTLAB: tpm-device=present"
+    # The shipped script being PRESENT and the shipped script being RUNNABLE
+    # are different claims, and the first real run of this scenario proved it:
+    # `have-apex-luks-enroll=yes` sat next to `enroll-exit=127` because
+    # /usr/bin/env was not in the initramfs. Assert the interpreter, so the
+    # day a bundled command is dropped the serial log names it instead of
+    # leaving a 127 to be re-diagnosed from scratch.
+    if grep -aq "APEX-BOOTLAB: enroll-interpreter=.* MISSING" "$ser"; then
+        bad "the shipped script's shebang interpreter is missing from the guest: $(grep -ao 'APEX-BOOTLAB: enroll-interpreter=[^ ]* MISSING' "$ser" | head -1)"
+    else
+        ok "the shipped script's shebang interpreter is present in the guest"
+    fi
+    if grep -aq "APEX-BOOTLAB: have-python3=yes" "$ser"; then
+        ok "the bundled python3 ran inside the guest"
+    else
+        bad "python3 did not report itself present — the bundle did not reach the guest correctly"
+    fi
+
+    local pcr7_pre
+    pcr7_pre="$(luks_serial_field "$ser" pcr7-pre-enroll)"
+    if luks_pcr_is_real "$pcr7_pre"; then
+        ok "PCR 7 was already a real measurement before enrolment ($pcr7_pre)"
+    else
+        bad "PCR 7 read '$pcr7_pre' before enrolment — not a real firmware measurement, enrolling against it proves nothing"
+        return
+    fi
+
+    # policy_select fell through PAST signed-pcr11 — not because signed-pcr11
+    # is broken, but because this UKI never published a PCR-11 signing key for
+    # sd-stub to hand it.
+    #
+    # WHICH of probe_signed_pcr11's gates refuses is the whole point, and the
+    # first real run of this scenario (2026-09-21) asserted the wrong one. The
+    # probe refuses in order: Secure Boot off, then no StubInfo efivar, then no
+    # readable signing key, then PCR 11 unmeasured. What actually fires here is
+    # the THIRD. That is a stronger result than the second would have been:
+    # gates one and two PASSING is a measurement that this guest booted with
+    # Secure Boot enforcing AND genuinely came up through sd-stub, so the only
+    # thing standing between this lab and a signed-PCR-11 enrolment is building
+    # the UKI with --pcr-key. Assert the absence of the sd-stub refusal too, so
+    # the day that stops being true this says so instead of passing quietly.
+    assert_serial_has "$ser" \
+        "APEX-BOOTLAB: enroll-err:   not using signed-pcr11: the boot did not publish a PCR signing key at /run/systemd/tpm2-pcr-public-key.pem"
+    assert_serial_lacks "$ser" \
+        "APEX-BOOTLAB: enroll-err:   not using signed-pcr11: this machine did not boot through sd-stub"
+    assert_serial_lacks "$ser" \
+        "APEX-BOOTLAB: enroll-err:   not using signed-pcr11: Secure Boot is off"
+    assert_serial_has "$ser" "APEX-BOOTLAB: enroll-exit=0"
+
+    local tpm2field
+    tpm2field="$(grep -ao 'APEX-BOOTLAB: enroll-out: tpm2: enrolled binding=[a-z0-9-]* pcrs=[0-9]* bank=[a-z0-9]* hash=[[:xdigit:]]* pin=[a-z]*' "$ser" | head -1)"
+    case "$tpm2field" in
+        *"binding=pcr7 pcrs=7 bank=sha256 hash="*)
+            ok "the shipped script chose binding=pcr7, live, against a real boot" ;;
+        *)
+            bad "the shipped script's tpm2: line was '$tpm2field' — expected binding=pcr7" ;;
+    esac
+
+    # "TPM auto-unlock by default, WHERE SAFE" (L-003) is not satisfied by an
+    # unlock that works; it is satisfied by an unlock that works AND leaves the
+    # user another way in. Enrolment rewrites the LUKS2 header, so the
+    # passphrase it was unlocked with has to be re-proved afterwards, in this
+    # same boot, against this same volume.
+    if grep -aq "APEX-BOOTLAB: passphrase-after-enrol=SUCCESS" "$ser"; then
+        ok "the original passphrase still opens the volume after enrolment"
+    else
+        bad "the passphrase did not verify after enrolment: $(luks_serial_field "$ser" passphrase-after-enrol) — enrolling a TPM slot must never be the only way in"
+    fi
+
+    local recovery=""
+    recovery="$(luks_serial_field "$ser" recovery-key)"
+    if [[ -n "$recovery" && "$recovery" != "<not"* ]]; then
+        # NO TRAILING NEWLINE. `cryptsetup --key-file <regular file>` uses
+        # EVERY BYTE of the file as the passphrase, so one '\n' turns a
+        # correct 71-byte recovery key into a wrong 72-byte one and boot C
+        # reports "Failed to activate with key file … (Key data incorrect?)" —
+        # which reads exactly like a broken recovery slot and is not one.
+        # Measured on katana 2026-09-21 against this very volume: 72 bytes
+        # REFUSED, the same key piped without the newline OPENS.
+        #
+        # The SHIPPED script already gets this right — it writes
+        # `systemd-cryptenroll`'s output through `tr -d '[:space:]'`, 71 bytes,
+        # and `apex-install` re-strips with `tr -d '\r\n'` before piping. Only
+        # this scenario had the bug, because it is the only one that has to
+        # recover the key from a guest's SERIAL LOG rather than from the file
+        # the script wrote; every other scenario installs `$LUKS_RECOVERY`
+        # straight through.
+        printf '%s' "$recovery" > "$WORK/luks-pcr7-recovery.key"
+        # Check the length HERE, host-side, rather than discovering it four
+        # minutes later inside boot C.
+        local reclen
+        reclen="$(wc -c < "$WORK/luks-pcr7-recovery.key")"
+        if [[ "$reclen" == 71 ]]; then
+            ok "captured the recovery key the guest generated (71 bytes, no trailing newline)"
+        else
+            bad "the captured recovery key is $reclen bytes, expected 71 — a key file with a trailing newline is a different passphrase to cryptsetup"
+        fi
+    else
+        bad "no recovery key came back from the enrolment boot — boot C's refusal arm has no fallback to test"
+    fi
+    # No copy here: vm_boot was given --serial "$WORK/serial-pcr7-a.log"
+    # already, so the log is at its final name. `cp` onto itself fails
+    # ("are the same file"), and under this file's set -e that aborted the
+    # whole scenario after boot A on the first real run — boots B and C, the
+    # reproduction and the recovery arm, never ran at all.
+
+    # ── boot B: SAME vars template, SAME UKI signing cert, SAME swtpm state
+    #    DIRECTORY — but a FRESH swtpm PROCESS, which resets every PCR to zero
+    #    on startup-clear. Reproduced, not reused: the firmware has to
+    #    re-extend PCR 7 back to the SAME value on its own, or "reproducible"
+    #    was only ever true within one process. Plain guest-luks-probe.sh: no
+    #    enrolment tooling needed to ATTACH, only to CREATE, the token. ──────
+    local hookdir_b="$WORK/luks-pcr7-hook-b"
+    rm -rf "$hookdir_b"; mkdir -p "$hookdir_b/var/lib/dracut/hooks/pre-mount"
+    install -m 0755 "$HERE/guest-luks-probe.sh" \
+        "$hookdir_b/var/lib/dracut/hooks/pre-mount/50-apex-luks-probe.sh"
+    ( cd "$hookdir_b" && find . -print0 | cpio --null -o -H newc --quiet ) \
+        > "$WORK/luks-pcr7-hook-b.cpio"
+    "$HERE/apex-mkuki" --output "$WORK/uki-pcr7-b.efi" --from-root "$root" \
+        --cmdline "$CMDLINE_BASE apex.bootlab.entry=pcr7b apex.bootlab.luks=unlock rd.timeout=10 plymouth.enable=0 rd.plymouth=0" \
+        --deployment pcr7b --variant gaming \
+        --sb-key "$KEYS/sb/key.pem" --sb-cert "$KEYS/sb/cert.pem" \
+        --extra-initrd "$WORK/luks-pcr7-hook-b.cpio" >/dev/null \
+        || { bad "apex-mkuki failed for the PCR7 unlock UKI"; return; }
+
+    local diskb="$WORK/disk-pcr7-b.img" varsb="$WORK/vars-pcr7-b.fd" serb="$WORK/serial-pcr7-b.log"
+    "$HERE/apex-mkesp" --disk "$diskb" --size 1024 \
+        --sb-key "$KEYS/sb/key.pem" --sb-cert "$KEYS/sb/cert.pem" \
+        --uki "pcr7b:0:$WORK/uki-pcr7-b.efi" --default 'apex-pcr7b*' >/dev/null
+    fresh_vars "$varsb"
+    rc=0
+    vm_boot --disk "$diskb" --vars "$varsb" --name pcr7-unlock --serial "$serb" \
+            --tpm-state "$state" --extra-disk "$img" \
+            --mem 4096 --timeout 240 || rc=$?
+    assert_eq 0 "$rc" "pcr7 unlock boot: clean guest poweroff"
+    assert_serial_has "$serb" "APEX-BOOTLAB: tpm-unlock=SUCCESS"
+    assert_serial_has "$serb" "APEX-BOOTLAB: plaintext-marker=written"
+    # No signature was needed or used. This is what distinguishes this
+    # scenario from every luks-tpm* one: the token is bound BY VALUE to PCR 7,
+    # not by a PolicyAuthorize signature, so sd-stub publishing nothing here
+    # is correct, not a fixture gap.
+    assert_serial_has "$serb" "APEX-BOOTLAB: pcr-signature=<absent>"
+
+    local pcr7_b pcr11_a pcr11_b
+    pcr7_b="$(luks_serial_field "$serb" pcr7)"
+    if luks_pcr_is_real "$pcr7_b" && [[ "$(tr 'A-F' 'a-f' <<<"$pcr7_b")" == "$(tr 'A-F' 'a-f' <<<"$pcr7_pre")" ]]; then
+        ok "PCR 7 reproduced across two independent swtpm sessions ($pcr7_b)"
+    else
+        bad "PCR 7 did not reproduce: enrolled against '$pcr7_pre', this boot measured '$pcr7_b'"
+    fi
+    pcr11_a="$(luks_serial_field "$ser" pcr11)"
+    pcr11_b="$(luks_serial_field "$serb" pcr11)"
+    if [[ -n "$pcr11_a" && -n "$pcr11_b" && "$pcr11_a" != "$pcr11_b" ]]; then
+        ok "PCR 11 differs between the two boots (different UKIs) while PCR 7 held — the binding really is to PCR 7, not to whatever this UKI measures"
+    fi
+    # No copy here: vm_boot was given --serial "$WORK/serial-pcr7-b.log"
+    # already, so the log is at its final name. `cp` onto itself fails
+    # ("are the same file"), and under this file's set -e that aborted the
+    # whole scenario after boot A on the first real run — boots B and C, the
+    # reproduction and the recovery arm, never ran at all.
+
+    # ── boot C: the Secure Boot state changes (a dbx revocation update, same
+    #    technique luks-firmware-change uses for its control volume); PCR 7
+    #    must move and the slot must refuse, in a REAL guest, for the first
+    #    time in this harness ──────────────────────────────────────────────
+    local dbx="" cand
+    for cand in /usr/share/edk2/ovmf/DBXUpdate-*.x64.bin; do
+        [[ -f "$cand" ]] && { dbx="$cand"; break; }
+    done
+    if [[ -z "$dbx" ]]; then
+        cannot "no DBXUpdate-*.x64.bin in this lab image, so boot C's firmware-state change could not be applied"
+        return
+    fi
+    local varsc="$WORK/vars-pcr7-c.fd"
+    fresh_vars "$varsc"
+    virt-fw-vars --input "$varsc" --output "$varsc" --add-dbx "$dbx" >/dev/null 2>&1 \
+        || { bad "virt-fw-vars could not append the dbx update for boot C"; return; }
+
+    local hookdir_c="$WORK/luks-pcr7-hook-c"
+    rm -rf "$hookdir_c"; mkdir -p "$hookdir_c/var/lib/dracut/hooks/pre-mount"
+    install -m 0755 "$HERE/guest-luks-probe.sh" \
+        "$hookdir_c/var/lib/dracut/hooks/pre-mount/50-apex-luks-probe.sh"
+    local have_recovery=0
+    if [[ -s "$WORK/luks-pcr7-recovery.key" ]]; then
+        install -m 0400 "$WORK/luks-pcr7-recovery.key" "$hookdir_c/apex-bootlab-recovery-key"
+        have_recovery=1
+    fi
+    ( cd "$hookdir_c" && find . -print0 | cpio --null -o -H newc --quiet ) \
+        > "$WORK/luks-pcr7-hook-c.cpio"
+    "$HERE/apex-mkuki" --output "$WORK/uki-pcr7-c.efi" --from-root "$root" \
+        --cmdline "$CMDLINE_BASE apex.bootlab.entry=pcr7c apex.bootlab.luks=unlock rd.timeout=10 plymouth.enable=0 rd.plymouth=0" \
+        --deployment pcr7c --variant gaming \
+        --sb-key "$KEYS/sb/key.pem" --sb-cert "$KEYS/sb/cert.pem" \
+        --extra-initrd "$WORK/luks-pcr7-hook-c.cpio" >/dev/null \
+        || { bad "apex-mkuki failed for the PCR7 firmware-change UKI"; return; }
+
+    local diskc="$WORK/disk-pcr7-c.img" serc="$WORK/serial-pcr7-c.log"
+    "$HERE/apex-mkesp" --disk "$diskc" --size 1024 \
+        --sb-key "$KEYS/sb/key.pem" --sb-cert "$KEYS/sb/cert.pem" \
+        --uki "pcr7c:0:$WORK/uki-pcr7-c.efi" --default 'apex-pcr7c*' >/dev/null
+    rc=0
+    vm_boot --disk "$diskc" --vars "$varsc" --name pcr7-fw-change --serial "$serc" \
+            --tpm-state "$state" --extra-disk "$img" \
+            --mem 4096 --timeout 240 || rc=$?
+    assert_eq 0 "$rc" "pcr7 firmware-change boot: clean guest poweroff"
+    assert_serial_has "$serc" "APEX-BOOTLAB: tpm-unlock=REFUSED"
+    assert_serial_lacks "$serc" "APEX-BOOTLAB: tpm-unlock=SUCCESS"
+    local pcr7_c
+    pcr7_c="$(luks_serial_field "$serc" pcr7)"
+    if luks_pcr_is_real "$pcr7_c" && [[ "$pcr7_c" != "$pcr7_b" ]]; then
+        ok "PCR 7 changed after the dbx update ($pcr7_b -> $pcr7_c), and the slot refused"
+    else
+        bad "PCR 7 is '$pcr7_c' after the dbx update (was '$pcr7_b') — the change did not register, so the refusal proves nothing"
+    fi
+    if (( have_recovery )); then
+        assert_serial_has "$serc" "APEX-BOOTLAB: recovery-unlock=SUCCESS"
+    else
+        cannot "no recovery key was captured from boot A, so the refusal arm's recovery path is untested this run"
+    fi
+    # No copy here: vm_boot was given --serial "$WORK/serial-pcr7-c.log"
+    # already, so the log is at its final name. `cp` onto itself fails
+    # ("are the same file"), and under this file's set -e that aborted the
+    # whole scenario after boot A on the first real run — boots B and C, the
+    # reproduction and the recovery arm, never ran at all.
+}
+
+# ═════════════════════════════════════════════════════════════════════════════
+#  luks-pcr7-signed — the same live in-boot enrolment as luks-pcr7, with ONE
+#  variable changed: boot A's UKI is built WITH --pcr-key/--pcr-pubkey.
+# ═════════════════════════════════════════════════════════════════════════════
+#
+#  WHY THIS IS A SEPARATE SCENARIO AND NOT A FLAG ON luks-pcr7. The two are
+#  the same harness answering opposite questions, and both answers matter:
+#
+#    luks-pcr7          a machine with no systemd-boot pivot — which is every
+#                       APEX machine today, because apex-install writes
+#                       GRUB + shim. policy_select falls THROUGH signed-pcr11
+#                       to pcr7, and that fallthrough is the property.
+#    luks-pcr7-signed   a machine that boots a UKI carrying a PCR signing key —
+#                       what the sd-boot pivot turns every APEX machine into.
+#                       policy_select must now STOP at signed-pcr11.
+#
+#  The first real run of luks-pcr7 (2026-09-21) measured the precondition
+#  rather than assuming it: probe_signed_pcr11 refuses in order — Secure Boot
+#  off, no StubInfo efivar, no readable signing key, PCR 11 unmeasured — and
+#  what fired was the THIRD. Gates one and two PASSED. So this lab was already
+#  one `--pcr-key` away from a signed-PCR-11 enrolment, and that is the entire
+#  delta between this scenario and its neighbour.
+#
+#  WHAT THIS PROVES THAT luks-tpm DOES NOT. luks-tpm enrols the signed policy
+#  HOST-SIDE, with a lab-chosen systemd-cryptenroll command line, and then
+#  boots a guest to show the token unseals. It never runs the shipped script,
+#  so it cannot say which binding APEX would CHOOSE. This scenario's boot A is
+#  the shipped /usr/libexec/apex-luks-enroll, in a real initramfs, picking
+#  signed-pcr11 out of its own table against a live TPM — and boot B then shows
+#  the token it created surviving a UKI change that moves PCR 11. That
+#  survival is the whole reason signed-pcr11 sits ABOVE pcr7 in the table, and
+#  until this scenario the ordering had never been justified by a token the
+#  shipped script itself wrote.
+#
+#  EVERY $WORK PATH HERE IS PREFIXED pcr7s. The default STAGED run executes
+#  this scenario and luks-pcr7 in the same $WORK: a shared `tpm-pcr7` state
+#  directory (which luks-pcr7 `rm -rf`s) or a shared volume image would make
+#  one scenario's result an artefact of the other's, silently and in the
+#  direction that reads as success.
+scenario_luks_pcr7_signed() {
+    log "luks-pcr7-signed: L-003, the shipped script CHOOSING signed-pcr11 in a real boot"
+    luks_require_root
+    local root="$LUKS_ROOT"
+    : "$root"
+
+    # ── the volume, host-side, with a KNOWN passphrase the guest presents via
+    #    --unlock-key-file ───────────────────────────────────────────────────
+    local img="$WORK/luks-pcr7s.img"
+    enroll_volume "$img"
+
+    # ── boot A: enrol, live, inside the guest, against THIS boot's own real
+    #    PCR 11, with sd-stub publishing the signing key ─────────────────────
+    build_pcr7_enroll_bundle "$WORK/luks-pcr7s-hook-a" "$ENROLL_KEYFILE" \
+        > "$WORK/luks-pcr7s-hook-a.cpio"
+    [[ -s "$WORK/luks-pcr7s-hook-a.cpio" ]] \
+        || { bad "empty PCR7-signed enrolment bundle"; return; }
+
+    # luks_uki rather than a bare apex-mkuki call, deliberately: it is the
+    # helper that carries --pcr-key/--pcr-pubkey AND re-checks the .pcrsig
+    # section afterwards. A forgotten --pcr-key here would not fail — it would
+    # produce exactly luks-pcr7's green result (binding=pcr7) under this
+    # scenario's name, which is the worst failure mode available.
+    luks_uki pcr7sa "$KEYS/pcr/key.pem" "$WORK/luks-pcr7s-hook-a.cpio" "" || return
+
+    local state="$WORK/tpm-pcr7s"
+    rm -rf "$state"
+    local disk="$WORK/disk-pcr7s-a.img" vars="$WORK/vars-pcr7s-a.fd"
+    local ser="$WORK/serial-pcr7s-a.log" rc=0
+    "$HERE/apex-mkesp" --disk "$disk" --size 1024 \
+        --sb-key "$KEYS/sb/key.pem" --sb-cert "$KEYS/sb/cert.pem" \
+        --uki "lukspcr7sa:0:$WORK/uki-luks-pcr7sa.efi" --default 'apex-lukspcr7sa*' >/dev/null
+    fresh_vars "$vars"
+    vm_boot --disk "$disk" --vars "$vars" --name pcr7s-enrol --serial "$ser" \
+            --tpm-state "$state" --extra-disk "$img" \
+            --mem 4096 --timeout 300 || rc=$?
+    assert_eq 0 "$rc" "pcr7-signed enrol boot: clean guest poweroff"
+    assert_serial_has "$ser" "APEX-BOOTLAB: apex-initramfs-reached"
+    assert_serial_has "$ser" "APEX-BOOTLAB: have-systemd-cryptenroll=yes"
+    assert_serial_has "$ser" "APEX-BOOTLAB: have-apex-luks-enroll=yes"
+    assert_serial_has "$ser" "APEX-BOOTLAB: tpm-device=present"
+    # Asserted here and not in luks-pcr7, because signed-pcr11's FIRST gate is
+    # Secure Boot: if this byte were not 1 the refusal below would be the SB
+    # gate wearing the signing-key gate's clothes, and the diagnosis would
+    # start in the wrong place.
+    assert_serial_has "$ser" "APEX-BOOTLAB: secure-boot-byte=1"
+    if grep -aq "APEX-BOOTLAB: enroll-interpreter=.* MISSING" "$ser"; then
+        bad "the shipped script's shebang interpreter is missing from the guest: $(grep -ao 'APEX-BOOTLAB: enroll-interpreter=[^ ]* MISSING' "$ser" | head -1)"
+    else
+        ok "the shipped script's shebang interpreter is present in the guest"
+    fi
+    if grep -aq "APEX-BOOTLAB: have-python3=yes" "$ser"; then
+        ok "the bundled python3 ran inside the guest"
+    else
+        bad "python3 did not report itself present — the bundle did not reach the guest correctly"
+    fi
+
+    # PCR 11 is what this binding is ABOUT, so it is the register that has to
+    # be a real measurement before enrolment — the same check luks-pcr7 makes
+    # of PCR 7, moved to the register under test. probe_signed_pcr11 makes it
+    # too, and would decline; asserting it here means a decline is reported as
+    # "PCR 11 was empty" rather than as a bare missing binding.
+    local pcr11_a
+    pcr11_a="$(luks_serial_field "$ser" pcr11)"
+    if luks_pcr_is_real "$pcr11_a"; then
+        ok "PCR 11 was a real measurement before enrolment ($pcr11_a)"
+    else
+        bad "PCR 11 read '$pcr11_a' before enrolment — not a real sd-stub measurement, so a signed policy bound to it would be unenforced"
+        return
+    fi
+
+    # THE assertion this scenario exists for. luks-pcr7 asserts the PRESENCE of
+    # the third refusal; this asserts the ABSENCE of all four, matched on the
+    # prefix they share so a gate added to probe_signed_pcr11 later is covered
+    # without anybody remembering to edit this line.
+    assert_serial_lacks "$ser" "APEX-BOOTLAB: enroll-err:   not using signed-pcr11"
+    assert_serial_has "$ser" "APEX-BOOTLAB: enroll-exit=0"
+
+    # `+` is in the character classes because tpm2_report joins a multi-PCR
+    # binding with it (`signed-pcr11+12`). Today the shipped script asks for
+    # 11 alone; a regex that could not express the other shape would report a
+    # future change as "no tpm2: line at all".
+    local tpm2field
+    tpm2field="$(grep -ao 'APEX-BOOTLAB: enroll-out: tpm2: enrolled binding=[a-z0-9+-]* pcrs=[0-9+]* bank=[a-z0-9]* hash=[[:xdigit:]]* pin=[a-z]*' "$ser" | head -1)"
+    case "$tpm2field" in
+        *"binding=signed-pcr11 pcrs=11 bank=sha256 hash="*)
+            ok "the shipped script chose binding=signed-pcr11, live, against a real boot" ;;
+        *"binding=pcr7"*)
+            bad "the shipped script fell back to binding=pcr7 — this UKI carries a PCR signing key, so signed-pcr11 should have won; read the 'not using' lines in $ser for which gate refused" ;;
+        *)
+            bad "the shipped script's tpm2: line was '$tpm2field' — expected binding=signed-pcr11" ;;
+    esac
+
+    # Same contract as luks-pcr7: an enrolment that costs the user their
+    # passphrase is not "where safe" under any reading of L-003.
+    if grep -aq "APEX-BOOTLAB: passphrase-after-enrol=SUCCESS" "$ser"; then
+        ok "the original passphrase still opens the volume after the signed enrolment"
+    else
+        bad "the passphrase did not verify after enrolment: $(luks_serial_field "$ser" passphrase-after-enrol) — enrolling a TPM slot must never be the only way in"
+    fi
+
+    local recovery=""
+    recovery="$(luks_serial_field "$ser" recovery-key)"
+    if [[ -n "$recovery" && "$recovery" != "<not"* ]]; then
+        # NO TRAILING NEWLINE, and the length checked HERE rather than four
+        # minutes later inside a guest: `cryptsetup --key-file <regular file>`
+        # uses EVERY BYTE as the passphrase, so one '\n' turns a correct
+        # 71-byte recovery key into a wrong 72-byte one and the failure reads
+        # exactly like a broken recovery slot. Measured on katana 2026-09-21
+        # against this very volume; see luks-pcr7's copy of this comment.
+        printf '%s' "$recovery" > "$WORK/luks-pcr7s-recovery.key"
+        local reclen
+        reclen="$(wc -c < "$WORK/luks-pcr7s-recovery.key")"
+        if [[ "$reclen" == 71 ]]; then
+            ok "captured the recovery key the signed enrolment generated (71 bytes, no trailing newline)"
+        else
+            bad "the captured recovery key is $reclen bytes, expected 71 — a key file with a trailing newline is a different passphrase to cryptsetup"
+        fi
+    else
+        bad "no recovery key came back from the signed enrolment boot"
+    fi
+
+    # ── boot B: a DIFFERENT UKI, signed by the SAME PCR key. Its cmdline
+    #    differs (apex.bootlab.entry=lukspcr7sb), so sd-stub measures a
+    #    DIFFERENT PCR 11 — the faithful stand-in for a kernel update that
+    #    luks-tpm's 'update' UKI uses, because sd-stub measures the .cmdline
+    #    section into PCR 11 exactly as it measures a new .linux.
+    #
+    #    A VALUE-BOUND POLICY WOULD REFUSE HERE. That this one does not is the
+    #    whole reason signed-pcr11 sits above pcr7 in the shipped table, and
+    #    it is being shown for the first time against a token the SHIPPED
+    #    SCRIPT created rather than one the lab enrolled for itself. ─────────
+    local hookdir_b="$WORK/luks-pcr7s-hook-b"
+    rm -rf "$hookdir_b"; mkdir -p "$hookdir_b/var/lib/dracut/hooks/pre-mount"
+    install -m 0755 "$HERE/guest-luks-probe.sh" \
+        "$hookdir_b/var/lib/dracut/hooks/pre-mount/50-apex-luks-probe.sh"
+    ( cd "$hookdir_b" && find . -print0 | cpio --null -o -H newc --quiet ) \
+        > "$WORK/luks-pcr7s-hook-b.cpio"
+    luks_uki pcr7sb "$KEYS/pcr/key.pem" "$WORK/luks-pcr7s-hook-b.cpio" \
+        "apex.bootlab.luks=unlock" || return
+
+    local diskb="$WORK/disk-pcr7s-b.img" varsb="$WORK/vars-pcr7s-b.fd"
+    local serb="$WORK/serial-pcr7s-b.log"
+    "$HERE/apex-mkesp" --disk "$diskb" --size 1024 \
+        --sb-key "$KEYS/sb/key.pem" --sb-cert "$KEYS/sb/cert.pem" \
+        --uki "lukspcr7sb:0:$WORK/uki-luks-pcr7sb.efi" --default 'apex-lukspcr7sb*' >/dev/null
+    fresh_vars "$varsb"
+    rc=0
+    vm_boot --disk "$diskb" --vars "$varsb" --name pcr7s-unlock --serial "$serb" \
+            --tpm-state "$state" --extra-disk "$img" \
+            --mem 4096 --timeout 240 || rc=$?
+    assert_eq 0 "$rc" "pcr7-signed unlock boot: clean guest poweroff"
+    # Which file the signature was found in is reported by the probe and
+    # asserted here: "the signature is missing" and "the signature did not
+    # satisfy the policy" are different failures, and only the first would make
+    # the unlock below a statement about the fixture instead of the policy.
+    assert_serial_has "$serb" "APEX-BOOTLAB: pcr-signature=/run/systemd/tpm2-pcr-signature.json"
+    assert_serial_has "$serb" "APEX-BOOTLAB: tpm-unlock=SUCCESS"
+    assert_serial_has "$serb" "APEX-BOOTLAB: plaintext-marker=written"
+
+    # The unlock is only interesting if PCR 11 actually MOVED. If the two boots
+    # measured the same value, boot B is a second copy of boot A and says
+    # nothing about surviving an update — so the comparison runs first and the
+    # claim is only made when it holds.
+    local pcr11_b
+    pcr11_b="$(luks_serial_field "$serb" pcr11)"
+    if ! luks_pcr_is_real "$pcr11_b"; then
+        bad "PCR 11 read '$pcr11_b' in the unlock boot — not a real measurement, so the comparison below is meaningless"
+    elif [[ "$(tr 'A-F' 'a-f' <<<"$pcr11_b")" == "$(tr 'A-F' 'a-f' <<<"$pcr11_a")" ]]; then
+        bad "PCR 11 is identical in both boots ($pcr11_a) — the second UKI did not move it, so this unlock proves nothing a value-bound policy could not also do"
+    else
+        ok "PCR 11 MOVED between the enrolling boot and this one ($pcr11_a -> $pcr11_b) and the signed policy still unsealed — a value-bound policy would have refused"
+    fi
+
+    # ── boot C: the refusal arm. A UKI whose PCR policy is signed by the OTHER
+    #    key, and the recovery key boot A generated.
+    #
+    #    WITHOUT THIS, BOOT B IS NOT YET A RESULT. "The token unsealed under a
+    #    PCR 11 it was not enrolled against" has two explanations — the
+    #    signature satisfied a PolicyAuthorize, or the policy constrains nothing
+    #    and would unseal for anybody. tpm2_report already refuses a zero policy
+    #    hash, which rules the second out by inspection; this rules it out by
+    #    measurement, in a guest, against the same token.
+    #
+    #    --pcrpkey stays the REAL public key (luks_uki does this for every
+    #    caller) so the refusal is isolated to the SIGNATURE. If the embedded
+    #    public key were swapped too, "the key in the image is not the enrolled
+    #    one" would explain the refusal just as well, and the boot would not
+    #    distinguish a policy check from a key-identity check. ────────────────
+    local hookdir_c="$WORK/luks-pcr7s-hook-c"
+    rm -rf "$hookdir_c"; mkdir -p "$hookdir_c/var/lib/dracut/hooks/pre-mount"
+    install -m 0755 "$HERE/guest-luks-probe.sh" \
+        "$hookdir_c/var/lib/dracut/hooks/pre-mount/50-apex-luks-probe.sh"
+    local have_recovery=0
+    if [[ -s "$WORK/luks-pcr7s-recovery.key" ]]; then
+        install -m 0400 "$WORK/luks-pcr7s-recovery.key" "$hookdir_c/apex-bootlab-recovery-key"
+        have_recovery=1
+    fi
+    ( cd "$hookdir_c" && find . -print0 | cpio --null -o -H newc --quiet ) \
+        > "$WORK/luks-pcr7s-hook-c.cpio"
+    luks_uki pcr7sc "$KEYS/foreign/key.pem" "$WORK/luks-pcr7s-hook-c.cpio" \
+        "apex.bootlab.luks=unlock" || return
+
+    local diskc="$WORK/disk-pcr7s-c.img" varsc="$WORK/vars-pcr7s-c.fd"
+    local serc="$WORK/serial-pcr7s-c.log"
+    "$HERE/apex-mkesp" --disk "$diskc" --size 1024 \
+        --sb-key "$KEYS/sb/key.pem" --sb-cert "$KEYS/sb/cert.pem" \
+        --uki "lukspcr7sc:0:$WORK/uki-luks-pcr7sc.efi" --default 'apex-lukspcr7sc*' >/dev/null
+    fresh_vars "$varsc"
+    rc=0
+    vm_boot --disk "$diskc" --vars "$varsc" --name pcr7s-foreign --serial "$serc" \
+            --tpm-state "$state" --extra-disk "$img" \
+            --mem 4096 --timeout 240 || rc=$?
+    assert_eq 0 "$rc" "pcr7-signed foreign-signature boot: clean guest poweroff"
+    # A signature WAS offered. Without this the refusal below would read the
+    # same whether the signature failed to verify or was never published at
+    # all, and only the first says anything about the policy.
+    assert_serial_has "$serc" "APEX-BOOTLAB: pcr-signature=/run/systemd/tpm2-pcr-signature.json"
+    assert_serial_has "$serc" "APEX-BOOTLAB: tpm-unlock=REFUSED"
+    assert_serial_lacks "$serc" "APEX-BOOTLAB: tpm-unlock=SUCCESS"
+    if (( have_recovery )); then
+        assert_serial_has "$serc" "APEX-BOOTLAB: recovery-unlock=SUCCESS"
+        # A mapper appearing says a keyslot was satisfied. The marker says the
+        # user got THEIR DISK back — written through the TPM path in boot B,
+        # read here through the recovery key, so the two are joined in one
+        # scenario rather than left as separate green checks that never met.
+        assert_serial_has "$serc" "APEX-BOOTLAB: recovery-marker=found"
+    else
+        cannot "no recovery key was captured from boot A, so the refusal arm's recovery path is untested this run"
+    fi
+}
+
+# ═════════════════════════════════════════════════════════════════════════════
+#  L-003 — the SHIPPED enrolment path, /usr/libexec/apex-luks-enroll
+# ═════════════════════════════════════════════════════════════════════════════
+#
+#  Everything above this line boots a guest. These four do not, and that is not
+#  a shortcut: what they have to prove is what a LUKS2 HEADER ends up holding on
+#  a machine in three states, and a header is the same object whether it was
+#  written from a guest or from here. Booting a VM to read one back would add
+#  eight minutes and a second thing that can break, and would prove nothing the
+#  header does not already say.
+#
+#  What they do NOT prove, said here rather than left implied: that the slot
+#  unlocks at BOOT. `luks-tpm` boots a real guest for that, against the signed
+#  PCR 11 policy the lab builds a UKI for. On the PCR 7 binding the production
+#  script chooses on a machine with no systemd-boot pivot, the in-boot half is
+#  now `luks-pcr7`, above this section — it runs the SHIPPED script live,
+#  inside the guest, because a value-bound `--tpm2-pcrs=7` can only be enrolled
+#  against a PCR 7 that boot actually measured. See ROADMAP/state/agents/
+#  luks-enroll.md and luks-enroll-2.md for how that gap was found and closed.
+#
+#  The unseal itself IS proven here, without device-mapper and without a guest:
+#  `systemd-cryptenroll --unlock-tpm2-device=…` only succeeds if the TPM2 slot
+#  actually unsealed, so using it to add a throwaway slot on a COPY of the
+#  volume is a real unseal with a readable exit status. Moving PCR 7 and doing
+#  it again is the matching refusal.
+
+ENROLL="$(cd "$HERE/../../system/libexec" && pwd)/apex-luks-enroll"
+# EFI_GLOBAL_VARIABLE. The production script reads SecureBoot and SetupMode
+# from here; the fixtures below write the real 5-byte shape (4 attribute bytes
+# then the value) rather than a byte, so a script that forgot the offset fails.
+ENROLL_SB_GUID=8be4df61-93ca-11d2-aa0d-00e098032b8c
+ENROLL_PASS=apex-bootlab-passphrase
+
+enroll_require() {
+    [[ -x "$ENROLL" ]] || die "no executable enrolment script at $ENROLL"
+    command -v swtpm >/dev/null || die "swtpm is missing from the boot lab"
+    command -v tpm2_pcrextend >/dev/null || die "tpm2-tools is missing from the boot lab"
+}
+
+# enroll_swtpm TAG PORT — a fresh software TPM, and the TCTI string for it.
+#
+# Its own state directory per scenario: a TPM whose state another scenario has
+# already written to makes "PCR 7 holds what we put there" depend on execution
+# order, which is the property fresh_vars exists to protect for EFI variables.
+ENROLL_TPM=""       # the systemd/tpm2-tools device string
+ENROLL_TPM_DIR=""
+enroll_swtpm() {
+    local tag="$1" port="$2"
+    ENROLL_TPM_DIR="$WORK/enroll-tpm-$tag"
+    rm -rf "$ENROLL_TPM_DIR"; mkdir -p "$ENROLL_TPM_DIR"
+    swtpm socket --tpm2 --tpmstate "dir=$ENROLL_TPM_DIR" \
+        --server "type=tcp,port=$port,bindaddr=127.0.0.1" \
+        --ctrl "type=tcp,port=$((port + 1)),bindaddr=127.0.0.1" \
+        --flags not-need-init,startup-clear \
+        --log "file=$ENROLL_TPM_DIR/swtpm.log,level=1" \
+        --pid "file=$ENROLL_TPM_DIR/swtpm.pid" --daemon \
+        || die "swtpm failed to start for '$tag' (see $ENROLL_TPM_DIR/swtpm.log)"
+    ENROLL_TPM="swtpm:host=127.0.0.1,port=$port"
+}
+
+enroll_swtpm_stop() {
+    [[ -f "${ENROLL_TPM_DIR:-}/swtpm.pid" ]] || return 0
+    kill "$(cat "$ENROLL_TPM_DIR/swtpm.pid")" 2>/dev/null || true
+    rm -f "$ENROLL_TPM_DIR/swtpm.pid"
+}
+
+# enroll_pcr7 HEX — extend PCR 7 in the current software TPM.
+#
+# WITHOUT THIS THE SB-ON SCENARIO WOULD TEST A STATE NO SECURE-BOOT MACHINE IS
+# EVER IN. A bare swtpm has PCR 7 at 64 zeros; systemd enrols against it anyway
+# and prints "PCR policy effectively unenforced", and the policy hash is
+# non-zero either way — so a hash-only assertion would pass on a volume bound to
+# a register anybody can set. Real firmware extends PCR 7 before handing over,
+# and the production script treats that warning as a refusal, so the fixture has
+# to put the register in the state the refusal is written for.
+enroll_pcr7() {
+    TPM2TOOLS_TCTI="$ENROLL_TPM" tpm2_pcrextend "7:sha256=$1" >/dev/null \
+        || die "could not extend PCR 7 in the software TPM"
+}
+
+# enroll_volume PATH — a LUKS2 volume with a known passphrase, and a key file
+# holding it so nothing below has to drive a prompt.
+#
+# pbkdf2 at the minimum iteration count: this is a throwaway header in a test
+# and argon2id's default memory cost turns each of these scenarios into minutes.
+# It is NOT what an APEX machine uses, and nothing here configures one.
+ENROLL_KEYFILE=""
+enroll_volume() {
+    local img="$1"
+    ENROLL_KEYFILE="$WORK/enroll-key.txt"
+    printf '%s' "$ENROLL_PASS" > "$ENROLL_KEYFILE"
+    chmod 600 "$ENROLL_KEYFILE"
+    rm -f "$img"
+    truncate -s 48M "$img"
+    cryptsetup luksFormat --type luks2 --batch-mode \
+        --pbkdf pbkdf2 --pbkdf-force-iterations 1000 \
+        --label APEXENROLLLAB "$img" "$ENROLL_KEYFILE" >&2 \
+        || die "could not create a LUKS2 volume at $img"
+}
+
+# enroll_root TAG SECUREBOOT SETUPMODE WITH_TPM_NODE — the fixture the
+# production script probes with --probe-root.
+#
+# An efivar is 4 bytes of attributes then the value, so these are 5 bytes with
+# the state in byte 5. The whole 5-byte shape is written, not just the value
+# byte, so that a script which read byte 1 instead of byte 5 would report
+# SecureBoot as 7 on every fixture and fail rather than accidentally agree.
+enroll_root() {
+    local tag="$1" sb="$2" setup="$3" tpmnode="$4"
+    local root="$WORK/enroll-root-$tag"
+    rm -rf "$root"
+    mkdir -p "$root/sys/firmware/efi/efivars" "$root/dev" "$root/run/systemd"
+    # Written with python3 rather than printf: a 5-byte file with a NUL in it
+    # is exactly the shape `printf` is worst at, and an efivar fixture that
+    # silently came out 4 bytes would make the production script's offset
+    # arithmetic untested rather than wrong.
+    python3 -c 'import sys; open(sys.argv[1], "wb").write(bytes([7, 0, 0, 0, int(sys.argv[2])]))' \
+        "$root/sys/firmware/efi/efivars/SecureBoot-$ENROLL_SB_GUID" "$sb"
+    python3 -c 'import sys; open(sys.argv[1], "wb").write(bytes([7, 0, 0, 0, int(sys.argv[2])]))' \
+        "$root/sys/firmware/efi/efivars/SetupMode-$ENROLL_SB_GUID" "$setup"
+    # The TPM device node. The production script tests the NODE and not
+    # /sys/class/tpm, because sysfs inside this container is the BUILD BOX's —
+    # `systemd-cryptenroll --tpm2-device=list` in here prints katana's real TPM.
+    # A regular file is enough to prove the branch is not taken; the node test
+    # is `-c`, so the scenario that wants "TPM present" names its device
+    # explicitly instead of relying on this.
+    # The production script's test is `-c`, so the fixture has to satisfy `-c`
+    # or the present-node arm of that check never runs. podman drops CAP_MKNOD,
+    # so mknod fails here — a SYMLINK TO /dev/null is a character device by
+    # every test `-c` makes, cannot be mistaken for a TPM by anything that
+    # opens it, and needs no capability. mknod is still tried first, so a lab
+    # with the capability gets the real thing.
+    if [[ "$tpmnode" == yes ]]; then
+        mknod "$root/dev/tpmrm0" c 10 224 2>/dev/null \
+            || ln -sf /dev/null "$root/dev/tpmrm0"
+    fi
+    printf '%s\n' "$root"
+}
+
+# enroll_run OUT_PREFIX ARGS... — run the shipped script, capturing both
+# streams separately, and print the exit status.
+#
+# The two streams are kept apart on purpose: the contract with the installer is
+# that STDOUT carries machine lines and STDERR carries the prose for a person.
+# A scenario that grepped a merged log could not tell the two apart and would
+# pass a script that printed its machine lines into the prose.
+# Every scenario in this family is bounded. Nothing here may wait for a person.
+#
+# MEASURED, TWICE, AND THE FIRST FIX WAS NOT ENOUGH. `systemd-cryptenroll
+# --tpm2-with-pin=yes` asks for the new PIN, and the harness sat on that prompt
+# for seven minutes with fifteen green lines already printed above it. Closing
+# stdin looked like the fix; it is not. With stdin on /dev/null and no terminal
+# at all, the same command blocked for THIRTY-SIX MINUTES inside the container,
+# because systemd falls back to its ask-password SOCKET protocol and waits for
+# an agent that will never come. `$NEWPIN` is what makes the non-interactive
+# path work, and a scenario that forgets it must FAIL rather than hang.
+#
+# So the bound is external and applies to every invocation. 120 s is roughly
+# forty times the slowest thing any of these scenarios legitimately does.
+ENROLL_TIMEOUT=120
+
+enroll_run() {
+    local prefix="$1"; shift
+    local rc=0
+    timeout "$ENROLL_TIMEOUT" "$ENROLL" "$@" \
+        >"$prefix.out" 2>"$prefix.err" </dev/null || rc=$?
+    # `timeout` reports 124 for a kill. Recorded in the captured stderr so the
+    # scenario's own assertions have something to read, rather than silently
+    # looking like a script that printed nothing.
+    (( rc == 124 )) && printf 'TIMED OUT after %ss\n' "$ENROLL_TIMEOUT" >>"$prefix.err"
+    printf '%s\n' "$rc"
+}
+
+# enroll_check DEV OUT — `--check`, bounded the same way. Prints the exit code.
+enroll_check() {
+    local dev="$1" out="$2" rc=0
+    timeout "$ENROLL_TIMEOUT" "$ENROLL" --check --device "$dev" \
+        >"$out" 2>&1 </dev/null || rc=$?
+    printf '%s\n' "$rc"
+}
+
+# enroll_field FILE KEY — the value of one `key: value` machine line, or empty.
+#
+# `|| true` because an absent field is an ANSWER here, not an error: several
+# assertions below are "this line is not present", and `$( )` under `set -e`
+# turns a grep miss into an abort of the whole harness.
+enroll_field() {
+    grep -m1 "^$2: " "$1" 2>/dev/null | cut -d' ' -f2- || true
+}
+
+# The recovery key opens the volume, and a mutated one does not.
+#
+# BOTH HALVES, ALWAYS. `--test-passphrase` needs no device-mapper, so this runs
+# unprivileged — and a check that only ever tries the right key cannot tell a
+# working recovery slot from a header that accepts anything.
+enroll_assert_recovery() {
+    local img="$1" key="$2" what="$3"
+    if [[ ! -s "$key" ]]; then bad "$what: no recovery key file at $key"; return; fi
+    local n; n="$(wc -c < "$key")"
+    assert_eq 71 "$n" "$what: recovery key length"
+    if grep -qE '^[a-z]{8}(-[a-z]{8}){7}$' "$key"; then
+        ok "$what: the recovery key is 8 modhex groups of 8"
+    else
+        bad "$what: the recovery key is not 8 modhex groups of 8"
+    fi
+    if cryptsetup open --test-passphrase --key-file "$key" "$img" >/dev/null 2>&1; then
+        ok "$what: the recovery key opens the volume"
+    else
+        bad "$what: the recovery key does NOT open the volume"
+    fi
+    # The control. One character changed; anything else is a header that would
+    # have accepted the empty string just as happily.
+    # One character changed, and changed to ANOTHER MODHEX CHARACTER. 'z' is
+    # not in systemd's modhex alphabet (cbdefghijklnrtuv), so a key mutated to
+    # 'z' would be refused for being malformed — which would leave "a wrong key
+    # is refused" untested while looking green.
+    local bad_key="$key.mutant"
+    sed 's/^c/b/; t; s/^./c/' "$key" > "$bad_key"
+    if files_same "$key" "$bad_key"; then
+        bad "$what: the mutated recovery key is identical to the real one — the control proves nothing"
+    elif cryptsetup open --test-passphrase --key-file "$bad_key" "$img" >/dev/null 2>&1; then
+        bad "$what: a MUTATED recovery key also opened the volume"
+    else
+        ok "$what: a mutated recovery key is refused (control)"
+    fi
+}
+
+# enroll_assert_unseal IMG WANT WHAT — does the TPM2 slot actually unseal?
+#
+# On a COPY, because the proof is destructive: `--unlock-tpm2-device` has to be
+# given something to DO, and the cheapest harmless thing is to add a recovery
+# slot. The copy is thrown away afterwards, so the volume every other assertion
+# reads stays exactly as the production script left it.
+enroll_assert_unseal() {
+    local img="$1" want="$2" what="$3"
+    local copy="$img.unseal-probe"
+    cp "$img" "$copy"
+    local rc=0
+    PASSWORD="" timeout "$ENROLL_TIMEOUT" systemd-cryptenroll \
+        --unlock-tpm2-device="$ENROLL_TPM" \
+        --recovery-key "$copy" >/dev/null 2>"$copy.err" </dev/null || rc=$?
+    if [[ "$want" == unseals ]]; then
+        if (( rc == 0 )); then ok "$what: the TPM2 slot unsealed the volume"
+        else bad "$what: the TPM2 slot did NOT unseal (rc=$rc): $(head -2 "$copy.err" | tr '\n' ' ')"; fi
+    else
+        if (( rc != 0 )); then ok "$what: the TPM2 slot REFUSED to unseal, as it must"
+        else bad "$what: the TPM2 slot unsealed when it should have refused"; fi
+    fi
+    rm -f "$copy"
+}
+
+# ── Secure Boot ON: a TPM slot, bound to PCR 7, with a policy ───────────────
+scenario_enroll_sb_on() {
+    log "enroll-sb-on: L-003, Secure Boot on — a TPM slot bound to PCR 7"
+    enroll_require
+    enroll_swtpm sbon 2341
+    trap enroll_swtpm_stop RETURN
+    # A value no firmware would produce, so nothing below can be reading a
+    # register some other part of the harness happened to extend.
+    enroll_pcr7 00000000000000000000000000000000000000000000000000000000000000a1
+
+    local root img rec rc
+    root="$(enroll_root sbon 1 0 yes)"
+    img="$WORK/enroll-sbon.img"
+    rec="$WORK/enroll-sbon.recovery-key"
+    enroll_volume "$img"
+
+    # NEWPIN IS SET ON THE DEFAULT ENROLMENT ON PURPOSE, and it is not a
+    # convenience. The default path asks for no PIN, so this variable is inert
+    # — which makes the `pin=no` assertion below a stronger claim than it looks:
+    # the enrolment had a PIN available for the taking and did not take it.
+    #
+    # It also makes the "PIN on by default" mutant die on the assertion written
+    # for it. MEASURED: without it that mutant was caught by the timeout bound
+    # instead, because an un-PINned `--tpm2-with-pin=yes` blocks on systemd's
+    # ask-password socket — a real kill, but one that never reaches `pin=no`, so
+    # the assertion this scenario exists to make went untested.
+    rc="$(NEWPIN=1234 enroll_run "$WORK/enroll-sbon" --device "$img" --recovery-out "$rec" \
+            --unlock-key-file "$ENROLL_KEYFILE" --tpm2-device "$ENROLL_TPM" \
+            --probe-root "$root")"
+    assert_eq 0 "$rc" "enroll-sb-on: exit status"
+
+    # ── the machine lines the installer reads ──────────────────────────────
+    local tpm2 tokens
+    tpm2="$(enroll_field "$WORK/enroll-sbon.out" tpm2)"
+    tokens="$(enroll_field "$WORK/enroll-sbon.out" tokens)"
+    info "tpm2: $tpm2"
+    assert_eq "systemd-recovery systemd-tpm2" "$tokens" "enroll-sb-on: tokens"
+    assert_eq "enrolled file=$rec" \
+        "$(enroll_field "$WORK/enroll-sbon.out" recovery)" "enroll-sb-on: recovery line"
+
+    # The binding is asserted EXACTLY, field by field, not with a pattern that
+    # any binding would satisfy. The hash is pulled out and checked separately
+    # because "a policy hash is present" and "a policy hash is not 32 zero
+    # bytes" are different claims, and the bare enrolment satisfies the first.
+    local want_prefix="enrolled binding=pcr7 pcrs=7 bank=sha256 hash="
+    case "$tpm2" in
+        "$want_prefix"*) ok "enroll-sb-on: bound to PCR 7 in the sha256 bank" ;;
+        *) bad "enroll-sb-on: tpm2 line is '$tpm2', expected to start '$want_prefix'" ;;
+    esac
+    case "$tpm2" in
+        *" pin=no") ok "enroll-sb-on: no PIN, with NEWPIN set and available to take" ;;
+        *) bad "enroll-sb-on: the default enrolment set a PIN: '$tpm2'" ;;
+    esac
+    local hash
+    hash="$(sed -n 's/.* hash=\([0-9a-f]*\).*/\1/p' <<<"$tpm2")"
+    if luks_pcr_is_real "$hash"; then
+        ok "enroll-sb-on: the policy hash is a real 32-byte digest ($hash)"
+    else
+        bad "enroll-sb-on: the policy hash is '$hash' — empty, short, or 32 zero bytes"
+    fi
+
+    # ── the seam: it SAID why it passed over the better binding ────────────
+    # The signed PCR 11 policy is the one this machine would rather have. There
+    # is no sd-stub in the fixture, so it must be skipped AND the skip must be
+    # legible — a silent fallback is how a machine that could have had the
+    # better binding quietly gets the worse one for ever.
+    if grep -q 'not using signed-pcr11' "$WORK/enroll-sbon.err"; then
+        ok "enroll-sb-on: it named the better binding it could not use"
+        info "$(grep -m1 'not using signed-pcr11' "$WORK/enroll-sbon.err")"
+    else
+        bad "enroll-sb-on: it fell back to PCR 7 without saying why signed-pcr11 was unavailable"
+    fi
+
+    # ── the gate, run separately against the volume it just wrote ──────────
+    local crc
+    crc="$(enroll_check "$img" "$WORK/enroll-sbon.check.out")"
+    assert_eq 0 "$crc" "enroll-sb-on: --check accepts the volume it enrolled"
+
+    # ── does it actually unseal, and does it stop when PCR 7 moves? ────────
+    enroll_assert_unseal "$img" unseals "enroll-sb-on"
+    enroll_pcr7 00000000000000000000000000000000000000000000000000000000000000a2
+    enroll_assert_unseal "$img" refuses "enroll-sb-on, PCR 7 moved"
+
+    # ── the recovery key still works after all of that ─────────────────────
+    enroll_assert_recovery "$img" "$rec" "enroll-sb-on"
+
+    # ── a register nobody extended is refused, and the slot is not left ───
+    #
+    # This is the branch the policy hash CANNOT catch. Enrolling against a PCR 7
+    # that is still 64 zeros produces a perfectly good-looking non-zero policy
+    # hash — measured in this lab — while binding to a register any root process
+    # can set to any value it likes. systemd says so on stderr and nowhere else,
+    # so the script reads its stderr, and this arm is what proves it does.
+    #
+    # A SECOND software TPM, on its own port, because the one above has had PCR 7
+    # extended three times by now and cannot be put back: tpm2_pcrreset answers
+    # "bad locality" for PCR 7 exactly as it does on silicon.
+    local zimg="$WORK/enroll-sbon-zero.img" zrec="$WORK/enroll-sbon-zero.recovery-key"
+    local hot_tpm="$ENROLL_TPM" hot_dir="$ENROLL_TPM_DIR"
+    enroll_swtpm sbon-zero 2343
+    enroll_volume "$zimg"
+    rc="$(enroll_run "$WORK/enroll-zero" --device "$zimg" --recovery-out "$zrec" \
+            --unlock-key-file "$ENROLL_KEYFILE" --tpm2-device "$ENROLL_TPM" \
+            --probe-root "$root")"
+    assert_eq 0 "$rc" "enroll-sb-on, PCR 7 never extended: exit status"
+    assert_eq "declined reason=pcr-uninitialised" \
+        "$(enroll_field "$WORK/enroll-zero.out" tpm2)" \
+        "enroll-sb-on, PCR 7 never extended: refused the unenforceable binding"
+    # And it did not leave the slot it had just created lying around. A refusal
+    # that reports a refusal while the keyslot stays enrolled is the worst of
+    # both: the user is told there is no TPM unlock and the disk has one.
+    assert_eq "systemd-recovery" \
+        "$(enroll_field "$WORK/enroll-zero.out" tokens)" \
+        "enroll-sb-on, PCR 7 never extended: the TPM slot was removed again"
+    enroll_assert_recovery "$zimg" "$zrec" "enroll-sb-on, PCR 7 never extended"
+    enroll_swtpm_stop
+    ENROLL_TPM="$hot_tpm"; ENROLL_TPM_DIR="$hot_dir"
+
+    # ── --with-pin is opt-in, and it shows its arithmetic ──────────────────
+    # A separate volume: the one above must keep pin=no so that assertion means
+    # what it says.
+    local pimg="$WORK/enroll-sbon-pin.img" prec="$WORK/enroll-sbon-pin.recovery-key"
+    enroll_volume "$pimg"
+    enroll_pcr7 00000000000000000000000000000000000000000000000000000000000000b1
+    rc="$(NEWPIN=1234 enroll_run "$WORK/enroll-pin" \
+            --device "$pimg" --recovery-out "$prec" \
+            --unlock-key-file "$ENROLL_KEYFILE" --tpm2-device "$ENROLL_TPM" \
+            --probe-root "$root" --with-pin)"
+    if (( rc == 0 )); then
+        case "$(enroll_field "$WORK/enroll-pin.out" tpm2)" in
+            *" pin=yes") ok "enroll-sb-on: --with-pin really sets a PIN" ;;
+            *) bad "enroll-sb-on: --with-pin did not produce pin=yes" ;;
+        esac
+        # The numbers, read off the part, and not the word "unknown" beside
+        # them: the script has an honest fallback for a TPM that will not
+        # answer, and a check that accepted the fallback would pass a script
+        # that had stopped asking.
+        if grep -qE 'TPM2_PT_MAX_AUTH_FAIL = 0x[0-9A-Fa-f]+' "$WORK/enroll-pin.err" \
+           && grep -qE 'TPM2_PT_LOCKOUT_INTERVAL = 0x[0-9A-Fa-f]+' "$WORK/enroll-pin.err" \
+           && grep -qE 'TPM2_PT_LOCKOUT_RECOVERY = 0x[0-9A-Fa-f]+' "$WORK/enroll-pin.err"; then
+            ok "enroll-sb-on: --with-pin read this part's lockout arithmetic off the chip"
+            info "$(grep -m1 'TPM2_PT_MAX_AUTH_FAIL' "$WORK/enroll-pin.err")"
+        elif grep -q 'would not report its lockout properties' "$WORK/enroll-pin.err"; then
+            cannot "enroll-sb-on: the software TPM would not report its lockout properties, so --with-pin could only say so"
+        else
+            bad "enroll-sb-on: --with-pin said nothing about the lockout counter at all"
+        fi
+        enroll_assert_recovery "$pimg" "$prec" "enroll-sb-on --with-pin"
+    else
+        # A software TPM that will not take a PIN is a lab limitation, not an
+        # APEX defect, and recording it as a failure would report the wrong
+        # thing. It is NOT recorded as a pass either.
+        cannot "enroll-sb-on: --with-pin exited $rc against swtpm: $(head -2 "$WORK/enroll-pin.err" | tr '\n' ' ')"
+    fi
+}
+
+# ── Secure Boot OFF: no TPM slot, and a reason a user can act on ───────────
+scenario_enroll_sb_off() {
+    log "enroll-sb-off: L-003, Secure Boot off — recovery key only, and it says why"
+    enroll_require
+    enroll_swtpm sboff 2351
+    trap enroll_swtpm_stop RETURN
+    enroll_pcr7 00000000000000000000000000000000000000000000000000000000000000c1
+
+    local root img rec rc
+    root="$(enroll_root sboff 0 0 yes)"
+    img="$WORK/enroll-sboff.img"
+    rec="$WORK/enroll-sboff.recovery-key"
+    enroll_volume "$img"
+
+    rc="$(enroll_run "$WORK/enroll-sboff" --device "$img" --recovery-out "$rec" \
+            --unlock-key-file "$ENROLL_KEYFILE" --tpm2-device "$ENROLL_TPM" \
+            --probe-root "$root")"
+    # EXIT 0 IS PART OF THE CONTRACT. The volume is usable and the recovery key
+    # is enrolled; an installer that read "no TPM slot" as a failed install
+    # would abort a perfectly good installation on a machine whose owner simply
+    # has not turned Secure Boot on.
+    assert_eq 0 "$rc" "enroll-sb-off: exit status (a declined TPM slot is not a failure)"
+
+    assert_eq "declined reason=secure-boot-off" \
+        "$(enroll_field "$WORK/enroll-sboff.out" tpm2)" "enroll-sb-off: tpm2 line"
+    # EXACTLY the recovery token. "contains systemd-recovery" would also pass on
+    # a volume that had quietly been given a TPM slot as well.
+    assert_eq "systemd-recovery" \
+        "$(enroll_field "$WORK/enroll-sboff.out" tokens)" "enroll-sb-off: tokens"
+    assert_eq "enrolled file=$rec" \
+        "$(enroll_field "$WORK/enroll-sboff.out" recovery)" "enroll-sb-off: recovery line"
+
+    # The reason has to be in words the user can act on, which means naming the
+    # thing to change and where. A slug alone is a machine talking to itself.
+    local err="$WORK/enroll-sboff.err"
+    if grep -qi 'Secure Boot is OFF' "$err"; then
+        ok "enroll-sb-off: it says Secure Boot is off, in those words"
+    else
+        bad "enroll-sb-off: the prose never says Secure Boot is off"
+    fi
+    if grep -qi 'turn Secure Boot on in the firmware setup' "$err"; then
+        ok "enroll-sb-off: it says what to change and where"
+    else
+        bad "enroll-sb-off: it does not tell the user what to do about it"
+    fi
+    if grep -qF -- "$rec" "$err"; then
+        ok "enroll-sb-off: it names the recovery key file the user must keep"
+    else
+        bad "enroll-sb-off: the prose never names the recovery key file"
+    fi
+
+    # --check agrees, from outside, that there is no TPM slot here.
+    local crc
+    crc="$(enroll_check "$img" "$WORK/enroll-sboff.check.out")"
+    assert_eq 0 "$crc" "enroll-sb-off: --check exit status"
+    assert_eq "absent" "$(enroll_field "$WORK/enroll-sboff.check.out" tpm2)" \
+        "enroll-sb-off: --check reports no TPM slot"
+
+    enroll_assert_recovery "$img" "$rec" "enroll-sb-off"
+
+    # ── setup mode is refused too, and for its own reason ──────────────────
+    # SecureBoot=1 in SETUP MODE means nothing: there is no platform key, so
+    # anyone can enrol their own and sign whatever they like. A check that only
+    # read SecureBoot would call this machine safe.
+    local sroot simg srec
+    sroot="$(enroll_root setupmode 1 1 yes)"
+    simg="$WORK/enroll-setupmode.img"
+    srec="$WORK/enroll-setupmode.recovery-key"
+    enroll_volume "$simg"
+    rc="$(enroll_run "$WORK/enroll-setupmode" --device "$simg" --recovery-out "$srec" \
+            --unlock-key-file "$ENROLL_KEYFILE" --tpm2-device "$ENROLL_TPM" \
+            --probe-root "$sroot")"
+    assert_eq 0 "$rc" "enroll-setup-mode: exit status"
+    assert_eq "declined reason=setup-mode" \
+        "$(enroll_field "$WORK/enroll-setupmode.out" tpm2)" \
+        "enroll-setup-mode: SecureBoot=1 in setup mode is still refused"
+    enroll_assert_recovery "$simg" "$srec" "enroll-setup-mode"
+}
+
+# ── No TPM at all: recovery key, and the firmware setting to look for ──────
+scenario_enroll_no_tpm() {
+    log "enroll-no-tpm: L-003, no TPM device — recovery key only"
+    enroll_require
+
+    local root img rec rc
+    # Secure Boot ON, so the only thing that can decline is the missing TPM.
+    # With it off, this scenario would pass while testing the previous one.
+    root="$(enroll_root notpm 1 0 no)"
+    img="$WORK/enroll-notpm.img"
+    rec="$WORK/enroll-notpm.recovery-key"
+    enroll_volume "$img"
+
+    # --tpm2-device is left at its default `auto`, which is the branch that
+    # looks for a device node. Naming a device would assert one exists.
+    rc="$(enroll_run "$WORK/enroll-notpm" --device "$img" --recovery-out "$rec" \
+            --unlock-key-file "$ENROLL_KEYFILE" --probe-root "$root")"
+    assert_eq 0 "$rc" "enroll-no-tpm: exit status"
+    assert_eq "declined reason=no-tpm2-device" \
+        "$(enroll_field "$WORK/enroll-notpm.out" tpm2)" "enroll-no-tpm: tpm2 line"
+    assert_eq "systemd-recovery" \
+        "$(enroll_field "$WORK/enroll-notpm.out" tokens)" "enroll-no-tpm: tokens"
+
+    local err="$WORK/enroll-notpm.err"
+    if grep -qi 'PTT' "$err" && grep -qi 'fTPM' "$err"; then
+        ok "enroll-no-tpm: it names the firmware settings to look for"
+    else
+        bad "enroll-no-tpm: it does not say where a user would turn a TPM on"
+    fi
+
+    enroll_assert_recovery "$img" "$rec" "enroll-no-tpm"
+
+    # The control on the fixture itself. If enroll_root were writing the TPM
+    # node in both cases, the scenario above would be declining for the reason
+    # it declines everywhere, and would still be green.
+    local yesroot
+    yesroot="$(enroll_root notpm-control 1 0 yes)"
+    if [[ -e "$yesroot/dev/tpmrm0" && ! -e "$root/dev/tpmrm0" ]]; then
+        ok "enroll-no-tpm: the fixture really does differ in the TPM node (control)"
+    else
+        bad "enroll-no-tpm: the with-TPM and without-TPM fixtures are the same — the scenario proves nothing"
+    fi
+
+    # THE OTHER ARM. Everything above shows an absent node declines. Without
+    # this, a script that declined `no-tpm2-device` unconditionally would be
+    # green — the same shape as a gate that inspects nothing. The node has to be
+    # a real CHARACTER DEVICE for the branch to be exercised, and podman drops
+    # CAP_MKNOD by default, so a lab that cannot make one records COULD-NOT-RUN
+    # rather than passing or failing.
+    if [[ -c "$yesroot/dev/tpmrm0" ]]; then
+        local cimg="$WORK/enroll-notpm-control.img" crec="$WORK/enroll-notpm-control.recovery-key"
+        enroll_volume "$cimg"
+        rc="$(enroll_run "$WORK/enroll-notpm-control" --device "$cimg" \
+                --recovery-out "$crec" --unlock-key-file "$ENROLL_KEYFILE" \
+                --probe-root "$yesroot")"
+        # It will still fail to enrol — `auto` finds no TPM to talk to in this
+        # container — but it must fail for a DIFFERENT reason, which is the
+        # whole point: the node check is what separates the two fixtures.
+        case "$(enroll_field "$WORK/enroll-notpm-control.out" tpm2)" in
+            *no-tpm2-device*)
+                bad "enroll-no-tpm: a present TPM node still declined as no-tpm2-device — the node check is not what decided" ;;
+            *)  ok "enroll-no-tpm: a present TPM node does NOT decline as no-tpm2-device (control)" ;;
+        esac
+        enroll_assert_recovery "$cimg" "$crec" "enroll-no-tpm control"
+    else
+        cannot "enroll-no-tpm: could not create a character device at $yesroot/dev/tpmrm0 (podman drops CAP_MKNOD), so the present-node arm of the check is untested"
+    fi
+}
+
+# ── THE NEGATIVE CONTROL: a volume enrolled the bare way must be caught ────
+#
+#  This is the scenario that decides whether any of the others mean anything.
+#  Everything else checks that the production script's output matches what the
+#  production script was written to produce. This one enrols a volume WITHOUT
+#  the production script, the way `systemd-cryptenroll --tpm2-device=auto` does
+#  it by default, and requires the gate to reject it.
+#
+#  MEASURED, systemd 258.10, in this lab: that enrolment prints "New TPM2 token
+#  enrolled as key slot 1", exits 0, and writes `tpm2-pcrs: []`,
+#  `tpm2-policy-hash: <64 zeros>` and no `tpm2-pcr-bank` field at all. The
+#  object is sealed to the TPM's storage key and nothing else.
+scenario_enroll_bare_policy() {
+    log "enroll-bare-policy: L-003, the gate catches an enrolment bound to no PCRs"
+    enroll_require
+    enroll_swtpm bare 2361
+    trap enroll_swtpm_stop RETURN
+    enroll_pcr7 00000000000000000000000000000000000000000000000000000000000000d1
+
+    local img="$WORK/enroll-bare.img"
+    enroll_volume "$img"
+    # Deliberately NOT through the production script.
+    PASSWORD="$ENROLL_PASS" systemd-cryptenroll --tpm2-device="$ENROLL_TPM" \
+        --unlock-key-file="$ENROLL_KEYFILE" "$img" >&2 </dev/null \
+        || die "could not create the bare-enrolment control volume"
+
+    # The control is known-bad rather than assumed bad. If systemd ever changes
+    # its default to bind something, this says so instead of quietly turning the
+    # scenario into a test of nothing.
+    local shape
+    shape="$(cryptsetup luksDump --dump-json-metadata "$img" | python3 -c '
+import json, sys
+t = [v for v in json.load(sys.stdin).get("tokens", {}).values()
+     if v.get("type") == "systemd-tpm2"]
+if len(t) != 1:
+    print("no-single-tpm2-token"); raise SystemExit(0)
+print("pcrs=%s hash=%s" % (t[0].get("tpm2-pcrs"), t[0].get("tpm2-policy-hash")))
+')"
+    info "bare token: $shape"
+    if [[ "$shape" == "pcrs=[] hash=$(printf '0%.0s' {1..64})" ]]; then
+        ok "enroll-bare-policy: the control volume really is bound to no PCRs"
+    else
+        bad "enroll-bare-policy: the control is '$shape', not the empty policy this scenario exists to catch"
+    fi
+
+    # ── the gate ───────────────────────────────────────────────────────────
+    local rc
+    rc="$(enroll_check "$img" "$WORK/enroll-bare.out")"
+    cp "$WORK/enroll-bare.out" "$WORK/enroll-bare.err"
+    assert_eq 2 "$rc" "enroll-bare-policy: --check REFUSES the empty policy"
+    assert_eq "unsafe" "$(enroll_field "$WORK/enroll-bare.out" tpm2)" \
+        "enroll-bare-policy: --check machine line"
+    if grep -q 'binds NO PCRs at all' "$WORK/enroll-bare.err"; then
+        ok "enroll-bare-policy: it says what is wrong with the token"
+    else
+        bad "enroll-bare-policy: the refusal does not explain itself"
+    fi
+    if grep -q 'wipe-slot=tpm2' "$WORK/enroll-bare.err"; then
+        ok "enroll-bare-policy: it says how to undo it"
+    else
+        bad "enroll-bare-policy: the refusal offers no way forward"
+    fi
+
+    # ── the OTHER arm of the same gate ─────────────────────────────────────
+    # A gate that refuses everything is not a gate. The SB-on scenario asserts
+    # --check accepts a good volume, but it does so with the same swtpm and the
+    # same fixture; doing it again here, on a volume this scenario enrolled,
+    # means the refusal above cannot be an artefact of the gate always failing.
+    local goodimg="$WORK/enroll-bare-good.img" goodrec="$WORK/enroll-bare-good.recovery-key"
+    local root; root="$(enroll_root bare 1 0 yes)"
+    enroll_volume "$goodimg"
+    rc="$(enroll_run "$WORK/enroll-bare-good" --device "$goodimg" --recovery-out "$goodrec" \
+            --unlock-key-file "$ENROLL_KEYFILE" --tpm2-device "$ENROLL_TPM" \
+            --probe-root "$root")"
+    assert_eq 0 "$rc" "enroll-bare-policy: the good volume enrols"
+    rc="$(enroll_check "$goodimg" "$WORK/enroll-bare-good.check.out")"
+    assert_eq 0 "$rc" "enroll-bare-policy: --check ACCEPTS a volume bound to PCR 7 (both arms)"
+
+    # ── and the production script REPAIRS a volume that already has the bad
+    #    token, rather than stacking a second one beside it ─────────────────
+    local fiximg="$WORK/enroll-bare-fix.img" fixrec="$WORK/enroll-bare-fix.recovery-key"
+    cp "$img" "$fiximg"
+    rc="$(enroll_run "$WORK/enroll-bare-fix" --device "$fiximg" --recovery-out "$fixrec" \
+            --unlock-key-file "$ENROLL_KEYFILE" --tpm2-device "$ENROLL_TPM" \
+            --probe-root "$root")"
+    assert_eq 0 "$rc" "enroll-bare-policy: re-enrolling over the bad token"
+    assert_eq "systemd-recovery systemd-tpm2" \
+        "$(enroll_field "$WORK/enroll-bare-fix.out" tokens)" \
+        "enroll-bare-policy: exactly one TPM token afterwards, not two"
+    case "$(enroll_field "$WORK/enroll-bare-fix.out" tpm2)" in
+        "enrolled binding=pcr7 pcrs=7 bank=sha256 hash="*)
+            ok "enroll-bare-policy: the repaired volume is bound to PCR 7" ;;
+        *)  bad "enroll-bare-policy: the repaired volume is still not bound to PCR 7" ;;
+    esac
+    rc="$(enroll_check "$fiximg" "$WORK/enroll-bare-fix.check.out")"
+    assert_eq 0 "$rc" "enroll-bare-policy: --check now accepts the repaired volume"
+    enroll_assert_recovery "$fiximg" "$fixrec" "enroll-bare-policy, repaired"
+}
+
+# ── run ─────────────────────────────────────────────────────────────────────
+for s in "${SCENARIOS[@]}"; do
+    fn="scenario_${s//-/_}"
+    declare -F "$fn" >/dev/null || die "no such scenario: $s (try --list)"
+    "$fn"
+done
+# No explicit summary call: bootv2_report runs on EXIT and prints exactly one,
+# on this path and on every abort path alike. Two call sites would be two
+# chances for the reporting to differ from the reporting under failure, which
+# is the only time anybody reads it closely.

@@ -140,6 +140,7 @@ fn enter_then_exit_restores_the_filesystem_byte_for_byte() {
         cfg: &cfg,
         topo: &topo,
         nvidia: &[], // covered separately; nvidia-smi is not on the test host
+        gpus: &[],
         irqs: &irqs,
         pids: &placements,
         mems: "0".into(),
@@ -195,6 +196,7 @@ fn exit_is_idempotent() {
         cfg: &cfg,
         topo: &topo,
         nvidia: &[],
+        gpus: &[],
         irqs: &irqs,
         pids: &[],
         mems: "0".into(),
@@ -234,12 +236,13 @@ fn a_uniform_machine_plans_no_pinning_and_no_steering() {
         cfg: &cfg,
         topo: &topo,
         nvidia: &[],
+        gpus: &[],
         irqs: &irqs,
         pids: &[],
         mems: "0".into(),
         irqbalance: false,
     });
-    assert_eq!(plan.irqs_steered, 0);
+    assert_eq!(plan.irqs_attempted, 0);
     assert!(!plan.enter.iter().any(|a| matches!(a, Action::IrqAffinity { .. })));
     assert!(plan.notes.iter().any(|n| n.contains("no P/E split")));
 }
@@ -259,12 +262,13 @@ fn irq_policy_off_leaves_interrupts_alone() {
         cfg: &cfg,
         topo: &topo,
         nvidia: &[],
+        gpus: &[],
         irqs: &irqs,
         pids: &[],
         mems: "0".into(),
         irqbalance: false,
     });
-    assert_eq!(plan.irqs_steered, 0);
+    assert_eq!(plan.irqs_attempted, 0);
     assert!(plan.enter.iter().any(|a| matches!(a, Action::CgroupEnsure { .. })));
 }
 
@@ -291,6 +295,7 @@ fn cpuset_off_plans_nothing_at_all() {
         cfg: &cfg,
         topo: &topo,
         nvidia: &[],
+        gpus: &[],
         irqs: &irq::enumerate(&f.path().join("proc/irq")),
         pids: &[],
         mems: "0".into(),
@@ -372,12 +377,13 @@ fn a_running_irqbalance_is_called_out() {
         cfg: &cfg,
         topo: &topo,
         nvidia: &[],
+        gpus: &[],
         irqs: &irqs,
         pids: &[],
         mems: "0".into(),
         irqbalance: true,
     });
-    assert!(plan.irqs_steered > 0);
+    assert!(plan.irqs_attempted > 0);
     assert!(
         plan.notes.iter().any(|n| n.contains("irqbalance")),
         "steering while irqbalance runs must be reported, not silently lost"
@@ -494,11 +500,15 @@ fn a_session_with_a_gpu_locks_and_unlocks_it() {
             max_memory_mhz: Some(6001),
             persistence: Some(false),
         }],
+        // Game planning does not read VRAM; spelled with the struct-update
+        // syntax so a future querier field does not break this case again.
+        ..Default::default()
     };
     let plan = game::plan(&GameInputs {
         cfg: &cfg,
         topo: &topo,
         nvidia: &nvidia.query(),
+        gpus: &[],
         irqs: &irq::enumerate(&f.path().join("proc/irq")),
         pids: &[],
         mems: "0".into(),
@@ -567,6 +577,7 @@ fn scx_plan(scx: &str) -> (Fixture, game::GamePlan) {
         cfg: &cfg,
         topo: &topo,
         nvidia: &[],
+        gpus: &[],
         irqs: &irqs,
         pids: &placements,
         mems: "0".into(),
@@ -636,6 +647,59 @@ fn scx_is_first_on_enter_and_last_on_exit() {
 }
 
 #[test]
+fn the_plan_note_asks_for_a_scheduler_and_does_not_claim_one() {
+    // A PLAN cannot know what the machine did with it, and this note is what
+    // `apex game status` carried as its only sched-ext surface. It read
+    //
+    //     sched-ext: scx_lavd for the session, kernel scheduler restored on exit
+    //
+    // and on katana it was printed directly beneath the journal line recording
+    // `scxctl` refusing the call — for three consecutive boots, on two
+    // different images. Nobody could have caught it, because the sentence was
+    // copied out of the plan and never checked against anything.
+    //
+    // Both directions matter. A note that stops naming the scheduler is no
+    // use either, so the name is required as well.
+    let (_f, plan) = scx_plan("scx_lavd");
+    let note = plan
+        .notes
+        .iter()
+        .find(|n| n.contains("sched-ext"))
+        .unwrap_or_else(|| panic!("the plan must still explain its scx step: {:?}", plan.notes));
+
+    assert!(
+        note.contains("scx_lavd"),
+        "the note must name the scheduler it plans: {note}"
+    );
+    assert!(
+        note.to_lowercase().contains("asks"),
+        "a plan ASKS; it is in no position to report. Got: {note}"
+    );
+    assert!(
+        note.contains("scx_state"),
+        "and it must point at the surface that DOES report, or the reader has \
+         nowhere to go for the answer: {note}"
+    );
+    assert!(
+        !note.contains("for the session, kernel scheduler restored on exit"),
+        "this is the exact sentence that asserted a scheduler that had never \
+         loaded — it must not come back: {note}"
+    );
+}
+
+#[test]
+fn a_profile_that_asks_for_no_scheduler_plans_no_note_about_one() {
+    // The other direction: `scx = ""` must produce silence, not a note
+    // explaining a step that is not in the plan.
+    let (_f, plan) = scx_plan("");
+    assert!(
+        !plan.notes.iter().any(|n| n.contains("sched-ext")),
+        "nothing was planned, so nothing is to be said: {:?}",
+        plan.notes
+    );
+}
+
+#[test]
 fn the_default_scx_is_the_only_thing_planned_when_cpuset_is_off() {
     // The complement of cpuset_off_plans_nothing_at_all: with the shipped
     // default, `cpuset = "off"` plans the scheduler switch and NOTHING else. If
@@ -652,6 +716,7 @@ fn the_default_scx_is_the_only_thing_planned_when_cpuset_is_off() {
         cfg: &cfg,
         topo: &topo,
         nvidia: &[],
+        gpus: &[],
         irqs: &irq::enumerate(&f.path().join("proc/irq")),
         pids: &[],
         mems: "0".into(),
@@ -663,4 +728,142 @@ fn the_default_scx_is_the_only_thing_planned_when_cpuset_is_off() {
         "cpuset off must plan the scheduler switch and nothing else"
     );
     assert_eq!(plan.exit, vec![Action::ScxStop]);
+}
+
+// ── the session owner: who the daemon watches so a torn-down session releases ─
+//
+// These stand behind the fix for the katana 2026-09-19 defect (evidence §3.4):
+// Gaming Mode could not release itself when logind deactivated its session,
+// because the EXIT trap's `apex game stop` is a polkit `allow_active=yes`
+// action and a deactivated session is no longer active. apexd now watches the
+// process that asked for game mode and releases it when that process dies.
+// Everything below is the reading that decision is made from.
+
+use apexd_core::game::{owner_for_pid, owner_state, parse_proc_stat, OwnerState, SessionOwner};
+
+/// A `/proc/<pid>/stat` line in the kernel's real shape. Fields 1 and 2 are
+/// `pid` and `(comm)`; everything after the closing paren is field 3 onward.
+fn stat_line(pid: u32, comm: &str, state: char, starttime: u64) -> String {
+    let mut fields: Vec<String> = Vec::new();
+    // fields 4..=21 — their values do not matter here, only their COUNT does.
+    for n in 4..=21 {
+        fields.push(n.to_string());
+    }
+    format!(
+        "{pid} ({comm}) {state} {} {starttime} 0 0 0",
+        fields.join(" ")
+    )
+}
+
+fn proc_fixture(tag: &str) -> Fixture {
+    Fixture::new(tag)
+}
+
+#[test]
+fn starttime_is_read_after_the_last_paren_so_a_comm_with_spaces_cannot_shift_it() {
+    // The same process, named three ways. A whitespace-split from the start of
+    // the line reads a different field for each of these; the parse must not.
+    for comm in ["bash", "apex gaming session", "my prog (old)", "a) b (c"] {
+        let line = stat_line(4242, comm, 'S', 99_887_766);
+        let st = parse_proc_stat(&line)
+            .unwrap_or_else(|| panic!("comm {comm:?} made the stat line unparseable"));
+        assert_eq!(
+            st.starttime, 99_887_766,
+            "comm {comm:?} shifted the start time; field 2 was not skipped by the last ')'"
+        );
+        assert_eq!(st.state, 'S', "comm {comm:?} shifted the state field");
+    }
+}
+
+#[test]
+fn a_truncated_stat_line_is_unparseable_rather_than_wrong() {
+    // 22 fields are needed. A line with 21 must yield None — NOT a zero, which
+    // would compare unequal to every recorded start time and release game mode
+    // on every tick.
+    let short = format!("7 (x) S {}", (4..=21).map(|n| n.to_string()).collect::<Vec<_>>().join(" "));
+    assert_eq!(parse_proc_stat(&short), None);
+    assert_eq!(parse_proc_stat(""), None);
+    assert_eq!(parse_proc_stat("7 x S 1 2 3"), None, "no ')' at all");
+}
+
+#[test]
+fn an_owner_that_is_still_running_is_alive() {
+    let f = proc_fixture("owner-alive");
+    f.write("proc/900/stat", &stat_line(900, "apex-gaming-ses", 'S', 12345));
+    let owner = owner_for_pid(&f.path().join("proc"), 900).expect("the fixture pid is readable");
+    assert_eq!(owner, SessionOwner { pid: 900, starttime: 12345 });
+    assert_eq!(owner_state(&f.path().join("proc"), &owner), OwnerState::Alive);
+}
+
+#[test]
+fn an_owner_whose_proc_entry_vanished_is_gone() {
+    let f = proc_fixture("owner-gone");
+    f.write("proc/901/stat", &stat_line(901, "apex-gaming-ses", 'S', 12345));
+    let proc = f.path().join("proc");
+    let owner = owner_for_pid(&proc, 901).unwrap();
+    assert_eq!(owner_state(&proc, &owner), OwnerState::Alive);
+
+    fs::remove_dir_all(proc.join("901")).unwrap();
+    match owner_state(&proc, &owner) {
+        OwnerState::Gone(why) => assert!(why.contains("/proc/901"), "why was {why:?}"),
+        other => panic!("a vanished owner read as {other:?}"),
+    }
+}
+
+#[test]
+fn a_reused_pid_is_gone_and_not_alive() {
+    // The whole reason the start time is recorded. Same number, different
+    // process: a bare-PID watch would call this Alive and pin the machine in a
+    // gaming power profile for as long as the impostor lives.
+    let f = proc_fixture("owner-reused");
+    let proc = f.path().join("proc");
+    f.write("proc/902/stat", &stat_line(902, "apex-gaming-ses", 'S', 12345));
+    let owner = owner_for_pid(&proc, 902).unwrap();
+
+    f.write("proc/902/stat", &stat_line(902, "something-else", 'S', 999_999));
+    match owner_state(&proc, &owner) {
+        OwnerState::Gone(why) => assert!(why.contains("reused"), "why was {why:?}"),
+        other => panic!("a reused pid read as {other:?}"),
+    }
+}
+
+#[test]
+fn a_zombie_owner_is_gone() {
+    // It has exited and holds nothing; only an unreaped parent keeps the
+    // directory. Waiting for the reap would mean a greetd that died mid-
+    // teardown leaves the machine in the gaming profile indefinitely.
+    let f = proc_fixture("owner-zombie");
+    let proc = f.path().join("proc");
+    f.write("proc/903/stat", &stat_line(903, "apex-gaming-ses", 'Z', 12345));
+    let owner = SessionOwner { pid: 903, starttime: 12345 };
+    match owner_state(&proc, &owner) {
+        OwnerState::Gone(why) => assert!(why.contains("zombie"), "why was {why:?}"),
+        other => panic!("a zombie owner read as {other:?}"),
+    }
+}
+
+#[test]
+fn an_unreadable_proc_is_a_third_answer_and_never_a_release() {
+    // Fail closed. An unreadable /proc has measured nothing, and turning that
+    // into a release would make an I/O error change the machine's power state.
+    let f = proc_fixture("owner-unreadable");
+    let owner = SessionOwner { pid: 904, starttime: 12345 };
+
+    match owner_state(&f.path().join("no-such-proc"), &owner) {
+        OwnerState::Unknown(why) => assert!(why.contains("no-such-proc"), "why was {why:?}"),
+        other => panic!("an absent /proc read as {other:?}"),
+    }
+
+    // Present but garbage: also Unknown, not Gone.
+    f.write("proc/904/stat", "this is not a stat line");
+    match owner_state(&f.path().join("proc"), &owner) {
+        OwnerState::Unknown(why) => assert!(why.contains("904"), "why was {why:?}"),
+        other => panic!("an unparseable stat read as {other:?}"),
+    }
+}
+
+#[test]
+fn owner_for_pid_refuses_a_pid_that_does_not_exist() {
+    let f = proc_fixture("owner-absent");
+    assert_eq!(owner_for_pid(&f.path().join("proc"), 905), None);
 }

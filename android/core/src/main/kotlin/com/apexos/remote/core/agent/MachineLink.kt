@@ -1,0 +1,426 @@
+package com.apexos.remote.core.agent
+
+import com.apexos.remote.core.FrameChannel
+import com.apexos.remote.core.link.Disconnected
+import com.apexos.remote.core.link.Mux
+import com.apexos.remote.core.link.Upload
+import java.io.Closeable
+import java.util.concurrent.TimeoutException
+
+/**
+ * The control plane: one connection, used for asking a machine questions.
+ *
+ * ## Why it is not the PTY's connection
+ *
+ * Because the PTY's connection is busy being a PTY. `apex-remoted` answers a
+ * control frame from a single-threaded loop that **blocks while `apex-agentd`
+ * thinks** — `serve.rs` — and a privilege request legitimately waits as long
+ * as the person does, which is why `Mux.CONTROL_TIMEOUT_MS` is five minutes.
+ * Sharing one connection would mean a list refresh could sit behind a prompt
+ * somebody has gone to lunch without answering, with the terminal frozen
+ * behind it.
+ *
+ * There is no per-device connection cap on the far side to make this
+ * expensive: `apex-remoted` opens a fresh unix connection to `apex-agentd` per
+ * control round trip anyway, and `net.rs` caps message size rather than
+ * connections. Checked, rather than assumed.
+ *
+ * ## Reconnecting is a property of asking, not of a loop
+ *
+ * There is no reconnect *thread* here, and that is deliberate. A control
+ * connection has nothing to deliver while nobody is asking — unlike a PTY,
+ * which is a stream whose whole point is arriving unbidden. So a dead
+ * connection is noticed on the next question and replaced then, and a phone in
+ * a pocket is not reconnecting to something it is not reading.
+ *
+ * One retry, and only for [Disconnected]: a request that reached the daemon
+ * and was refused must not be sent twice. `signal` is the case that makes this
+ * more than tidiness — a `SIGTERM` delivered twice because the reply was lost
+ * is a second signal into whatever the agent was doing next.
+ */
+class MachineLink(
+    /** Opens a fresh connection. May throw; the caller sees the throw. */
+    private val connect: () -> FrameChannel,
+    private val onEvent: (LinkEvent) -> Unit = {},
+) : Closeable {
+    /** What a caller is told about the connection underneath. */
+    sealed class LinkEvent {
+        data class Connected(val machine: String) : LinkEvent()
+
+        /** The connection went; the next request will make a new one. */
+        data class Dropped(val cause: Throwable?) : LinkEvent()
+    }
+
+    private val lock = Any()
+    private var mux: Mux? = null
+    private var pump: Thread? = null
+
+    @Volatile
+    private var closed = false
+
+    /** How many connections this link has opened. The reconnect's own evidence. */
+    @Volatile
+    var connections: Int = 0
+        private set
+
+    /** Whether a connection is currently up. */
+    val connected: Boolean get() = synchronized(lock) { mux != null }
+
+    // ---- the verbs ------------------------------------------------------
+
+    fun hello(): Hello = Agentd.readHello(request(Agentd.hello()))
+
+    /**
+     * Every session the daemon knows, in the order the Agent Center draws
+     * them.
+     *
+     * Sorted here rather than by the screen, so that a notification, a badge
+     * count and a list cannot disagree about which session is first.
+     */
+    fun sessions(): List<AgentSession> = Order.flat(Agentd.readSessions(request(Agentd.list())))
+
+    /** The daemon's own order, for a caller that wants to sort differently. */
+    fun sessionsUnsorted(): List<AgentSession> = Agentd.readSessions(request(Agentd.list()))
+
+    fun info(id: Int): AgentSession = Agentd.readSession(request(Agentd.info(id)))
+
+    /**
+     * Deliver a signal, by the daemon's name for it.
+     *
+     * Not retried on a dropped connection — see the class note. The caller is
+     * told the connection went and can decide, which is the only safe place
+     * for that decision: only a person knows whether the agent they meant to
+     * stop is one they mind stopping twice.
+     */
+    fun signal(id: Int, signal: String) = Agentd.readOk(request(Agentd.signal(id, signal), retry = false))
+
+    fun pause(id: Int) = signal(id, "stop")
+
+    fun resume(id: Int) = signal(id, "cont")
+
+    /** Ask politely: `SIGTERM`. */
+    fun stop(id: Int) = signal(id, "term")
+
+    fun interrupt(id: Int) = signal(id, "int")
+
+    /**
+     * Start a session, and get it back.
+     *
+     * Never retried, for the obvious reason: a `run` whose reply was lost may
+     * have started an agent, and a second attempt would start a second one in
+     * the same directory. `cwd` must be absolute — `RunRequest` says so — and
+     * that is checked here rather than discovered as a daemon error.
+     */
+    fun run(
+        cwd: String,
+        cols: Int,
+        rows: Int,
+        agent: String? = null,
+        prompt: String? = null,
+        worktree: String? = null,
+        checkpoint: Boolean = false,
+        /**
+         * Extra arguments after the adapter's own — `RunRequest.args`.
+         *
+         * For `generic` this is the program, and it is not optional there: the
+         * daemon refuses a `generic` session with none. See
+         * [Agentd.commandIsRequired].
+         */
+        args: List<String> = emptyList(),
+        /**
+         * What `profiles` said about the adapters, when the caller has it.
+         *
+         * Only ever used to decide whether this adapter needs a program named
+         * by the caller. Empty falls back to the id rule, which is what a
+         * machine older than the `profiles` verb still needs.
+         */
+        profiles: List<AgentProfile> = emptyList(),
+    ): AgentSession {
+        require(cwd.startsWith("/")) { "a working directory must be absolute, and `$cwd` is not" }
+        require(!(Agentd.commandIsRequired(agent, profiles) && args.isEmpty())) {
+            "the $agent adapter runs a program you name, and none was given"
+        }
+        return Agentd.readSession(
+            request(
+                Agentd.run(cwd, cols, rows, agent, prompt, worktree, checkpoint, args),
+                retry = false,
+            ),
+        )
+    }
+
+    /**
+     * Type into a live session, without attaching.
+     *
+     * **Never retried**, and this is the strongest case for that on the whole
+     * link: `input` is the only verb here that is not idempotent in the
+     * ordinary sense. A `run` whose reply was lost may have started an agent;
+     * an `input` whose reply was lost HAS put the bytes on the terminal, and a
+     * retry types the user's sentence a second time — into an agent that has
+     * by then acted on the first copy. Better to tell the caller the
+     * connection went and let them look.
+     *
+     * Bytes go through [Reply.bytes], never straight from a text field: the
+     * daemon appends no terminator, so a reply sent as typed is a reply the
+     * agent never receives.
+     */
+    fun input(id: Int, data: String) =
+        Agentd.readOk(request(Agentd.input(id, data), retry = false))
+
+    /**
+     * What is on the COMPUTER's clipboard right now (P1-059 criterion 3).
+     *
+     * **Retried**, unlike [input] directly above it, and the contrast is the
+     * point: `input` is an instruction whose replay types a user's sentence
+     * twice, and this is a question. Asking twice reads the clipboard twice
+     * and changes nothing at the machine. A caller who lost the reply is
+     * better served by a second ask than by an error.
+     *
+     * Takes no session id — one seat has one clipboard — so it is a property
+     * of the LINK, and the only precondition is that the link is up. It is
+     * `machine`-scoped in the same way [worktrees] is.
+     *
+     * Blocking, so callers run it inside `withContext(Dispatchers.IO)`. It
+     * cannot hang the phone for long even if the computer misbehaves: the
+     * daemon bounds its own read at five seconds and kills the tool, because
+     * a Wayland clipboard is served by the application that owns it and a
+     * wedged application never serves it. That bound is at the machine
+     * deliberately — `Mux.CONTROL_TIMEOUT_MS` is five minutes, so without it
+     * a frozen editor on the computer would freeze this phone's whole
+     * connection, terminal included.
+     *
+     * **Returns the EMPTY STRING when the computer's clipboard is empty, and
+     * that is a real answer rather than a failure** — `Response::Clipboard`
+     * says so in its own words. It is the one outcome callers keep getting
+     * wrong: reported as an error it sends somebody hunting for a permission
+     * to grant when the machine simply had nothing on it, and reported as
+     * nothing at all it reads as a button that does not work.
+     *
+     * Every genuine refusal arrives as an [AgentError] instead — not text,
+     * over the cap, no compositor, a wedged application — each carrying a
+     * sentence the daemon wrote for a person to read, which callers should
+     * show rather than paraphrase. `Agentd.isTooOld` names the one that means
+     * the computer's runtime predates the verb rather than that it refused.
+     */
+    fun clipboard(): String = Agentd.readClipboard(request(Agentd.clipboard()))
+
+    // ---- push (P1-058) ---------------------------------------------------
+    //
+    // The only two verbs here that `apex-agentd` never sees: `apex-remoted`
+    // answers them itself, because they are about how THIS connection is
+    // reached and the daemon has no concept of a transport. They travel on
+    // channel zero like everything else, so a machine too old to know them
+    // forwards them and answers `bad_request` — which `Agentd.isTooOld`
+    // already recognises, and which callers must read as "this machine cannot
+    // wake me" rather than as a failure.
+
+    /**
+     * Tell this machine where to wake this phone.
+     *
+     * **Not retried.** A retry can only arrive after the connection dropped,
+     * and the phone will send it again on the next connection anyway — where a
+     * lost reply is a free round trip rather than a registration reported as
+     * failed after it landed. Nothing on a screen is waiting for this.
+     */
+    fun pushRegister(endpoint: String, key: String) =
+        Agentd.readOk(request(Agentd.pushRegister(endpoint, key), retry = false))
+
+    /** Stop this machine pushing to this phone. Idempotent at the far end. */
+    fun pushUnregister() = Agentd.readOk(request(Agentd.pushUnregister(), retry = false))
+
+    /**
+     * Per-worktree status for every remembered project, or for one slug.
+     *
+     * Retried on a dropped connection like every other question here, and this
+     * one deserves the note: answering it makes the daemon run git in every
+     * remembered project, `merge-tree --write-tree` included. That writes
+     * objects, which sounds like an action — but it writes only unreferenced
+     * ones into the object database to answer "would this merge", and the
+     * answer to asking twice is the same answer. It is a question.
+     *
+     * It is also slow, which is why it is not folded into the Agent Center's
+     * four-second poll. `Mux.CONTROL_TIMEOUT_MS` is five minutes, matching
+     * `apex-remoted`'s own, so a large repository has room.
+     */
+    /**
+     * Hand a file to a session whose bytes are on this phone (P1-059).
+     *
+     * **On a connection of its own**, and this is the one verb here that does
+     * not travel on the connection this class holds. Two reasons, both about
+     * the connection rather than about the file: `receive` TAKES A CHANNEL
+     * OVER, so it cannot go through [request] at all — `apex-remoted` refuses
+     * a takeover verb on channel zero by name — and a multi-megabyte upload
+     * ahead of everything else in [Mux]'s strict FIFO is a session list that
+     * arrives when the photo finishes. [com.apexos.remote.core.link.Upload]
+     * has the whole account.
+     *
+     * Blocking, like everything else here, and for longer than anything else
+     * here: callers run it inside `withContext(Dispatchers.IO)`.
+     */
+    fun upload(
+        id: Int,
+        name: String,
+        len: Long,
+        source: () -> java.io.InputStream,
+        onProgress: (Long) -> Unit = {},
+    ): Upload.Landed = Upload.send(connect, id, name, len, source, onProgress)
+
+    fun worktrees(project: String? = null): List<WorktreeStatus> =
+        Agentd.readWorktrees(request(Agentd.worktrees(project)))
+
+    /** The same, grouped into the projects the daemon walked. */
+    fun projects(): List<Project> = Project.group(worktrees())
+
+    // ---- the picker verbs (P1-054) ---------------------------------------
+    //
+    // Deliberately NOT folded into `projects()` above, which is the expensive
+    // worktree walk under a similar name. The two answer different questions:
+    // `projects()` is "what is the git status of everything", which runs
+    // `merge-tree --write-tree` in every remembered project; these two are
+    // "what could I start an agent in, and with what", which read records and
+    // stat paths. A screen that opened by calling the wrong one would put
+    // seconds of git in front of a text field, which is exactly why the Start
+    // screen had no picker.
+
+    /**
+     * Every project the machine remembers, most recently opened first.
+     *
+     * Already in that order from the daemon; [ProjectRecord.ordered] restates
+     * it rather than trusting it, because the first row is a screen's default
+     * selection and a silent dependence on somebody else's sort is a default
+     * that changes without anyone choosing to change it.
+     */
+    fun projectRecords(): List<ProjectRecord> =
+        ProjectRecord.ordered(Agentd.readProjects(request(Agentd.projects())))
+
+    /** Every adapter, with its program and profile as they stand there. */
+    fun profiles(): List<AgentProfile> = Agentd.readProfiles(request(Agentd.profiles()))
+
+    // ---- approvals (P1-057) ---------------------------------------------
+    //
+    // There is no `decide` here and there must not be one. See `Approvals.kt`.
+
+    fun requests(): List<PrivilegeRequest> = Agentd.readRequests(request(Agentd.requests()))
+
+    /** Only the ones still waiting on a human — at the machine, not here. */
+    fun pendingRequests(): List<PrivilegeRequest> = requests().filter { it.isPending }
+
+    fun grants(): Grants = Agentd.readGrants(request(Agentd.grants()))
+
+    fun systemGrants(): List<Pair<SystemGrant, GrantState>> =
+        Agentd.readSystemGrants(request(Agentd.systemGrants()))
+
+    /**
+     * Withdraw a per-project grant, or all of them for the project.
+     *
+     * **Not retried**, and that is not tidiness. `revoke` without a key
+     * removes every grant for a project, and a reply lost after the daemon
+     * acted would have the retry answer `no_such_request` — reporting a
+     * failure for something that succeeded, which on a screen about authority
+     * is the wrong way round. The caller is told the connection went.
+     */
+    fun revoke(project: String, key: String? = null): Grants =
+        Agentd.readGrants(request(Agentd.revoke(project, key), retry = false))
+
+    /** End a live system-access grant now. Not retried, for the reason above. */
+    fun revokeSystemGrant(id: Int): List<Pair<SystemGrant, GrantState>> =
+        Agentd.readSystemGrants(request(Agentd.revokeSystemGrant(id), retry = false))
+
+    // ---- the connection -------------------------------------------------
+
+    /**
+     * Send one request, opening or replacing the connection as needed.
+     *
+     * [retry] is what separates a question from an instruction. A question
+     * that was lost costs nothing to ask again; an instruction that was lost
+     * may or may not have been carried out, and only the caller knows whether
+     * repeating it is safe.
+     */
+    @Throws(Disconnected::class, AgentError::class, TimeoutException::class)
+    fun request(line: String, retry: Boolean = true): String {
+        check(!closed) { "this link is closed" }
+        return try {
+            live().request(line)
+        } catch (e: Disconnected) {
+            drop(e)
+            if (!retry) throw e
+            // One more, on a connection made for this attempt. If that fails
+            // the throw reaches the caller: two dead connections in a row is
+            // a machine that is not there, not a link that needs another go.
+            live().request(line)
+        }
+    }
+
+    private fun live(): Mux {
+        synchronized(lock) {
+            mux?.let { return it }
+        }
+        // Outside the lock: opening a connection is a handshake over a socket
+        // and holding a monitor across it would block every other caller,
+        // including the one trying to close this link.
+        val channel = connect()
+        val m = Mux(channel, Listener())
+        val thread = Thread({ m.pump() }, "apex-link-${channel.machine}")
+        thread.isDaemon = true
+        val install = synchronized(lock) {
+            if (closed || mux != null) {
+                null
+            } else {
+                mux = m
+                pump = thread
+                connections++
+                m
+            }
+        }
+        if (install == null) {
+            // Two callers raced, or the link closed while this one was
+            // connecting. The loser's connection is closed rather than leaked.
+            runCatching { m.close() }
+            runCatching { channel.close() }
+            synchronized(lock) { mux }?.let { return it }
+            throw Disconnected("this link to ${channel.machine} closed while connecting")
+        }
+        thread.start()
+        onEvent(LinkEvent.Connected(channel.machine))
+        return install
+    }
+
+    private fun drop(cause: Throwable?) {
+        val going = synchronized(lock) {
+            val m = mux ?: return
+            mux = null
+            pump = null
+            m
+        }
+        runCatching { going.close() }
+        onEvent(LinkEvent.Dropped(cause))
+    }
+
+    private inner class Listener : Mux.Listener {
+        // A control connection carries no channels: nothing is ever opened on
+        // it, so data and close cannot arrive. They are not errors, and they
+        // are not silently swallowed either — they simply cannot happen, and
+        // a build where they do has a multiplexer bug rather than a link one.
+        override fun onData(channel: UInt, bytes: ByteArray) = Unit
+
+        override fun onClose(channel: UInt, reason: String) = Unit
+
+        override fun onDisconnect(cause: Throwable?) {
+            // The connection ended on its own — the machine went away, or slept.
+            // Cleared here so the next request opens a new one rather than
+            // failing against a corpse.
+            val ended = synchronized(lock) {
+                val m = mux ?: return
+                mux = null
+                pump = null
+                m
+            }
+            runCatching { ended.close() }
+            onEvent(LinkEvent.Dropped(cause))
+        }
+    }
+
+    override fun close() {
+        closed = true
+        drop(null)
+    }
+}

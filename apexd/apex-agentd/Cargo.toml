@@ -14,7 +14,35 @@ path = "src/main.rs"
 
 [dependencies]
 apex-agent-core = { path = "../apex-agent-core" }
+apex-secret-core = { path = "../apex-secret-core" }
 anyhow.workspace = true
 serde.workspace = true
 serde_json.workspace = true
 libc.workspace = true
+
+# The TLS SERVER for one pinned destination (P2-012, route B). Pinned to the
+# same version `apex-remoted` and `apex-secretd` use, so one image cannot end
+# up with two rustls builds. `rustls-native-certs` is here for the tests'
+# control arm, which has to check the minted leaf against the roots the
+# machine really holds.
+rustls = { version = "0.23.42", default-features = false, features = ["std", "ring", "tls12"] }
+rustls-pki-types = { version = "1", features = ["std"] }
+rustls-native-certs = "0.8"
+
+# The integration test drives a real daemon over its socket and reads the
+# replies as JSON. It needs the protocol types to check them against §7's
+# vocabulary rather than against string literals it could get wrong.
+# `test-support` is what lets `privilege::decide_origin`'s PASSING branch be
+# tested at all: a `SecondFactor` cannot be constructed outside
+# `apex-agent-core`, so without the signer every test of that gate would
+# assert a refusal. Dev-only, so `cargo build` of the daemon never sees it.
+[dev-dependencies]
+apex-agent-core = { path = "../apex-agent-core", features = ["test-support"] }
+serde_json.workspace = true
+# `clipboard::MAX_BYTES` is sized so that the worst-case JSON encoding of a
+# full clipboard still fits one `Frame::Control`. The test that checks that sum
+# imports `wire::MAX_PAYLOAD` rather than restating 65514, because a test that
+# repeats the number it is checking against keeps passing on the day the number
+# moves. Dev-only: the daemon itself has no business knowing about the remote
+# wire, and `apex-remoted` is what bridges the two.
+apex-remote-core = { path = "../apex-remote-core" }

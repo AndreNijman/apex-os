@@ -1,0 +1,47 @@
+# Commands the docs name on purpose because they do NOT exist. Each line is a
+# deliberate mention; deleting the line would make the checker demand the
+# sentence be removed, and the sentence is the useful part.
+
+# docs/boot-v2.md: "There is deliberately no `apex boot ack` verb: the notice is
+# cleared automatically on a boot where no entry is exhausted, so it tracks
+# reality instead of tracking whether somebody dismissed it."
+apex boot ack
+
+# docs/recovery.md: "Adding an `apex recover previous` verb would have been a
+# second name for an operation that already exists" (namely `sudo apex rollback`).
+apex recover previous
+
+# docs/rollback.md: "An earlier version of this document claimed
+# `apex reset --keep-home` shipped in M3. It never did; the verb above is what
+# exists." Naming the retired claim is how a reader who saw the old doc knows.
+apex reset
+
+# docs/fleet.md is a DESIGN, and it says so in its first two sentences: "No code
+# here exists. There is no `apex fleet` verb, no enrolment record, no server."
+# The verb names are the shape being proposed, and a checker that demanded they
+# be removed would turn a design document into a document that cannot describe
+# what it is designing. They leave this file on the day the verb ships.
+apex fleet
+apex fleet join
+apex fleet leave
+apex fleet status
+# The design's own test-shaped guarantee: "the client must be able to print
+# exactly what it would send without sending it, the way `apex channel report`
+# does today. `apex fleet report --dry-run` is that verb."
+apex fleet report
+
+
+# docs/apex-owns-its-esp.md opens with Andre's decision in his own words:
+# "windows side install should be like everything else with the systemd-boot.
+# maybe it should build a new esp for apex or something." That is a quotation
+# of SPEECH, not a claim that a verb exists — but `mentions()` scans prose, not
+# just backticked text, so it reads "apex or something" as a two-word verb and
+# refuses it. roadmap/v2.2 went red on exactly this the moment the doc landed.
+#
+# The line is here rather than in the document because the document's whole
+# value is that the decision is recorded verbatim; rewording Andre to satisfy a
+# regex would destroy the only thing it is for. The extractor's real limitation
+# is that it cannot tell an English function word from a subcommand name —
+# nothing is or will be named `or` — and tightening it is a separate change
+# with its own both-ways test, not something to smuggle in behind a doc fix.
+apex or something

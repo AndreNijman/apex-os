@@ -1,0 +1,129 @@
+name: kernel-drift
+
+# APEX builds its own kernel now, and that changed the shape of the
+# security-update obligation.
+#
+# Before: the COPR rebuilt kernel-cachyos when CachyOS tagged a release and
+# APEX picked it up with a forced core rebuild. Nothing had to be remembered.
+#
+# Now: `KERNEL_TAG` and its sha256 in kernel/kernel.pin decide which kernel
+# APEX ships, and they move when a human moves them. An unbumped pin is a
+# kernel that quietly stops receiving security fixes WHILE EVERY OTHER GATE IN
+# THIS REPOSITORY STAYS GREEN — the build verifies its sha256, the BTF gate
+# passes, CI is all ticks. Green means "this is the kernel you pinned", never
+# "this kernel is current". Nothing else here can tell the difference.
+#
+# This workflow is the thing that can. It is the mechanism that stops the
+# obligation from being something a person has to remember.
+#
+# ═══ WHAT THIS WORKFLOW COSTS AND MUST NOT DO ═══
+#
+#   * It does NOT build a kernel. It is curl, `git ls-remote` and a JSON parse:
+#     seconds on the smallest runner, no dependency on the ~100 GB build tree
+#     that makes the kernel tier itself unrunnable on a hosted runner.
+#   * It does NOT rebuild core, publish, or promote. `contents: read` plus
+#     `issues: write` and nothing else — it cannot push to GHCR or mint a
+#     cosign identity even by accident.
+#   * It must never conclude "no newer kernel" from a lookup that failed.
+#     tests/check-kernel-drift.sh has three outcomes for that reason: 0 no
+#     drift, 1 drift, 2 COULD NOT TELL. This workflow treats 2 as a failure,
+#     not a pass.
+
+on:
+  schedule:
+    # Weekly, Monday 02:00 UTC. A kernel CVE does not wait for a sprint, but
+    # CachyOS tags at a human pace and a daily run would only train people to
+    # ignore the issue this opens.
+    - cron: '0 2 * * 1'
+  workflow_dispatch:
+  push:
+    # A pin bump is exactly when this should run: it says immediately whether
+    # the new value is the newest, rather than a week later.
+    paths:
+      - 'kernel/kernel.pin'
+      - 'tests/check-kernel-drift.sh'
+      - '.github/workflows/kernel-drift.yml'
+
+permissions:
+  contents: read
+  issues: write
+
+concurrency:
+  group: kernel-drift
+  cancel-in-progress: false
+
+jobs:
+  drift:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+
+      - name: Is kernel/kernel.pin still current?
+        id: check
+        run: |
+          set +e
+          ./tests/check-kernel-drift.sh 2>&1 | tee /tmp/drift.txt
+          rc="${PIPESTATUS[0]}"
+          echo "rc=${rc}" >> "$GITHUB_OUTPUT"
+          {
+            echo "### kernel pin drift"
+            echo
+            echo '```text'
+            cat /tmp/drift.txt
+            echo '```'
+          } >> "$GITHUB_STEP_SUMMARY"
+          exit 0
+
+      - name: Open or update the drift issue
+        if: steps.check.outputs.rc != '0'
+        env:
+          GH_TOKEN: ${{ github.token }}
+          RC: ${{ steps.check.outputs.rc }}
+        run: |
+          set -euo pipefail
+          title="kernel pin drift: kernel/kernel.pin needs a human"
+          if [ "${RC}" = "2" ]; then
+            head="A drift lookup COULD NOT BE PERFORMED. This is not a pass and not drift — it means the check could not answer."
+          else
+            head="kernel/kernel.pin has drifted from upstream. Details below; the report says which input moved and what to bump."
+          fi
+          {
+            echo "${head}"
+            echo
+            echo "Run: ${GITHUB_SERVER_URL}/${GITHUB_REPOSITORY}/actions/runs/${GITHUB_RUN_ID}"
+            echo
+            echo '```text'
+            cat /tmp/drift.txt
+            echo '```'
+          } > /tmp/body.md
+          # One issue, reopened and updated, rather than a new one every week.
+          num="$(gh issue list --state open --search "${title} in:title" \
+                   --json number,title \
+                   --jq "map(select(.title == \"${title}\")) | .[0].number // empty")"
+          if [ -n "${num}" ]; then
+            gh issue comment "${num}" --body-file /tmp/body.md
+            echo "commented on existing issue #${num}"
+          else
+            gh issue create --title "${title}" --body-file /tmp/body.md
+          fi
+
+      - name: Close the drift issue now that the pin is current
+        if: steps.check.outputs.rc == '0'
+        env:
+          GH_TOKEN: ${{ github.token }}
+        run: |
+          set -euo pipefail
+          title="kernel pin drift: kernel/kernel.pin needs a human"
+          num="$(gh issue list --state open --search "${title} in:title" \
+                   --json number,title \
+                   --jq "map(select(.title == \"${title}\")) | .[0].number // empty")"
+          if [ -n "${num}" ]; then
+            gh issue close "${num}" --comment "kernel/kernel.pin is current again as of ${GITHUB_SHA}. Closed by kernel-drift."
+          fi
+
+      - name: Fail if the pin drifted or could not be checked
+        if: steps.check.outputs.rc != '0'
+        run: |
+          echo "check-kernel-drift.sh exited ${{ steps.check.outputs.rc }}"
+          echo "1 = something upstream moved. 2 = a lookup could not be performed."
+          exit 1

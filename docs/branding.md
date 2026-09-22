@@ -7,16 +7,22 @@ colorways. The wordmark is the letterspaced "APEX OS".
 
 ## Color semantics
 
-| Colorway | Hex (highlight) | Edition | Represents |
-|----------|-----------------|---------|------------|
-| **Gold** | `#FDE047` | APEX-OS **Gaming** | Power |
-| **Chartreuse** | `#D9F99D` | APEX-OS **Daily** | Everyday |
+| Colorway | Hex (highlight) | Used for | Represents |
+|----------|-----------------|----------|------------|
+| **Chartreuse** | `#D9F99D` | APEX-OS | Everyday |
+| **Gold** | `#FDE047` | legacy Gaming accent | Power |
 | **Mono (black)** | — | neutral | Light backgrounds, print, single-color contexts |
 | **Mono (white)** | — | neutral | Dark backgrounds, single-color contexts |
 
-Gold always denotes the Gaming edition; chartreuse always denotes the Daily
-edition. The mono variants exist for any context that needs a neutral,
-single-color mark and must not imply an edition.
+APEX publishes ONE image, so chartreuse is the colour of the product: the boot
+splash and the greeter accent. There is no edition for gold to denote any more.
+
+Gold is retained for one reason, and only that reason: a machine still booting a
+pre-merge image reports `VARIANT_ID=gaming`, and apex-greet maps that to the gold
+accent and `spark-gold.png` so it keeps its identity until it updates. New
+artwork should not use gold to mean anything.
+
+The mono variants exist for any context that needs a neutral, single-color mark.
 
 ## Asset inventory
 
@@ -36,10 +42,15 @@ Each colorway provides:
 
 ### Plymouth boot themes — `files/branding/plymouth/`
 
-Two themes, one per edition:
+**One theme ships.** `Containerfile.apex` copies `apex-os-chartreuse` and runs
+`plymouth-set-default-theme apex-os-chartreuse`; nothing installs the gold
+theme, because there is no second image to install it into.
 
-- `apex-os-gold/` — Gaming edition boot splash
-- `apex-os-chartreuse/` — Daily edition boot splash
+- `apex-os-chartreuse/` — the boot splash, on every machine
+- `apex-os-gold/` — source art only. NOT installed by any Containerfile. Kept
+  because it is the same animation in the other colourway and deleting
+  commissioned art to tidy a build is not a trade worth making; do not read its
+  presence as evidence that a second image exists.
 
 Each theme contains its `.plymouth` descriptor, the shared `apex-os.script`
 animation, and the sprite images `spark.png`, `comet.png`, `glow.png`,
@@ -57,8 +68,8 @@ handled (theme dims, prompt + bullets shown); shutdown shows a static spark.
 Install (inside the image build):
 
 ```sh
-cp -r apex-os-gold /usr/share/plymouth/themes/
-plymouth-set-default-theme -R apex-os-gold   # -R rebuilds the initramfs
+cp -r apex-os-chartreuse /usr/share/plymouth/themes/
+plymouth-set-default-theme -R apex-os-chartreuse   # -R rebuilds the initramfs
 ```
 
 Kernel args need `quiet splash`. See
@@ -121,14 +132,14 @@ Fixes land in one of two places:
 | 7 | `os-release` `DOCUMENTATION_URL` / `SUPPORT_URL` | `docs.fedoraproject.org` / `ask.fedoraproject.org` | the apex-os GitHub repo | image | same `sed` |
 | 8 | `os-release` `REDHAT_BUGZILLA_*` / `REDHAT_SUPPORT_*` | `"Fedora"` ×4 | deleted | image | `sed -e '/^REDHAT_/d'` |
 | 9 | `os-release` `ANSI_COLOR`, `DEFAULT_HOSTNAME`, `HOME_URL`, `BUG_REPORT_URL` | Fedora blue / `fedora` / fedoraproject.org / bugzilla | APEX chartreuse / `apex` / apex-os repo | image | same `sed` (pre-existing) |
-| 10 | `/etc/system-release`, `/etc/redhat-release`, `/etc/fedora-release` (all → `/usr/lib/fedora-release`) | `Fedora release 43 (Forty Three)` | `APEX-OS release 43` | image | `Containerfile.base`. **Content only — the file is NOT renamed**, the symlink chain and `[ -f /etc/fedora-release ]` probes must keep working, and this is the string bootupd turns into the firmware label |
+| 10 | `/etc/system-release`, `/etc/redhat-release`, `/etc/fedora-release` (all → `/usr/lib/fedora-release`) | `Fedora release 43 (Forty Three)` | `APEX-OS release 43` | image | `Containerfile.core`. **Content only — the file is NOT renamed**, the symlink chain and `[ -f /etc/fedora-release ]` probes must keep working, and this is the string bootupd turns into the firmware label. The image now **re-creates** those three links itself (plus `os-release`, the CPE and `issue{,.net}`) rather than inheriting them from the base layer, and asserts the branded string *through `/etc`*: writing only `/usr/lib` and trusting an inherited hardlinked symlink is what failed every weekly `core` build from 2026-08-17 on |
 | 11 | VT login banner `/etc/issue`, `/etc/issue.net` (→ `/usr/lib/issue*`) | `\S` + `Kernel \r on \m (\l)` → printed `7.1.3-cachyos1.fc43.x86_64` | `\S` only → prints `APEX-OS` | image | `Containerfile.base`. `\S` is expanded by agetty from `PRETTY_NAME`. Writing `/usr/lib/issue` (not `/etc/issue`) keeps the symlink intact |
 | 12 | `fastfetch` kernel line | `Linux 7.1.3-cachyos1.fc43.x86_64` | `7.1.3` | image | `files/system/fastfetch/config.jsonc` — the `kernel` module replaced by a `command` module running `uname -r \| cut -d- -f1` |
 | 13 | `fastfetch` OS line + ASCII logo | Fedora `F` logo (auto-detected from `ID`) | APEX spark + `APEX-OS 43` | image (pre-existing) | `config.jsonc` pins `logo.source` to `/etc/fastfetch/apex-logo.txt`; bare `fastfetch` picks up `/etc/fastfetch/config.jsonc`, verified |
 | 14 | Kernel-version stamp file | `/usr/lib/apex-cachyos-kver` | `/usr/lib/apex-kver` | image | `Containerfile.base` / `.daily` / `.gaming` |
 | 15 | Installer completion screen | *"look for \"Fedora\" / \"APEX\""* | *"pick it from the one-time boot menu (F12 on ThinkPads)"* | image | `installer/apex-install` |
 | 16 | Live-ISO GRUB menu | already `Install APEX-OS` | unchanged | image (pre-existing) | `installer/build-live-iso.sh` |
-| 17 | Plymouth boot splash | already `apex-os-chartreuse` / `apex-os-gold`, wordmark `A P E X   O S` | unchanged | image (pre-existing) | `files/branding/plymouth/` |
+| 17 | Plymouth boot splash | `apex-os-chartreuse` on every machine (gold is source art only), wordmark `A P E X   O S` | unchanged | image (pre-existing) | `files/branding/plymouth/` |
 | 18 | Greeter (`apex-greet`) | no distro string at all | unchanged | n/a | verified clean |
 | 18a | `hostnamectl` "Operating System" | `Fedora Linux 43 (Forty Three)` | `APEX-OS` | image | reads os-release `PRETTY_NAME`; covered by surface 3. Its "Kernel:" line still shows the CachyOS release string — see the unfixable table |
 | 18b | `neofetch` / `screenfetch` / `lsb_release` | — | — | n/a | **not installed** in the image (verified). `fastfetch` is the only fetch tool, and it is handled by surfaces 12–13. If one is ever layered in, it will auto-detect the Fedora logo from `ID` exactly as bare `fastfetch` would, and needs the same `logo.source` pin |

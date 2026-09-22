@@ -1,0 +1,93 @@
+#!/usr/bin/env bash
+# ─────────────────────────────────────────────────────────────────────────────
+#  apex-stage-root — copy the three files apex-mkuki needs out of a real APEX
+#  image or a booted APEX deployment, into a staging directory the boot lab can
+#  read.
+#
+#  §22's deliverable is a UKI "produced reproducibly from an APEX image", and
+#  the honest way to prove that is to build one from an actual APEX kernel and
+#  the actual APEX initramfs — the one that is already composefs-aware and
+#  already built --no-hostonly, because a bootc image has to boot arbitrary
+#  hardware. Nothing about that is reproducible if the initramfs is a synthetic
+#  stand-in.
+#
+#  This runs on the HOST, not inside the boot lab container, for one reason:
+#  /usr/lib/modules/<kver>/initramfs.img is mode 0600, so reading it needs
+#  root. Reading is all this does.
+#
+#  ── what it may and may not touch ──
+#
+#  Reads:  <root>/usr/lib/modules/<kver>/vmlinuz
+#          <root>/usr/lib/modules/<kver>/initramfs.img
+#          <root>/usr/lib/os-release
+#  Writes: the staging directory, and nothing else.
+#
+#  /usr is read-only on an APEX machine and the boot path is not touched at
+#  all: no /boot, no /boot/efi, no /efi, no efivarfs, no efibootmgr. AGENTS.md
+#  boot-path rule 1 forbids writing there and says nothing about reading /usr,
+#  which is the image content every APEX machine already exposes read-only.
+#  The output path is still validated, because a typo'd argument must not be
+#  the thing that decides whether this is safe.
+# ─────────────────────────────────────────────────────────────────────────────
+set -euo pipefail
+# shellcheck source=files/scripts/boot-v2/lib.sh
+. "$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)/lib.sh"
+
+SRC=/ OUT=""
+while [[ $# -gt 0 ]]; do
+    case "$1" in
+        --from)   SRC="$2"; shift 2;;
+        --output) OUT="$2"; shift 2;;
+        *) die "unknown argument: $1";;
+    esac
+done
+[[ -n "$OUT" ]] || die "usage: apex-stage-root [--from ROOT] --output DIR"
+
+case "$(readlink -m "$OUT")" in
+    /|/boot|/boot/*|/efi|/efi/*|/usr|/usr/*|/sys/*|/proc/*|/dev/*)
+        die "refusing to stage into $OUT" ;;
+esac
+
+[[ -d "$SRC/usr/lib/modules" ]] || die "$SRC does not look like an APEX/bootc root"
+mapfile -t KVERS < <(find "$SRC/usr/lib/modules" -mindepth 1 -maxdepth 1 -type d -printf '%f\n' | sort)
+(( ${#KVERS[@]} == 1 )) \
+    || die "expected exactly 1 kernel under $SRC/usr/lib/modules, found ${#KVERS[@]}: ${KVERS[*]}"
+KVER="${KVERS[0]}"
+
+K="$SRC/usr/lib/modules/$KVER/vmlinuz"
+I="$SRC/usr/lib/modules/$KVER/initramfs.img"
+O="$SRC/usr/lib/os-release"
+for f in "$K" "$I" "$O"; do
+    [[ -f "$f" ]] || die "missing $f"
+done
+
+log "staging $KVER from $SRC into $OUT"
+D="$OUT/usr/lib/modules/$KVER"
+mkdir -p "$D" "$OUT/usr/lib"
+
+# `install -m` rather than cp, so the staged copies are readable by the
+# unprivileged container that will build the UKI. The source initramfs is 0600
+# and root-owned; the staged one is a throwaway copy of image content, not a
+# secret.
+install -m 0644 "$K" "$D/vmlinuz"
+install -m 0644 "$I" "$D/initramfs.img"
+install -m 0644 "$O" "$OUT/usr/lib/os-release"
+if [[ -n "${SUDO_UID:-}" && -n "${SUDO_GID:-}" ]]; then
+    chown -R "$SUDO_UID:$SUDO_GID" "$OUT"
+fi
+
+# Postconditions. `install` exiting 0 is not proof the bytes arrived: a
+# truncated 369 MB initramfs would produce a UKI that builds, signs, boots and
+# then panics, which is the most expensive possible way to find out.
+for pair in "$K:$D/vmlinuz" "$I:$D/initramfs.img" "$O:$OUT/usr/lib/os-release"; do
+    src="${pair%%:*}" dst="${pair##*:}"
+    [[ "$(stat -c %s "$src")" == "$(stat -c %s "$dst")" ]] \
+        || die "size mismatch after staging $src"
+    [[ "$(sha256sum <"$src" | cut -d' ' -f1)" == "$(sha256sum <"$dst" | cut -d' ' -f1)" ]] \
+        || die "checksum mismatch after staging $src"
+done
+
+info "kernel     $(stat -c %s "$D/vmlinuz") bytes"
+info "initramfs  $(stat -c %s "$D/initramfs.img") bytes"
+info "os-release $(sed -n 's/^PRETTY_NAME=//p' "$OUT/usr/lib/os-release")"
+info "staged     $OUT"

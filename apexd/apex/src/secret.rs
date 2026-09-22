@@ -1,0 +1,918 @@
+//! `apex secret` — the user-facing half of the protected secret service (§11).
+//!
+//! ```text
+//! apex secret add github --host github.com          # credential on stdin
+//! apex secret list
+//! apex secret capabilities                          # what the daemon offers
+//! apex secret grant github git.push
+//! apex secret use github git.push origin            # run by an agent
+//! apex secret use github git.push origin -o branch=main
+//! apex secret audit
+//! ```
+//!
+//! An operation is named the way §13.2 names one — `git.push`,
+//! `cloudflare.worker.deploy` — and this CLI knows none of them. The list comes
+//! from `apex-secretd`'s registry over the wire, and an operation's arguments
+//! are `-o name=value` pairs the daemon checks against what the provider
+//! declared. That is what lets P1-002 add Cloudflare without touching this
+//! file.
+//!
+//! Two daemons answer these, and which one is not arbitrary.
+//!
+//! * `add`, `remove`, `list`, `grant`, `revoke`, `grants` and `audit` go
+//!   straight to `apex-secretd`, which owns the store and refuses any of the
+//!   mutating ones from a caller inside an agent session.
+//! * `use` goes through `apex-agentd` first, because only that daemon can say
+//!   which session is asking, what its secret policy is, and which project it
+//!   was started in. It forwards a capability record; `apex-secretd` performs
+//!   the operation.
+//!
+//! Nothing on either path can return the credential. `apex-secretd` has no verb
+//! that does.
+
+use std::io::Read;
+
+use anyhow::{anyhow, bail, Result};
+use apex_agent_core::protocol::{
+    Request as AgentRequest, Response as AgentResponse, BROKERED_SECRET_SERVICE_VERSION,
+    GENERIC_CAPABILITY_VERSION,
+};
+use apex_secret_core::client::Client;
+use apex_secret_core::operation::{self, OperationInfo};
+use apex_secret_core::protocol::{Request, Response};
+use apex_secret_core::store::{valid_service_name, ANY_PROJECT};
+use apex_secret_core::SecretValue;
+use clap::Subcommand;
+
+/// A literal at the comparison would be one careless edit from meaning nothing,
+/// and the failure it prevents is a "no credential stored" about a store the
+/// user never wrote to. A floor rather than the current revision: later
+/// revisions add capabilities, and a daemon that has the store in the right
+/// place still serves `git-push` correctly.
+const _: () = assert!(BROKERED_SECRET_SERVICE_VERSION > 0);
+const _: () =
+    assert!(BROKERED_SECRET_SERVICE_VERSION <= apex_agent_core::protocol::PROTOCOL_VERSION);
+
+/// `apex secret <verb>`.
+#[derive(Subcommand)]
+pub enum SecretCmd {
+    /// Store a credential. It is read from stdin, never from the command line —
+    /// argv is world-readable through /proc.
+    Add {
+        /// Name you will refer to it by, e.g. `github`.
+        service: String,
+        /// Host the credential is valid for. A remote pointing anywhere else
+        /// is refused at use time.
+        #[arg(long)]
+        host: String,
+        /// Username to send. Most token schemes ignore it.
+        #[arg(long, default_value = "x-access-token")]
+        username: String,
+        /// Scheme the host is reached over. `http` is accepted only for a
+        /// loopback host, where the credential does not cross a network.
+        #[arg(long, default_value = "https")]
+        scheme: String,
+        /// Path on that host this credential's own endpoint lives at, for a
+        /// service the broker talks to directly — an MCP server's `/mcp`. Not
+        /// used by git, which resolves its URL from the repository.
+        #[arg(long, default_value = "")]
+        path: String,
+        /// How the credential is sent: `bearer` for `Authorization: Bearer
+        /// <value>`, `raw` when the stored value is the whole header.
+        #[arg(long, default_value = "bearer")]
+        auth: String,
+        /// Port, when the endpoint is not on the scheme's own. Git ignores it;
+        /// the broker's own endpoint needs it.
+        #[arg(long)]
+        port: Option<u16>,
+    },
+    /// Stored credentials. Never prints one.
+    List {
+        #[arg(long)]
+        json: bool,
+    },
+    /// Delete a stored credential and every grant that named it.
+    Remove { service: String },
+    /// The operations an agent can be granted, as the service offers them.
+    Capabilities,
+    /// Allow an operation for the current project.
+    Grant {
+        service: String,
+        operation: String,
+        /// Allow it in every project instead of this one.
+        ///
+        /// Only for an operation whose provider declares that it reaches the
+        /// same thing in every project — `mcp.request` is the one there is.
+        /// Such an operation reaches only the endpoint pinned when its
+        /// credential was stored, so this widens *where* it may be asked for
+        /// and not *what* it reaches. An MCP server is defined once and is
+        /// therefore present in every directory; without this, every new
+        /// worktree is one where it is unauthorised until somebody notices.
+        ///
+        /// Naming nothing is not enough on its own: `cloudflare.account.read`
+        /// takes no resource and no options and still resolves its account out
+        /// of the project's own `apex.toml`, so it is refused here and granted
+        /// per project.
+        #[arg(long)]
+        everywhere: bool,
+    },
+    /// Withdraw one.
+    Revoke {
+        service: String,
+        operation: String,
+        /// Withdraw the grant made with `--everywhere`, not this project's.
+        #[arg(long)]
+        everywhere: bool,
+    },
+    /// What is allowed, per project.
+    Grants {
+        #[arg(long)]
+        json: bool,
+    },
+    /// §13.8: approve ONE operation on ONE resource, once.
+    ///
+    /// Not a grant. A grant says an agent may deploy this project's workers
+    /// and keeps saying it; this is spent by the first deployment that matches
+    /// and expires on its own. It is what a production deployment needs when
+    /// the project has not written `unattended = true` under its environment.
+    ///
+    /// `apex secret approve cloudflare cloudflare.worker.deploy my-worker`
+    Approve {
+        service: String,
+        operation: String,
+        /// Exactly what the operation will name — the worker, the bucket.
+        ///
+        /// `allow_hyphen_values` for `Use`'s reason: `-f` has to reach the
+        /// service's validator and be refused as "not a resource this
+        /// operation can act on", rather than being rejected here as an
+        /// unknown option.
+        #[arg(default_value = "", allow_hyphen_values = true)]
+        resource: String,
+        /// How long it may be spent for, in minutes. The default is 15 and the
+        /// most is 1440; longer is refused rather than shortened.
+        #[arg(long, value_name = "MINUTES")]
+        minutes: Option<u64>,
+        /// Take an approval back instead of giving one.
+        #[arg(long)]
+        withdraw: bool,
+    },
+    /// Every approval outstanding, soonest to expire first.
+    Approvals {
+        #[arg(long)]
+        json: bool,
+    },
+    /// Use a capability. The service performs it; you get the result.
+    Use {
+        service: String,
+        /// One of `apex secret capabilities`, e.g. `git.push`.
+        operation: String,
+        /// What to act on, as a NAME — a git remote, a worker, a bucket.
+        /// Never a URL: the provider resolves the name against something you
+        /// do not control, and accepting a URL would let a session choose
+        /// where the credential gets sent.
+        ///
+        /// `allow_hyphen_values` so that `-f` reaches the validator and is
+        /// refused as "not a resource this operation can act on", rather than
+        /// being rejected by the argument parser as an unknown option — which
+        /// is the right outcome for the wrong reason, and reads as a bug.
+        #[arg(default_value = "", allow_hyphen_values = true)]
+        resource: String,
+        /// An option the operation declares, as `name=value`. Repeatable.
+        ///
+        /// Checked by the service against the provider's declaration; one it
+        /// does not declare is refused rather than ignored, so this is not a
+        /// way to pass a command line.
+        #[arg(long = "option", short = 'o', value_name = "NAME=VALUE")]
+        options: Vec<String>,
+    },
+    /// Move credentials this machine already has in plaintext into the store.
+    ///
+    /// Reads each one, stores it, proves the stored copy works, and only then
+    /// removes the original — in that order, so an interrupted run leaves a
+    /// machine that still works. Run it from your own shell, with no agent
+    /// running.
+    Migrate {
+        /// Say what would move and write nothing.
+        #[arg(long)]
+        dry_run: bool,
+    },
+
+    /// The audit trail: which capability was used, by what, and when.
+    Audit {
+        #[arg(long, short, default_value_t = 20)]
+        lines: usize,
+    },
+}
+
+pub fn main(cmd: SecretCmd) -> i32 {
+    let result = match cmd {
+        SecretCmd::Add {
+            service,
+            host,
+            username,
+            scheme,
+            path,
+            auth,
+            port,
+        } => add(&service, &host, &username, &scheme, &path, &auth, port),
+        SecretCmd::List { json } => list(json),
+        SecretCmd::Remove { service } => remove(&service),
+        SecretCmd::Capabilities => capabilities(),
+        SecretCmd::Grant {
+            service,
+            operation,
+            everywhere,
+        } => grant(&service, &operation, false, everywhere),
+        SecretCmd::Revoke {
+            service,
+            operation,
+            everywhere,
+        } => grant(&service, &operation, true, everywhere),
+        SecretCmd::Grants { json } => grants(json),
+        SecretCmd::Approve {
+            service,
+            operation,
+            resource,
+            minutes,
+            withdraw,
+        } => approve(&service, &operation, &resource, minutes, withdraw),
+        SecretCmd::Approvals { json } => approvals(json),
+        SecretCmd::Use {
+            service,
+            operation,
+            resource,
+            options,
+        } => use_it(&service, &operation, &resource, &options),
+        SecretCmd::Migrate { dry_run } => crate::migrate::main(dry_run),
+        SecretCmd::Audit { lines } => audit(lines),
+    };
+    match result {
+        Ok(code) => code,
+        Err(e) => {
+            eprintln!("apex secret: {e:#}");
+            1
+        }
+    }
+}
+
+fn add(
+    service: &str,
+    host: &str,
+    username: &str,
+    scheme: &str,
+    path: &str,
+    auth: &str,
+    port: Option<u16>,
+) -> Result<i32> {
+    if !valid_service_name(service) {
+        bail!("'{service}' is not a usable service name (letters, digits, _ - .)");
+    }
+    if host.trim().is_empty() {
+        bail!("--host is required: it is what a remote's URL is checked against");
+    }
+
+    // stdin, never argv. A credential on a command line is visible in
+    // /proc/<pid>/cmdline to every process on the machine for as long as this
+    // runs, and in the shell history forever.
+    let mut value = String::new();
+    std::io::stdin().read_to_string(&mut value)?;
+    let value = value.trim();
+    if value.is_empty() {
+        bail!(
+            "nothing on stdin. Pipe the credential in:\n  \
+             printf %s \"$TOKEN\" | apex secret add {service} --host {host}"
+        );
+    }
+
+    let host = host.trim().to_ascii_lowercase();
+    Client::connect()?.add(
+        service,
+        &host,
+        scheme,
+        Some(username),
+        path,
+        auth,
+        port,
+        &SecretValue::new(value.as_bytes().to_vec()),
+    )?;
+    println!("stored a credential for {service} ({scheme}://{host})");
+    println!("nothing is allowed yet. The operations this service offers:");
+    println!("  apex secret capabilities");
+    println!("allow one for this project:");
+    println!("  apex secret grant {service} <operation>");
+    Ok(0)
+}
+
+fn list(json: bool) -> Result<i32> {
+    let mut client = Client::connect()?;
+    let services = match client.call(&Request::List)? {
+        Response::Services { services } => services,
+        other => bail!("unexpected reply: {}", other.variant()),
+    };
+    if !json {
+        warn_if_unprotected(&mut client);
+        warn_about_the_old_store();
+    }
+    if json {
+        println!("{}", serde_json::to_string_pretty(&services)?);
+        return Ok(0);
+    }
+    if services.is_empty() {
+        println!("no credentials stored");
+        return Ok(0);
+    }
+    println!("{:<16} {:<28} USERNAME", "SERVICE", "ENDPOINT");
+    for i in &services {
+        println!(
+            "{:<16} {:<28} {}",
+            i.service,
+            format!("{}://{}", i.scheme, i.host),
+            i.username
+        );
+    }
+    Ok(0)
+}
+
+/// Where the agent runtime's broker used to keep credentials.
+///
+/// Plain JSON, `0600`, inside `$HOME`. Readable by anything running as the
+/// user, which is the whole reason the store moved to `apex-secretd`.
+fn old_store() -> std::path::PathBuf {
+    apex_agent_core::paths::state_dir().join("secrets")
+}
+
+/// Say so when credentials from the old broker are still lying in the home.
+///
+/// Nothing reads them any more. They are not deleted for you either: a file
+/// that may hold the only copy of a token is not something a `list` command
+/// should remove on its own initiative. So it is named, on stderr, where the
+/// person who can decide will see it — an upgraded machine keeps its old
+/// credential files until somebody looks.
+fn warn_about_the_old_store() {
+    let dir = old_store();
+    let Ok(entries) = std::fs::read_dir(&dir) else {
+        return;
+    };
+    let count = entries
+        .flatten()
+        .filter(|e| e.path().extension().and_then(|s| s.to_str()) == Some("json"))
+        .count();
+    if count == 0 {
+        return;
+    }
+    let (plural, verb) = if count == 1 { ("", "is") } else { ("s", "are") };
+    eprintln!(
+        "apex secret: {count} credential file{plural} from the old broker {verb} still in\n  \
+         {}\n  \
+         Nothing reads them now, and anything running as you can. Re-add what you\n  \
+         still need with `apex secret add`, then delete that directory.",
+        dir.display()
+    );
+}
+
+/// Say so when the service is holding the store where the caller could read it.
+///
+/// True of a daemon started by hand for a test, false of the one the image
+/// ships. Reporting it costs one round trip and stops a test instance from
+/// looking like a boundary it is not.
+fn warn_if_unprotected(client: &mut Client) {
+    if let Ok(Response::Hello {
+        protected: false, ..
+    }) = client.call(&Request::Hello)
+    {
+        eprintln!(
+            "apex secret: this secret service is not running as root, so its store is\n  \
+             readable by your own account. That is a test instance, not a boundary."
+        );
+    }
+}
+
+fn remove(service: &str) -> Result<i32> {
+    Client::connect()?.call(&Request::Remove {
+        service: service.to_string(),
+    })?;
+    println!("removed {service}, and every grant that named it");
+    Ok(0)
+}
+
+/// The vocabulary, read from the service rather than from a list kept here.
+///
+/// A provider registered in `apex-secretd` shows up in this output without the
+/// CLI being rebuilt around it. That is the point: §14 names seven more
+/// providers, and each one printing its own help would be seven edits here.
+fn capabilities() -> Result<i32> {
+    let vocabulary = match Client::connect()?.call(&Request::Hello)? {
+        Response::Hello { vocabulary, .. } => vocabulary,
+        other => bail!("unexpected reply: {}", other.variant()),
+    };
+    if vocabulary.is_empty() {
+        println!("this secret service offers no capabilities");
+        return Ok(0);
+    }
+    println!("Capabilities an agent can be granted:\n");
+    for op in &vocabulary {
+        println!("  {:<26} {}  ({})", op.id, op.summary, op.effect);
+        print_options(op);
+    }
+    println!(
+        "\napex-secretd PERFORMS these; it never hands over the credential, and\n\
+         has no verb that could. A git credential helper cannot achieve that,\n\
+         because git runs inside the sandbox and whatever the helper prints is\n\
+         readable by the agent.\n\
+         \n\
+         A resource is named, never given as a URL. The provider resolves the\n\
+         name against something you do not control, and the service checks the\n\
+         host against the credential, so nobody can turn a grant into a request\n\
+         to somewhere else.\n\
+         \n\
+         You do not have to type any of this. A managed session finds a `git` on\n\
+         its PATH that sends push, fetch and ls-remote here and execs the real\n\
+         git for everything else, so a skill keeps running `git push`."
+    );
+    Ok(0)
+}
+
+fn print_options(op: &OperationInfo) {
+    for param in &op.params {
+        let need = if param.required { "required" } else { "optional" };
+        println!("      -o {}=…  {} ({need})", param.name, param.summary);
+    }
+}
+
+/// Split `name=value`, refusing anything that is not one.
+///
+/// The service checks the value against the provider's declared syntax; what
+/// this owes the user is a clear message for `-o branch` with no `=`, which is
+/// otherwise sent as an option named `branch` with an empty value and refused
+/// for a reason that does not mention the typo.
+fn parse_option(text: &str) -> Result<(String, String)> {
+    match text.split_once('=') {
+        Some((name, value)) if !name.is_empty() => Ok((name.to_string(), value.to_string())),
+        _ => bail!("'{text}' is not an option; write one as name=value"),
+    }
+}
+
+fn grant(service: &str, operation: &str, revoke: bool, everywhere: bool) -> Result<i32> {
+    // `--everywhere` does not need to be standing in a project, and requiring
+    // one would be a strange thing to insist on for a grant that is not about
+    // where you are.
+    let project = if everywhere {
+        ANY_PROJECT.to_string()
+    } else {
+        current_project_root()?
+    };
+    Client::connect()?.call(&Request::Grant {
+        project: project.clone(),
+        service: service.to_string(),
+        capability: operation.to_string(),
+        revoke,
+    })?;
+    let scope = describe_scope(&project);
+    if revoke {
+        println!("withdrew {service}:{operation} {scope}");
+    } else {
+        println!("allowed {service}:{operation} {scope}");
+    }
+    Ok(0)
+}
+
+/// A grant's project key, in words.
+///
+/// `*` is not a path, and printing it raw would read as a directory called `*`
+/// — which is a thing a shell can produce, so the ambiguity is not theoretical.
+fn describe_scope(project: &str) -> String {
+    if project == ANY_PROJECT {
+        "in every project".to_string()
+    } else {
+        format!("for {project}")
+    }
+}
+
+/// §13.8's verb. Always for the project you are standing in.
+///
+/// There is no `--everywhere`, and there will not be one: an approval that
+/// applied wherever the agent happened to be standing would be standing
+/// permission with a shorter life, which is the thing §13.8 says has to be
+/// written down in the project file instead.
+fn approve(
+    service: &str,
+    operation: &str,
+    resource: &str,
+    minutes: Option<u64>,
+    withdraw: bool,
+) -> Result<i32> {
+    let project = current_project_root()?;
+    // Minutes here, milliseconds on the wire. The unit a person types is not
+    // the unit a clock compares, and converting at the edge keeps the
+    // service's bound expressible in one unit rather than two.
+    let ttl_ms = match minutes {
+        Some(m) => Some(
+            m.checked_mul(60_000)
+                .ok_or_else(|| anyhow!("{m} minutes is longer than this can express"))?,
+        ),
+        None => None,
+    };
+    let reply = Client::connect()?.call(&Request::Approve {
+        project: project.clone(),
+        service: service.to_string(),
+        operation: operation.to_string(),
+        resource: resource.to_string(),
+        ttl_ms,
+        withdraw,
+    })?;
+    let pending = match reply {
+        Response::Approvals { pending } => pending,
+        other => bail!("unexpected reply: {}", other.variant()),
+    };
+    let named = if resource.is_empty() {
+        operation.to_string()
+    } else {
+        format!("{operation} {resource}")
+    };
+    if withdraw {
+        println!("withdrew the approval for {named} in {project}");
+        return Ok(0);
+    }
+    // The expiry, because an approval nobody spends is gone and the person who
+    // gave it is the only one who can give another.
+    let mine = pending
+        .iter()
+        .find(|a| a.operation == operation || a.resource == resource);
+    match mine {
+        Some(a) => println!(
+            "approved {named} in {project}, once, for the next {}",
+            roughly_ms(a.expires_ms.saturating_sub(a.granted_ms))
+        ),
+        None => println!("approved {named} in {project}, once"),
+    }
+    println!("it is spent by the next matching operation, whether that operation succeeds or not");
+    Ok(0)
+}
+
+fn approvals(json: bool) -> Result<i32> {
+    let pending = match Client::connect()?.call(&Request::Approvals)? {
+        Response::Approvals { pending } => pending,
+        other => bail!("unexpected reply: {}", other.variant()),
+    };
+    if json {
+        println!("{}", serde_json::to_string_pretty(&pending)?);
+        return Ok(0);
+    }
+    if pending.is_empty() {
+        println!("nothing is approved; an operation that needs one will be refused");
+        return Ok(0);
+    }
+    let now = apex_secret_core::store::now_ms();
+    for a in &pending {
+        println!(
+            "{}:{}{} in {} — {} left",
+            a.service,
+            a.operation,
+            if a.resource.is_empty() {
+                String::new()
+            } else {
+                format!(" {}", a.resource)
+            },
+            a.project,
+            roughly_ms(a.expires_ms.saturating_sub(now))
+        );
+    }
+    Ok(0)
+}
+
+/// A duration in milliseconds, in the largest unit that does not lie.
+fn roughly_ms(ms: u64) -> String {
+    let seconds = ms / 1000;
+    let (n, unit) = match seconds {
+        0..=90 => (seconds, "second"),
+        91..=3599 => (seconds / 60, "minute"),
+        _ => (seconds / 3600, "hour"),
+    };
+    format!("{n} {unit}{}", if n == 1 { "" } else { "s" })
+}
+
+fn grants(json: bool) -> Result<i32> {
+    let projects = match Client::connect()?.call(&Request::Grants)? {
+        Response::Grants { projects } => projects,
+        other => bail!("unexpected reply: {}", other.variant()),
+    };
+    if json {
+        println!("{}", serde_json::to_string_pretty(&projects)?);
+        return Ok(0);
+    }
+    if projects.is_empty() {
+        println!("nothing is granted; no agent can use a credential");
+        return Ok(0);
+    }
+    for (project, keys) in &projects {
+        if project == ANY_PROJECT {
+            println!("every project");
+        } else {
+            println!("{project}");
+        }
+        for k in keys {
+            println!("    {k}");
+        }
+    }
+    Ok(0)
+}
+
+/// Exit codes are the message, because an agent reads `$?`:
+///   0  the operation ran and succeeded
+///   1  the service refused, or the operation failed
+///   2  the request was malformed
+fn use_it(service: &str, operation: &str, resource: &str, options: &[String]) -> Result<i32> {
+    // Shape only. This CLI does not know which operations exist — the service
+    // does, and a list here would be one to keep in step with every provider
+    // added. An older spelling has to reach the service too, because only its
+    // registry knows one. Both daemons validate again and trust none of this.
+    if !operation::valid_operation_ref(operation) {
+        eprintln!(
+            "apex secret: '{}' is not an operation name. One looks like \
+             `provider.thing.verb` — see `apex secret capabilities`",
+            operation.escape_debug()
+        );
+        return Ok(2);
+    }
+    let mut params = std::collections::BTreeMap::new();
+    for option in options {
+        match parse_option(option) {
+            Ok((name, value)) => {
+                params.insert(name, value);
+            }
+            Err(e) => {
+                eprintln!("apex secret: {e}");
+                return Ok(2);
+            }
+        }
+    }
+
+    // Sent because `apex-agentd` cannot see this process's working directory.
+    // It is ignored for a managed session, whose project the daemon already
+    // knows.
+    let project = current_project_root().ok();
+
+    let mut agent = apex_agent_core::client::Client::connect()?;
+    require_a_runtime_that_forwards(&mut agent)?;
+
+    match agent.call(&AgentRequest::SecretUse {
+        service: service.to_string(),
+        operation: operation.to_string(),
+        resource: resource.to_string(),
+        params,
+        body: None,
+        project,
+    })? {
+        AgentResponse::Brokered {
+            detail,
+            endpoint,
+            exit_code,
+            output,
+            ..
+        } => {
+            if !output.trim().is_empty() {
+                println!("{}", output.trim_end());
+            }
+            if exit_code == 0 {
+                eprintln!("apex secret: {detail} against {endpoint} — done");
+                Ok(0)
+            } else {
+                eprintln!("apex secret: {detail} against {endpoint} — exited {exit_code}");
+                Ok(1)
+            }
+        }
+        AgentResponse::Error { message, .. } => {
+            eprintln!("apex secret: {message}");
+            Ok(1)
+        }
+        other => bail!("unexpected reply: {other:?}"),
+    }
+}
+
+/// Refuse to ask a runtime that cannot understand the request.
+///
+/// A daemon below [`GENERIC_CAPABILITY_VERSION`] expects `capability`, `remote`
+/// and `branch` where this sends `operation`, `resource` and `params`, so it
+/// reads a request for nothing and answers about a capability nobody named.
+/// Below that again it has its own broker and its own store in `$HOME`, and
+/// would look for the credential in a place `apex secret add` no longer writes
+/// to — "no credential stored" is a true sentence about the wrong store, and
+/// the most confusing possible reply to somebody who just added one.
+///
+/// The guard names the constant rather than a literal, for the same reason the
+/// two before it do: a bare `< 4` is one careless edit away from meaning
+/// nothing.
+fn require_a_runtime_that_forwards(agent: &mut apex_agent_core::client::Client) -> Result<()> {
+    let AgentResponse::Hello { version, .. } = agent.call(&AgentRequest::Hello)? else {
+        // A daemon that cannot answer the handshake is one this cannot reason
+        // about, and guessing in the permissive direction is the failure mode.
+        bail!("the agent runtime did not answer the protocol handshake");
+    };
+    if version < GENERIC_CAPABILITY_VERSION {
+        bail!(
+            "the running agent runtime speaks protocol {version}, which predates generic \
+             capabilities and does not understand this request; restart it with \
+             `systemctl --user restart apex-agentd`"
+        );
+    }
+    Ok(())
+}
+
+fn audit(lines: usize) -> Result<i32> {
+    let entries = match Client::connect()?.call(&Request::Audit { lines, project: None })? {
+        Response::Audit { entries } => entries,
+        other => bail!("unexpected reply: {}", other.variant()),
+    };
+    if entries.is_empty() {
+        println!("no capability has been used by this account yet");
+        return Ok(0);
+    }
+    for e in &entries {
+        let outcome = match (e.exit_code, e.reason.as_deref()) {
+            (Some(0), _) => String::new(),
+            (Some(code), _) => format!("  exit {code}"),
+            (None, Some(reason)) => format!("  {reason}"),
+            (None, None) => String::new(),
+        };
+        println!(
+            "{:<9} {:<14} {:<24} {}{}",
+            e.event.as_str(),
+            e.provider,
+            e.detail,
+            e.endpoint.as_deref().unwrap_or("-"),
+            outcome
+        );
+    }
+    Ok(0)
+}
+
+/// `pub(crate)` so `apex account` keys a grant exactly the way this file does.
+///
+/// Not a convenience. A grant is keyed on a project ROOT, and `apex-agentd`
+/// forwards a session's root when it uses one — so a second derivation that
+/// stored the current directory would write a key that nothing ever matches,
+/// from any subdirectory of a project. Same store, two key derivations, and the
+/// symptom is a capability that was granted and silently never applies.
+pub(crate) fn current_project_root() -> Result<String> {
+    let cwd = std::env::current_dir()?;
+    apex_agent_core::project::detect(&cwd)
+        .map(|p| p.root)
+        .ok_or_else(|| {
+            anyhow::anyhow!(
+                "{} is not inside a git repository, and a capability is granted \
+                 per project",
+                cwd.display()
+            )
+        })
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn this_cli_knows_no_operation_names() {
+        // The property that makes P1-002 a change to `apex-secretd` alone. If
+        // a list of operations ever appears in this file, adding a provider
+        // becomes an edit here too — which is the coupling P1-001 removed.
+        // Everything above the test module — the test module names operations
+        // on purpose. The doc comment at the top shows the CLI being used,
+        // which is what a `--help` reader needs, so comments are exempt; what
+        // must not appear is a name in executable code.
+        let source = include_str!("secret.rs");
+        let shipped = source.split("#[cfg(test)]").next().expect("source");
+        for name in ["git.", "git-push", "git-fetch", "cloudflare."] {
+            let in_code: Vec<&str> = shipped
+                .lines()
+                .filter(|l| l.contains(name))
+                .filter(|l| !l.trim_start().starts_with("//") && !l.trim_start().starts_with("///"))
+                .collect();
+            assert!(in_code.is_empty(), "{name} is hardcoded in the CLI: {in_code:?}");
+        }
+    }
+
+    #[test]
+    fn an_option_must_be_written_as_a_pair() {
+        assert_eq!(
+            parse_option("branch=main").unwrap(),
+            ("branch".to_string(), "main".to_string())
+        );
+        // An empty value is a value: a provider may declare an option whose
+        // presence is the point.
+        assert_eq!(
+            parse_option("force=").unwrap(),
+            ("force".to_string(), String::new())
+        );
+        for evil in ["branch", "=main", ""] {
+            assert!(parse_option(evil).is_err(), "'{evil}' was accepted");
+        }
+    }
+
+    #[test]
+    fn the_version_guard_names_the_revision_the_wire_changed_in() {
+        // The one guard that is NOT just a fact about two constants, so it
+        // stays a test. The store guard beside it is a floor and is checked at
+        // compile time.
+        //
+        // It used to assert equality with `PROTOCOL_VERSION`, standing in for
+        // "the newest named revision IS the current one". That held only while
+        // the secret service happened to be the last thing to change the wire.
+        // P0-007 added `RunRequest::capabilities` — an agent-runtime field the
+        // secret CLI never sends — and bumped the protocol to 6, at which
+        // point the equality failed for a change that has nothing to do with
+        // this guard, and the only ways to make it pass again were to bump a
+        // secret-service revision that did not move or to delete the
+        // assertion.
+        //
+        // So it now says the two things that are actually true and actually
+        // protective: this guard names a revision that exists (a guard above
+        // the current version refuses every daemon), and it is not zero (a
+        // guard at zero can never fire). The "newest named revision is the
+        // current one" ratchet is kept, once, beside the constants themselves
+        // — `protocol.rs`'s `every_version_guard_names_a_revision_that_exists`
+        // asserts `SCOPED_GRANT_VERSION == PROTOCOL_VERSION` — which is where
+        // a reader adding a wire field will actually look.
+        let current = apex_agent_core::protocol::PROTOCOL_VERSION;
+        assert!(
+            GENERIC_CAPABILITY_VERSION <= current,
+            "this guard names protocol {GENERIC_CAPABILITY_VERSION}, which is ahead of \
+             {current}, so it would refuse every daemon"
+        );
+        // Compile-time, not runtime. The value is a constant, so there is no
+        // run in which it could differ, and `const _` fails the BUILD instead
+        // of one test — which is what a guard whose whole job is to be
+        // impossible to leave wrong should do. Clippy's
+        // `assertions_on_constants` asks for exactly this, and it is a
+        // strengthening rather than a concession: a `cargo test` nobody ran
+        // cannot miss it.
+        const _: () = assert!(
+            GENERIC_CAPABILITY_VERSION > 0,
+            "a guard at zero can never fire"
+        );
+    }
+
+    #[test]
+    fn the_use_exit_codes_are_distinct() {
+        // An agent branches on these; two states sharing a code would make
+        // "refused" and "malformed" indistinguishable.
+        let codes = [0, 1, 2];
+        let mut seen = std::collections::HashSet::new();
+        for c in codes {
+            assert!(seen.insert(c), "{c} is used twice");
+        }
+    }
+
+    #[test]
+    fn no_verb_offers_to_hand_a_credential_back() {
+        // The CLI is the surface people read, and a `apex secret show github`
+        // would be an obvious thing for somebody to add — obvious, and the one
+        // thing this whole task exists to make impossible. The daemon could not
+        // answer it, so it would ship as a verb that always fails; asserting
+        // the vocabulary here means it never gets written in the first place.
+        //
+        // The image asserts the same thing against the built binary's help, in
+        // Containerfile.base. This is where it fails first.
+        let cmd = SecretCmd::augment_subcommands(clap::Command::new("secret"));
+        let names: Vec<String> = cmd
+            .get_subcommands()
+            .map(|c| c.get_name().to_string())
+            .collect();
+        for forbidden in ["show", "reveal", "export", "cat", "print", "read", "dump", "get"] {
+            assert!(
+                !names.iter().any(|n| n == forbidden),
+                "`apex secret {forbidden}` exists; no verb may return a credential"
+            );
+        }
+        // ...and the ones that must exist, by name, because a rename is a
+        // silent no-op in every skill and shell function that calls them.
+        for expected in [
+            "add",
+            "list",
+            "remove",
+            "capabilities",
+            "grant",
+            "revoke",
+            "grants",
+            "use",
+            "migrate",
+            "audit",
+        ] {
+            assert!(names.iter().any(|n| n == expected), "`{expected}` is gone");
+        }
+    }
+
+    #[test]
+    fn the_capability_text_says_the_credential_is_never_handed_over() {
+        // `apex secret capabilities` is where somebody decides whether to trust
+        // this with a credential. If it stops saying what the service refuses
+        // to do, the one thing they needed is gone. The operation list comes
+        // from the daemon; this sentence is the CLI's own and has to stay.
+        let source = include_str!("secret.rs");
+        for phrase in [
+            "never hands over the credential",
+            "never given as a URL",
+        ] {
+            assert!(source.contains(phrase), "`apex secret capabilities` no longer says: {phrase}");
+        }
+    }
+}

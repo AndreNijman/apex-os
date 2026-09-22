@@ -21,6 +21,18 @@
 //!   arbitrary terminal output, and a wrong guess here is worse than no guess:
 //!   it would tell the user an agent is blocked when it is working, or the
 //!   reverse. Clients report it through `apex agent event`.
+//!
+//! ## The one thing a published event changes about inference
+//!
+//! Silence is ambiguous: an agent waiting on a person and an agent running
+//! `cargo test` both produce nothing. Output cannot tell them apart, so the
+//! idle rule picks the more common one and is wrong for the whole of every
+//! long tool call. A session that published a `PreToolUse` and has not yet
+//! published its `PostToolUse` has resolved the ambiguity, and `next_state`
+//! takes that answer — bounded, so a hook that stops firing hands the decision
+//! back rather than freezing the session. [`crate::hook`] is where those
+//! events come from for Claude; the parameter is a plain `Option<u64>` so any
+//! agent can supply it through the same open event protocol.
 
 use crate::protocol::AgentState;
 
@@ -41,10 +53,28 @@ pub const SCROLLBACK_BYTES: usize = 256 * 1024;
 /// entire run.
 pub const IDLE_TO_WAITING_SECS: u64 = 10;
 
+/// How long a tool may be reported as running before the idle rule takes over
+/// again.
+///
+/// The in-flight flag is set by a `PreToolUse` hook and cleared by the
+/// `PostToolUse` that answers it. A hook that never fires — a crashed daemon,
+/// a `--bare` session, an agent that rewrote its own settings — would
+/// otherwise pin a session to `working` for as long as it existed. Fifteen
+/// minutes: Claude's own Bash tool tops out at ten, so this is above every
+/// real tool call and far below "forever". Past it the session is inferred
+/// from output again, which is exactly the fallback §6.1 keeps.
+pub const TOOL_IN_FLIGHT_MAX_SECS: u64 = 900;
+
 /// Largest OSC payload retained while scanning. Past this the sequence is
 /// abandoned and scanning returns to ground state — an OSC this long is
 /// binary output that happened to contain `ESC ]`, not a real notification.
 const MAX_OSC_PAYLOAD: usize = 4096;
+
+/// Longest CSI parameter run remembered while scanning.
+///
+/// `?1049;2004` is ten bytes and no real private-mode list is close to this;
+/// anything longer is binary output that happened to contain `ESC [`.
+const MAX_CSI_PARAMS: usize = 64;
 
 /// A fixed-capacity byte ring holding the tail of a session's output.
 ///
@@ -175,6 +205,8 @@ enum Scan {
     Ground,
     /// Saw `ESC`.
     Esc,
+    /// Inside `ESC [ ...`, collecting parameter bytes.
+    Csi,
     /// Inside `ESC ] … `.
     Osc,
     /// Inside an OSC and saw `ESC`, which may begin the `ESC \` terminator.
@@ -193,6 +225,11 @@ pub struct OutputScanner {
     osc: Vec<u8>,
     /// Set when an OSC payload overran; suppresses the completion event.
     overran: bool,
+    /// Parameter bytes of the CSI being collected, bounded by
+    /// [`MAX_CSI_PARAMS`].
+    csi: Vec<u8>,
+    /// Whether the application has `DECSET 2004` on right now.
+    bracketed_paste: bool,
 }
 
 impl Default for OutputScanner {
@@ -207,7 +244,21 @@ impl OutputScanner {
             scan: Scan::Ground,
             osc: Vec::new(),
             overran: false,
+            csi: Vec::new(),
+            bracketed_paste: false,
         }
+    }
+
+    /// Whether the program on this PTY has asked for bracketed paste.
+    ///
+    /// Read by the daemon before it types a path into a session
+    /// ([`crate::inject`]): the markers are a service to an application that
+    /// asked for them and line noise to one that did not, and the only way to
+    /// know which this is, is to have watched it ask. The daemon owns the
+    /// master from the moment the session is spawned, so it has seen every
+    /// byte the application ever wrote and cannot have missed the request.
+    pub fn bracketed_paste(&self) -> bool {
+        self.bracketed_paste
     }
 
     /// Feed a chunk of PTY output, returning every signal it completed.
@@ -220,16 +271,47 @@ impl OutputScanner {
                     0x07 => out.push(Signal::Bell),
                     _ => {}
                 },
-                Scan::Esc => {
-                    if b == b']' {
+                Scan::Esc => match b {
+                    b']' => {
                         self.scan = Scan::Osc;
                         self.osc.clear();
                         self.overran = false;
+                    }
+                    b'[' => {
+                        self.scan = Scan::Csi;
+                        self.csi.clear();
+                    }
+                    // Not an OSC and not a CSI. The remaining escape forms
+                    // cannot contain BEL, so plain ground scanning is safe; if
+                    // this byte is itself an ESC we are starting over.
+                    0x1b => self.scan = Scan::Esc,
+                    _ => self.scan = Scan::Ground,
+                },
+                Scan::Csi => {
+                    if (0x20..=0x3f).contains(&b) {
+                        // A parameter or intermediate byte. Past the bound this
+                        // is no longer a private mode set, so remembering stops
+                        // while the search for the terminator continues.
+                        if self.csi.len() < MAX_CSI_PARAMS {
+                            self.csi.push(b);
+                        } else if !self.csi.is_empty() {
+                            self.csi.clear();
+                        }
+                    } else if (0x40..=0x7e).contains(&b) {
+                        self.apply_csi(b);
+                        self.scan = Scan::Ground;
                     } else {
-                        // Not an OSC. CSI and the other escape forms cannot
-                        // contain BEL, so plain ground scanning is safe; if
-                        // this byte is itself an ESC we are starting over.
-                        self.scan = if b == 0x1b { Scan::Esc } else { Scan::Ground };
+                        // Not part of a CSI at all: an abandoned sequence. Fall
+                        // back to ground and let this byte mean what it would
+                        // have meant there, so a BEL inside a malformed escape
+                        // is still a bell -- which is what the scanner did
+                        // before it knew what a CSI was.
+                        self.scan = Scan::Ground;
+                        match b {
+                            0x1b => self.scan = Scan::Esc,
+                            0x07 => out.push(Signal::Bell),
+                            _ => {}
+                        }
                     }
                 }
                 Scan::Osc => match b {
@@ -257,6 +339,29 @@ impl OutputScanner {
             }
         }
         out
+    }
+
+    /// Apply a completed CSI, when it is one of the modes this cares about.
+    ///
+    /// Exactly one is: `ESC [ ? 2004 h` and its `l`. Everything else a program
+    /// does to its terminal is the program's own business, and a scanner that
+    /// modelled more of it would be a terminal emulator.
+    fn apply_csi(&mut self, final_byte: u8) {
+        if final_byte != b'h' && final_byte != b'l' {
+            return;
+        }
+        // `?` marks a DEC private mode. The parameters after it are
+        // semicolon-separated and 2004 may be any one of them, because
+        // `ESC [ ? 1049 ; 2004 h` is a legal way to ask for both.
+        let Some(params) = self.csi.strip_prefix(b"?") else {
+            return;
+        };
+        let on = final_byte == b'h';
+        for part in params.split(|b| *b == b';') {
+            if part == b"2004" {
+                self.bracketed_paste = on;
+            }
+        }
     }
 
     fn push_osc(&mut self, b: u8) {
@@ -320,22 +425,39 @@ fn parse_osc(payload: &[u8]) -> Option<Signal> {
     }
 }
 
+/// Whether a published event says a tool is running, and for how long.
+///
+/// `None` is what every unintegrated agent has: no hook has ever said
+/// anything, so the idle rule decides on its own exactly as it did before.
+pub type ToolInFlight = Option<u64>;
+
 /// Decide the state a live session should report.
 ///
 /// `current` is what it reports now, `signals` is what the last read produced,
-/// `had_output` is whether that read produced any bytes at all, and
-/// `idle_secs` is how long it has been since the last output or event.
+/// `had_output` is whether that read produced any bytes at all, `idle_secs` is
+/// how long it has been since the last output or event, and `tool_in_flight`
+/// is how long ago a published event said a tool started, when one did.
 ///
 /// Terminal states are never left, and `permission_request` is never
 /// overwritten by inference — only the process exiting or another published
 /// event can move a session out of it. An agent that is genuinely blocked on a
 /// permission decision produces no output, and letting the idle rule rewrite
 /// that to `waiting_for_user` would discard the more specific truth.
+///
+/// `tool_in_flight` is the same argument applied to the other silent case.
+/// `cargo test` prints nothing for two minutes; the idle rule reads that
+/// silence as the user being asked a question and is wrong for a hundred and
+/// ten seconds of it. A session that told us a tool started and has not told
+/// us it finished is working, and silence is the evidence for that rather than
+/// against it. Bounded by [`TOOL_IN_FLIGHT_MAX_SECS`] so a hook that stopped
+/// firing hands the decision back to the idle rule instead of pinning the
+/// session to `working` forever.
 pub fn next_state(
     current: AgentState,
     signals: &[Signal],
     had_output: bool,
     idle_secs: u64,
+    tool_in_flight: ToolInFlight,
 ) -> AgentState {
     if current.is_terminal() {
         return current;
@@ -358,6 +480,9 @@ pub fn next_state(
     }
 
     if idle_secs >= IDLE_TO_WAITING_SECS {
+        if matches!(tool_in_flight, Some(secs) if secs < TOOL_IN_FLIGHT_MAX_SECS) {
+            return AgentState::Working;
+        }
         return AgentState::WaitingForUser;
     }
 
@@ -397,6 +522,17 @@ mod tests {
 
     fn scan(data: &[u8]) -> Vec<Signal> {
         OutputScanner::new().feed(data)
+    }
+
+    /// `next_state` for a session no hook has ever spoken for, which is every
+    /// agent but Claude and is what these cases are about.
+    fn infer(
+        current: AgentState,
+        signals: &[Signal],
+        had_output: bool,
+        idle_secs: u64,
+    ) -> AgentState {
+        next_state(current, signals, had_output, idle_secs, None)
     }
 
     #[test]
@@ -531,9 +667,86 @@ mod tests {
     }
 
     #[test]
+    fn bracketed_paste_is_off_until_the_application_asks() {
+        let mut s = OutputScanner::new();
+        assert!(!s.bracketed_paste());
+        s.feed(b"hello world\n");
+        assert!(!s.bracketed_paste(), "plain output must not turn it on");
+        s.feed(b"\x1b[?2004h");
+        assert!(s.bracketed_paste());
+        s.feed(b"\x1b[?2004l");
+        assert!(!s.bracketed_paste(), "the application asked for it to stop");
+    }
+
+    #[test]
+    fn the_mode_is_recognised_when_it_arrives_beside_others() {
+        // Every full-screen TUI sends the alternate screen and bracketed paste
+        // together, and some send them in one sequence.
+        let mut s = OutputScanner::new();
+        s.feed(b"\x1b[?1049;2004h");
+        assert!(s.bracketed_paste());
+        s.feed(b"\x1b[?1049;2004l");
+        assert!(!s.bracketed_paste());
+    }
+
+    #[test]
+    fn a_sequence_split_across_reads_is_still_one_sequence() {
+        // The reason the scanner carries state at all. A 4 KiB read boundary
+        // lands wherever it lands.
+        let mut s = OutputScanner::new();
+        s.feed(b"\x1b[?20");
+        assert!(!s.bracketed_paste(), "incomplete is not on");
+        s.feed(b"04h");
+        assert!(s.bracketed_paste());
+    }
+
+    #[test]
+    fn a_number_that_merely_contains_2004_is_not_the_mode() {
+        let mut s = OutputScanner::new();
+        s.feed(b"\x1b[?12004h");
+        assert!(!s.bracketed_paste(), "12004 is not 2004");
+        s.feed(b"\x1b[?20041h");
+        assert!(!s.bracketed_paste(), "20041 is not 2004");
+        // And a public mode 2004 is a different mode from the private one.
+        s.feed(b"\x1b[2004h");
+        assert!(!s.bracketed_paste(), "no ? means no DEC private mode");
+    }
+
+    #[test]
+    fn learning_about_csi_did_not_cost_the_scanner_a_bell() {
+        // Before this scanner knew what a CSI was, `ESC [` fell straight back
+        // to ground and a BEL after it was a bell. It still is: a malformed
+        // escape must not swallow the one signal an agent uses to say it wants
+        // attention.
+        assert_eq!(scan(b"\x1b[31\x07"), vec![Signal::Bell]);
+        assert_eq!(scan(b"\x1b[\x07"), vec![Signal::Bell]);
+        // A well-formed CSI still ends at its final byte, and the bell after
+        // it is seen.
+        assert_eq!(scan(b"\x1b[31m\x07"), vec![Signal::Bell]);
+        // And an OSC that follows a CSI still parses.
+        assert_eq!(
+            scan(b"\x1b[2J\x1b]9;done\x07"),
+            vec![Signal::Notification("done".to_string())]
+        );
+    }
+
+    #[test]
+    fn an_oversized_csi_cannot_grow_without_bound_and_recovers() {
+        let mut s = OutputScanner::new();
+        let mut junk = Vec::from(&b"\x1b[?"[..]);
+        junk.extend(std::iter::repeat(b'1').take(MAX_CSI_PARAMS + 64));
+        junk.extend_from_slice(b"h");
+        s.feed(&junk);
+        assert!(!s.bracketed_paste());
+        // Back in ground state: a real request is still recognised.
+        s.feed(b"\x1b[?2004h");
+        assert!(s.bracketed_paste());
+    }
+
+    #[test]
     fn output_alone_means_working() {
         assert_eq!(
-            next_state(AgentState::Starting, &[], true, 0),
+            infer(AgentState::Starting, &[], true, 0),
             AgentState::Working
         );
     }
@@ -541,12 +754,12 @@ mod tests {
     #[test]
     fn silence_past_the_threshold_means_waiting() {
         assert_eq!(
-            next_state(AgentState::Working, &[], false, IDLE_TO_WAITING_SECS),
+            infer(AgentState::Working, &[], false, IDLE_TO_WAITING_SECS),
             AgentState::WaitingForUser
         );
         // Just under the threshold, nothing changes.
         assert_eq!(
-            next_state(AgentState::Working, &[], false, IDLE_TO_WAITING_SECS - 1),
+            infer(AgentState::Working, &[], false, IDLE_TO_WAITING_SECS - 1),
             AgentState::Working
         );
     }
@@ -554,11 +767,11 @@ mod tests {
     #[test]
     fn a_signal_beats_the_idle_rule_and_raw_output() {
         assert_eq!(
-            next_state(AgentState::Working, &[Signal::Bell], true, 0),
+            infer(AgentState::Working, &[Signal::Bell], true, 0),
             AgentState::WaitingForUser
         );
         assert_eq!(
-            next_state(
+            infer(
                 AgentState::WaitingForUser,
                 &[Signal::CommandStarted],
                 false,
@@ -572,7 +785,7 @@ mod tests {
     fn the_last_signal_in_a_read_wins() {
         let signals = vec![Signal::Bell, Signal::CommandStarted];
         assert_eq!(
-            next_state(AgentState::Starting, &signals, true, 0),
+            infer(AgentState::Starting, &signals, true, 0),
             AgentState::Working
         );
     }
@@ -582,16 +795,16 @@ mod tests {
         // Neither output nor silence may downgrade a published permission
         // request; only another event or the process exiting.
         assert_eq!(
-            next_state(AgentState::PermissionRequest, &[], true, 0),
+            infer(AgentState::PermissionRequest, &[], true, 0),
             AgentState::PermissionRequest
         );
         assert_eq!(
-            next_state(AgentState::PermissionRequest, &[], false, 3600),
+            infer(AgentState::PermissionRequest, &[], false, 3600),
             AgentState::PermissionRequest
         );
         // An explicit signal still moves it.
         assert_eq!(
-            next_state(
+            infer(
                 AgentState::PermissionRequest,
                 &[Signal::CommandStarted],
                 false,
@@ -604,8 +817,8 @@ mod tests {
     #[test]
     fn terminal_states_are_never_left() {
         for s in [AgentState::Complete, AgentState::Failed, AgentState::Exited] {
-            assert_eq!(next_state(s, &[Signal::Bell], true, 0), s);
-            assert_eq!(next_state(s, &[], false, 9999), s);
+            assert_eq!(infer(s, &[Signal::Bell], true, 0), s);
+            assert_eq!(infer(s, &[], false, 9999), s);
         }
     }
 
@@ -628,4 +841,214 @@ mod tests {
         assert_eq!(signal_number("nope"), None);
         assert_eq!(signal_number(""), None);
     }
+
+    #[test]
+    fn a_tool_in_flight_holds_working_through_the_silence_the_idle_rule_misreads() {
+        // The case §6.1 exists for. `cargo test` prints nothing for two
+        // minutes; without the hook the idle rule calls that waiting_for_user
+        // after ten seconds and is wrong for the rest of the run.
+        let quiet = 120;
+        assert_eq!(
+            infer(AgentState::Working, &[], false, quiet),
+            AgentState::WaitingForUser,
+            "inference alone gets this wrong, which is the point"
+        );
+        assert_eq!(
+            next_state(AgentState::Working, &[], false, quiet, Some(quiet)),
+            AgentState::Working
+        );
+    }
+
+    #[test]
+    fn a_tool_that_never_reported_finishing_stops_pinning_the_session() {
+        // A crashed daemon, a --bare session or an agent that rewrote its own
+        // settings all end the event stream mid-call. The bound is what makes
+        // that a delay rather than a session stuck on `working` forever.
+        assert_eq!(
+            next_state(
+                AgentState::Working,
+                &[],
+                false,
+                TOOL_IN_FLIGHT_MAX_SECS,
+                Some(TOOL_IN_FLIGHT_MAX_SECS)
+            ),
+            AgentState::WaitingForUser
+        );
+        assert_eq!(
+            next_state(
+                AgentState::Working,
+                &[],
+                false,
+                TOOL_IN_FLIGHT_MAX_SECS,
+                Some(TOOL_IN_FLIGHT_MAX_SECS - 1)
+            ),
+            AgentState::Working
+        );
+    }
+
+    #[test]
+    fn a_tool_in_flight_changes_nothing_else_about_the_rule() {
+        // It is one condition on one branch. Output still means working, a
+        // signal still wins, a terminal state is still terminal, and a
+        // permission request is still not overwritten — otherwise the flag
+        // would be a second state machine racing the first.
+        for tool in [None, Some(0), Some(5), Some(TOOL_IN_FLIGHT_MAX_SECS + 1)] {
+            assert_eq!(
+                next_state(AgentState::Starting, &[], true, 0, tool),
+                AgentState::Working
+            );
+            assert_eq!(
+                next_state(AgentState::Working, &[Signal::Bell], false, 0, tool),
+                AgentState::WaitingForUser
+            );
+            assert_eq!(
+                next_state(AgentState::PermissionRequest, &[], false, 3600, tool),
+                AgentState::PermissionRequest
+            );
+            assert_eq!(
+                next_state(AgentState::Complete, &[], false, 3600, tool),
+                AgentState::Complete
+            );
+            // And below the idle threshold nothing moves either way.
+            assert_eq!(
+                next_state(AgentState::Working, &[], false, 1, tool),
+                AgentState::Working
+            );
+        }
+    }
+    /// One turn, replayed a second at a time, counting the seconds the
+    /// reported state disagrees with what the session was actually doing.
+    ///
+    /// The timeline is written out rather than derived, because it is the
+    /// ground truth the two answers are scored against: the agent works from
+    /// the prompt until `stop_at`, and a tool runs quietly in the middle of
+    /// that. Output lands when the tool prints its result and when the agent
+    /// prints its answer — the silence in between is the whole problem.
+    ///
+    /// Returns (seconds a running agent was called idle, seconds a finished
+    /// turn was called working). The daemon's own order is reproduced: output
+    /// is absorbed first and a published event overrides it, which is what
+    /// happens when Claude prints its answer and then runs its `Stop` hook.
+    fn misreported(hooks: bool, tool_at: u64, tool_secs: u64, stop_at: u64, turn: u64) -> (u64, u64) {
+        let tool_end = tool_at + tool_secs;
+        let mut state = AgentState::Working;
+        let mut last_activity = 0u64;
+        let mut tool_started: Option<u64> = None;
+        let (mut called_idle, mut called_working) = (0, 0);
+
+        for now in 1..=turn {
+            let output = now == tool_end || now == stop_at;
+            if output {
+                last_activity = now;
+            }
+            let in_flight = tool_started.map(|at| now - at);
+            state = next_state(state, &[], output, now - last_activity, in_flight);
+
+            if hooks {
+                let event = match now {
+                    n if n == tool_at => Some(crate::hook::HookEvent::PreToolUse),
+                    n if n == tool_end => Some(crate::hook::HookEvent::PostToolUse),
+                    n if n == stop_at => Some(crate::hook::HookEvent::Stop),
+                    _ => None,
+                };
+                if let Some(e) = event {
+                    let o = crate::hook::observe(e, &crate::hook::Payload::default());
+                    match o.tool {
+                        crate::hook::ToolTransition::Started => tool_started = Some(now),
+                        crate::hook::ToolTransition::Finished => tool_started = None,
+                        crate::hook::ToolTransition::Unchanged => {}
+                    }
+                    if let Some(published) = o.state {
+                        state = published;
+                    }
+                    last_activity = now;
+                }
+            }
+
+            let working = now < stop_at;
+            match (working, state == AgentState::Working) {
+                (true, false) => called_idle += 1,
+                (false, true) => called_working += 1,
+                _ => {}
+            }
+        }
+        (called_idle, called_working)
+    }
+
+    #[test]
+    fn the_hook_bridge_is_measurably_more_accurate_than_the_idle_rule() {
+        // Acceptance criterion 3 of P0-011 as a number rather than a claim. A
+        // two-minute quiet tool call five seconds into a turn that ends at
+        // 130s, watched for three minutes.
+        let (tool_at, tool_secs, stop_at, turn) = (5, 120, 130, 180);
+        let (idle_wrong, idle_late) = misreported(false, tool_at, tool_secs, stop_at, turn);
+        let (hook_wrong, hook_late) = misreported(true, tool_at, tool_secs, stop_at, turn);
+
+        // Inference: wrong from the tenth second of silence until the tool
+        // printed — 115 of the 129 seconds the agent was working — and then
+        // wrong the other way for the ten seconds after the turn ended, while
+        // it waited for the silence to reach the threshold. 125 seconds of a
+        // 180-second turn reported as the opposite of what was happening.
+        assert_eq!(idle_wrong, tool_at + tool_secs - IDLE_TO_WAITING_SECS);
+        assert_eq!(idle_wrong, 115);
+        assert_eq!(idle_late, IDLE_TO_WAITING_SECS);
+        assert_eq!(idle_wrong + idle_late, 125);
+
+        // Hooks: right every second of the turn.
+        assert_eq!((hook_wrong, hook_late), (0, 0));
+    }
+
+    #[test]
+    fn the_idle_rule_cannot_reach_permission_request_at_all() {
+        // The other half of criterion 3, and the larger half: no sequence of
+        // output, silence or signals produces this state, because no pattern
+        // match on arbitrary terminal output can recognise a permission prompt.
+        // A hook publishes it directly. Accuracy for this state is therefore
+        // not "better" — it is zero against one.
+        let every_signal = [
+            Signal::Bell,
+            Signal::CommandStarted,
+            Signal::PromptReady,
+            Signal::Notification(String::new()),
+        ];
+        for current in [
+            AgentState::Starting,
+            AgentState::Working,
+            AgentState::WaitingForUser,
+        ] {
+            for had_output in [true, false] {
+                for idle in [0, 1, IDLE_TO_WAITING_SECS, 3600] {
+                    for tool in [None, Some(0), Some(TOOL_IN_FLIGHT_MAX_SECS + 1)] {
+                        assert_ne!(
+                            next_state(current, &[], had_output, idle, tool),
+                            AgentState::PermissionRequest
+                        );
+                        for sig in &every_signal {
+                            assert_ne!(
+                                next_state(
+                                    current,
+                                    std::slice::from_ref(sig),
+                                    had_output,
+                                    idle,
+                                    tool
+                                ),
+                                AgentState::PermissionRequest,
+                                "{sig:?}"
+                            );
+                        }
+                    }
+                }
+            }
+        }
+        // And the hook is the one thing that does produce it.
+        assert_eq!(
+            crate::hook::observe(
+                crate::hook::HookEvent::PermissionRequest,
+                &crate::hook::Payload::default()
+            )
+            .state,
+            Some(AgentState::PermissionRequest)
+        );
+    }
+
 }

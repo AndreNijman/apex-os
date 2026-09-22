@@ -1,0 +1,73 @@
+#!/usr/bin/env bash
+# ─────────────────────────────────────────────────────────────────────────────
+#  Open a terminal on one privilege request, so it can be reviewed and decided.
+#
+#  Called from the APEX Shell notification's [Review] action (roadmap §4's
+#  prompt) and from the Agent Center.
+#
+#  WHY A TERMINAL AND NOT A DIALOG
+#
+#  Approving PERFORMS the operation, with the reviewing human's own root — that
+#  is the whole design of `apex request` (see docs/agent-runtime.md). So the
+#  decision has to happen somewhere sudo can authenticate and where the full
+#  prompt, the reason and the resulting output are all visible. A graphical
+#  dialog that shells out to a hidden `sudo -A` would hide exactly the part the
+#  user is being asked to judge.
+#
+#  The shell therefore navigates; it does not decide. Same rule as §3's Agent
+#  Center being "a supervisor and navigator, not a replacement for the
+#  terminal".
+# ─────────────────────────────────────────────────────────────────────────────
+set -euo pipefail
+
+usage() {
+    cat >&2 <<'EOF'
+usage: apex-agent-review <request-id>
+
+Opens a terminal showing one privilege request and the commands to decide it.
+EOF
+    exit 2
+}
+
+[ "$#" -eq 1 ] || usage
+case "$1" in
+    ''|*[!0-9]*) usage ;;
+esac
+ID="$1"
+
+APEX="$(command -v apex || echo /usr/bin/apex)"
+[ -x "$APEX" ] || { printf 'apex-agent-review: apex is not installed\n' >&2; exit 3; }
+
+# The review session. `exec $SHELL` at the end so the terminal stays open on the
+# request rather than flashing up and vanishing before it can be read — and so
+# the user can run the approve command from the same window, with the prompt
+# still on screen above it.
+SCRIPT=$(cat <<EOF
+${APEX} request show ${ID} || true
+printf '\n'
+printf 'Decide it with:\n'
+printf '  sudo %s request approve %s                 # allow once, and run it\n' "${APEX}" "${ID}"
+printf '  sudo %s request approve %s --for-project   # ...and stop asking for this one\n' "${APEX}" "${ID}"
+printf '  %s request deny %s\n' "${APEX}" "${ID}"
+printf '\n'
+exec "\${SHELL:-/bin/sh}" -i
+EOF
+)
+
+# Terminal candidates in preference order, each with its own exec flag. Getting
+# the flag wrong opens an empty terminal, which looks like the action did
+# nothing.
+for entry in "${TERMINAL:-}:-e" alacritty:-e ghostty:-e foot:-e kitty:-e wezterm:start xterm:-e; do
+    bin="${entry%%:*}"
+    flag="${entry##*:}"
+    [ -n "$bin" ] || continue
+    command -v "$bin" >/dev/null 2>&1 || continue
+    # setsid so the terminal is not killed when the shell's notification
+    # handler exits.
+    setsid "$bin" "$flag" /bin/sh -c "$SCRIPT" >/dev/null 2>&1 &
+    exit 0
+done
+
+printf 'apex-agent-review: no terminal emulator found; run: %s request show %s\n' \
+    "$APEX" "$ID" >&2
+exit 3

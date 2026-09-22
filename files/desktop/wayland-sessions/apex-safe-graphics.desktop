@@ -1,0 +1,24 @@
+[Desktop Entry]
+Name=APEX Safe Graphics
+Comment=A minimal desktop with software rendering, for when the normal one will not start
+# NAME IS A PRODUCT NAME, NOT THE COMPOSITOR'S — the same rule
+# apex-labwc.desktop states at length. This session is labwc too, and
+# tests/test-apex-greet-sessions.sh fails the build if any shipped session name
+# carries an implementation token.
+#
+# Roadmap P2-018. What makes this a recovery session rather than a second
+# desktop is `labwc -C /usr/share/apex/safe-graphics` inside the Exec: a baked
+# config directory, so nothing here reads ~/.config/labwc — the file
+# apex-input-apply splices into and apex-labwc-keybinds generates into, and
+# therefore the file that can be the reason the normal session did not paint.
+#
+# TryExec, for the reason apex-gaming.desktop gives: the entry must not be
+# offered on a machine where it cannot start. Unlike Gaming Mode this one is
+# image content and the binary is always there — which is the point of pinning
+# it anyway, because an entry that vanished would be the visible symptom of the
+# session helper being lost from an image build.
+Exec=/usr/libexec/apex-safe-graphics
+TryExec=/usr/libexec/apex-safe-graphics
+Type=Application
+DesktopNames=labwc
+Keywords=recovery;safe;rescue;software;rendering;failsafe;

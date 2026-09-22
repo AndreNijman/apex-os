@@ -1,0 +1,192 @@
+#!/usr/bin/env bash
+# ─────────────────────────────────────────────────────────────────────────────
+# apex-tool-broker — wrangler and terraform, without the agent holding a token.
+#
+# WHY THIS EXISTS
+# §13.4: "Do not pass even the temporary token directly to the agent if a
+# broker-owned wrangler/API child process can perform the operation." P1-011
+# made the token short-lived and P1-012 made the child broker-owned, but both
+# of those are inside apex-secretd. This is the part the agent touches.
+#
+# P1-012's first acceptance criterion is "existing skills can continue invoking
+# normal tools". A skill that has always run `wrangler deploy` should go on
+# running `wrangler deploy`. So this script is installed on the agent's PATH
+# under the tools' own names, ahead of the real ones:
+#
+#     /usr/libexec/apex/tools/wrangler   -> apex-tool-broker
+#     /usr/libexec/apex/tools/terraform  -> apex-tool-broker
+#
+# and it decides, per subcommand, between two things:
+#
+#   * a subcommand apex-secretd brokers — ask the daemon, which runs the REAL
+#     tool with a credential in its environment and hands back the output. The
+#     tool believes it has credentials because it does. The agent never had
+#     them and cannot read the process that does.
+#
+#   * anything else — exec the real tool unchanged, with whatever environment
+#     the caller has. `wrangler --version`, `wrangler types`, `terraform fmt`
+#     and `terraform validate` need no credential and keep working exactly as
+#     they did. They will not be authenticated if they need to be, which is the
+#     truth rather than a failure: the agent has no credential, and that is the
+#     whole design.
+#
+# WHAT THIS IS NOT
+# It is not a sandbox and it is not a policy boundary. Nothing here is
+# load-bearing for security: an agent that does not want to use this script can
+# call the real tool directly, and will simply have no credentials when it
+# does. The boundary is the store and the grant, both of which are in
+# apex-secretd and neither of which this script can influence. What this gives
+# is TRANSPARENCY — the normal command works — and nothing else.
+#
+# WHY THE SUBCOMMAND LIST IS HERE AND ALSO IN THE DAEMON
+# It is not duplicated policy. The daemon's list is what may run; this one is
+# what to route. A subcommand this script routes that the daemon does not
+# broker gets a clean refusal from the daemon naming the operation, which is a
+# better answer than this script guessing. A subcommand this script does NOT
+# route but the daemon does broker still works — through `apex secret use`
+# spelled out — it just is not transparent. The failure modes of the two lists
+# disagreeing are both mild and both visible, which is why the list is
+# duplicated rather than fetched at every invocation.
+# ─────────────────────────────────────────────────────────────────────────────
+set -euo pipefail
+
+tool="${APEX_TOOL_NAME:-$(basename "$0")}"
+
+die() { printf 'apex: %s\n' "$*" >&2; exit 64; }
+
+# The real one, which is whatever is on PATH after this script's own directory
+# is taken out of it. Resolved rather than hard-coded so that a tool installed
+# by npm, by a capsule or by the image all work.
+real_tool() {
+    local self_dir
+    self_dir="$(cd "$(dirname "$(readlink -f "$0")")" && pwd)"
+    local shim_dir
+    shim_dir="$(cd "$(dirname "$0")" && pwd)"
+    local IFS=:
+    local dir
+    for dir in $PATH; do
+        [ -n "$dir" ] || continue
+        local resolved
+        resolved="$(cd "$dir" 2>/dev/null && pwd)" || continue
+        [ "$resolved" = "$self_dir" ] && continue
+        [ "$resolved" = "$shim_dir" ] && continue
+        if [ -x "$resolved/$tool" ]; then
+            printf '%s\n' "$resolved/$tool"
+            return 0
+        fi
+    done
+    return 1
+}
+
+# Which apex-secretd operation carries this invocation, if one does.
+#
+# Matched on the leading words only. A flag before the subcommand is not
+# something either tool accepts, and a flag after it is the caller asking for
+# something the brokered argv does not do — so those fall through to the real
+# tool rather than being silently run as a different command.
+# The worker a brokered wrangler acts on.
+#
+# §13.1 binds the NAME on the daemon's side — a name the project did not bind
+# does not resolve and nothing runs — so what this has to supply is which of
+# the project's workers is meant. `wrangler.toml` already says, in the same
+# directory, and reading it is what makes `wrangler deploy` work with no
+# arguments the way it always has. $APEX_CF_WORKER overrides it for a project
+# whose config this cannot parse.
+worker_name() {
+    if [ -n "${APEX_CF_WORKER:-}" ]; then
+        printf '%s\n' "$APEX_CF_WORKER"
+        return 0
+    fi
+    local file
+    for file in wrangler.toml wrangler.json wrangler.jsonc; do
+        [ -f "$file" ] || continue
+        # The first top-level `name` — in TOML unquoted, in JSON quoted. Both
+        # spellings, one expression, and nothing clever: a name wrangler would
+        # accept has no quotes or spaces in it anyway.
+        local found
+        found=$(sed -n 's/^[[:space:]]*[{,]\{0,1\}[[:space:]]*"\{0,1\}name"\{0,1\}[[:space:]]*[:=][[:space:]]*"\([^"]*\)".*/\1/p' "$file" | head -n 1)
+        if [ -n "$found" ]; then
+            printf '%s\n' "$found"
+            return 0
+        fi
+    done
+    return 1
+}
+
+operation=""
+resource=""
+environment=""
+case "$tool" in
+    wrangler)
+        case "${1:-}:${2:-}" in
+            deploy:*)        operation="cloudflare.wrangler.deploy" ;;
+            versions:upload) operation="cloudflare.wrangler.versions-upload" ;;
+        esac
+        resource="$(worker_name || true)"
+        ;;
+    terraform)
+        case "${1:-}" in
+            plan)  operation="cloudflare.terraform.plan" ;;
+            apply) operation="cloudflare.terraform.apply" ;;
+        esac
+        ;;
+    *)
+        die "apex-tool-broker was invoked as '$tool', which it does not broker"
+        ;;
+esac
+
+operation_words="${1:-}"
+[ "$operation" = "cloudflare.wrangler.versions-upload" ] && operation_words="versions upload"
+
+if [ -z "$operation" ]; then
+    exec_real=$(real_tool) || die "$tool is not installed on this machine"
+    exec "$exec_real" "$@"
+fi
+
+shift_count=1
+[ "$operation" = "cloudflare.wrangler.versions-upload" ] && shift_count=2
+shift "$shift_count" || true
+
+# `--env <name>` is the one flag worth understanding rather than refusing: it
+# is how a skill picks between a project's environments, and it is far and away
+# the most common thing after the subcommand itself. The daemon does not take
+# it as an argument — the environment comes from the project's own apex.toml,
+# for the worker being named — so what this does is turn it into the WORKER
+# that environment binds, and let the daemon resolve that name the way it
+# resolves every other. A name the project did not bind still does not resolve.
+while [ "$#" -gt 0 ]; do
+    case "$1" in
+        --env|-e)
+            [ "$#" -ge 2 ] || die "--env needs a name"
+            environment="$2"; shift 2 ;;
+        --env=*)
+            environment="${1#--env=}"; shift ;;
+        *) break ;;
+    esac
+done
+
+# Anything left is a flag the fixed argv cannot carry. The broker runs a
+# command line this build wrote, so honouring extra flags would mean running
+# something other than what was asked for. Say so rather than quietly dropping
+# them — a `--dry-run` that silently deployed would be the worst outcome here.
+if [ "$#" -gt 0 ]; then
+    die "apex brokers \`$tool $operation_words\` and runs a fixed command line, \
+so it cannot also pass $*. Run \`$(real_tool 2>/dev/null || echo "$tool")\` \
+directly if you need those flags — it will not be authenticated, because the \
+credential is not yours to hold."
+fi
+
+if [ "$tool" = "wrangler" ] && [ -n "$environment" ]; then
+    # The environment names a worker in this project's apex.toml, and that
+    # worker is what the daemon is asked for. APEX_CF_WORKER stays the
+    # override: a caller who set both meant the one they typed.
+    [ -n "${APEX_CF_WORKER:-}" ] || resource="$environment"
+fi
+
+if [ "$tool" = "wrangler" ] && [ -z "$resource" ]; then
+    die "apex could not tell which worker to act on: there is no \`name\` in a \
+wrangler.toml/.json/.jsonc here and APEX_CF_WORKER is not set. \`apex cf \
+status\` lists the workers this project binds."
+fi
+
+exec apex secret use cloudflare "$operation" "$resource"

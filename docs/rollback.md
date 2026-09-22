@@ -35,8 +35,11 @@ sudo ostree admin pin 0          # pin the current (index-0) deployment
 sudo ostree admin pin --unpin 2
 ```
 
-`apex pin` (M3, the CLI over apexd+bootc) wraps this and auto-pins before
-kernel-channel switches.
+`apex pin` (M3, the CLI over apexd+bootc) wraps this. `sudo apex channel set`
+pins automatically when the move is toward `stable`, which usually deploys an
+older image: bootc keeps the booted deployment and one more, so a switch
+backwards followed by one update can evict the deployment you would return to.
+Until §26 nothing auto-pinned before anything, and this line promised it.
 
 ## 2. Source ↔ image mapping (the git side)
 
@@ -49,9 +52,14 @@ skopeo inspect docker://ghcr.io/andrenijman/apex-os:daily \
 
 That SHA is a commit on `main`. So "roll the OS back to how it was on
 2026-07-21" and "check out that commit" are the same operation from two ends.
-Promotions to a stable channel get an annotated git tag (`good-YYYYMMDD`),
-and the matching image is tagged the same — pinning a deployment and checking
-out its tag land you on identical state.
+
+An earlier version of this section said promotions to a stable channel get an
+annotated git tag (`good-YYYYMMDD`) and the image is tagged the same. No such
+tag has ever been created, and until §26 there was no stable channel to promote
+to. What exists now is `.github/workflows/promote-channel.yml`, which moves a
+`stable`, `candidate` or `beta` tag onto a digest; the git commit is still
+recoverable from that digest through the `org.opencontainers.image.revision`
+label above, which is the link that has always been real.
 
 ## 3. Rebuild-from-git drill (the full loop)
 
@@ -69,13 +77,32 @@ sudo bootc switch --transport containers-storage localhost/apex-os:daily-local
 sudo systemctl reboot
 ```
 
-## 4. Factory-reset without losing $HOME
+## 4. Factory reset, and what it preserves
 
-`apex reset --keep-home` (M3) re-runs the first-boot provisioner against the
-current image: reprovisions `/etc` defaults and re-clones the Brain_Shell
-checkout, leaving `/var/home` intact. The manual equivalent is a fresh
-`bootc switch` to the pristine image tag plus re-running
-`/usr/libexec/apex-firstboot`.
+`apex recover reset` (§19 — `docs/recovery.md` is the reference). Two scopes:
+`--scope desktop` removes APEX Shell's settings, keybinds and caches for the
+invoking account; `--scope user` adds the blueprint, per-game profiles,
+trusted-device registry, local-model settings and recorded agent sessions.
+Neither touches a document, a checkout, a credential, a capsule, an installed
+package or the booted deployment.
+
+It is a **dry run** unless given both `--commit` and a `--confirm` token
+derived from the plan it printed, it refuses to run as root, and it copies
+everything it removes to `~/apex-reset-backup-<timestamp>` first.
+
+```bash
+apex recover reset --scope desktop          # prints the loss list, changes nothing
+apex recover reset --scope user             # a wider one, still a dry run
+```
+
+A **full** factory reset — user accounts removed, `/etc` restored to image
+state, disks repartitioned — is the installer's job, not a verb on a running
+system. `docs/recovery.md` says why: `/etc` holds `passwd`, `fstab` and
+`crypttab`, ostree three-way-merges it against the deployment, and there is no
+runtime operation that restores it without deploying.
+
+An earlier version of this document claimed `apex reset --keep-home` shipped in
+M3. It never did; the verb above is what exists.
 
 ## Status of this drill
 

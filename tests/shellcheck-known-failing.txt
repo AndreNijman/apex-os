@@ -1,0 +1,24 @@
+# Scripts that do not yet pass `shellcheck -S warning -x`.
+#
+# THIS LIST IS EMPTY, and that is the state it is meant to be kept in.
+# check-shellcheck-coverage.sh fails both ways — a discovered script that is
+# not listed and does not pass, and a listed script that has started passing —
+# so the file cannot rot into a permanent exemption in either direction. An
+# empty list means every shell script under tests/, files/ and android/tools/
+# passes at warning severity, which is the point; it does not mean the check
+# has nothing to do.
+#
+# Measured 2026-09-13, after the 27 entries this file was created with were
+# fixed: 150 scripts discovered, 0 failing.
+#
+# Check a new entry against the RUNNER's shellcheck, not only your own. They
+# disagree: ubuntu-24.04 ships 0.9.0 and a Fedora 43 workstation has 0.11.0,
+# and files/system/libexec/apex-pkg passed on 0.11.0 while 0.9.0 reported
+# SC2120 on it. The gate runs on the runner, so 0.9.0 is the one that decides.
+#
+#   podman run --rm -v "$PWD":/m:ro,Z -w /m \
+#       docker.io/koalaman/shellcheck-alpine:v0.9.0 \
+#       shellcheck -S warning -x <path>
+#
+# If you must add a line: one path, then nothing. A reason belongs in the
+# commit message, and a fix belongs in the script.

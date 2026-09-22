@@ -58,16 +58,81 @@ cd "$(dirname "$0")"
 
 ENGINE=./apex-install
 ANS=$(mktemp /tmp/apex-test-answers.XXXXXX)
-trap 'rm -f "$ANS"' EXIT
+
+# ── Getting the engine as far as its own guards ──────────────────────────────
+#
+# Every case below feeds the engine an answers file and expects a named refusal.
+# None of them could reach one. apex-install:353 refuses to continue unless the
+# APEX-OS image is present in ROOT podman storage, and that check runs BEFORE
+# argument parsing — so on any machine that is not the ISO build box the engine
+# died at preflight and every case in the three engine sections reported the
+# same "image is not present" text instead of the guard under test.
+#
+# That was not a regression. `git log -S` puts the image check in dddabd6f
+# (2026-07-23) and these cases in 33b744d5, five days later: they were written
+# against an engine that already refused them, and only ever passed where root
+# podman storage happened to hold localhost/apex-os:daily. pr-validation.yml
+# runs this suite on a bare ubuntu-24.04 runner, so they were dead in CI too.
+# The tell that needs no theory: the "no arguments" case asserts exit 2, and
+# preflight's die() exits 1.
+#
+# apex-install:56 is IMAGE="${APEX_IMAGE:-localhost/apex-os:${EDITION}}", with
+# the comment "override with APEX_IMAGE=... for testing". An empty tar imported
+# by podman is a valid image with no layers — no network, no build, removed
+# again on exit, so the suite does not depend on the ambient store either.
+#
+# sudo's env_reset strips APEX_* from the caller's environment, so this must be
+# passed as `sudo -n APEX_IMAGE=...` on each invocation and cannot be exported.
+SCRATCH_IMAGE="localhost/apex-engine-probe:test"
+ENGINE_IMAGE=""
+scratch_made=0
+BUILD_CTX=""
+cleanup() {
+    rm -f "$ANS"
+    [ -n "$BUILD_CTX" ] && rm -rf "$BUILD_CTX"
+    [ "$scratch_made" = 1 ] && sudo -n podman rmi -f "$SCRATCH_IMAGE" >/dev/null 2>&1
+}
+trap cleanup EXIT
 chmod 600 "$ANS"
 
+ensure_engine_image() {
+    command -v podman >/dev/null 2>&1 || return 1
+    sudo -n true 2>/dev/null || return 1
+    if sudo -n podman image exists localhost/apex-os:daily 2>/dev/null; then
+        ENGINE_IMAGE="localhost/apex-os:daily"; return 0
+    fi
+    local t; t=$(mktemp /tmp/apex-empty.XXXXXX.tar) || return 1
+    tar -cf "$t" -T /dev/null 2>/dev/null \
+        && sudo -n podman import -q "$t" "$SCRATCH_IMAGE" >/dev/null 2>&1
+    local rc=$?
+    rm -f "$t"
+    [ "$rc" = 0 ] || return 1
+    scratch_made=1
+    ENGINE_IMAGE="$SCRATCH_IMAGE"
+    return 0
+}
+
 pass=0; fail=0
+
+# Skipping here is honest and failing is not: with no image the engine cannot be
+# exercised at all, and a suite that reports 20 failures on a laptop teaches
+# people to ignore it. But it must be LOUD, because a silent skip of the engine
+# half is how this went unnoticed for six weeks.
+ENGINE_RUNNABLE=1
+if ! ensure_engine_image; then
+    ENGINE_RUNNABLE=0
+    echo "SKIP: the engine half cannot run here — preflight needs an APEX-OS image in"
+    echo "      ROOT podman storage and neither one nor passwordless podman is available."
+fi
 
 # $1 = case name, $2 = expected substring in the failure reason, $3 = answers body
 check() {
     local name=$1 want=$2 body=$3 out
+    if [ "$ENGINE_RUNNABLE" != 1 ]; then
+        printf 'SKIP  %-30s no engine image\n' "$name"; return
+    fi
     printf '%s\n' "$body" > "$ANS"
-    out=$(sudo -n "$ENGINE" --headless "$ANS" 2>&1 </dev/null)
+    out=$(sudo -n APEX_IMAGE="$ENGINE_IMAGE" "$ENGINE" --headless "$ANS" 2>&1 </dev/null)
 
     if grep -q 'Unexpected error on line' <<<"$out"; then
         printf 'FAIL  %-30s ERR TRAP FIRED\n' "$name"; fail=$((fail+1)); return
@@ -84,11 +149,19 @@ check() {
 # A disk that cannot exist, so the whole-disk cases stop at the block-device
 # check instead of proceeding. The account guards run BEFORE that check — which
 # is the ordering under test.
-BASE=$'mode=disk\ndisk=/dev/zzz-does-not-exist\npassword=pw\nhostname=apex'
+# `encrypt=no` is here because the engine now REFUSES an answers file that
+# does not say, one way or the other, whether to encrypt the disk. It is not
+# a default this suite is choosing: a missing key is its own refusal, and
+# installer/test-installer-luks.sh is the suite that asserts that. Without
+# it every case below would stop at the encryption question instead of the
+# guard it is actually testing.
+BASE=$'mode=disk\ndisk=/dev/zzz-does-not-exist\npassword=pw\nhostname=apex\nencrypt=no'
 
 echo "── argument handling ──────────────────────────────────────────────────"
-out=$(sudo -n "$ENGINE" </dev/null 2>&1); rc=$?
-if [ "$rc" = 2 ] && grep -q 'not a user interface' <<<"$out"; then
+out=$(sudo -n APEX_IMAGE="$ENGINE_IMAGE" "$ENGINE" </dev/null 2>&1); rc=$?
+if [ "$ENGINE_RUNNABLE" != 1 ]; then
+    printf 'SKIP  %-30s no engine image\n' "no arguments"
+elif [ "$rc" = 2 ] && grep -q 'not a user interface' <<<"$out"; then
     printf 'PASS  %-30s (exit 2, starts nothing)\n' "no arguments"; pass=$((pass+1))
 else
     printf 'FAIL  %-30s exit=%s\n' "no arguments" "$rc"; fail=$((fail+1))
@@ -98,7 +171,7 @@ echo "── account validation (must run before the disk is touched) ───�
 check "username: uppercase"   "Invalid username 'Bob'"        "$BASE"$'\nusername=Bob'
 check "username: leading digit" "Invalid username '1bob'"     "$BASE"$'\nusername=1bob'
 check "username: reserved"    "reserved system account"       "$BASE"$'\nusername=root'
-check "hostname: underscore"  "Invalid hostname 'my_host'"    $'mode=disk\ndisk=/dev/zzz-does-not-exist\npassword=pw\nusername=bob\nhostname=my_host'
+check "hostname: underscore"  "Invalid hostname 'my_host'"    $'mode=disk\ndisk=/dev/zzz-does-not-exist\npassword=pw\nusername=bob\nhostname=my_host\nencrypt=no'
 
 echo "── answers-file handling ──────────────────────────────────────────────"
 check "unknown key"           "unknown key in answers file"   "$BASE"$'\nusername=bob\nbogus=1'
@@ -131,13 +204,185 @@ echo "── partition mode: the two most destructive mistakes ─────�
 # These need devices that exist for the guard to be reached. Read-only: both
 # cases are refused by the guard under test, long before any write.
 if [ -b /dev/sda ] && [ -b /dev/sdb ] && [ -b /dev/sda2 ] && [ -b /dev/sdb1 ]; then
-    check "target == ESP"     "same device"                   $'mode=partition\ndisk=/dev/sda\ntarget=/dev/sda2\nesp=/dev/sda2\nusername=bob\npassword=pw\nhostname=apex'
-    check "target on another disk" "is not a partition of"    $'mode=partition\ndisk=/dev/sda\ntarget=/dev/sdb1\nesp=/dev/sda2\nusername=bob\npassword=pw\nhostname=apex'
+    check "target == ESP"     "same device"                   $'mode=partition\ndisk=/dev/sda\ntarget=/dev/sda2\nesp=/dev/sda2\nusername=bob\npassword=pw\nhostname=apex\nencrypt=no'
+    check "target on another disk" "is not a partition of"    $'mode=partition\ndisk=/dev/sda\ntarget=/dev/sdb1\nesp=/dev/sda2\nusername=bob\npassword=pw\nhostname=apex\nencrypt=no'
 else
     echo "SKIP  partition-mode cases (need /dev/sda2 and /dev/sdb1 present)"
 fi
 
 echo
+echo "── netinstall staging: never RAM, never the disk being wiped ──────────"
+# A network install used to `podman pull` into the live environment's
+# containers-storage, which on a booted ISO is the RAM overlay: ~12 GB of
+# decompressed layers in RAM, plus several more when bootc re-tarred them into
+# /var/tmp. It staged to disk instead, and these guard the chooser that decides
+# WHERE. Two of them are the difference between a working install and a
+# destroyed one:
+#
+#   * a tmpfs must never be chosen — that IS the RAM overlay, the whole bug;
+#   * the disk about to be repartitioned must never be chosen — staging onto it
+#     means bootc wipes the image out from under itself mid-install.
+#
+# The functions are sourced out of the shipped engine rather than copied, so
+# this tests what installs, not a paraphrase of it.
+_fns=$(mktemp /tmp/apex-scratch-fns.XXXXXX)
+sed -n '/^scratch_fs_ok()/,/^}/p;/^pick_scratch()/,/^}/p;/^stage_budget_kb()/,/^}/p;/^stage_setup()/,/^}/p;/^stage_teardown()/,/^}/p' "$ENGINE" > "$_fns"
+if [ ! -s "$_fns" ]; then
+    printf 'FAIL  %-30s could not extract the chooser from %s\n' "scratch chooser" "$ENGINE"
+    fail=$((fail+1))
+else
+(
+    set +u
+    NEED_SCRATCH_GB=22
+    DISK=/dev/sdz
+    # shellcheck disable=SC1090
+    . "$_fns"
+    _p=0; _f=0
+    _ck() {  # name, got, want
+        if [ "$2" = "$3" ]; then printf 'PASS  %-30s\n' "$1"; _p=$((_p+1))
+        else printf 'FAIL  %-30s want %s got %s\n' "$1" "$3" "$2"; _f=$((_f+1)); fi
+    }
+    mkdir -p /dev/shm/apex-scratch-test
+    scratch_fs_ok /dev/shm/apex-scratch-test && r=yes || r=no
+    _ck "tmpfs refused"              "$r" no
+    scratch_fs_ok /var/tmp && r=yes || r=no
+    _ck "real filesystem accepted"   "$r" yes
+    # shellcheck disable=SC2034  # read by scratch_fs_ok, sourced above
+    ( NEED_SCRATCH_GB=999999; scratch_fs_ok /var/tmp ) && r=yes || r=no
+    _ck "too small refused"          "$r" no
+    scratch_fs_ok /no/such/dir && r=yes || r=no
+    _ck "missing directory refused"  "$r" no
+    # shellcheck disable=SC2034  # read by scratch_fs_ok, sourced above
+    ( DISK=$(df -P /var/tmp | awk 'NR==2{print $1}'); scratch_fs_ok /var/tmp ) && r=yes || r=no
+    _ck "target disk refused"        "$r" no
+    mkdir -p /var/tmp/apex-scratch-ovr
+    out=$(APEX_OCI_SCRATCH=/var/tmp/apex-scratch-ovr pick_scratch || true)
+    _ck "override honoured"          "$out" /var/tmp/apex-scratch-ovr
+    out=$(APEX_OCI_SCRATCH=/dev/shm/apex-scratch-test pick_scratch || true)
+    _ck "override onto tmpfs refused" "${out:-<empty>}" "<empty>"
+
+    # ── The machine this installer will meet most often ────────────────────
+    # A laptop with ONE internal disk, booted from a plain single-partition
+    # USB. Nothing qualifies, by construction: the live session automounts
+    # nothing under /run/media because the stick has no second partition,
+    # /mnt and /media are empty, and /var/tmp IS the RAM overlay. Until the
+    # fallback existed the chooser answered with nothing and the install
+    # aborted, telling the user to get "the full offline ISO" — which has
+    # never been published. The candidate list is substituted here rather
+    # than simulated so the case is the real chooser's answer to the real
+    # shape of that machine.
+    out=$( APEX_SCRATCH_CANDIDATES="/dev/shm/apex-scratch-test /no/such/dir" \
+           pick_scratch || true )
+    _ck "single-disk USB falls back"  "${out:-<empty>}" "@target"
+    # …and the tmpfs in that list was refused on the way past, not chosen:
+    # falling back to RAM is the bug 63857891 fixed and this must not undo.
+    _ck "fallback is not the tmpfs"   "$(printf '%s' "$out" | grep -c '/dev/shm' || true)" 0
+    # A real scratch volume still wins — the fallback is a fallback.
+    out=$( APEX_SCRATCH_CANDIDATES="/dev/shm/apex-scratch-test /var/tmp" \
+           pick_scratch || true )
+    _ck "spare volume still preferred" "${out:-<empty>}" "/var/tmp/apex-install-scratch"
+    rmdir /dev/shm/apex-scratch-test /var/tmp/apex-scratch-ovr 2>/dev/null
+
+    # ── How much of the target the download may take ───────────────────────
+    # The only part of staging-on-target that can be exercised without a block
+    # device, and the part that decides whether a disk is erased for nothing.
+    # STAGE_RESERVE_GB is what keeps room for the OS itself: the staged blobs
+    # and the installed system are on the same filesystem at the same time.
+    STAGE_RESERVE_GB=15
+    _gb() { echo $(( $1 * 1024 * 1024 )); }
+    out=$(stage_budget_kb "$(_gb 200)" || echo REFUSED)
+    _ck "200 GB target accepted"      "$out" "$(_gb 185)"
+    out=$(stage_budget_kb "$(_gb 37)" || echo REFUSED)
+    _ck "37 GB target accepted"       "$out" "$(_gb 22)"
+    out=$(stage_budget_kb "$(_gb 36)" || echo REFUSED)
+    _ck "36 GB target refused"        "$out" REFUSED
+    out=$(stage_budget_kb "$(_gb 20)" || echo REFUSED)
+    _ck "20 GB target refused"        "$out" REFUSED
+    out=$(stage_budget_kb "not-a-number" || echo REFUSED)
+    _ck "unreadable free space refused" "$out" REFUSED
+
+    # ── The staging image must leave the target root PRISTINE ──────────────
+    # `bootc install to-filesystem` refuses a target that is not empty — its
+    # own error says "Requiring directory contains only mount points" — so the
+    # backing file is created on the target, handed to a loop device and then
+    # UNLINKED. Nothing here opens a block device: losetup, mkfs.xfs and mount
+    # are stubbed, and the only real work is the sparse file, which the
+    # function under test is supposed to remove. If the unlink is ever
+    # simplified out, every staged install fails on hardware and nothing else
+    # in this suite would notice.
+    _st=$(mktemp -d /var/tmp/apex-stage-probe.XXXXXX)
+    (
+      # shellcheck disable=SC2034  # LOG and STAGE_DIR are read by stage_setup,
+      # which is sourced from the engine above, not defined here.
+      LOG=/dev/null
+      log() { :; }
+      losetup() { echo /dev/loop-probe; }
+      mkfs.xfs() { :; }
+      mount()    { :; }
+      df()       { command df "$@"; }
+      # shellcheck disable=SC2034
+      STAGE_DIR="$_st/mnt"
+      # Bound the sparse ceiling to ~25 GB whatever this machine has free.
+      _avail_gb=$(command df -PBG "$_st" | awk 'NR==2{gsub(/G/,"",$4); print $4+0}')
+      STAGE_RESERVE_GB=$(( _avail_gb - 25 ))
+      [ "$STAGE_RESERVE_GB" -ge 1 ] || STAGE_RESERVE_GB=1
+      mkdir -p "$_st/root"
+      stage_setup "$_st/root" >/dev/null 2>&1 || { echo "SETUP-FAILED"; exit 0; }
+      [ -e "$_st/root/.apex-stage.img" ] && echo "LEFT-BEHIND" && exit 0
+      [ "$STAGE_TMPDIR" = "$_st/mnt/tmp" ] || { echo "TMPDIR=$STAGE_TMPDIR"; exit 0; }
+      printf '%s\n' "${STAGE_BOOTC_ARGS[*]}"
+    ) > "$_st/out" 2>&1
+    _ck "staging image is unlinked"   "$(cat "$_st/out")" "--skip-finalize"
+    rm -rf "$_st"
+    echo "$_p $_f" > /tmp/apex-scratch-counts
+)
+read -r _sp _sf < /tmp/apex-scratch-counts 2>/dev/null || { _sp=0; _sf=1; }
+pass=$((pass + _sp)); fail=$((fail + _sf))
+rm -f "$_fns" /tmp/apex-scratch-counts
+fi
+
+# What the engine must and must not say about staging.
+#
+# The refusal these three assertions used to guard — "There is nowhere to put
+# the download", with "the full offline ISO" named as the way out — was a dead
+# end: that ISO has never been published, and on the commonest machine this
+# installer meets there was no other way forward either. It is GONE, and its
+# absence is asserted, because reintroducing it would put the dead end back.
+for _gone in "There is nowhere to put the download" \
+             "Use the full offline ISO. It carries the OS and needs no staging at all."; do
+    if grep -qF "$_gone" "$ENGINE"; then
+        printf 'FAIL  %-30s the dead-end refusal is back in the engine\n' "no dead end: ${_gone:0:18}"; fail=$((fail+1))
+    else
+        printf 'PASS  %-30s\n' "no dead end: ${_gone:0:18}"; pass=$((pass+1))
+    fi
+done
+# And what must be there instead.
+#
+#   * the reassurance the external-scratch path can still honestly give;
+#   * the warning the fallback path must give in its place, because there the
+#     download and the destruction are the same step;
+#   * the reachability probe that is the last free check before the wipe;
+#   * --skip-finalize, without which a completely successful staged install
+#     reports as a failure (the loop device holds a writable fd, so bootc's
+#     closing remount-read-only fails with EBUSY).
+for _want in "Nothing has been erased" \
+             "downloads onto it as it goes" \
+             "skopeo inspect --raw" \
+             "--skip-finalize"; do
+    if grep -qF -- "$_want" "$ENGINE"; then
+        printf 'PASS  %-30s\n' "engine says: ${_want:0:22}"; pass=$((pass+1))
+    else
+        printf 'FAIL  %-30s missing from the engine\n' "engine says: ${_want:0:22}"; fail=$((fail+1))
+    fi
+done
+
+# And the engine must not have quietly kept the old RAM-filling path.
+if grep -qE '^\s*if podman pull' "$ENGINE"; then
+    printf 'FAIL  %-30s engine still uses `podman pull` to fetch the OS\n' "no podman pull"; fail=$((fail+1))
+else
+    printf 'PASS  %-30s\n' "no podman pull"; pass=$((pass+1))
+fi
+
 echo "── GUI: every page must draw — it is the only front end there is ──────"
 
 GUI=./apex-installer-gui
@@ -167,18 +412,37 @@ fi
 # hard-wired to 1280x720 — the only supported way to get another geometry is
 # the wlr-output-management protocol, which cage speaks and wlr-randr drives.
 # Hence the one-package derived image.
+# An EMPTY build context, made here rather than named. This used to be
+# /var/empty, which exists on Fedora and does NOT exist on a stock
+# ubuntu-24.04 GitHub runner — so `podman build` failed instantly with a
+# missing-context error, and because the build's output went to /dev/null the
+# suite reported only "could not build", with the actual reason discarded.
+#
+# That went unnoticed because this job is gated on installer changes and the
+# roadmap branches had not touched installer/ until now. It is a pre-existing
+# defect surfaced by this branch, not one it introduced.
+BUILD_CTX=$(mktemp -d /tmp/apex-guitest-ctx.XXXXXX)
+build_img() {   # build_img <tag> <containerfile-on-stdin>
+    local tag=$1 err
+    if err=$(sudo -n podman build -t "$tag" -f - "$BUILD_CTX" 2>&1 >/dev/null); then
+        return 0
+    fi
+    # The reason, not just the verdict. A build that fails for no stated cause
+    # is the shape of bug this whole file exists to prevent.
+    printf 'FAIL  %-30s could not build %s\n' "gui: render image" "$tag"
+    printf '      podman said: %s\n' "$(printf '%s' "$err" | tail -3 | tr '\n' ' ')"
+    fail=$((fail+1)); gui_skip=1
+    return 1
+}
+
 if [ "$gui_skip" = 0 ] && ! sudo -n podman image exists "$GUITEST" 2>/dev/null; then
     echo "      ($GUITEST missing — building it, first run only)"
     printf 'FROM registry.fedoraproject.org/fedora:43\nRUN dnf install -y cage gtk4 libadwaita python3-gobject gobject-introspection python3-cairo cairo-gobject mesa-dri-drivers seatd grim && dnf clean all\n' \
-        | sudo -n podman build -t "$GUITEST" -f - /var/empty >/dev/null 2>&1 \
-        || { printf 'FAIL  %-30s could not build %s\n' "gui: render image" "$GUITEST"
-             fail=$((fail+1)); gui_skip=1; }
+        | build_img "$GUITEST"
 fi
 if [ "$gui_skip" = 0 ] && ! sudo -n podman image exists "$RANDR" 2>/dev/null; then
     printf 'FROM %s\nRUN dnf install -y wlr-randr && dnf clean all\n' "$GUITEST" \
-        | sudo -n podman build -t "$RANDR" -f - /var/empty >/dev/null 2>&1 \
-        || { printf 'FAIL  %-30s could not build %s\n' "gui: render image" "$RANDR"
-             fail=$((fail+1)); gui_skip=1; }
+        | build_img "$RANDR"
 fi
 
 if [ "$gui_skip" = 0 ]; then

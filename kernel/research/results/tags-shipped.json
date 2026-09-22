@@ -1,0 +1,32 @@
+{
+  "btf_dump": "/work/out/dump-shipped.txt",
+  "total_funcs": 72906,
+  "decl_tag_values": {
+    "bpf_fastcall": 2,
+    "bpf_kfunc": 288
+  },
+  "scx_bpf_examined": 68,
+  "scx_bpf_tagged": 50,
+  "scx_bpf_untagged": 18,
+  "untagged_names": [
+    "scx_bpf_cid_curr",
+    "scx_bpf_cid_override",
+    "scx_bpf_cidperf_cur",
+    "scx_bpf_cidperf_set",
+    "scx_bpf_cpu_to_cid",
+    "scx_bpf_cpuperf_cap",
+    "scx_bpf_destroy_dsq",
+    "scx_bpf_dispatch_cancel",
+    "scx_bpf_dsq_insert___v2",
+    "scx_bpf_dsq_nr_queued",
+    "scx_bpf_error_bstr",
+    "scx_bpf_get_idle_cpumask",
+    "scx_bpf_get_idle_smtmask_node",
+    "scx_bpf_pick_any_cpu",
+    "scx_bpf_pick_any_cpu_node",
+    "scx_bpf_reenqueue_local",
+    "scx_bpf_task_set_slice",
+    "scx_bpf_test_and_clear_cpu_idle"
+  ],
+  "impl_twins_skipped": 29
+}

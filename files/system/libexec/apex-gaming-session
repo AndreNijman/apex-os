@@ -30,9 +30,21 @@
 #  usual here: this session cannot be verified on the author's hardware yet.
 #
 #  Env overrides (for debugging, not for normal use):
-#    APEX_GAMESCOPE_ARGS   extra gamescope arguments
+#    APEX_GAMESCOPE_ARGS   extra gamescope arguments, appended LAST so they
+#                          override the device selection below
 #    APEX_STEAM_ARGS       replace the Steam argument list
 #    APEX_GAMING_NO_APEXD  set to 1 to skip `apex game start`
+#    APEX_GAMING_NO_DEVICE_SELECT
+#                          set to 1 to let gamescope pick its own GPU, which is
+#                          the behaviour this script had before 2026-09-19 and
+#                          the one that put Gaming Mode on the wrong screen
+#    APEX_GAMING_EXPOSE_WAYLAND
+#                          set to 0 to drop --expose-wayland (X11-only games).
+#                          It also decides --mangoapp, because the two cannot
+#                          both be on — see the MangoHud block below.
+#    APEX_ROOT             the fixture root `apex gaming` already honours; the
+#                          capability read below uses it too. Never set in a
+#                          real session.
 # ─────────────────────────────────────────────────────────────────────────────
 # Deliberately NOT `set -e`: every optimisation below is best-effort, and none of
 # them may prevent the session from starting. The hard requirements are checked
@@ -42,13 +54,22 @@ set -uo pipefail
 log() { printf '[apex-gaming-session] %s\n' "$*" >&2; }
 
 # ── Hard requirements ───────────────────────────────────────────────────────
+# The message matters: this is the ONE moment a user meets this failure, from a
+# log they usually cannot see, after picking Gaming Mode at the greeter. It used
+# to guess — "this is not the Gaming edition?" — which was a fair guess while
+# there were editions. There is one image now, this session script ships on
+# every machine, and gamescope/steam install on demand, so the cause is never
+# the edition and the remedy is always the same command. Say it.
+missing=""
 for bin in gamescope steam; do
-    command -v "$bin" >/dev/null 2>&1 || {
-        log "FATAL: '$bin' is not installed — this is not the Gaming edition?"
-        log "returning to the greeter rather than starting a broken session"
-        exit 1
-    }
+    command -v "$bin" >/dev/null 2>&1 || missing="$missing $bin"
 done
+if [ -n "$missing" ]; then
+    log "FATAL: not installed:$missing"
+    log "install the gaming userspace with: sudo apex install$missing"
+    log "returning to the greeter rather than starting a broken session"
+    exit 1
+fi
 
 # ── APEX game mode: cpuset, IRQ steering, GPU clocks, tier, sched-ext ───────
 # One call does all of it. `apex game start` goes through apexd's D-Bus API,
@@ -58,57 +79,155 @@ done
 #
 # Best-effort: on a machine whose profile disables game mode, or with apexd
 # down, gaming still works — it is just not tuned.
+#
+# `--owner-pid $$` is the fix for the defect the 2026-09-19 katana run found
+# (evidence §3.4), and it is the load-bearing half of leaving Gaming Mode.
+# The EXIT trap below CANNOT be relied on: it runs `apex game stop`, which is
+# polkit action `org.apexos.apexd.manage-power` with `allow_active=yes` and
+# `auth_admin` for everything else, so the instant logind stops calling this
+# session active — a greetd restart, a VT switch, any logind-driven teardown —
+# the trap's own call is refused and the machine keeps a p-core cpuset, steered
+# IRQs, the `performance` tier and scx_lavd with nothing able to undo them.
+#
+# Naming an owner hands that job to apexd, which is root and asks polkit nothing
+# about itself: when THIS script dies, for any reason, in any state of the
+# session, apexd releases game mode. The owner is watched, not pinned — nothing
+# about the cpuset changes.
 if [ "${APEX_GAMING_NO_APEXD:-0}" != "1" ] && command -v apex >/dev/null 2>&1; then
-    if apex game start >/dev/null 2>&1; then
+    if apex game start --owner-pid "$$" >/dev/null 2>&1; then
         log "apexd game mode engaged (cpuset/IRQ/clocks/tier/sched-ext)"
+        log "  release is owned by apexd, watching pid $$ — a destroyed session still undoes it"
+    elif apex game start >/dev/null 2>&1; then
+        # An apexd that predates the owner watch. Say what is lost rather than
+        # letting it read as a normal start.
+        log "apexd game mode engaged (cpuset/IRQ/clocks/tier/sched-ext)"
+        log "  WARNING: this apexd does not accept a session owner, so releasing game mode"
+        log "  depends entirely on the EXIT trap below — and polkit refuses that trap once"
+        log "  logind deactivates this session. See evidence §3.4."
     else
         log "apexd game mode unavailable — continuing untuned"
     fi
 fi
 
 # Leaving Gaming Mode must always undo it, however the session ends.
+#
+# This is now the SECOND of two paths and no longer the only one. It is kept
+# because it is instant on the clean path, where apexd's watch would take up to
+# a tick longer; both call the same idempotent release, so the two racing is
+# harmless. What it must never do again is fail in silence: the version this
+# replaces was `apex game stop >/dev/null 2>&1 && log …`, which on the refused
+# path printed absolutely nothing, and that silence is why a machine sat in a
+# gaming power profile for 75 minutes with no clue in its own log.
 cleanup() {
     if [ "${APEX_GAMING_NO_APEXD:-0}" != "1" ] && command -v apex >/dev/null 2>&1; then
-        apex game stop >/dev/null 2>&1 && log "apexd game mode released"
+        local out
+        if out="$(apex game stop 2>&1)"; then
+            log "apexd game mode released"
+        else
+            log "this session could not release game mode: ${out}"
+            log "  expected when logind has already deactivated the session; apexd is"
+            log "  watching pid $$ and releases it itself within a couple of seconds."
+        fi
     fi
 }
 trap cleanup EXIT HUP INT TERM
 
-# ── Realtime scheduling ─────────────────────────────────────────────────────
-# `--rt` needs a non-zero RLIMIT_RTPRIO; the image ships
-# /etc/security/limits.d/30-apex-gaming-rtprio.conf and pam_limits applies it.
-# Only pass the flag when the limit is actually there, so the log says something
-# true instead of gamescope quietly failing to acquire RT.
-# The SOFT limit is the one that bounds sched_setscheduler(), so that is what
-# gets checked. `ulimit -Hr` (the hard limit) would pass a limits.d file that
-# raised only the ceiling and left the soft limit at 0 — i.e. it would report
-# success for exactly the silent failure this is here to catch. The shipped
-# drop-in uses `-`, which sets both.
-RT_ARGS=()
-rtprio="$(ulimit -Sr 2>/dev/null || echo 0)"
-case "${rtprio}" in
-    unlimited)   RT_ARGS=(--rt) ;;
-    ''|*[!0-9]*) log "cannot read the soft RLIMIT_RTPRIO — not asking for realtime" ;;
-    *) if [ "${rtprio}" -gt 0 ]; then
-           RT_ARGS=(--rt)
-           log "soft RLIMIT_RTPRIO is ${rtprio} — requesting realtime scheduling"
-       else
-           log "soft RLIMIT_RTPRIO is 0 — realtime unavailable (is the user in @wheel?)"
-       fi ;;
+# ── Capabilities, logged before anything uses them ──────────────────────────
+# Two separate questions turn on this one reading, and both were open after the
+# 2026-09-19 katana run, so it is printed unconditionally rather than derived
+# twice in silence.
+#
+#  1. `--rt` (below) needs CAP_SYS_NICE in the EFFECTIVE set.
+#  2. Steam's own bwrap refuses to start with ANY capability in the PERMITTED
+#     set of a non-setuid process — "Unexpected capabilities but not setuid,
+#     old file caps config?", which is what §6.3 recorded and did not root
+#     cause. If CapPrm below is non-zero, that message is explained and the
+#     session is the thing to fix, not Steam.
+#
+# Those two pull in opposite directions, and that is the finding: granting the
+# session CAP_SYS_NICE so gamescope gets realtime is the same act that stops
+# Steam's runtime from starting inside it. Do not "fix" §6.2 by granting
+# capabilities at login without measuring §6.3 again afterwards.
+# `APEX_ROOT` is the fixture root `apex gaming` already honours, and the same
+# one is honoured here so the capability branches can be exercised on a machine
+# whose real capability set is whatever it is. Unset — which is every real
+# session — this is exactly /proc/self/status.
+CAP_STATUS="/proc/self/status"
+[ -n "${APEX_ROOT:-}" ] && CAP_STATUS="${APEX_ROOT%/}/proc/self/status"
+cap_hex() { awk -v f="$1" '$1 == f":" { print $2; exit }' "${CAP_STATUS}" 2>/dev/null; }
+cap_has() {
+    # bit 23 is CAP_SYS_NICE (include/uapi/linux/capability.h). The kernel
+    # prints these bitmaps most-significant-nibble-first as one 16-digit hex
+    # number, so this is plain arithmetic — NOT the word-reversed format
+    # /sys/class/input/*/capabilities/key uses.
+    local hex="$1" bit="$2"
+    case "${hex}" in ''|*[!0-9a-fA-F]*) return 2 ;; esac
+    (( ( 16#${hex} >> bit ) & 1 ))
+}
+CAP_EFF="$(cap_hex CapEff)"
+CAP_PRM="$(cap_hex CapPrm)"
+CAP_AMB="$(cap_hex CapAmb)"
+log "capabilities: CapEff=${CAP_EFF:-?} CapPrm=${CAP_PRM:-?} CapAmb=${CAP_AMB:-?}"
+# A permitted set of all zeroes is the healthy case. Anything else — and an
+# unreadable one is NOT "anything else", it is a third answer — gets said out
+# loud, because it explains a Steam that dies before it draws anything.
+case "${CAP_PRM}" in
+    '')            log "could not read CapPrm; §6.3's bwrap failure cannot be ruled in or out" ;;
+    *[!0]*)
+        log "WARNING: this session holds capabilities in its permitted set (CapPrm=${CAP_PRM})."
+        log "         Steam's own bwrap refuses to start with any of them: 'Unexpected"
+        log "         capabilities but not setuid, old file caps config?' — evidence §6.3." ;;
 esac
 
-# ── VRR ─────────────────────────────────────────────────────────────────────
-# Only ask for adaptive sync if a connected output actually advertises it.
-# Passing it blindly is harmless on paper but muddies the failure diagnosis.
-VRR_ARGS=()
-for p in /sys/class/drm/card*-*/vrr_capable; do
-    [ -r "$p" ] || continue
-    if [ "$(cat "$p" 2>/dev/null)" = "1" ]; then
-        VRR_ARGS=(--adaptive-sync)
-        log "VRR-capable output found — enabling adaptive sync"
-        break
+# ── Realtime scheduling ─────────────────────────────────────────────────────
+# MEASURED ON KATANA 2026-09-19 (§6.2), and the reason this block no longer
+# keys off the rlimit alone: the drop-in was installed, the soft RLIMIT_RTPRIO
+# really was 20, this script said "requesting realtime scheduling", passed
+# `--rt`, and gamescope answered
+#
+#     No CAP_SYS_NICE, falling back to regular-priority compute and threads.
+#
+# on all three attempts. gamescope gates its realtime path on the CAPABILITY,
+# not on the rlimit, so the old check was careful about the wrong thing and the
+# log line was a false claim. A flag that is passed and silently dropped is
+# worse than one that is not passed: it makes a status output say `yes`.
+#
+# The rlimit is still read and still logged, because it is the thing that would
+# ALSO have to be there, and a reader chasing frame pacing needs both numbers.
+#
+# WHY NOTHING HERE GRANTS THE CAPABILITY
+#   * `setcap cap_sys_nice+ep /usr/bin/gamescope` cannot work: APEX's /usr is a
+#     read-only composefs, and gamescope arrives through a systemd-sysext
+#     overlay whose lower layers are equally read-only. There is no writable
+#     inode to hang the xattr on. (If a future gamescope RPM ships the file
+#     capability itself, the `getcap` probe below finds it and `--rt` comes
+#     back on with no change here.)
+#   * pam_cap at login would work mechanically and is NOT done, because it puts
+#     capabilities into the permitted set of every process in the session —
+#     including Steam's bwrap, which then refuses to start. See the block above.
+RT_ARGS=()
+rtprio="$(ulimit -Sr 2>/dev/null || echo 0)"
+rt_cap="no"
+if cap_has "${CAP_EFF}" 23; then
+    rt_cap="yes (effective set)"
+elif command -v getcap >/dev/null 2>&1; then
+    gs_caps="$(getcap "$(command -v gamescope)" 2>/dev/null)"
+    # `[[ == * ]]` and not `grep -q`: under `pipefail` a matching `grep -q`
+    # closes the pipe and the writer dies of SIGPIPE, so the pipeline returns
+    # 141 on a MATCH. That trap has already cost this program five suites.
+    if [[ "${gs_caps}" == *cap_sys_nice* ]]; then
+        rt_cap="yes (file capability on gamescope)"
     fi
-done
+fi
+if [ "${rt_cap}" != "no" ]; then
+    RT_ARGS=(--rt)
+    log "CAP_SYS_NICE: ${rt_cap}; soft RLIMIT_RTPRIO is ${rtprio} — requesting realtime"
+else
+    log "CAP_SYS_NICE: absent; soft RLIMIT_RTPRIO is ${rtprio}."
+    log "  NOT passing --rt: gamescope needs the capability, not the rlimit, and would"
+    log "  log 'No CAP_SYS_NICE' and run at ordinary priority anyway. Frame pacing under"
+    log "  load is worse; nothing else is affected. See evidence §6.2."
+fi
 
 # ── HDR ─────────────────────────────────────────────────────────────────────
 # Left OFF on purpose. gamescope's HDR path needs the WSI layer and a display
@@ -129,14 +248,153 @@ if [ -n "${APEX_STEAM_ARGS:-}" ]; then
     STEAM_ARGS=(${APEX_STEAM_ARGS})
 fi
 
+# ── Which GPU, and which screen ─────────────────────────────────────────────
+# THE DEFECT THIS FIXES, measured on katana 2026-09-19 (§6.1). With no device
+# preference, gamescope took its default — the first DRM node — which on a
+# hybrid laptop is the integrated GPU:
+#
+#   vulkan: selecting physical device 'Intel(R) Iris(R) Xe Graphics (ADL GT2)'
+#   drm:    opening DRM node '/dev/dri/card1'
+#   drm:      eDP-1 (connected)          <- the laptop panel, and nothing else
+#   Error drm: drmModeAddFB2WithModifiers failed: Invalid argument
+#
+# The RTX 3070 driving the user's only monitor is card2, and gamescope never
+# looked at it. With `--prefer-vk-device 10de:249d` the same script selected
+# the NVIDIA device, opened card2, found HDMI-A-1 and ran it at 240 Hz.
+#
+# `WLR_DRM_DEVICES` is NOT the lever — also measured: gamescope's DRM backend
+# is its own, not wlroots', and it ignored the variable completely.
+#
+# The card id is NOT hardcoded. `apex gaming --gamescope-device-args` derives
+# it from sysfs with one rule — the output decides the card — which needs no
+# special case for a single-GPU machine or an all-AMD one. The rule and the
+# argument for it live in apexd-core's `gpu::choose_display`; the tests that
+# hold it live in apexd-core/tests/gpu_parity.rs.
+#
+# FAILING LOUDLY, because a silent fallback to the iGPU is the defect: every
+# line the selector prints goes into this log, and a selector that cannot
+# answer says so here before gamescope starts. It is not fatal — refusing to
+# start would regress every single-GPU machine over a probe that hiccupped —
+# but it is never quiet.
+DEVICE_ARGS=()
+if [ "${APEX_GAMING_NO_DEVICE_SELECT:-0}" = "1" ]; then
+    log "device selection disabled by APEX_GAMING_NO_DEVICE_SELECT — gamescope will"
+    log "  take its own default, which on a hybrid laptop is the integrated GPU"
+elif ! command -v apex >/dev/null 2>&1; then
+    log "ERROR: \`apex\` is not on PATH, so the GPU/output selection could not be made."
+    log "  gamescope will take its own default (the first DRM node). On a hybrid"
+    log "  laptop that is the iGPU, and the external monitor will stay dark."
+else
+    _sel_err="$(mktemp)" || _sel_err=/dev/null
+    _sel_out="$(apex gaming --gamescope-device-args 2>"${_sel_err}")"
+    _sel_rc=$?
+    # Read the reasoning back BEFORE acting on the status: the selector always
+    # explains itself, and the explanation is the part that would have made
+    # §6.1 visible in the first session log rather than after a hardware run.
+    if [ -s "${_sel_err}" ]; then
+        while IFS= read -r _line; do
+            [ -n "${_line}" ] && log "gpu-select: ${_line}"
+        done < "${_sel_err}"
+    fi
+    [ "${_sel_err}" = /dev/null ] || rm -f "${_sel_err}"
+    while IFS= read -r _line; do
+        [ -n "${_line}" ] && DEVICE_ARGS+=("${_line}")
+    done <<< "${_sel_out}"
+    if [ "${#DEVICE_ARGS[@]}" -gt 0 ]; then
+        log "GPU/output: ${DEVICE_ARGS[*]}"
+    fi
+    # A PARTIAL answer is still used. `apex` exits non-zero when it could not
+    # produce a COMPLETE one — a screen and the card to drive it with — and the
+    # commonest way that happens is a DRM node with no PCI device behind it,
+    # where `--prefer-output` is perfectly good and only `--prefer-vk-device`
+    # is missing. Throwing the good half away because the other half was
+    # unknowable would be a second silent regression on top of the one being
+    # fixed. What "fail loudly" requires is that the gap is SAID, not that the
+    # session gets less than it could have.
+    if [ "${_sel_rc}" -ne 0 ]; then
+        log "ERROR: the GPU/output selection is incomplete (apex exited ${_sel_rc})."
+        log "  gamescope may take its own default (the first DRM node). On a hybrid"
+        log "  laptop that is the iGPU, and the external monitor will stay dark."
+        log "  Override with APEX_GAMESCOPE_ARGS=\"--prefer-vk-device <vendor>:<device>\"."
+    fi
+fi
+
+# ── Wayland exposure, and the MangoHud overlay it rules out ─────────────────
+# MEASURED ON KATANA 2026-09-19, twice — in the real Gaming Mode session and
+# then in a controlled headless A/B. This is a real either/or, not a
+# preference:
+#
+#   gamescope --backend headless --mangoapp                  -> mangoapp alive,
+#       env: DISPLAY=:0  GAMESCOPE_WAYLAND_DISPLAY=gamescope-0   0 restarts/22 s
+#   gamescope --backend headless --expose-wayland --mangoapp -> 171 restarts/22 s
+#       env: the same PLUS WAYLAND_DISPLAY=gamescope-0
+#
+# `--expose-wayland` is what puts `WAYLAND_DISPLAY` in the environment of
+# gamescope's children, mangoapp included. GLFW auto-selects its Wayland backend
+# whenever that variable is set (libdecor loads, and says so), and mangoapp then
+# calls `glfwGetX11Display()` — which on the Wayland backend logs
+# `Glfw Error 65550: X11: Platform not initialized` and returns NULL — and hands
+# that NULL straight to `XInternAtom`. The backtrace off katana's kept core dump
+# is two frames long: `XInternAtom` called from `main`.
+#
+# gamescopereaper respawns it immediately and forever. On katana that was
+# 15 376 core dumps in one boot, 14 403 respawns and 57 612 GLFW lines in one
+# 2-hour session (144 187 journal lines for a single session), and 4.0 GB of
+# stored dumps. The overlay never drew a pixel, so this costs nothing to give
+# up: `--mangoapp` was buying a crash loop and no overlay.
+#
+# THE CHOICE, stated: `--expose-wayland` stays on. Native Wayland (xdg-shell)
+# games are worth more than an overlay that has never rendered on this system,
+# and §6.1/§6.3 were qualified on hardware WITH it. `--mangoapp` is therefore
+# not passed — and it is gated on the variable rather than deleted, so that if
+# `--expose-wayland` is ever turned off the overlay comes back by itself
+# instead of needing someone to remember it.
+#
+# Neither half is APEX's to fix upstream: mangoapp should request the X11
+# platform (or refuse to dereference a NULL Display), and gamescopereaper's
+# `--respawn` has no backoff. Both are reported by this comment and by the
+# evidence, not worked around.
+EXPOSE_WAYLAND="${APEX_GAMING_EXPOSE_WAYLAND:-1}"
+WAYLAND_ARGS=()
+MANGO_ARGS=()
+if [ "${EXPOSE_WAYLAND}" = "1" ]; then
+    WAYLAND_ARGS=(--expose-wayland)
+fi
+if ! command -v mangoapp >/dev/null 2>&1; then
+    :   # not installed — `apex install mangohud` would add it
+elif [ "${EXPOSE_WAYLAND}" = "1" ]; then
+    log "NOT passing --mangoapp: it and --expose-wayland cannot both be on."
+    log "  --expose-wayland puts WAYLAND_DISPLAY in mangoapp's environment, GLFW then"
+    log "  picks its Wayland backend, and mangoapp dereferences the NULL X11 display"
+    log "  it gets back — a segfault every ~0.5 s for the whole session, respawned by"
+    log "  gamescopereaper, and no overlay. Measured on katana; see evidence §3.4."
+    log "  Set APEX_GAMING_EXPOSE_WAYLAND=0 to have the overlay instead of native"
+    log "  Wayland game support."
+else
+    MANGO_ARGS=(--mangoapp)
+    log "--mangoapp enabled: --expose-wayland is off, so GLFW will take the X11 backend"
+fi
+
 # ── gamescope ───────────────────────────────────────────────────────────────
 #   -e/--steam        Steam integration (Big Picture keyboard/controller glue)
 #   -f                fullscreen; the output's native mode is used
 #   --expose-wayland  let native Wayland (xdg-shell) games in, not just X11
-#   --mangoapp        MangoHud via gamescope's own overlay, which upstream says
-#                     to use INSTEAD of wrapping the game in mangohud
-GS_ARGS=(-e -f --expose-wayland "${RT_ARGS[@]}" "${VRR_ARGS[@]}")
-command -v mangoapp >/dev/null 2>&1 && GS_ARGS+=(--mangoapp)
+#   --mangoapp        MangoHud via gamescope's own overlay — see the block above
+#                     for why it is off while --expose-wayland is on
+#
+# `--adaptive-sync` is not decided here. It arrives inside DEVICE_ARGS, from the
+# same selector, because it is a question about ONE connector and the selector
+# is the thing that knows which connector this session gets. It used to be
+# decided here by globbing /sys/class/drm/card*-*/vrr_capable, and that is wrong
+# twice over: connector names are unique per CARD, not per machine, so a hybrid
+# laptop's `card1-HDMI-A-1` and `card2-HDMI-A-1` both match and the glob answers
+# about whichever sorts first; and a glob that matches nothing — which is katana,
+# where no connector publishes the file at all — passed nothing and said nothing,
+# so "no VRR here" and "this driver does not publish it" were the same silence.
+#
+# DEVICE_ARGS comes before APEX_GAMESCOPE_ARGS so a hand-set override still
+# wins: gamescope takes the last occurrence of a repeated option.
+GS_ARGS=(-e -f "${WAYLAND_ARGS[@]}" "${RT_ARGS[@]}" "${DEVICE_ARGS[@]}" "${MANGO_ARGS[@]}")
 if [ -n "${APEX_GAMESCOPE_ARGS:-}" ]; then
     # shellcheck disable=SC2206
     GS_ARGS+=(${APEX_GAMESCOPE_ARGS})

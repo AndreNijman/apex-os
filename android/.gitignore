@@ -1,0 +1,23 @@
+# Gradle's own caches and the build outputs. Nothing here is reproducible
+# input; everything here is derived from the sources beside it.
+.gradle/
+build/
+.kotlin/
+
+# `sdk.dir` is a path on one machine. It comes from ANDROID_HOME at build
+# time — committing it would make this tree buildable only where it was
+# written, and CI has its own SDK in a different place.
+local.properties
+
+*.iml
+.idea/
+captures/
+
+# Signing material. Nothing of the sort belongs in this repository: a signing
+# key here is a signing key for everybody who can clone it, and a forged build
+# of this app asks a phone for its paired device key. The release config reads
+# every value from the environment, and CI writes its keystore from a secret
+# and shreds it in an `if: always()` step.
+*.jks
+*.keystore
+keystore.properties

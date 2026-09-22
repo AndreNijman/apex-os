@@ -2,7 +2,10 @@
 # APEX-OS — CORE image (heavy, slow-moving foundation)
 #
 #   fedora-bootc:43
-#     → CachyOS perf kernel swap + MOK signing                [own RUNs]
+#     → APEX's own kernel, from Containerfile.kernel + MOK    [own RUNs]
+#       (the COMPILE is its own tier; this installs and signs the RPMs)
+#     → out-of-tree modules (nvidia, xone, xpadneo) + MOK     [own RUNs]
+#       module signing, NVIDIA userspace, nouveau/KMS config
 #     → hardware-enablement firmware                          [own RUN]
 #     → desktop + greeter stack (hyprland/quickshell/sway/…)  [own RUN]
 #     → sched-ext userspace (scx), Bazaar, RPMFusion + codecs [own RUNs]
@@ -31,7 +34,11 @@
 #
 # ── What belongs in core vs base ──
 #   CORE  anything installed by dnf, fetched from the network, or compiled;
-#         OS-level branding/locale/hardening that does not read files/**.
+#         OS-level branding/locale/hardening that does not read files/**;
+#         and — since the three published images became one — every out-of-tree
+#         KERNEL MODULE, because a module can only be made loadable under an
+#         enforcing kernel by signing it with the APEX MOK, and that private key
+#         exists only inside a CI build secret that is mounted here.
 #   BASE  every COPY out of files/** and config/**, the apexd/apex binaries,
 #         the vendored APEX Shell, and any RUN that asserts against them.
 # A RUN that mixes the two must be SPLIT, not moved wholesale. Four in the
@@ -69,6 +76,41 @@
 # almost every commit, so they are compiled in Containerfile.base instead —
 # keeping this stage, and everything downstream of it, off the hot path.
 
+# APEX_KERNEL_IMAGE MUST be declared HERE, before the first FROM in the file,
+# not down at its point of use next to `FROM ${APEX_KERNEL_IMAGE} AS
+# kernel-rpms`. Buildah/Docker only makes an ARG visible to a *stage's FROM
+# line* if it was declared before the FIRST FROM in the whole file — an ARG
+# declared inside an earlier stage (as this one originally was, right above
+# the kernel-rpms FROM) is scoped to that stage and invisible to any FROM,
+# including its own. Measured, not theoretical: with the ARG in its old spot,
+# `FROM ${APEX_KERNEL_IMAGE} AS kernel-rpms` evaluated to an empty image name
+# and podman failed the whole build with "determining starting point for
+# build: no FROM statement found" — even when build-local.sh passed the
+# correct value with `--build-arg APEX_KERNEL_IMAGE=…`, because the override
+# has nothing to attach to before this point in the file. This is the first
+# time `core` was ever built against the real kernel tier, so the defect had
+# never been exercised. See ROADMAP/evidence/kernel-publish-20260921.md.
+#
+# The default below is a DIGEST of a published kernel image, not the floating
+# `:kernel` tag and not a localhost name. `core` refuses a kernel whose
+# manifest does not say `btf_scx=usable`, and that refusal is worth much less
+# if the image behind the name can be repointed after the check was made. A
+# localhost default is worse still: it exists only on a machine somebody has
+# hand-built a kernel on, CI is not one, and naming it is what stopped every
+# image build in the project (run 35552604603 on roadmap/v2.2). There is
+# deliberately NO fallback to the COPR kernel — one would silently reintroduce
+# the sched-ext BTF defect this tier exists to fix, invisibly, until a
+# scheduler failed to load on a user's machine months later.
+#
+# Building the kernel locally is unaffected: build-local.sh overrides this with
+# `--build-arg APEX_KERNEL_IMAGE=localhost/apex-kernel:local`. To refresh the
+# pin, re-run kernel-build.yml and paste the `ARG APEX_KERNEL_IMAGE=…` line its
+# run summary prints. The value below is from run 35557283953, immutable tag
+# `kernel-7.2.6-cachyos1.apex1.fc43.x86_64-544143e`. Exactly one space and no
+# quotes: build-image.yml's resolve step parses this line with a stricter
+# regex than tests/check-kernel-image-pin.sh, which enforces the rest.
+ARG APEX_KERNEL_IMAGE=ghcr.io/andrenijman/apex-os@sha256:2ff544dd021478dbd36dab4efb1ce43ad9cc858f16cd07a271f01693822972d6
+
 FROM quay.io/fedora/fedora-bootc:43 AS toolbuilder
 # /root is special in bootc images (symlink → /var/roothome), so cargo's default
 # $HOME/.cargo fails ("File exists" on mkdir). Point CARGO_HOME at the build tree.
@@ -81,10 +123,26 @@ ENV CARGO_HOME=/build/.cargo
 # gcc/cc is needed by several -sys crates.
 RUN sed -i '/^\[main\]/a max_parallel_downloads=20' /etc/dnf/dnf.conf; \
     dnf5 -y install cargo rust git-core gcc lz4-devel pkgconf-pkg-config \
-        wayland-protocols-devel wayland-devel libxkbcommon-devel >/dev/null \
+        wayland-protocols-devel wayland-devel libxkbcommon-devel \
+        curl unzip tar >/dev/null \
     && dnf5 clean all
+# curl/unzip/tar are for the prebuilt matugen and yazi downloads below. cargo
+# and the wayland dev files remain because awww is still built from source —
+# it is a codeberg fork with no release artifacts.
 
+# `mkdir -p /out` first, and it is load-bearing rather than tidy. Nothing else
+# creates /out: on the success path `install -D` makes /out/usr/bin as a side
+# effect, so the status write that follows happens to work. On the FAILURE path
+# nothing has created /out, so `echo … > /out/awww-status` fails with "No such
+# file or directory" and `set -e` kills the build — which means the branch
+# labelled "non-fatal" was only ever non-fatal when the build had succeeded.
+#
+# It cost a real build. Codeberg returned 504 during the final image build, the
+# clone failed exactly as this branch anticipates, and the step exited 1 anyway.
+# Reproduced in a Fedora 43 container before fixing: `if false; then …; else
+# echo x > /out/awww-status; fi` under `set -eux` fails on the redirect.
 RUN set -eux; \
+    mkdir -p /out; \
     if git clone --depth 1 https://codeberg.org/LGFae/awww /build/awww \
        && cd /build/awww && cargo build --release; then \
         for b in target/release/awww target/release/awww-daemon; do \
@@ -92,10 +150,26 @@ RUN set -eux; \
         done; echo "awww: built" > /out/awww-status; \
     else echo "awww: BUILD FAILED (wallpaper daemon absent; non-fatal)" > /out/awww-status; \
     fi; cat /out/awww-status
-# matugen (Rust, from crates.io) — built here rather than via a COPR that lacks a
-# fedora-43 build; COPY'd out with the other binaries. The shell's theming needs
-# it, so this one IS fatal on failure.
-RUN cargo install matugen --root /out/usr
+# matugen — the shell's theming engine, FATAL on failure.
+#
+# Was `cargo install matugen`, which compiled it from crates.io on every core
+# build. Upstream ships a prebuilt x86_64 tarball, so this is a download and a
+# checksum instead of a compile: minutes back on the critical path, and a
+# pinned VERSION rather than "whatever crates.io had that morning", which the
+# cargo form silently allowed to drift.
+#
+# The sha256 is pinned deliberately. A release asset can be replaced in place;
+# an unpinned download would make the image's contents depend on that. Verified
+# to run on a clean fedora:43 (`matugen --version` -> 4.2.0) before landing.
+ARG MATUGEN_VERSION=4.2.0
+ARG MATUGEN_SHA256=a2e3b50e49ed6439999ba3c252ed04fabd98ee4e9d12e5e5dff2e66370569751
+RUN set -eux; \
+    curl -fsSL -o /tmp/matugen.tar.gz \
+      "https://github.com/InioX/matugen/releases/download/v${MATUGEN_VERSION}/matugen-${MATUGEN_VERSION}-x86_64.tar.gz"; \
+    echo "${MATUGEN_SHA256}  /tmp/matugen.tar.gz" | sha256sum -c -; \
+    tar xzf /tmp/matugen.tar.gz -C /tmp; \
+    install -Dm755 /tmp/matugen /out/usr/bin/matugen; \
+    /out/usr/bin/matugen --version
 # yazi (Rust TUI file manager, the CLI companion to Thunar). NOT packaged in
 # Fedora dist-git, and `cargo install yazi-fm yazi-cli` from crates.io is BROKEN:
 # yazi-plugin `include_bytes!`s its preset .lua files via a workspace-relative
@@ -104,14 +178,47 @@ RUN cargo install matugen --root /out/usr
 # the pinned git WORKSPACE (same clone+build pattern as awww above). yazi-fm →
 # `yazi`, yazi-cli → `ya`. Non-fatal: a failure leaves the TUI FM absent (Thunar,
 # the GUI handler, remains) but never aborts the image.
+# Upstream ships a prebuilt musl tarball of the SAME v26.5.6 this used to build
+# from the git workspace, so the workspace-layout problem described above is
+# moot: the release artifact is already linked. musl rather than gnu so the
+# binary cannot care what glibc the image happens to carry.
+#
+# Still non-fatal: a failure leaves the TUI file manager absent (Thunar, the GUI
+# handler, remains) but never aborts the image.
+ARG YAZI_VERSION=26.5.6
+ARG YAZI_SHA256=1031a02560d053301537195a6661d227c15cb4ce5c30481050b31e2b88681bff
 RUN set -eux; \
-    if git clone --depth 1 --branch v26.5.6 https://github.com/sxyazi/yazi /build/yazi \
-       && cd /build/yazi \
-       && cargo build --release --locked -p yazi-fm -p yazi-cli; then \
-        install -Dm755 target/release/yazi /out/usr/bin/yazi; \
-        install -Dm755 target/release/ya   /out/usr/bin/ya; \
-        echo "yazi: built v26.5.6 from git workspace"; \
-    else echo "yazi: BUILD FAILED (TUI file manager absent; non-fatal — Thunar remains)"; fi
+    if curl -fsSL -o /tmp/yazi.zip \
+         "https://github.com/sxyazi/yazi/releases/download/v${YAZI_VERSION}/yazi-x86_64-unknown-linux-musl.zip" \
+       && echo "${YAZI_SHA256}  /tmp/yazi.zip" | sha256sum -c - \
+       && unzip -qo /tmp/yazi.zip -d /tmp/yazi; then \
+        install -Dm755 /tmp/yazi/yazi-x86_64-unknown-linux-musl/yazi /out/usr/bin/yazi; \
+        install -Dm755 /tmp/yazi/yazi-x86_64-unknown-linux-musl/ya   /out/usr/bin/ya; \
+        /out/usr/bin/yazi --version; \
+        echo "yazi: installed prebuilt v${YAZI_VERSION}"; \
+    else echo "yazi: DOWNLOAD FAILED (TUI file manager absent; non-fatal — Thunar remains)"; fi
+
+# ─────────────────────────────────────────────────────────────────────────
+# ── The kernel tier, consumed by digest ──────────────────────────────────
+# APEX builds its own kernel in Containerfile.kernel, published as its own
+# image and pinned here by digest — the same mechanism Containerfile.base uses
+# to consume this file's output, and for the same reason.
+#
+# WHY THE KERNEL IS NOT BUILT IN THIS FILE
+# CI builds core with no layer cache (build-image.yml: "nothing reads or writes
+# a registry build cache any more", plus `--no-cache` on scheduled and forced
+# runs). A ~45-minute kernel compile here would be paid in full on every core
+# rebuild — and core rebuilds for reasons unrelated to the kernel: a desktop
+# package, a new fedora-bootc digest, an AI-app bump. Each of those would then
+# produce a DIFFERENT kernel binary, with new modules, new BTF and re-signed
+# akmods, as a side effect. The kernel must move when the kernel's inputs move,
+# which is what kernel/kernel.pin is for.
+#
+# A NAMED STAGE, not `COPY --from=${ARG}`: an ARG-substituted --from resolves
+# inconsistently across builders and fails in ways that read as a missing file.
+# APEX_KERNEL_IMAGE itself is declared at the top of this file, before the
+# first FROM — see the comment there for why it cannot be declared here.
+FROM ${APEX_KERNEL_IMAGE} AS kernel-rpms
 
 # ─────────────────────────────────────────────────────────────────────────
 FROM quay.io/fedora/fedora-bootc:43
@@ -162,19 +269,88 @@ RUN sed -i '/^\[main\]/a max_parallel_downloads=20' /etc/dnf/dnf.conf
 # next step. So: tolerate the install's non-zero exit, then HARD-GATE on
 # `rpm -q` proving the kernel packages actually landed. A genuine failure
 # (COPR down, package missing) fails the `rpm -q` and aborts.
+# ── The kernel now comes from APEX's own build, not from the COPR ──────────
+# Containerfile.kernel builds it, and its build FAILS if the produced kernel
+# carries the sched-ext kfunc BTF defect — the defect that made every APEX
+# image to date unable to load any scheduler
+# (ROADMAP/evidence/kernel-build-20260920.md).
+#
+# There is DELIBERATELY NO COPR FALLBACK. A fallback would mean a kernel that
+# never went through that gate could still be installed here, which makes the
+# gate advisory — and an advisory gate on the defect this tier exists to
+# prevent is the "gate that inspects nothing" wearing a different hat. If the
+# kernel image is missing the build stops, loudly, with a message saying what
+# to build.
+#
+# The COPRs still get enabled further down for `scx-scheds`/`scx-tools`: that is
+# sched-ext USERSPACE and is unaffected by any of this.
+COPY --from=kernel-rpms /rpms     /tmp/apex-kernel-rpms
+COPY --from=kernel-rpms /manifest /tmp/apex-kernel-manifest
+# The pin as THIS commit has it, so the two can be compared. `kernel/**` is
+# already in the core path filter, so this COPY costs nothing and buys the
+# check that makes that filter mean what it appears to mean.
+COPY kernel/kernel.pin /tmp/apex-kernel-pin-expected
 RUN set -eux; \
     dnf5 -y install dnf5-plugins; \
-    dnf5 -y copr enable bieszczaders/kernel-cachyos; \
-    dnf5 -y copr enable bieszczaders/kernel-cachyos-addons; \
     dnf5 -y remove --no-autoremove \
         kernel kernel-core kernel-modules kernel-modules-core; \
-    dnf5 -y install \
-        kernel-cachyos kernel-cachyos-core kernel-cachyos-modules \
-        kernel-cachyos-devel-matched \
+    test -d /tmp/apex-kernel-rpms \
+        || { echo "FATAL: no kernel RPMs in the build context."; \
+             echo "       Containerfile.core consumes the kernel from Containerfile.kernel."; \
+             echo "       Build it first (build-local.sh does this for you), or pass"; \
+             echo "       --build-arg APEX_KERNEL_IMAGE=<published kernel image@sha256:…>."; \
+             exit 1; }; \
+    MAN=/tmp/apex-kernel-manifest/kernel-build.txt; \
+    test -s "${MAN}" \
+        || { echo "FATAL: the kernel image carries no /manifest/kernel-build.txt — it was not built by Containerfile.kernel"; exit 1; }; \
+    cat "${MAN}"; \
+    # The cross-tier contract. `btf_scx=usable` is written only after
+    # apex-kernel-btf-gate passed over the vmlinux that produced these exact
+    # RPMs, so this line is core refusing a kernel whose BTF was never checked
+    # — not core re-deciding it.
+    BTF="$(sed -n 's/^btf_scx=//p' "${MAN}")"; \
+    test "${BTF}" = usable \
+        || { echo "FATAL: kernel manifest says btf_scx='${BTF}', expected 'usable'"; exit 1; }; \
+    echo "kernel BTF verdict from the build that made these RPMs: ${BTF}"; \
+    # IDENTITY, not just health. Without this, a stale local kernel image built
+    # from a pin three revisions ago passes every other check here: its BTF was
+    # genuinely usable, its kver genuinely matches its own manifest. `kernel/**`
+    # triggers a core rebuild precisely so core picks up a new kernel — this is
+    # what makes that true rather than assumed.
+    cmp /tmp/apex-kernel-pin-expected "${MAN%/*}/kernel.pin" \
+        || { echo "FATAL: the kernel image was built from a DIFFERENT kernel/kernel.pin than this commit has."; \
+             echo "       Rebuild the kernel tier (./build-local.sh kernel --force-core),"; \
+             echo "       or point APEX_KERNEL_IMAGE at one built from this pin."; \
+             diff /tmp/apex-kernel-pin-expected "${MAN%/*}/kernel.pin" || true; \
+             exit 1; }; \
+    echo "kernel image was built from this commit's kernel/kernel.pin"; \
+    # --nogpgcheck is a DECISION, stated rather than left as a warning in the
+    # log. These RPMs are local files APEX built itself; there is no repo
+    # signature to check and no key to check it against. What stands in for the
+    # signature is the identity check above plus the digest-pinned
+    # `FROM ${APEX_KERNEL_IMAGE}` that produced them.
+    dnf5 -y --nogpgcheck install /tmp/apex-kernel-rpms/kernel-cachyos-*.rpm \
       || echo "WARN: kernel install exited non-zero (expected: cosmetic %posttrans dracut) — verifying RPMs landed"; \
-    rpm -q kernel-cachyos kernel-cachyos-core kernel-cachyos-modules kernel-cachyos-devel-matched; \
-    dnf5 -y copr disable bieszczaders/kernel-cachyos; \
-    dnf5 -y copr disable bieszczaders/kernel-cachyos-addons; \
+    # That `|| echo` tolerates a cosmetic %posttrans failure, but it also
+    # swallows a real one — a missing dependency, a conflict with the Fedora
+    # kernel just removed — and `rpm -q` alone would still pass, because
+    # posttrans is the final phase and the packages did land. So every one of
+    # the four must be the EXACT version the manifest vouches for, not merely
+    # present.
+    WANT_KVER="$(sed -n 's/^kver=//p' "${MAN}")"; \
+    test -n "${WANT_KVER}" || { echo "FATAL: kernel manifest carries no kver"; exit 1; }; \
+    for p in kernel-cachyos kernel-cachyos-core kernel-cachyos-modules \
+             kernel-cachyos-devel-matched; do \
+        got="$(rpm -q --qf '%{VERSION}-%{RELEASE}.%{ARCH}\n' "${p}")"; \
+        test "${got}" = "${WANT_KVER}" \
+            || { echo "FATAL: ${p} is ${got}, manifest vouches for ${WANT_KVER}"; exit 1; }; \
+        echo "installed: ${p}-${got}"; \
+    done; \
+    echo "kernel ${WANT_KVER} installed, from APEX's own build"; \
+    mkdir -p /usr/share/apex-os/kernel; \
+    cp "${MAN}" /usr/share/apex-os/kernel/build.txt; \
+    cp /tmp/apex-kernel-manifest/kernel.pin /usr/share/apex-os/kernel/kernel.pin; \
+    rm -rf /tmp/apex-kernel-rpms /tmp/apex-kernel-manifest /tmp/apex-kernel-pin-expected; \
     dnf5 clean all
 
 # Ensure the kernel image + initramfs live under /usr/lib/modules/<kver>/ —
@@ -282,6 +458,67 @@ RUN set -eux; \
     echo "firmware: iwlwifi $(find /usr/lib/firmware -name 'iwlwifi*' | wc -l) files, SOF + UCM2 present"; \
     dnf5 clean all
 
+# ── Stage 1a2: the disk-unlock chain is an EXPLICIT dependency ─────────────
+#
+# cryptsetup was in this image, and nothing asked for it. `rpm -q --whatrequires
+# cryptsetup` answered with exactly one package — clevis-luks — which is itself
+# only here because it comes down with the bootc base. So the binary that opens
+# an encrypted root was present at the end of a two-link chain of other
+# people's decisions, and any of the three could drop it in a rebase without a
+# single line of this repository changing.
+#
+# That is not an acceptable shape for a dependency of the BOOT PATH. If
+# cryptsetup disappears, the failure is not a missing feature at install time:
+# it is a machine that has already been encrypted and can no longer be opened,
+# discovered on the first boot after an update. Name it here, where a dependency
+# that has to exist is a line somebody has to delete on purpose.
+#
+# kbd is named for the same reason and is the other half of the same failure.
+# The unlock prompt is a kernel console prompt, so the console keymap decides
+# which characters the owner's keyboard actually produces; without
+# /usr/lib/kbd/keymaps there is one layout, `us`, and a passphrase typed on any
+# other layout cannot be entered. It arrives today through systemd-udev, which
+# is no more a decision of this repository's than clevis-luks was.
+#
+# Both are asserted after installing, because `dnf5 -y install` on a package
+# that is already present is a no-op that exits 0 and proves nothing about
+# whether the files are there.
+RUN set -eux; \
+    dnf5 -y install cryptsetup kbd; \
+    command -v cryptsetup >/dev/null \
+        || { echo "FATAL: cryptsetup is not on PATH — an encrypted root could not be opened"; exit 1; }; \
+    rpm -q cryptsetup >/dev/null \
+        || { echo "FATAL: cryptsetup is not owned by the rpmdb"; exit 1; }; \
+    { test -x /usr/bin/systemd-cryptsetup || test -x /usr/lib/systemd/systemd-cryptsetup; } \
+        || { echo "FATAL: systemd-cryptsetup is missing — the initramfs could not unlock the root"; exit 1; }; \
+    test -f /usr/lib64/cryptsetup/libcryptsetup-token-systemd-tpm2.so \
+        || { echo "FATAL: the systemd-tpm2 LUKS2 token plugin is missing — a TPM-enrolled keyslot could not be used"; exit 1; }; \
+    test -f /usr/share/systemd/kbd-model-map \
+        || { echo "FATAL: kbd-model-map is missing — the installer could not convert an XKB layout to a console keymap"; exit 1; }; \
+    test -n "$(find /usr/lib/kbd/keymaps -name 'us.map*' -print -quit)" \
+        || { echo "FATAL: no console keymaps — every unlock prompt would be a blind one"; exit 1; }; \
+    echo "unlock chain: $(rpm -q cryptsetup), $(rpm -q kbd), $(find /usr/lib/kbd/keymaps -name '*.map*' | wc -l) keymaps"; \
+    dnf5 clean all
+
+# ── The unlock prompt has to be able to explain itself ─────────────────────
+# Plymouth's message() was an empty function in both APEX themes, so everything
+# the boot tried to tell the user was accepted and dropped. That is fixed in
+# the themes; this is the caller. It has to live in the INITRAMFS, because the
+# passphrase prompt happens before any filesystem is mounted, so a dracut
+# module is the only shape it can take.
+#
+# Landed HERE rather than in the apex tier because the LAST dracut run of the
+# build is the apex tier's plymouth one (see Containerfile.apex): a module
+# copied in after that would never be in a shipped initramfs at all.
+COPY files/dracut/apex-unlock-hint /usr/lib/dracut/modules.d/99apex-unlock-hint
+RUN set -eux; \
+    chmod 0755 /usr/lib/dracut/modules.d/99apex-unlock-hint/module-setup.sh \
+               /usr/lib/dracut/modules.d/99apex-unlock-hint/apex-unlock-hint; \
+    chmod 0644 /usr/lib/dracut/modules.d/99apex-unlock-hint/apex-unlock-hint.service; \
+    sh -n /usr/lib/dracut/modules.d/99apex-unlock-hint/apex-unlock-hint; \
+    bash -n /usr/lib/dracut/modules.d/99apex-unlock-hint/module-setup.sh; \
+    echo "dracut: 99apex-unlock-hint installed"
+
 # ── Stage 1b: Secure Boot — sign the kernel with the APEX MOK ──────────────
 # The CachyOS kernel comes from a COPR and is UNSIGNED (verified: PE certificate
 # table size 0). Under Secure Boot, Fedora's signed grub refuses to boot it, so
@@ -318,9 +555,530 @@ RUN --mount=type=secret,id=apex_sb_key --mount=type=secret,id=apex_sb_crt \
         echo "SECURE BOOT: no signing secret supplied — kernel left UNSIGNED (Secure Boot must be OFF)"; \
     fi
 
+# ── Stage 1d: out-of-tree kernel modules — built AND SIGNED here ───────────
+#
+# WHY THESE ARE IN CORE AND NOT IN A FLAVOR
+# APEX publishes ONE image for every laptop. Userspace can be added to a running
+# machine (`apex install` builds a systemd system extension); a KERNEL MODULE
+# cannot, because a module the kernel will accept has to be signed with the APEX
+# MOK private key, and that key is a CI secret that must never reach a user's
+# machine. `apex-pkg` refuses kernels/akmods for exactly this reason. So the rule
+# that decides what ships and what installs on demand is simply:
+#
+#     kernel module  -> built and signed HERE, in the image
+#     userspace      -> `apex install steam gamescope …` on demand
+#
+# and everything below is on the kernel-module side of that line.
+#
+# WHY CORE SPECIFICALLY, GIVEN THE HEADER'S UPDATE-SIZE RULE
+# This is the tier the signing secret is already mounted in (Stage 1b), the tier
+# that owns the kernel these modules must match, and — decisively — the tier the
+# base consumes as `FROM …@sha256:…`. A digest-pinned parent's layer descriptors
+# are reused verbatim, so bootc already holds these blobs and downloads none of
+# them on a normal `apex update`. Put the same content in `base` or a flavor and
+# every user would re-download the NVIDIA driver on every push.
+#
+# THE SIGNING GAP THIS CLOSES
+# Nothing in this repository has ever signed an out-of-tree module. The akmod was
+# built in Containerfile.gaming, which is a FLAVOR — and the flavor job is never
+# passed `--secret id=apex_sb_key`, so `sign-file` could not have run there even
+# if someone had written it. CI's Secure Boot check ran `sbverify` against
+# vmlinuz only. AGENTS.md has always required that "the shipped kernel and
+# required out-of-tree modules must be signed by the expected chain".
+#
+# Measured caveat, recorded so nobody over-claims this fix: on the shipped
+# CachyOS kernel the modules were LOADING regardless, because that kernel does
+# not enforce module signatures —
+#     CONFIG_MODULE_SIG=y            (signatures are understood)
+#     # CONFIG_MODULE_SIG_FORCE is not set
+#     CONFIG_LOCK_DOWN_KERNEL_FORCE_NONE=y
+#     CONFIG_LOCK_DOWN_IN_EFI_SECURE_BOOT — absent entirely
+# so, unlike a Fedora kernel, Secure Boot does NOT put this kernel into lockdown
+# and an unsigned module loads fine today. What the signature buys is that the
+# moment enforcement appears — a CachyOS respin enabling the lockdown coupling, a
+# user adding `module.sig_enforce=1` or `lockdown=integrity` — NVIDIA keeps
+# working instead of silently failing to load into a black screen. And it can be
+# trusted when it happens: the kernel carries
+#     CONFIG_INTEGRITY_MACHINE_KEYRING=y  +  CONFIG_SECONDARY_TRUSTED_KEYRING=y
+# so the MOK the user already enrols for the kernel validates these modules too.
+#
+# WHAT IS BUILT
+#   nvidia    RPMFusion akmod-nvidia (580.x). The dGPU driver.
+#   xone      ublue-os/akmods — Xbox One/Series controllers, wired and via the
+#             Microsoft wireless dongle. NOTE: the DONGLE also needs a firmware
+#             blob extracted from a Microsoft driver package, which is not
+#             redistributable and therefore not baked in; wired pads work as
+#             shipped, dongle users run `xone-get-firmware.sh` once.
+#   xpadneo   shdwchn10/xpadneo 0.10.2 — Bluetooth Xbox pads: rumble, battery
+#             reporting and correct axis mapping that in-kernel `hid-generic`
+#             does not provide.
+# Containerfile.gaming claimed "no akmod source is currently published that
+# matches this kernel". That was wrong, and it is worth naming why: an akmod
+# source package is kernel-INDEPENDENT — `akmods` compiles it against whatever
+# `--kernels` is given. Verified with the COPRs enabled against fc43:
+#     akmod-xone     1000.0.0.git.1442.85e53359-2.fc43  [ublue-os/akmods]
+#     akmod-xpadneo  0.10.2-1.fc43                      [shdwchn10/xpadneo]
+#
+# RPMFusion is enabled HERE (earliest consumer) and left enabled — Stage 5a-codecs
+# below now asserts it rather than re-adding it. The two akmod COPRs are one-shot
+# build inputs and are disabled again, matching the CachyOS kernel COPR posture.
+#
+# Build and signing are ONE layer on purpose: signing rewrites every module, so
+# splitting them would commit the unsigned copies to a lower layer and ship both.
+ARG APEX_AKMODS="nvidia xone xpadneo"
+RUN --mount=type=secret,id=apex_sb_key --mount=type=secret,id=apex_sb_crt \
+    set -eux; \
+    KVER="$(cat /usr/lib/apex-kver)"; \
+    echo "building out-of-tree modules against CachyOS kver: ${KVER}"; \
+    test -d "/usr/src/kernels/${KVER}" \
+        || { echo "FATAL: kernel-devel headers missing for ${KVER}"; exit 1; }; \
+    dnf5 -y install \
+        "https://mirrors.rpmfusion.org/free/fedora/rpmfusion-free-release-$(rpm -E %fedora).noarch.rpm" \
+        "https://mirrors.rpmfusion.org/nonfree/fedora/rpmfusion-nonfree-release-$(rpm -E %fedora).noarch.rpm"; \
+    dnf5 -y copr enable ublue-os/akmods; \
+    dnf5 -y copr enable shdwchn10/xpadneo; \
+    dnf5 -y install akmods kmodtool gcc make; \
+    dnf5 -y install akmod-nvidia akmod-xone akmod-xpadneo; \
+    for k in ${APEX_AKMODS}; do \
+        echo "=== akmods: building ${k} for ${KVER} ==="; \
+        akmods_rc=0; \
+        akmods --force --kernels "${KVER}" --kmod "${k}" || akmods_rc=$?; \
+        if [ "${akmods_rc}" -ne 0 ]; then \
+            echo "FATAL: akmods ${k} exited ${akmods_rc} for ${KVER}"; \
+            echo "--- .last.log (akmodsbuild output; the compiler error is here) ---"; \
+            tail -200 /var/cache/akmods/${k}/.last.log 2>/dev/null || echo "(absent)"; \
+            echo "--- *.failed.log ---"; \
+            cat /var/cache/akmods/${k}/*.failed.log 2>/dev/null || echo "(absent)"; \
+            echo "--- /var/log/akmods/akmods.log (tail) ---"; \
+            tail -80 /var/log/akmods/akmods.log 2>/dev/null || echo "(absent)"; \
+            exit 1; \
+        fi; \
+        RPM="$(ls -1 /var/cache/akmods/${k}/kmod-${k}-*.rpm 2>/dev/null | head -1)"; \
+        test -n "${RPM}" && test -f "${RPM}" \
+            || { echo "FATAL: ${k} akmod exited 0 but produced no kmod RPM for ${KVER}"; \
+                 ls -la /var/cache/akmods/${k}/ 2>/dev/null || echo "(no such directory)"; \
+                 tail -200 /var/cache/akmods/${k}/.last.log 2>/dev/null || echo "(absent)"; \
+                 sed -n '1,80p' /var/cache/akmods/${k}/*.failed.log 2>/dev/null; exit 1; }; \
+        echo "built: ${RPM}"; \
+        dnf5 -y install "${RPM}"; \
+    done; \
+    dnf5 -y copr disable ublue-os/akmods; \
+    dnf5 -y copr disable shdwchn10/xpadneo; \
+    depmod -a "${KVER}"; \
+    MODDIR="/usr/lib/modules/${KVER}"; \
+    SIGN_FILE="${MODDIR}/build/scripts/sign-file"; \
+    HASH="$(sed -n 's/^CONFIG_MODULE_SIG_HASH="\(.*\)"$/\1/p' "${MODDIR}/config")"; \
+    test -n "${HASH}" \
+        || { echo "FATAL: cannot read CONFIG_MODULE_SIG_HASH from ${MODDIR}/config"; exit 1; }; \
+    mkdir -p /usr/share/apex-os/secureboot; \
+    if [ -s /run/secrets/apex_sb_key ] && [ -s /run/secrets/apex_sb_crt ]; then \
+        test -x "${SIGN_FILE}" \
+            || { echo "FATAL: ${SIGN_FILE} missing — kernel-devel did not ship the signing helper"; exit 1; }; \
+        dnf5 -y install zstd xz >/dev/null; \
+        openssl x509 -in /run/secrets/apex_sb_crt -outform DER -out /tmp/apex-mok.der; \
+        SIGNER="$(openssl x509 -in /run/secrets/apex_sb_crt -noout -subject -nameopt multiline \
+                  | sed -n 's/^ *commonName *= *//p')"; \
+        test -n "${SIGNER}" \
+            || { echo "FATAL: APEX MOK certificate has no commonName to verify against"; exit 1; }; \
+        echo "signing out-of-tree modules with ${HASH}, signer CN='${SIGNER}'"; \
+        SIGNED=0; \
+        OOT=""; for d in extra updates; do [ -d "${MODDIR}/${d}" ] && OOT="${OOT} ${MODDIR}/${d}"; done; \
+        test -n "${OOT}" \
+            || { echo "FATAL: no out-of-tree module directory under ${MODDIR}"; exit 1; }; \
+        for m in $(find ${OOT} -type f -name '*.ko*'); do \
+            case "${m}" in \
+                *.ko.zst) zstd -q -d --rm "${m}"; ko="${m%.zst}"; recomp=zst ;; \
+                *.ko.xz)  xz -q -d "${m}";        ko="${m%.xz}";  recomp=xz  ;; \
+                *.ko)     ko="${m}";              recomp=none ;; \
+                *) echo "FATAL: unhandled module file ${m}"; exit 1 ;; \
+            esac; \
+            "${SIGN_FILE}" "${HASH}" /run/secrets/apex_sb_key /tmp/apex-mok.der "${ko}"; \
+            tail -c 28 "${ko}" | grep -q 'Module signature appended' \
+                || { echo "FATAL: no signature trailer on ${ko}"; exit 1; }; \
+            case "${recomp}" in \
+                zst) zstd -q -19 -T0 --rm "${ko}" ;; \
+                xz)  xz -q -T0 "${ko}" ;; \
+            esac; \
+            SIGNED=$((SIGNED + 1)); \
+        done; \
+        rm -f /tmp/apex-mok.der; \
+        test "${SIGNED}" -gt 0 \
+            || { echo "FATAL: signed 0 modules — the enumeration found nothing to sign"; exit 1; }; \
+        depmod -a "${KVER}"; \
+        printf '%s\n' "${SIGNER}" > /usr/share/apex-os/secureboot/module-signer; \
+        printf 'signed\n' > /usr/share/apex-os/secureboot/modules-signed; \
+        echo "SECURE BOOT: ${SIGNED} out-of-tree modules signed with the APEX MOK"; \
+    else \
+        printf 'unsigned\n' > /usr/share/apex-os/secureboot/modules-signed; \
+        echo "SECURE BOOT: no signing secret — out-of-tree modules left UNSIGNED"; \
+    fi; \
+    dnf5 clean all
+
+# THE POSTCONDITION. Separate RUN so it cannot share a shell with the code that
+# produced the thing it checks, and written so it CANNOT PASS VACUOUSLY: it
+# enumerates every out-of-tree module, requires at least one nvidia + one xone +
+# one xpadneo, and requires `modinfo -F signer` on each to equal the certificate
+# CN recorded above. A marker file is not evidence; this reads the signature out
+# of the shipped artifact. `modules-signed = unsigned` (a local build with no
+# key) is tolerated here in the same way Stage 1b tolerates an unsigned kernel —
+# and CI refuses to publish either.
+#
+# Module NAMES, not package names: `akmod-xone` builds xone-wired/xone-dongle/
+# xone-gip*, and `akmod-xpadneo` builds hid-xpadneo. Only nvidia is named after
+# its akmod, so presence is checked by locating the module FILES each akmod
+# installed rather than by `modinfo <akmod name>`, which would fail for two of
+# the three and would have to be weakened to pass — the exact shape of check
+# that stops meaning anything.
+RUN set -eux; \
+    KVER="$(cat /usr/lib/apex-kver)"; \
+    MODDIR="/usr/lib/modules/${KVER}"; \
+    OOT=""; for d in extra updates; do [ -d "${MODDIR}/${d}" ] && OOT="${OOT} ${MODDIR}/${d}"; done; \
+    test -n "${OOT}" || { echo "FATAL: no out-of-tree module directory"; exit 1; }; \
+    for pat in nvidia xone xpadneo; do \
+        n="$(find ${OOT} -type f -name "*${pat}*.ko*" | wc -l)"; \
+        test "${n}" -gt 0 \
+            || { echo "FATAL: no ${pat} module under ${OOT}"; find ${OOT} -name '*.ko*'; exit 1; }; \
+        echo "present: ${n} ${pat} module(s)"; \
+    done; \
+    modinfo -k "${KVER}" nvidia >/dev/null \
+        || { echo "FATAL: modinfo cannot resolve nvidia for ${KVER}"; exit 1; }; \
+    if [ "$(cat /usr/share/apex-os/secureboot/modules-signed)" = signed ]; then \
+        SIGNER="$(cat /usr/share/apex-os/secureboot/module-signer)"; \
+        N=0; \
+        for m in $(find ${OOT} -type f -name '*.ko*'); do \
+            got="$(modinfo -F signer "${m}" 2>/dev/null || true)"; \
+            [ "${got}" = "${SIGNER}" ] \
+                || { echo "FATAL: ${m} signer is '${got}', expected '${SIGNER}'"; exit 1; }; \
+            N=$((N + 1)); \
+        done; \
+        test "${N}" -gt 0 \
+            || { echo "FATAL: zero out-of-tree modules found — this check would have passed vacuously"; exit 1; }; \
+        echo "module signatures verified: ${N} modules, all signed by '${SIGNER}'"; \
+    else \
+        echo "modules are UNSIGNED (no build secret); CI will refuse to publish this"; \
+    fi
+
+# ── Stage 1e: NVIDIA userspace driver (every image, every machine) ─────────
+# The stage above built the kernel MODULE; a working NVIDIA machine also needs
+# the USERSPACE driver (libGLX_nvidia / libnvidia-*) plus the CUDA runtime. The
+# VA-API↔NVDEC bridge (RPMFusion renamed nvidia-vaapi-driver →
+# libva-nvidia-driver) gives the codec userland hardware decode on NVIDIA too;
+# best-effort across BOTH names with `--skip-unavailable`, so a rename upstream
+# can never abort the driver + CUDA install that matters.
+#
+# COEXISTENCE WITH MESA IS THE WHOLE QUESTION HERE, because this now lands on
+# AMD-only and Intel-only laptops too. It is safe because Fedora/RPMFusion ship
+# GLVND: mesa provides libGLX_mesa/libEGL_mesa, NVIDIA provides
+# libGLX_nvidia/libEGL_nvidia, and libglvnd dispatches per-screen from the
+# vendor JSON in /usr/share/glvnd/egl_vendor.d — there is no libGL.so
+# "alternative" to win or lose any more, which is what the old
+# `nvidia-xconfig`-era conflict was about. Asserted, not assumed: the next RUN
+# checks both vendors' GLX/EGL libraries and Vulkan ICDs survive this install.
+RUN set -eux; \
+    dnf5 -y install xorg-x11-drv-nvidia xorg-x11-drv-nvidia-cuda; \
+    dnf5 -y install --skip-unavailable libva-nvidia-driver nvidia-vaapi-driver; \
+    dnf5 clean all
+
+# Mesa must still work on a machine that has no NVIDIA GPU at all. These are the
+# files that make that true, so these are what is checked — the mechanism is
+# GLVND dispatch, the evidence is that both vendors are present and neither
+# replaced the other.
+RUN set -eux; \
+    test -e /usr/lib64/libGLX_mesa.so.0; \
+    test -e /usr/lib64/libEGL_mesa.so.0; \
+    test -e /usr/lib64/libGLX_nvidia.so.0; \
+    test -s /usr/share/glvnd/egl_vendor.d/50_mesa.json; \
+    test -s /usr/share/glvnd/egl_vendor.d/10_nvidia.json; \
+    ls /usr/share/vulkan/icd.d/ | grep -q '^radeon_icd'; \
+    ls /usr/share/vulkan/icd.d/ | grep -q '^intel_icd'; \
+    ls /usr/share/vulkan/icd.d/ | grep -qi 'nvidia'; \
+    # THE ONE THAT MATTERS. The historical Mesa/NVIDIA conflict was over who
+    # owned libGL.so.1. Under GLVND neither vendor does — libglvnd owns the
+    # dispatch library and both ship only libGLX_<vendor>. If a driver update
+    # ever went back to claiming libGL.so.1, an AMD/Intel laptop would be
+    # dispatching its OpenGL through the NVIDIA stack, and this is what catches
+    # it. Checked by package ownership, not by the file merely existing.
+    owner="$(rpm -qf --qf '%{NAME}\n' /usr/lib64/libGL.so.1)"; \
+    case "${owner}" in libglvnd*) ;; \
+        *) echo "FATAL: /usr/lib64/libGL.so.1 is owned by '${owner}', not libglvnd — mesa/nvidia GL dispatch is broken"; exit 1 ;; \
+    esac; \
+    echo "glvnd: libGL.so.1 owned by ${owner}; mesa and nvidia GLX/EGL/Vulkan coexist"
+
+# ── Stage 1f: NVIDIA boot correctness + the initramfs size budget ──────────
+# Everything here MUST land before the LAST initramfs regeneration in the build,
+# which is the Plymouth dracut run in Containerfile.apex. (apex-logs 46)
+#
+# ═══ THE SIZE BUDGET, AND WHY IT OWNS THIS FILE ══════════════════════════════
+#
+# A 512 MiB ESP is the normal case on a Windows dual-boot machine, and
+# systemd-boot needs the kernel and initramfs ON the ESP: `bootc` does not
+# implement XBOOTLDR Type #1 entries (measured 2026-09-21 — the GUID constant
+# exists in its source and nothing reachable references it), so there is no
+# second partition to put them on. apex-boot-migrate needs room for three
+# deployments plus slack — booted, rollback, and the one an update stages
+# alongside them — so the arithmetic is `3 × (vmlinuz + initramfs) + 48 MiB`.
+#
+# MEASURED on the L16, 2026-09-21, dracut-107-8.fc43, kernel
+# 7.2.3-cachyos2.fc43.x86_64 (ROADMAP/evidence/initramfs-slim-20260921.md):
+#
+#     initramfs   358.3 MiB       of which  203 MiB was GPU firmware under
+#     vmlinuz      16.1 MiB                 /usr/lib/firmware/nvidia alone
+#     ──────────────────                    ( 101 MiB proprietary GSP blobs,
+#     per deployment 374.4 MiB                100 MiB nouveau GSP blobs)
+#     × 3 + 48 MiB = 1171 MiB   →  every 512 MiB ESP refused `esp-too-small`.
+#
+# The initramfs was 96% of it, and firmware was 70% of the initramfs. Two
+# omissions in the dracut config below take it to:
+#
+#     initramfs    98.5 MiB
+#     vmlinuz      16.1 MiB
+#     ──────────────────
+#     per deployment 114.6 MiB  ×  3 + 48 MiB = 392 MiB   →  fits.
+#
+# ═══ FINDING 1 — the nouveau blacklist stays ═════════════════════════════════
+#
+# nouveau is NOT blacklisted by anything else. RPMFusion ships its blacklist
+# ONLY via a %posttrans grubby call, which is inert on bootc — there is no
+# modprobe.d fallback anywhere in RPMFusion F43. The CachyOS kernel ships
+# nouveau with a catch-all pci:v000010DEd* alias, so on the REAL root it races
+# nvidia for the dGPU. modprobe.d + the kargs below are what stop that, and
+# they are unchanged.
+#
+# ═══ FINDING 2 — REVISED 2026-09-21: no KMS driver goes in the initramfs ═════
+#
+# This file used to OVERWRITE RPMFusion's 99-nvidia-dracut.conf to force
+# `add_drivers+=" nvidia nvidia_modeset nvidia_drm nvidia_uvm "`, so that a
+# dGPU-attached panel would get KMS during the initrd phase. That bought a
+# nicer splash and cost 101 MiB of GSP firmware, because dracut installs the
+# firmware of every driver it installs. dracut's own `drm` module then swept in
+# nouveau, amdgpu, i915, xe and radeon with another ~138 MiB behind them.
+#
+# The replacement policy is one line to state: NO FIRMWARE-BEARING KMS DRIVER
+# IS IN THE INITRAMFS. Plymouth and the LUKS passphrase prompt run on
+# `simpledrm`, which binds the framebuffer UEFI's GOP already set up. That is
+# not a hope — it is a kernel contract, asserted in Containerfile.kernel:
+#
+# SAY "FIRMWARE-BEARING" AND MEAN IT. An earlier draft of this comment claimed
+# NO KMS driver at all, and that is measurably false: `omit_drivers` below
+# names the big ones, and bochs, cirrus-qemu, virtio-gpu, vmwgfx and ast are
+# still in the initramfs. They are left there deliberately. The hazard is not
+# "a KMS driver" — it is a driver that calls
+# drm_aperture_remove_conflicting_pci_framebuffers(), evicting simpledrm, and
+# then cannot light the panel because its firmware was omitted with it. These
+# five need no firmware, and they are how a VM and a BMC-equipped server get a
+# display at all, so removing them would cost the lab its console and buy
+# nothing: together they are under a megabyte.
+#
+# It also matters for anyone testing this in a guest. On `-vga std` bochs binds
+# card0 and evicts simpledrm, so a QEMU boot WITHOUT
+# `rd.driver.blacklist=bochs` measures the old design and proves nothing about
+# this one. Measured both ways 2026-09-21 — see
+# ROADMAP/evidence/initramfs-slim-20260921.md.
+#
+#     CONFIG_DRM=y  CONFIG_DRM_SIMPLEDRM=y  CONFIG_SYSFB_SIMPLEFB=y
+#     CONFIG_DRM_FBDEV_EMULATION=y  CONFIG_FRAMEBUFFER_CONSOLE=y
+#
+# all built IN, so they are present with zero modules and zero firmware in the
+# initrd. Every UEFI machine therefore has a DRM device before a single module
+# loads. (This is also RPMFusion's own shipped default; it is stage 1f that had
+# departed from it.)
+#
+# REMOVING A DRIVER AND KEEPING ITS FIRMWARE WOULD BE WORSE THAN EITHER. A KMS
+# driver calls drm_aperture_remove_conflicting_pci_framebuffers() early in
+# probe — it evicts simpledrm BEFORE it loads firmware. So a driver present
+# without its firmware kills the console and then fails to replace it: a black
+# screen at the passphrase prompt. `omit_drivers` removes module and firmware
+# together, which is why it is the lever used here and why `add_drivers` had to
+# go rather than be fought with omit-vs-add precedence (dracut drops any
+# omit_drivers entry that also appears in add_drivers — /usr/bin/dracut:1453).
+#
+# WHAT THIS BETS AGAINST, stated rather than implied: a UEFI machine whose GOP
+# framebuffer is not on a display the owner can see. On the machines this image
+# targets there is none. What it does cost is cosmetic and real: on a
+# dGPU-attached panel the splash and the passphrase prompt are at firmware
+# resolution, and the handover to the real driver is a visible mode change a
+# second later instead of a flicker-free one. The greeter is unaffected — the
+# real root loads nvidia/amdgpu normally.
+#
+# ═══ FINDING 2b — the initramfs has no network ═══════════════════════════════
+#
+# The other 34 MiB is dracut's network stack: `kernel-network-modules` installs
+# all of `=drivers/net` (23 MiB of PHY and ethernet drivers) and
+# `network`/`network-manager` bring NetworkManager, libnm and a glib stack.
+# All of it exists to mount a root filesystem over a network — NFS, NVMe-oF,
+# iSCSI, netboot — or to reach a Tang server for a network-bound keyslot.
+#
+# APEX roots are local block devices. The installer already made this decision
+# for the live ISO ("No 'livenet' … we don't netboot", installer/build-live-iso.sh
+# line 137) and nothing in this repo sets rd.neednet, netroot, nfsroot or
+# iscsi. So the initramfs stops carrying it.
+#
+# WHAT THIS BETS AGAINST: network-root installs of any kind, and Clevis/Tang
+# network unlock — `clevis-pin-tang` drops out with the network module, while
+# `clevis-pin-tpm2`, which is what 50-bootc-clevis.conf and APEX's own
+# enrolment actually use, stays. A machine that needs a network root cannot run
+# this image's initramfs; it was never a machine APEX shipped for.
+#
+# ═══ FINDING 3 — nvidia-drm modeset ══════════════════════════════════════════
+#
+# RPMFusion's nvidia-kmod carries make_modeset_default.patch
+#    so the built default is already on. We set it EXPLICITLY anyway, so a future
+#    RPMFusion respin that drops that patch cannot silently ship an image with no
+#    KMS — an explicit modprobe option beats whatever the compiled-in default is.
+#
+# WHAT UNIFICATION CHANGES, STATED PLAINLY: every APEX machine now carries the
+# nouveau blacklist, not just the ex-`gaming-nvidia` ones. On AMD/Intel hardware
+# that is inert (no NVIDIA device, nothing to bind). On a machine whose NVIDIA
+# GPU is too old for the 580 branch it means the dGPU goes unused rather than
+# falling back to nouveau — acceptable on the laptops this image targets, where
+# the panel is driven by the iGPU, and preferable to the boot race above.
+# The nvidia-*.service condition gates and the nvidia-fallback mask below are
+# what keep the image clean on machines with no NVIDIA hardware; they were
+# already written for portability and are now load-bearing for everyone.
+# printf, not a heredoc: heredoc bodies do not survive backslash-continued RUN
+# lines reliably, and this project has already shipped one Dockerfile-escaping bug.
+RUN set -eux; \
+    mkdir -p /usr/lib/modprobe.d /usr/lib/bootc/kargs.d /usr/lib/dracut/dracut.conf.d; \
+    printf '%s\n' \
+        '# APEX-OS (apex-logs 46). nouveau must never bind the dGPU: it races' \
+        '# the proprietary driver, and RPMFusion ships its blacklist only via a' \
+        '# %posttrans grubby call, which is inert on bootc.' \
+        'blacklist nouveau' \
+        'install nouveau /bin/false' \
+        '# Explicit, so we do not depend on RPMFusion make_modeset_default.patch' \
+        '# surviving a respin. modeset=1 is required by every Wayland compositor;' \
+        '# fbdev=1 gives a console/splash framebuffer on dGPU-attached outputs.' \
+        'options nvidia-drm modeset=1 fbdev=1' \
+        > /usr/lib/modprobe.d/50-apex-nvidia.conf; \
+    printf '%s\n' \
+        '# rd.driver.blacklist is the mechanism dracut honours in the INITRAMFS' \
+        '# phase — modprobe.d alone is weaker there, and nouveau is verifiably' \
+        '# inside the initramfs. modprobe.blacklist covers the real root.' \
+        'kargs = ["rd.driver.blacklist=nouveau", "modprobe.blacklist=nouveau"]' \
+        > /usr/lib/bootc/kargs.d/25-apex-nvidia.toml; \
+    printf '%s\n' \
+        '# APEX-OS replacement for RPMFusion 99-nvidia-dracut.conf.' \
+        '# Keeps their filename because this file exists to SHADOW theirs; it' \
+        '# now carries the whole initramfs size policy, not just nvidia.' \
+        '# See Containerfile.core stage 1f for the measurements and the bets.' \
+        '#' \
+        '# No KMS driver in the initramfs. Plymouth and the LUKS prompt run on' \
+        '# simpledrm over the UEFI GOP framebuffer, which is built into the' \
+        '# kernel. Assignment first, so RPMFusion cannot contribute a value;' \
+        '# then ours. omit_drivers takes MODULE NAMES, anchored ^name$ by' \
+        '# dracut, and removes each module together with its firmware.' \
+        'omit_drivers=""' \
+        'omit_drivers+=" nouveau amdgpu i915 xe radeon amdkfd "' \
+        'omit_drivers+=" nvidia nvidia_modeset nvidia_drm nvidia_uvm "' \
+        '#' \
+        '# No network in the initramfs: APEX roots are local block devices.' \
+        'omit_dracutmodules+=" network network-manager kernel-network-modules "' \
+        'omit_dracutmodules+=" nfs nvmf qemu-net walinuxagent "' \
+        > /usr/lib/dracut/dracut.conf.d/99-nvidia-dracut.conf; \
+    systemctl mask nvidia-fallback.service; \
+    for u in nvidia-powerd nvidia-persistenced; do \
+        mkdir -p "/usr/lib/systemd/system/${u}.service.d"; \
+        printf '%s\n' \
+            '# Portability (apex-logs 46): this image runs on ANY machine,' \
+            '# including ones with no NVIDIA GPU. Without this gate these units' \
+            '# fail at every boot on AMD/Intel hardware and show up as failed' \
+            '# units, which is noise the user then has to triage.' \
+            '[Unit]' \
+            'ConditionPathExistsGlob=/sys/module/nvidia' \
+            > "/usr/lib/systemd/system/${u}.service.d/10-apex-nvidia-only.conf"; \
+    done; \
+    test -s /usr/lib/modprobe.d/50-apex-nvidia.conf; \
+    test -s /usr/lib/bootc/kargs.d/25-apex-nvidia.toml; \
+    NVCONF=/usr/lib/dracut/dracut.conf.d/99-nvidia-dracut.conf; \
+    grep -q '^omit_drivers=""$' "${NVCONF}"; \
+    grep -q 'omit_drivers+=" nouveau amdgpu i915 xe radeon amdkfd "' "${NVCONF}"; \
+    grep -q 'omit_dracutmodules+=" network network-manager kernel-network-modules "' "${NVCONF}"; \
+    if grep -q 'add_drivers' "${NVCONF}"; then \
+        echo "FATAL: ${NVCONF} still has an add_drivers line. dracut DROPS any"; \
+        echo "       omit_drivers entry whose name also appears in add_drivers"; \
+        echo "       (/usr/bin/dracut:1453), so the GPU firmware would come"; \
+        echo "       straight back and the ESP budget with it."; \
+        exit 1; \
+    fi; \
+    echo "nvidia: nouveau blacklisted on the real root, no KMS driver in the initramfs"
+
+# ── Stage 1g: controller + fan/IRQ policy that is no longer edition-specific ─
+# These four moved out of Containerfile.gaming unchanged in effect. They were
+# never gaming-only in nature — they are hardware and daemon-arbitration policy —
+# and with one image there is no edition to gate them on.
+#
+# msi-wmi-platform: the in-tree msi-ec has a 25-entry EC-firmware allowlist with
+# NO 17L3 entry and no `force` parameter, so it will NOT bind on the MSI Katana
+# GF76 (board MS-17L3). msi-wmi-platform does take force=1 and registers an hwmon
+# device, so it is the viable fan/telemetry backend there. Loading it taints the
+# kernel; harmless, and a no-op on non-MSI hardware where the WMI GUID is absent.
+# apexd probes hwmon -> msi-wmi-platform -> msi-ec -> unsupported.
+#
+# irqbalance is MASKED (it is installed, as a dependency, on every image — so the
+# `|| true` this carried in Containerfile.gaming was dead weight guarding a
+# command that cannot fail, and is gone). It actively undoes apexd's M6 IRQ
+# pinning and a static IRQBALANCE_BANNED_CPULIST cannot track a cpuset chosen at
+# runtime. On a laptop the cost of not running it is negligible; the cost of it
+# fighting apexd is a measurable frame-pacing regression.
+#
+# /etc/gamemode.ini ships even though gamemode itself is now an on-demand
+# package: it is inert without gamemode, and it means the FIRST time a user runs
+# `apex install gamemode`, gamemoded already hands the governor to apexd instead
+# of flapping it. Config that arrives after the daemon is config nobody applies.
+#
+# xone/xpadneo module options: xpadneo's rumble and the xone dongle are what the
+# akmods above exist for; these give both sane defaults without a udev rule.
+RUN set -eux; \
+    mkdir -p /usr/lib/modules-load.d /usr/lib/modprobe.d; \
+    printf '%s\n' 'msi-wmi-platform' > /usr/lib/modules-load.d/apex-msi.conf; \
+    printf '%s\n' 'options msi-wmi-platform force=1' \
+        > /usr/lib/modprobe.d/51-apex-msi.conf; \
+    systemctl mask irqbalance.service; \
+    printf '%s\n' \
+        '[general]' \
+        '; apexd owns scaling_governor (M6 tier engine). Matching gamemoded to' \
+        '; apexd game tier means neither daemon flaps the governor against the' \
+        '; other.' \
+        'desiredgov=performance' \
+        'defaultgov=performance' \
+        'igpu_desiredgov=performance' \
+        '' \
+        '[custom]' \
+        '; Makes Steam `gamemoderun %command%` drive APEX game mode: P-core' \
+        '; cpuset, IRQ steering, NVIDIA clock locks and fan boost. Idempotent,' \
+        '; and safe when apexd is absent (the CLI reports unsupported, not err).' \
+        'start=/usr/bin/apex game start' \
+        'end=/usr/bin/apex game stop' \
+        > /etc/gamemode.ini; \
+    test -s /usr/lib/modules-load.d/apex-msi.conf; \
+    test -s /usr/lib/modprobe.d/51-apex-msi.conf; \
+    test -s /etc/gamemode.ini; \
+    test "$(readlink -f /etc/systemd/system/irqbalance.service)" = /dev/null \
+        || { echo "FATAL: irqbalance.service is not masked"; exit 1; }
+
 # ── Stage 2: desktop + greeter stack ───────────────────────────────────────
-# hyprland (sdegler COPR) + quickshell (errornointernet COPR 0.3.0 —
-# the exact version apex-greet targets) + greetd. The greeter's compositor host
+# hyprland (sdegler COPR) + quickshell-git (errornointernet COPR) + greetd.
+#
+# quickshell-git, NOT quickshell, and the reason is accessibility. Released
+# 0.3.1 publishes NOTHING to AT-SPI: the application node answers ChildCount 0
+# and no window appears, so every `Accessible.role`/`.name` in apex-shell is
+# source-correct and unreachable at runtime, including the ones on the lock
+# screen's password field. Measured with a per-pid AT-SPI probe across six
+# window configurations.
+#
+# The cause was never window creation. quickshell deleted a QCoreApplication
+# before building the QGuiApplication, which tore down QtQuick's accessibility
+# hooks; upstream fixed it in 916a0dd "launch: avoid creating multiple
+# QApplications" on 2026-08-28, EIGHT DAYS after v0.3.1 was tagged, so no
+# release carries it (their issues #1006 and #1144 cover it). The same COPR
+# builds master as quickshell-git, and c6a5160 publishes a real tree: frame ->
+# label for PanelWindow and PopupWindow, and `text 'PASSWORD FIELD'` for the
+# lock surface.
+#
+# The cost, stated rather than buried: this is a rolling snapshot, so an image
+# built next week gets a different commit. That is worse for reproducibility
+# than a tagged release and better than shipping a desktop no screen reader can
+# read. Move back to `quickshell` the moment a release contains 916a0dd. The greeter's compositor host
 # is moving OFF cage: M0 spike A found cage 0.2.0 does not serve wlr-layer-shell
 # to quickshell 0.3.0, so the greeter never paints under it. sway 1.11 and labwc
 # 0.9.6 (both stock F43, both layer-shell v4) are installed as the real host;
@@ -351,6 +1109,20 @@ RUN --mount=type=secret,id=apex_sb_key --mount=type=secret,id=apex_sb_crt \
 # niri sessions directly; Hyprland does not implement that protocol and is driven
 # through hyprctl by the same APEX settings model.
 #
+# wlopm is DISPLAY POWER, which is a different protocol and a different job from
+# wlr-randr's. It is the only thing that can turn the screen off on labwc:
+# labwc publishes no IPC socket at all, so there is no `hyprctl dispatch dpms`
+# or `niri msg action power-off-monitors` equivalent, and the one protocol it
+# does implement for this is zwlr-output-power-management-v1 (confirmed:
+# `strings /usr/bin/labwc` contains zwlr_output_power_manager_v1). Without it
+# the idle screen-off listener in the shipped hypridle.conf fired on labwc and
+# did nothing at all — the display stayed lit all night.
+#
+# wlr-randr is NOT a substitute. `--off` goes through wlr-output-management and
+# DISABLES the output: layer-shell surfaces on it are destroyed and windows are
+# re-laid-out onto whatever is left, every single idle timeout. That is worse
+# than the no-op it would replace. 28 KiB, and it is the whole fix.
+#
 # bubblewrap is the agent sandbox. It was already present as a flatpak
 # dependency and Containerfile.base asserts it, deliberately, so that the
 # security boundary did not force a core rebuild on its own. This transaction is
@@ -358,26 +1130,56 @@ RUN --mount=type=secret,id=apex_sb_key --mount=type=secret,id=apex_sb_crt \
 # additional cost — a security primitive should not rest on another package
 # happening to pull it in. The base assertion stays: it is what catches the
 # package being dropped again.
+#
+# qt6-qttranslations is here for exactly that reason and for a second one that
+# is not obvious. It is a `Recommends:` of qt6-qtbase-gui and NOTHING requires
+# it — measured on a booted APEX host: `rpm -q --whatrequires qt6-qttranslations`
+# answers "no package". It owns /usr/share/qt6/translations/qt_<lang>.qm, and
+# those catalogues are the entire mechanism by which any Qt surface in APEX
+# mirrors for a right-to-left language: Qt does not read the direction off the
+# locale, it TRANSLATES the string QT_LAYOUT_DIRECTION and compares the answer
+# to "RTL". Urdu proves it — unambiguously RTL, QLocale agrees, and Qt still
+# answers LeftToRight because upstream ships no qt_ur.qm. So a build that ever
+# passes --setopt=install_weak_deps=False (apex-pkg already has a
+# --no-weak-deps flag) would delete right-to-left support with nothing red
+# anywhere. tests/test-apex-platform-theme.sh is the assertion; this line is
+# what makes it true. mksquashfs reaching the image only as a weak dependency
+# of dracut-squash is the same class, already on record in apex-pkg.
 # Own transaction, `dnf5 clean all` at the end.
 RUN set -eux; \
     dnf5 -y copr enable sdegler/hyprland; \
     dnf5 -y copr enable errornointernet/quickshell; \
     dnf5 -y install \
-        hyprland quickshell greetd sway labwc cage xwayland-satellite foot \
+        hyprland quickshell-git greetd sway labwc cage xwayland-satellite foot \
         jetbrains-mono-fonts fontconfig flatpak distrobox git-core niri \
         hyprlock hypridle hyprsunset hyprshot grimblast mate-polkit \
         pipewire pipewire-pulseaudio wireplumber rtkit \
         playerctl brightnessctl wl-clipboard slurp wtype cliphist \
         upower libnotify lm_sensors cava wf-recorder ImageMagick \
-        qt6ct qt6-qtwebengine mpv-mpris xdg-user-dirs polkit gnome-keyring \
+        qt6ct qt6-qttranslations qt6-qtwebengine mpv-mpris xdg-user-dirs polkit gnome-keyring \
         gammastep geoclue2 jq dconf \
-        kanshi wlr-randr \
+        kanshi wlr-randr wlopm \
         bubblewrap \
         NetworkManager-wifi wpa_supplicant wireless-regdb iw \
         glibc-langpack-en zram-generator-defaults; \
     dnf5 -y copr disable sdegler/hyprland; \
     dnf5 -y copr disable errornointernet/quickshell; \
-    dnf5 clean all
+    dnf5 clean all; \
+    : 'The accessibility fix is the whole reason quickshell-git is here, so the'; \
+    : 'build refuses a quickshell that predates it. Released 0.3.1 reports an'; \
+    : 'EMPTY revision -- "Quickshell 0.3.1 (revision , distributed by ...)" --'; \
+    : 'because it is built from a tarball with no git tree. The snapshot reports'; \
+    : 'the commit it was built from. An empty revision therefore means the COPR'; \
+    : 'served the release package and every Accessible.* in apex-shell would be'; \
+    : 'unreachable at runtime, with nothing else failing to say so.'; \
+    qs_ver="$(quickshell --version 2>&1 | head -n1)"; \
+    printf 'quickshell: %s\n' "$qs_ver"; \
+    if ! printf '%s' "$qs_ver" | grep -qE 'revision [0-9a-f]{7,}'; then \
+        echo "FATAL: quickshell reports no git revision -- this is the release"; \
+        echo "       build, which publishes nothing to AT-SPI (upstream 916a0dd"; \
+        echo "       landed after v0.3.1). Got: $qs_ver"; \
+        exit 1; \
+    fi
 
 # ── hyprland-qtutils, built HERE against the desktop stack ──────────────────
 # Hyprland warns at every startup without it, and CAsyncDialogBox cannot create
@@ -430,7 +1232,8 @@ RUN set -eux; \
     for b in hyprland-dialog hyprland-donate-screen hyprland-update-screen; do \
         command -v "$b" >/dev/null || { echo "FATAL: $b missing"; exit 1; }; \
     done; \
-    ! ldd /usr/bin/hyprland-dialog | grep 'not found'; \
+    if ldd /usr/bin/hyprland-dialog | grep 'not found' \
+        ; then echo "FATAL: hyprland-dialog has unresolved shared libraries"; exit 1; fi; \
     test -d /usr/lib64/qt6/qml/org/hyprland/style; \
     test ! -d /usr/usr; \
     mkdir -p /usr/lib64/apex; \
@@ -487,21 +1290,48 @@ RUN set -eux; \
 # Fedora ships a legally-crippled multimedia stack: `ffmpeg-free` (no H.264/H.265/
 # AAC encoders) and mesa built WITHOUT the proprietary video codecs, so hardware
 # H.264/H.265 decode on the AMD 780M is dead out of the box. This stage fixes the
-# CODEC USERLAND that both editions share; the mesa VA drivers themselves are
-# swapped per-edition (Daily → mesa-va-drivers-freeworld; Gaming → Terra mesa),
-# because §4c pins Daily to stable mesa and Gaming to a fresher mesa.
+# codec userland AND — new with the single image — the mesa leg itself.
 #
-# Enable RPMFusion free+nonfree and LEAVE THEM ENABLED (unlike the COPRs, which
-# are one-shot build inputs disabled after use): RPMFusion is a persistent,
-# well-known repo the running system wants so users can install codecs/drivers —
-# the same posture Bazzite ships. Swap ffmpeg-free → full ffmpeg with
-# --allowerasing (they conflict), then the GStreamer plugin set (good is Fedora;
-# bad-freeworld/ugly/libav are RPMFusion) + VA-API userland. openh264 comes from
-# Fedora's Cisco repo. Own transaction, `dnf5 clean all`.
+# RPMFusion free+nonfree are enabled in Stage 1d (the akmod build is the earliest
+# consumer) and LEFT ENABLED, unlike the COPRs, which are one-shot build inputs
+# disabled after use: RPMFusion is a persistent, well-known repo the running
+# system wants so users can install codecs/drivers — the same posture Bazzite
+# ships. Asserted here rather than re-added, so deleting Stage 1d fails loudly
+# instead of silently depsolving this stage against Fedora alone.
+#
+# ── THE MESA LEG, MOVED HERE FROM THE FLAVOR TIER ──
+# §4c used to pin Daily to latest-STABLE mesa (Terra) and Gaming to mesa-*git*.
+# One image cannot have two, and latest-stable wins on two counts:
+#
+#   1. mesa-git's entire value is being fresh, and nothing in `core` is fresh —
+#      core rebuilds only on an upstream digest change or a force. A git snapshot
+#      frozen for weeks at a time is the worst of both: the regression risk of
+#      main-branch RADV with none of the currency that was the point.
+#   2. This image is now the one every laptop runs, including the ones whose
+#      acceptance gate is suspend reliability and idle drain. Shipping
+#      main-branch Mesa to all of them to chase frame pacing on some of them is
+#      the wrong trade. `apex repo enable-copr xxmitsu/mesa-git` remains for
+#      anyone who wants it per-machine.
+#
+# Terra (fyralabs) ships a newer *release* mesa than the fc43-pinned base, built
+# WITHOUT Fedora's codec crippling — so one distro-sync gets BOTH the fresher
+# stable stack AND H.264/H.265 hardware decode on RADV (the point of the base's
+# mpv.conf `hwdec=auto-safe`), with no separate freeworld swap.
+#
+# The Terra repo is REMOVED after the sync. It must NOT stay enabled in the
+# shipped image: terra-release's repo file points gpgkey at
+# file:///etc/pki/rpm-gpg/RPM-GPG-KEY-terra$releasever, and any later depsolve
+# against that enabled repo (bootc-image-builder's ISO build, or an `apex
+# install`) fails to read the key and aborts — which is exactly what broke the
+# first installer-ISO build. Falls back to Fedora-stable mesa + RPMFusion
+# freeworld VA if Terra is unavailable at build time; codecs work either way.
+#
+# Swap ffmpeg-free → full ffmpeg with --allowerasing (they conflict), then the
+# GStreamer plugin set (good is Fedora; bad-freeworld/ugly/libav are RPMFusion) +
+# VA-API userland. openh264 comes from Fedora's Cisco repo. Own transaction.
 RUN set -eux; \
-    dnf5 -y install \
-        "https://mirrors.rpmfusion.org/free/fedora/rpmfusion-free-release-$(rpm -E %fedora).noarch.rpm" \
-        "https://mirrors.rpmfusion.org/nonfree/fedora/rpmfusion-nonfree-release-$(rpm -E %fedora).noarch.rpm"; \
+    rpm -q rpmfusion-free-release rpmfusion-nonfree-release >/dev/null \
+        || { echo "FATAL: RPMFusion is not enabled — Stage 1d must run before this stage"; exit 1; }; \
     dnf5 -y install --allowerasing ffmpeg; \
     dnf5 -y install \
         gstreamer1-plugins-base gstreamer1-plugins-good \
@@ -509,6 +1339,24 @@ RUN set -eux; \
         gstreamer1-plugins-ugly gstreamer1-libav \
         libva libva-utils; \
     dnf5 -y install --skip-unavailable gstreamer1-vaapi; \
+    if dnf5 -y install --nogpgcheck \
+            --repofrompath "terra,https://repos.fyralabs.com/terra\$releasever" \
+            terra-release \
+       && dnf5 -y distro-sync "mesa*"; then \
+        dnf5 -y remove terra-release; \
+        echo "mesa: Terra latest-stable (codec-enabled; repo removed post-bake)" > /usr/lib/apex-mesa-leg; \
+    else \
+        echo "Terra unavailable — Fedora-stable mesa + RPMFusion freeworld VA"; \
+        dnf5 -y install --allowerasing \
+            mesa-va-drivers-freeworld mesa-vdpau-drivers-freeworld; \
+        echo "mesa: Fedora-stable + freeworld VA (Terra fallback)" > /usr/lib/apex-mesa-leg; \
+    fi; \
+    rm -f /etc/yum.repos.d/terra*.repo /etc/yum.repos.d/*terra*.repo; \
+    cat /usr/lib/apex-mesa-leg; \
+    test -z "$(ls /etc/yum.repos.d/ | grep -i terra || true)" \
+        || { echo "FATAL: a Terra repo file survived — every later depsolve would abort on its missing gpgkey"; exit 1; }; \
+    test -e /usr/lib64/libGLX_mesa.so.0; \
+    test -e /usr/lib64/libGLX_nvidia.so.0; \
     dnf5 clean all
 
 # ── Stage 5a-apps: baked userland (both editions) ──────────────────────────
@@ -523,26 +1371,88 @@ RUN set -eux; \
 # first boot; blueman gives the tray applet the shell's BT tab can also drive.
 # Package-name notes (verified against Fedora): the Thunar RPM is capitalised
 # `Thunar`; Fedora dropped p7zip for `7zip` (upstream 7-Zip, provides 7z + RAR
-# extraction); there is no `gvfs-archive` subpackage. `unrar` (RPMFusion nonfree)
-# is best-effort — `7zip`/`unar` already cover RAR — so a nonfree-repo hiccup can
-# never abort this stage.
+# extraction). `unrar` (RPMFusion nonfree) is best-effort — `7zip`/`unar` already
+# cover RAR — so a nonfree-repo hiccup can never abort this stage.
+#
+# ── The share stack was half a stack ────────────────────────────────────────
+# `gvfs gvfs-mtp gvfs-smb` looks like network shares are covered. They were not:
+#
+#   gvfs-fuse      NOT installed, and it is the one that decides whether a
+#                  mount exists for anything but GTK. gvfs without it puts the
+#                  share inside GIO and creates no /run/user/UID/gvfs, so
+#                  Thunar can open smb://server/share and a terminal, an
+#                  editor or an installer in the same session cannot see it.
+#                  "Mounted" and "usable" are different states and only this
+#                  package joins them.
+#   gvfs-gphoto2   NOT installed, so a camera or a phone in PTP mode appears
+#                  nowhere. MTP was covered and PTP was not, which is the
+#                  difference between an Android phone and every camera.
+#   gvfs-nfs       NOT installed: NFS was mountable as root and invisible to
+#                  the file manager.
+#   cifs-utils     NOT installed, so there was no mount.cifs at all — SMB
+#                  worked only through GIO, never as a kernel mount in fstab,
+#                  which is what a persistent share on a NAS actually is.
+#   samba-client   NOT installed, so no smbclient to diagnose any of it.
+#
+# WebDAV needed nothing: gvfsd-dav is in the base `gvfs` package and was
+# already here. It was still unusable outside GTK for the gvfs-fuse reason.
 RUN set -eux; \
     dnf5 -y copr enable zeno/scrcpy; \
     dnf5 -y install \
         firefox \
         Thunar thunar-volman thunar-archive-plugin \
-        gvfs gvfs-mtp gvfs-smb \
+        gvfs gvfs-fuse gvfs-mtp gvfs-smb gvfs-nfs gvfs-gphoto2 \
+        cifs-utils samba-client \
         evince qimgv mpv \
         7zip unzip unar xarchiver \
         btop qalculate-gtk neovim nano \
         alacritty fastfetch \
+        xdg-terminal-exec \
         pavucontrol \
         gparted parted gdisk udisks2 smartmontools \
-        bluez bluez-tools blueman \
+        fwupd \
+        bluez bluez-tools bluez-obexd blueman pipewire-codec-aptx \
         scrcpy android-tools; \
     rpm -q scrcpy android-tools; \
+    rpm -q fwupd; \
+    command -v fwupdmgr; \
     command -v scrcpy; \
     command -v adb; \
+    # xdg-terminal-exec is what makes a `Terminal=true` desktop entry
+    # launchable at all: the launcher hands it the program and it supplies the
+    # terminal. It was absent from every APEX machine, so nvim — which ships
+    # from the neovim rpm above WITH Terminal=true — could be clicked and did
+    # nothing, while `apex install neovim` correctly refused it as already
+    # provided by the image. Meanwhile /etc/xdg/xdg-terminals.list, this
+    # helper's config file, has been shipped since apex-logs 31. The
+    # configuration was on every machine and the program that reads it was
+    # never installed. Asserted here so the pair cannot come apart again;
+    # Containerfile.base asserts that the two agree.
+    command -v xdg-terminal-exec; \
+    test -x /usr/bin/xdg-terminal-exec \
+        || { echo "FATAL: xdg-terminal-exec is not executable; every Terminal=true desktop entry (nvim included) would be unlaunchable"; exit 1; }; \
+    # The share and device backends, asserted on the shipped artifact rather
+    # than on the package names above. gvfsd-fuse is the one that matters most:
+    # without it the GIO mounts exist only inside GTK's own process and
+    # /run/user/UID/gvfs is never created, so every other program on the
+    # machine — a terminal, an editor, Steam — cannot see the share at all.
+    test -x /usr/libexec/gvfsd-fuse; \
+    test -x /usr/libexec/gvfsd-gphoto2; \
+    test -x /usr/libexec/gvfsd-nfs; \
+    test -x /usr/libexec/gvfsd-dav; \
+    command -v mount.cifs; \
+    command -v smbclient; \
+    # aptX. The image already had AAC, LDAC, LC3, opus, G.722, FastStream and
+    # SBC; aptX is the one Qualcomm headset codec Fedora cannot ship, so it
+    # comes from RPM Fusion free, which Stage 1d enabled. Asserted rather than
+    # installed with --skip-unavailable: a headset that silently falls back to
+    # SBC is exactly the "it works but sounds wrong" report nobody can debug.
+    test -e /usr/lib64/spa-0.2/bluez5/libspa-codec-bluez5-aptx.so; \
+    test -e /usr/lib64/spa-0.2/bluez5/libspa-codec-bluez5-ldac.so; \
+    # Sending a file to a phone over Bluetooth. Session-bus activated, so it
+    # needs no unit enabled, but it needs to be installed — and it was only
+    # here as somebody else's dependency, which is not a thing to rely on.
+    test -x /usr/libexec/bluetooth/obexd; \
     dnf5 -y copr disable zeno/scrcpy; \
     dnf5 -y install --skip-unavailable unrar; \
     systemctl enable bluetooth.service; \
@@ -575,13 +1485,51 @@ RUN set -eux; \
 #
 # cups.SOCKET, not cups.service: socket activation means cupsd only runs when
 # something actually prints, instead of sitting resident on every laptop.
+#
+# ── avahi is asserted here, not enabled here ────────────────────────────────
+# Fedora's 90-default.preset carries `enable avahi-daemon.*` and the built image
+# does have avahi-daemon.service in multi-user.target.wants, so the enable below
+# changes nothing on a good build. It is a regression guard: everything in this
+# stage rests on avahi — DNS-SD finds driverless printers, nss-mdns resolves
+# .local through avahi's socket, `apex host` discovery is mDNS — and a preset
+# change or a dropped package would take all of it out silently. The FATAL makes
+# that a failed build instead.
+#
+# What this CANNOT fix is a mask. `systemctl mask avahi-daemon` writes a symlink
+# to /dev/null in /etc, which outlives every image update and is invisible to a
+# build. The machine this stage was written on is in exactly that state, and it
+# costs more than discovery:
+#
+#   scanimage -L NEVER RETURNS when avahi is unavailable. hplip's hpaio backend
+#   links libavahi-client and does a network probe in sane_hpaio_get_devices;
+#   with no avahi to answer it, the process sits in rt_sigsuspend past 400
+#   seconds instead of failing. On a machine with avahi running, the same image
+#   and the same backend list return in twelve seconds and find the same
+#   scanner. So this is avahi's absence, not hplip's presence — hpaio is left
+#   alone, and `apex devices scan` names the mask rather than letting a scan UI
+#   freeze on a device list that will not arrive.
+#
+# simple-scan ships because the image had no scanning application of any kind —
+# `scanimage` on a terminal is not "scanning works" for the person this distro
+# is for.
 RUN set -eux; \
     dnf5 -y install \
         cups cups-filters cups-pk-helper ghostscript \
         gutenprint gutenprint-cups hplip \
         nss-mdns system-config-printer \
-        sane-backends sane-airscan; \
+        sane-backends sane-airscan simple-scan \
+        avahi-tools; \
     systemctl enable cups.socket; \
+    systemctl enable avahi-daemon.service avahi-daemon.socket; \
+    systemctl is-enabled avahi-daemon.service \
+        || { echo "FATAL: avahi is not enabled — no printer on this network would ever be found"; exit 1; }; \
+    command -v simple-scan; \
+    # avahi-tools is named because apex-remoted publishes _apex-remote._tcp by
+    # running avahi-publish-service for as long as it is up (P1-052). It was
+    # already present as somebody else's dependency, which is exactly the kind
+    # of thing that disappears in a rebase nobody connects to remote access
+    # breaking. Asserted here so the build fails instead.
+    command -v avahi-publish-service; \
     authselect enable-feature with-mdns4 >/dev/null 2>&1 || true; \
     grep '^hosts:' /etc/nsswitch.conf; \
     grep -q mdns /etc/nsswitch.conf \
@@ -618,6 +1566,74 @@ RUN set -eux; \
     command -v fcitx5 >/dev/null; \
     dnf5 clean all
 
+# ── Stage 5a-a11y: the screen reader ───────────────────────────────────────
+# Asked of the built image's own rpmdb rather than by grepping Containerfiles —
+# a grep only finds what is named explicitly, and this image names almost none
+# of it — the accessibility plumbing was ALREADY here, as transitive
+# dependencies of gtk4 and Qt: at-spi2-core, at-spi2-atk, speech-dispatcher and
+# espeak-ng are all installed. A note on record that APEX shipped "zero
+# accessibility packages" was simply wrong.
+#
+# What was missing was the reader itself. Every piece except the one that
+# speaks: a blind user could not log in, could not run the installer, and could
+# not use the desktop, on a system that already carried the whole stack.
+#
+# Cost, measured rather than estimated (`dnf5 install --assumeno orca` inside
+# ghcr.io/andrenijman/apex-os:daily): FIVE packages — orca, brlapi,
+# python3-brlapi, python3-louis, python3-pyatspi — 4 MiB downloaded, 23 MiB
+# installed. Nothing pulls speech-dispatcher or espeak-ng, which is the rpmdb
+# confirming the paragraph above. This is a rounding error beside the 1.3 GB
+# the desktop AI apps put into this same tier (docs/update-cost.md).
+#
+# python3-pyatspi arriving with it is a side benefit worth naming: the AT-SPI
+# suites in tests/ were written to walk the bus over raw D-Bus precisely
+# because no bindings existed here.
+#
+# NOT autostarted, and that is a decision rather than an omission. A screen
+# reader that starts unbidden talks over a sighted user's first boot. orca is
+# started by the user who wants it. tests/test-apex-a11y-stack.sh asserts both
+# halves — that it is installed, and that nothing starts it.
+#
+# At the login screen it would have nothing to talk to in any case: the greet
+# session has no D-Bus session bus at all, so Qt's accessibility bridge has
+# nowhere to publish the greeter's tree. tests/test-apex-greet-session-bus.sh
+# measures that, on both greeter hosts, and goes red when somebody fixes it.
+RUN set -eux; \
+    dnf5 -y install orca; \
+    command -v orca >/dev/null; \
+    rpm -q orca at-spi2-core speech-dispatcher espeak-ng >/dev/null; \
+    dnf5 clean all
+
+# Shipping a reader nobody can start is not shipping a reader. orca has no
+# keybinding of its own, no tray entry and no toggle, and the one thing a user
+# who needs it cannot do is open a terminal and type `orca`. This is the switch:
+# APEX Shell binds SUPER+ALT+S to it on all three sessions (Hyprland, niri and
+# labwc, from the one KeybindService default), which is GNOME's combination for
+# the same action.
+#
+# It goes in this stage, beside the package, so the reader and its switch move
+# together: deleting one without the other is the shape of defect this file has
+# collected six times over (a change that selects no CI job and passes).
+#
+# The thing the script is built around, read out of the rpm rather than
+# remembered: orca 49 has NO `--quit` verb, so stopping it is SIGTERM. Its
+# option list is -h -v -r -s -l -e -d -p -u --speech-system --debug-file
+# --debug, and a toggle written around `orca --quit` turns the reader on and
+# never off.
+COPY --chmod=0755 files/system/libexec/apex-screen-reader /usr/libexec/apex-screen-reader
+#
+# The unit file test is not decoration: the script prefers
+# `systemctl --user start orca.service` over exec'ing orca, so an orca that
+# stopped shipping that unit would quietly move every user onto the fallback
+# path. That it is NOT enabled is asserted in tests/test-apex-a11y-stack.sh,
+# where a systemctl that cannot answer SKIPs with a reason instead of passing.
+RUN set -eux; \
+    bash -n /usr/libexec/apex-screen-reader; \
+    test -x /usr/libexec/apex-screen-reader; \
+    rc=0; /usr/libexec/apex-screen-reader status >/dev/null || rc=$?; \
+    test "$rc" -le 1; \
+    test -f /usr/lib/systemd/user/orca.service
+
 # ── Stage 5a-laptop: ordinary laptop hardware every vendor ships ───────────
 # Gaps found by diffing the built image against Fedora's @hardware-support and
 # the things a normal laptop owner expects to just work:
@@ -641,17 +1657,84 @@ RUN set -eux; \
 #                      university or corporate network needs on day one.
 #   libinput-utils / usbutils / pciutils  the tools any bug report will ask for.
 #
+# ── Four more gaps, each of them an acceptance criterion ────────────────────
+#
+#   bolt               Thunderbolt and USB4 device authorisation. On the
+#                      machine this was found on, both domains report
+#                      security=user, which means an attached device sits at
+#                      authorized=0 until something authorises it. Nothing did:
+#                      boltd was not installed, and APEX runs neither GNOME nor
+#                      KDE, so there was no other client of org.freedesktop.bolt
+#                      either. A USB-C dock behind a Thunderbolt controller was
+#                      dead with no message anywhere.
+#
+#   wireguard-tools    The kernel has CONFIG_WIREGUARD=m and NetworkManager
+#                      speaks WireGuard natively, so the protocol worked and
+#                      there was no `wg`, no `wg-quick` and no way to import
+#                      the .conf file every WireGuard provider hands out.
+#
+#   the NM VPN plugins Absolutely none were installed. NetworkManager has no
+#                      built-in VPN support beyond WireGuard: each protocol is a
+#                      separate service in /usr/lib/NetworkManager/VPN, so
+#                      "import a .ovpn" was not a slow path, it was no path.
+#                      openvpn and openconnect cover OpenVPN and the
+#                      AnyConnect/GlobalProtect/Pulse family; vpnc covers legacy
+#                      Cisco IPsec. l2tp is left out: it drags in strongswan and
+#                      xl2tpd, and nothing here has tested that chain.
+#
+#   dnsmasq            NetworkManager's shared mode — which is what "turn this
+#                      laptop into a hotspot" is — spawns dnsmasq for DHCP and
+#                      DNS. Without the binary the connection activates and
+#                      hands out no addresses, which reads as a hotspot that
+#                      exists and does not work.
+#                      NOTE: the default firewall still blocks a hotspot three
+#                      separate ways (forward is policy drop; the DHCP rule
+#                      matches replies, not a client's DISCOVER on dport 67;
+#                      dport 53 is shut). That is P1-044's file to change and
+#                      this stage does not touch it.
+#
 # thermald is Intel-only and its Fedora unit has NO vendor condition, plus
 # `Restart=on-failure` — so enabling it as-is would restart-loop into a failed
 # unit on every AMD boot. The ExecCondition drop-in makes systemd skip it
 # cleanly (condition-failed, not failed) on non-Intel machines, the same
-# portability posture Containerfile.gaming already applies to the NVIDIA units.
+# portability posture Stage 1f applies to the NVIDIA units.
+#
+# power-profiles-daemon moved here from Containerfile.daily. NOT tlp — tlp
+# conflicts with PPD on Fedora and fights the platform profile driver; the plan
+# standardises on PPD plus apexd's own sysctl/udev layer. It rides this existing
+# transaction rather than getting its own RUN, and that is a download decision,
+# not tidiness: every dnf transaction rewrites the ~200 MB sqlite rpmdb into its
+# own layer, and in the flavor tier that layer moved on EVERY push and shipped to
+# every user on every `apex update`. Here it is inside a layer the base consumes
+# by digest and nobody re-downloads.
 RUN set -eux; \
     dnf5 -y install \
         fprintd fprintd-pam iio-sensor-proxy switcheroo-control thermald \
         ModemManager NetworkManager-ppp NetworkManager-bluetooth \
-        nm-connection-editor \
+        nm-connection-editor power-profiles-daemon \
+        bolt \
+        wireguard-tools dnsmasq \
+        NetworkManager-openvpn NetworkManager-openconnect NetworkManager-vpnc \
         libinput-utils usbutils pciutils; \
+    # boltd is D-Bus activated and woken by 90-bolt.rules
+    # (SUBSYSTEM=="thunderbolt", SYSTEMD_WANTS+="bolt.service"), so it must NOT
+    # be `systemctl enable`d — the unit is Type=dbus and enabling it would start
+    # a Thunderbolt daemon on machines with no Thunderbolt. Both halves are
+    # asserted instead, because installing the package and never being woken by
+    # it is the failure mode that looks like success.
+    test -x /usr/libexec/boltd; \
+    grep -q 'SUBSYSTEM=="thunderbolt"' /usr/lib/udev/rules.d/90-bolt.rules; \
+    grep -q 'bolt.service' /usr/lib/udev/rules.d/90-bolt.rules; \
+    command -v wg; \
+    command -v wg-quick; \
+    test -e /usr/lib/NetworkManager/VPN/nm-openvpn-service.name; \
+    test -e /usr/lib/NetworkManager/VPN/nm-openconnect-service.name; \
+    test -e /usr/lib/NetworkManager/VPN/nm-vpnc-service.name; \
+    # NetworkManager spawns its own dnsmasq for a shared connection, with its
+    # own arguments and its own lifetime. Enabling dnsmasq.service would put a
+    # second resolver on port 53 that fights the first one.
+    command -v dnsmasq; \
+    test "$(systemctl is-enabled dnsmasq.service 2>&1)" != enabled; \
     mkdir -p /usr/lib/systemd/system/thermald.service.d; \
     printf '%s\n' \
         '# APEX-OS: thermald is Intel-only, its Fedora unit has no vendor gate,' \
@@ -664,6 +1747,7 @@ RUN set -eux; \
     systemctl enable switcheroo-control.service; \
     systemctl enable ModemManager.service; \
     systemctl enable thermald.service; \
+    systemctl enable power-profiles-daemon.service; \
     dnf5 clean all
 
 # ── Stage 5a-fonts: full font stack ────────────────────────────────────────
@@ -693,16 +1777,51 @@ RUN set -eux; \
 # ── Stage 5a-zed: Zed editor (/usr, official tarball) ──────────────────────
 # Zed is not packaged for Fedora (upstream ships a Flatpak or a raw tarball, and
 # Flatpaks cannot be installed at bootc build time). Fetch the official Linux
-# tarball into /usr/lib and symlink the launcher onto PATH. Non-fatal, same
-# posture as sing-box: a fetch failure leaves Zed absent (neovim/nano still there)
-# but never aborts the image build. The tarball unpacks to `zed.app/`.
+# tarball into /usr/lib and symlink the launcher onto PATH. The FETCH stays
+# non-fatal, same posture as sing-box: no network, no Zed, but the image still
+# builds and neovim/nano remain. The tarball unpacks to `zed.app/`.
+#
+# ── What is NOT non-fatal, and why this block is assertive now ──────────────
+# Everything after a successful unpack is checked, because the previous version
+# shipped a working Zed that no launcher could see, on every APEX image, and
+# nothing noticed. Two mistakes compounded:
+#
+#   1. It installed from `zed.app/share/applications/zed.desktop`. The tarball
+#      has never shipped that name — the file is `dev.zed.Zed.desktop`.
+#   2. `2>/dev/null || true` on the install swallowed the resulting failure.
+#
+# So `/usr/bin/zed` ran fine from a shell and Zed was absent from every menu,
+# every launcher and every "Open With" list. A user reasonably calls that "Zed
+# doesn't work". The fetch failing is a fact about the network; the tarball
+# unpacking and the entry not arriving is a bug, and the build now says so.
+#
+# The icons are installed for the same reason: `Icon=zed` in the entry resolves
+# through the hicolor theme, and an entry with an unresolvable icon is the same
+# invisible half-failure one step further along.
 RUN set -eux; \
     if curl -fsSL "https://zed.dev/api/releases/stable/latest/zed-linux-x86_64.tar.gz" -o /tmp/zed.tgz \
        && tar -xzf /tmp/zed.tgz -C /usr/lib; then \
         ln -sf /usr/lib/zed.app/bin/zed /usr/bin/zed; \
-        install -Dm644 /usr/lib/zed.app/share/applications/zed.desktop \
-            /usr/share/applications/dev.zed.Zed.desktop 2>/dev/null || true; \
-        echo "zed: installed to /usr/lib/zed.app"; \
+        install -Dm644 /usr/lib/zed.app/share/applications/dev.zed.Zed.desktop \
+            /usr/share/applications/dev.zed.Zed.desktop; \
+        for px in 512x512 1024x1024; do \
+            if [ -f "/usr/lib/zed.app/share/icons/hicolor/${px}/apps/zed.png" ]; then \
+                install -Dm644 "/usr/lib/zed.app/share/icons/hicolor/${px}/apps/zed.png" \
+                    "/usr/share/icons/hicolor/${px}/apps/zed.png"; \
+            fi; \
+        done; \
+        # The launcher entry has to exist, name a binary that is really on PATH,
+        # and carry an icon the theme can resolve. Asserted against the shipped
+        # files rather than trusted, because all three failed silently before.
+        test -s /usr/share/applications/dev.zed.Zed.desktop \
+            || { echo "FATAL: zed unpacked but shipped no desktop entry; it would be invisible in every launcher"; exit 1; }; \
+        grep -q '^TryExec=zed$' /usr/share/applications/dev.zed.Zed.desktop \
+            || { echo "FATAL: zed desktop entry has no TryExec=zed; upstream changed it and the launcher gate is now wrong"; exit 1; }; \
+        test -x /usr/bin/zed \
+            || { echo "FATAL: /usr/bin/zed is not executable; the entry names a binary that is not there"; exit 1; }; \
+        test -s /usr/share/icons/hicolor/512x512/apps/zed.png \
+            || { echo "FATAL: zed shipped no 512x512 icon; the entry's Icon=zed would not resolve"; exit 1; }; \
+        echo "zed: installed to /usr/lib/zed.app, entry + icon asserted"; \
     else echo "zed: fetch FAILED (editor absent; non-fatal — neovim/nano remain)"; fi; \
     rm -f /tmp/zed.tgz
 
@@ -743,6 +1862,235 @@ RUN set -eux; \
     else echo "claude-code: npm install FAILED (absent; non-fatal)"; fi; \
     rm -rf /tmp/.npm /tmp/.node-compile-cache /root/.npm 2>/dev/null || true
 
+# ── Stage 5a-aiapps: the desktop AI apps, image-owned (ChatGPT + Claude) ────
+# The 2026-09-11 product decision: the ChatGPT desktop app and the Claude
+# desktop app are PART of APEX-OS, not add-ons a user installs. They ship in
+# the image, existing machines pick them up with `sudo apex update`, and
+# neither app carries an update channel of its own. A version bump rides a
+# rebuild of this tier, like every other third-party payload in core.
+#
+# ── Both vendors ship an updater WITH the app, and both are removed here ────
+# This is the whole difficulty of the stage, and it is not hypothetical. Each
+# vendor packages for a mutable distribution, where "install the app" also
+# means "subscribe this machine to my repository":
+#
+#   - OpenAI's rpm ships /etc/yum.repos.d/chatgpt.repo with enabled=1.
+#   - Anthropic's deb writes an apt source, a keyring and an
+#     unattended-upgrades snippet from its maintainer script — "the VS Code /
+#     Chrome / 1Password model", in that script's own words — plus a GNOME
+#     Shell search provider nothing on APEX consumes.
+#
+# On APEX each is wrong twice over. /usr is read-only, so neither updater can
+# ever succeed. And `apex-pkg` builds user system extensions with dnf against
+# the HOST's repo set, so an enabled vendor repo means `apex install chatgpt`
+# layers a NEWER build into an extension that shadows the image's own /usr —
+# a self-update through a side channel, defeating the decision above. That is
+# not a worry about the future: /etc/yum.repos.d/chatgpt.repo and an extension
+# copy of the app are both live on the developer's laptop today, which is how
+# it was found.
+#
+# So the rpm's repo file is deleted after the install, and the deb is UNPACKED
+# rather than dpkg-installed — which is what stops its maintainer script from
+# running at all. The package-owned key files under /etc/pki/rpm-gpg stay: with
+# no repo referring to them they are inert, and deleting package-owned files
+# that do nothing buys nothing.
+#
+# ── Why ChatGPT goes through dnf and Claude does not ────────────────────────
+# A dnf transaction rewrites the ~200 MB sqlite rpmdb into this layer, so it is
+# never free and the default in this repository is to avoid one. It is bought
+# here deliberately: `apex-pkg` decides whether a package is image-owned by
+# asking the system rpmdb (`rpm -qf`), so an rpm-INSTALLED ChatGPT makes
+# `apex install chatgpt` refuse to shadow it, and an rpm merely UNPACKED into
+# /usr would leave that guard blind to 442 MB of application. Claude has no rpm
+# at all — Anthropic publishes an apt repo only (checked: five rpm/yum prefixes
+# under downloads.claude.ai, all 404) — so it is unpacked, and nothing in
+# Fedora's repos carries that name for the guard to have to refuse.
+#
+# ── Verification ───────────────────────────────────────────────────────────
+# Neither vendor publishes a bare signing-key URL (checked: seven candidate
+# paths, all 404; only repomd.xml.asc exists), so each package's key can only
+# be taken out of the package itself — which is worth nothing unless something
+# independent pins it. The fingerprints below ARE that independent thing: they
+# live in this repository, not in the download.
+#
+#   ChatGPT  3BFA0E4AE8B8CC16A2D9BA684A3B4A566C4660E4  "Codex Linux Repository"
+#   Claude   31DDDE24DDFAB679F42D7BD2BAA929FF1A7ECACE  "Anthropic Claude Code
+#                                                        Release Signing"
+#
+# Every gpg call below passes --homedir at a build path. That is the same trap
+# stage 5a-claude documents for npm: /root is a symlink to /var/roothome, which
+# does not exist at build time, so gpg's default homedir makes it exit with
+# "can't create directory '/root/.gnupg'". Measured in a scratch fedora-bootc:43
+# container before this stanza was written, not guessed.
+#
+# ChatGPT: the key is checked against the constant, imported into a THROWAWAY
+# rpmdb, and used to verify the package signature there. The image's own trust
+# store is deliberately NOT widened — a key trusted in the real rpmdb would be
+# honoured by every later rpm/dnf call on the machine, including apex-pkg's
+# extension builds, on behalf of a repository this stage has just deleted.
+#
+# Claude: the deb's sha256 comes out of the apt index, and an index is worth
+# exactly its signature, so the chain is closed rather than assumed — the key
+# is checked against the constant, `gpgv` verifies InRelease with it, and the
+# Packages file the sha256 was read from must itself be named by a hash inside
+# that verified InRelease.
+#
+# ── The fetch is non-fatal; nothing after it is ────────────────────────────
+# Same posture as zed and sing-box: a build box with no network still produces
+# an image. But an app that unpacked and then shipped no launcher entry, no
+# resolvable icon or a dead binary is the Zed defect over again, so each of
+# those is a hard failure carrying its own message.
+#
+# ChatGPT's icon is the one real repackaging this stage does. Upstream ships it
+# ONLY at /usr/share/pixmaps/chatgpt.png and nothing under hicolor. That is
+# legal — pixmaps is still in the icon-theme search path — but it is one
+# lookup-path change away from the invisible-launcher bug, and APEX's own
+# launcher assertions look in /usr/share/icons. A 1024x1024 png belongs in the
+# 1024x1024 hicolor directory, so it is installed there as well.
+RUN set -eux; \
+    CHATGPT_REPO="https://persistent.oaistatic.com/codex-app-prod/linux/rpm/x86_64"; \
+    CHATGPT_KEY_FPR="3BFA0E4AE8B8CC16A2D9BA684A3B4A566C4660E4"; \
+    CLAUDE_REPO="https://downloads.claude.ai/claude-desktop/apt/stable"; \
+    CLAUDE_KEY_FPR="31DDDE24DDFAB679F42D7BD2BAA929FF1A7ECACE"; \
+    # `ar` is the only tool this stage needs that fedora-bootc does not carry.
+    # It arrives with binutils, which gcc requires, which stage 5a-devstack
+    # above installs. Asserted rather than assumed: without it the deb silently
+    # does not unpack, and a silent non-unpack is how Zed shipped broken.
+    command -v ar >/dev/null 2>&1 \
+        || { echo "FATAL: ar is missing — stage 5a-devstack must install binutils before this stage"; exit 1; }; \
+    # Same shape, different reason: these two write the caches the desktop
+    # actually reads. They arrive transitively (desktop-file-utils with
+    # xdg-utils, gtk-update-icon-cache with the GTK stack) from the desktop
+    # package stanza far above, so they are asserted, not installed again. An
+    # entry whose scheme never reaches mimeinfo.cache is registered with
+    # nobody.
+    command -v update-desktop-database >/dev/null 2>&1 \
+        || { echo "FATAL: update-desktop-database is missing — desktop-file-utils must be installed before this stage or no scheme handler gets registered"; exit 1; }; \
+    command -v gtk-update-icon-cache >/dev/null 2>&1 \
+        || { echo "FATAL: gtk-update-icon-cache is missing — the GTK stack must be installed before this stage"; exit 1; }; \
+    \
+    # ── ChatGPT ────────────────────────────────────────────────────────────
+    # The repo keeps exactly ONE build (the current one), so there is no stable
+    # per-version URL to pin — resolve the filename out of the repo metadata at
+    # build time, the way sing-box resolves its tag.
+    if repomd="$(curl -fsSL --max-time 120 "$CHATGPT_REPO/repodata/repomd.xml")" \
+       && primary="$(printf '%s' "$repomd" | grep -oE 'repodata/[0-9a-f]+-primary\.xml\.gz' | head -n1)" \
+       && [ -n "$primary" ] \
+       && curl -fsSL --max-time 300 "$CHATGPT_REPO/$primary" -o /tmp/cg-primary.xml.gz \
+       && cgrpm="$(gzip -dc /tmp/cg-primary.xml.gz | grep -oE '<location href="[^"]+\.rpm"' | sed -e 's/.*href="//' -e 's/"$//' | head -n1)" \
+       && [ -n "$cgrpm" ] \
+       && curl -fsSL --max-time 1800 "$CHATGPT_REPO/$cgrpm" -o /tmp/chatgpt.rpm; then \
+        mkdir -p /tmp/cg-key /tmp/cg-rpmdb /tmp/cg-gpg; chmod 700 /tmp/cg-gpg; \
+        ( cd /tmp/cg-key && rpm2cpio /tmp/chatgpt.rpm | cpio -idmu --quiet './etc/pki/rpm-gpg/*' ); \
+        cgkey="/tmp/cg-key/etc/pki/rpm-gpg/RPM-GPG-KEY-chatgpt-${CHATGPT_KEY_FPR}.asc"; \
+        test -s "$cgkey" \
+            || { echo "FATAL: the chatgpt rpm no longer carries the key named by the pinned fingerprint ${CHATGPT_KEY_FPR}"; exit 1; }; \
+        cgfpr="$(gpg --homedir /tmp/cg-gpg --show-keys --with-colons --with-fingerprint "$cgkey" | awk -F: '/^fpr:/{print $10; exit}')"; \
+        test "$cgfpr" = "$CHATGPT_KEY_FPR" \
+            || { echo "FATAL: chatgpt signing key is ${cgfpr}, not the pinned ${CHATGPT_KEY_FPR}; refusing to install an unverified package"; exit 1; }; \
+        rpm --dbpath /tmp/cg-rpmdb --initdb; \
+        rpm --dbpath /tmp/cg-rpmdb --import "$cgkey"; \
+        rpm --dbpath /tmp/cg-rpmdb -K /tmp/chatgpt.rpm \
+            || { echo "FATAL: chatgpt rpm signature does not verify against the pinned key"; exit 1; }; \
+        dnf5 -y install /tmp/chatgpt.rpm; \
+        dnf5 clean all; \
+        rm -rf /tmp/cg-rpmdb /tmp/cg-key /tmp/cg-gpg /tmp/cg-primary.xml.gz /tmp/chatgpt.rpm; \
+        # The update channel the package brought with it. Deleting the file is
+        # the point of this line; see the header for why disabling it is not
+        # enough on a machine where apex-pkg builds extensions with dnf.
+        rm -f /etc/yum.repos.d/chatgpt.repo; \
+        install -Dm644 /usr/share/pixmaps/chatgpt.png \
+            /usr/share/icons/hicolor/1024x1024/apps/chatgpt.png; \
+        test -x /usr/bin/chatgpt \
+            || { echo "FATAL: chatgpt installed but /usr/bin/chatgpt is not executable; the launcher entry would name a binary that is not there"; exit 1; }; \
+        test -s /usr/share/applications/chatgpt.desktop \
+            || { echo "FATAL: chatgpt installed but shipped no desktop entry; it would be invisible in every launcher"; exit 1; }; \
+        test -s /usr/share/icons/hicolor/1024x1024/apps/chatgpt.png \
+            || { echo "FATAL: chatgpt shipped no hicolor icon; its entry's Icon=chatgpt would not resolve where APEX looks"; exit 1; }; \
+        test ! -e /etc/yum.repos.d/chatgpt.repo \
+            || { echo "FATAL: chatgpt.repo survived; the app would carry its own update channel, which the product decision forbids"; exit 1; }; \
+        echo "chatgpt: installed $(rpm -q --qf '%{VERSION}-%{RELEASE}' chatgpt), entry + hicolor icon asserted, vendor repo removed"; \
+    else echo "chatgpt: fetch FAILED (app absent; non-fatal — the image still builds)"; fi; \
+    \
+    # ── Claude Desktop ─────────────────────────────────────────────────────
+    if curl -fsSL --max-time 300 "$CLAUDE_REPO/dists/stable/InRelease" -o /tmp/cl-InRelease \
+       && curl -fsSL --max-time 300 "$CLAUDE_REPO/dists/stable/main/binary-amd64/Packages" -o /tmp/cl-Packages \
+       && clmeta="$(awk -v RS='' 'substr($0,1,24)=="Package: claude-desktop\n"{ \
+              match($0,/Version: [0-9.]+/);     v=substr($0,RSTART+9,RLENGTH-9); \
+              match($0,/Filename: [^ \n]+/);    f=substr($0,RSTART+10,RLENGTH-10); \
+              match($0,/SHA256: [0-9a-f]{64}/); s=substr($0,RSTART+8,RLENGTH-8); \
+              print v "\t" f "\t" s }' /tmp/cl-Packages | sort -V | tail -1)" \
+       && [ -n "$clmeta" ] \
+       && clver="$(printf '%s' "$clmeta" | cut -f1)" \
+       && clfile="$(printf '%s' "$clmeta" | cut -f2)" \
+       && clsha="$(printf '%s' "$clmeta" | cut -f3)" \
+       && [ -n "$clsha" ] \
+       && curl -fsSL --max-time 1800 "$CLAUDE_REPO/$clfile" -o /tmp/claude.deb; then \
+        echo "$clsha  /tmp/claude.deb" | sha256sum -c - \
+            || { echo "FATAL: claude-desktop deb does not match the sha256 the apt index publishes"; exit 1; }; \
+        mkdir -p /tmp/cl-deb /tmp/cl-ctl /tmp/cl-root /tmp/cl-gpg; \
+        ( cd /tmp/cl-deb && ar x /tmp/claude.deb ); \
+        tar -xf /tmp/cl-deb/control.tar.* -C /tmp/cl-ctl; \
+        awk '/^-----BEGIN PGP PUBLIC KEY BLOCK-----$/,/^-----END PGP PUBLIC KEY BLOCK-----$/' \
+            /tmp/cl-ctl/postinst > /tmp/cl-key.asc; \
+        test -s /tmp/cl-key.asc \
+            || { echo "FATAL: the claude-desktop deb no longer carries its archive signing key"; exit 1; }; \
+        chmod 700 /tmp/cl-gpg; \
+        clfpr="$(gpg --homedir /tmp/cl-gpg --show-keys --with-colons --with-fingerprint /tmp/cl-key.asc | awk -F: '/^fpr:/{print $10; exit}')"; \
+        test "$clfpr" = "$CLAUDE_KEY_FPR" \
+            || { echo "FATAL: claude-desktop signing key is ${clfpr}, not the pinned ${CLAUDE_KEY_FPR}; refusing to trust this apt index"; exit 1; }; \
+        gpg --homedir /tmp/cl-gpg --quiet --import /tmp/cl-key.asc; \
+        gpg --homedir /tmp/cl-gpg --export > /tmp/cl-key.gpg; \
+        gpgv --keyring /tmp/cl-key.gpg /tmp/cl-InRelease \
+            || { echo "FATAL: claude-desktop InRelease is not signed by the pinned key; the sha256 above would be unverified"; exit 1; }; \
+        clpsha="$(sha256sum /tmp/cl-Packages | cut -d' ' -f1)"; \
+        grep -q "$clpsha" /tmp/cl-InRelease \
+            || { echo "FATAL: the Packages index is not named by the signed InRelease; its sha256 for the deb proves nothing"; exit 1; }; \
+        tar -xJf /tmp/cl-deb/data.tar.xz -C /tmp/cl-root; \
+        cp -a /tmp/cl-root/usr/lib/claude-desktop /usr/lib/claude-desktop; \
+        # Chromium refuses to start when its setuid sandbox helper is present
+        # but not setuid root, so this is not optional hardening — it is the
+        # difference between an app that opens and one that exits on launch.
+        chmod 4755 /usr/lib/claude-desktop/chrome-sandbox; \
+        ln -sfn ../lib/claude-desktop/claude-desktop /usr/bin/claude-desktop; \
+        install -Dm644 /tmp/cl-root/usr/share/applications/com.anthropic.Claude.desktop \
+            /usr/share/applications/com.anthropic.Claude.desktop; \
+        for px in 16x16 32x32 48x48 128x128 256x256; do \
+            install -Dm644 "/tmp/cl-root/usr/share/icons/hicolor/$px/apps/claude-desktop.png" \
+                "/usr/share/icons/hicolor/$px/apps/claude-desktop.png"; \
+        done; \
+        rm -rf /tmp/cl-deb /tmp/cl-ctl /tmp/cl-root /tmp/cl-gpg /tmp/cl-key.asc /tmp/cl-key.gpg /tmp/claude.deb /tmp/cl-InRelease /tmp/cl-Packages; \
+        test -x /usr/bin/claude-desktop \
+            || { echo "FATAL: claude-desktop unpacked but /usr/bin/claude-desktop is not executable; the launcher entry would name a binary that is not there"; exit 1; }; \
+        test -s /usr/share/applications/com.anthropic.Claude.desktop \
+            || { echo "FATAL: claude-desktop unpacked but shipped no desktop entry; it would be invisible in every launcher"; exit 1; }; \
+        test -s /usr/share/icons/hicolor/256x256/apps/claude-desktop.png \
+            || { echo "FATAL: claude-desktop shipped no hicolor icon; its entry's Icon=claude-desktop would not resolve"; exit 1; }; \
+        test -u /usr/lib/claude-desktop/chrome-sandbox \
+            || { echo "FATAL: claude-desktop's chrome-sandbox is not setuid; Chromium exits at launch when it finds it unprivileged"; exit 1; }; \
+        test ! -e /etc/apt/sources.list.d/claude-desktop.list \
+            || { echo "FATAL: an apt source for claude-desktop exists; the deb's maintainer script must never run on APEX"; exit 1; }; \
+        echo "claude-desktop: installed ${clver}, entry + icons asserted, no maintainer script run"; \
+    else echo "claude-desktop: fetch FAILED (app absent; non-fatal — the image still builds)"; fi; \
+    \
+    # ── The caches the launchers actually read ─────────────────────────────
+    # Installing an entry is not the same as the desktop knowing about it, and
+    # a scheme handler that is not in mimeinfo.cache does not exist as far as
+    # xdg-open is concerned. Rebuild both caches, then assert the EFFECTIVE
+    # result rather than the file that was copied.
+    update-desktop-database /usr/share/applications; \
+    gtk-update-icon-cache -qf /usr/share/icons/hicolor 2>/dev/null || true; \
+    if [ -x /usr/bin/chatgpt ]; then \
+        grep -q '^x-scheme-handler/codex=.*chatgpt.desktop' /usr/share/applications/mimeinfo.cache \
+            || { echo "FATAL: codex:// is not registered to chatgpt.desktop; ChatGPT's own links would not open the app"; exit 1; }; \
+    fi; \
+    if [ -x /usr/bin/claude-desktop ]; then \
+        grep -q '^x-scheme-handler/claude=.*com.anthropic.Claude.desktop' /usr/share/applications/mimeinfo.cache \
+            || { echo "FATAL: claude:// is not registered to com.anthropic.Claude.desktop; every claude:// link would fail to open the app"; exit 1; }; \
+    fi; \
+    echo "ai-apps: desktop entries and scheme handlers registered"
+
+
 # sing-box official static binary (not in Fedora). Shipped DISABLED (unit gates
 # on the user's /etc/sing-box/config.json). Non-fatal: a fetch failure leaves the
 # VPN tab degraded but never aborts the image build.
@@ -764,11 +2112,31 @@ RUN set -eux; \
 # NO framework (oh-my-zsh etc). A framework is a second config system with its
 # own update path and a slow startup; everything APEX needs is a zsh builtin or
 # one small package.
+#
+# fish, nushell and tmux ride in this SAME transaction rather than a new RUN,
+# and that is not tidiness: every dnf transaction rewrites the ~200 MB sqlite
+# rpmdb into its own layer (the reason the Plymouth engine moved here from the
+# flavors, documented below). One transaction instead of two is one rpmdb-sized
+# layer instead of two, on the tier where a rebuild already costs the fleet a
+# multi-gigabyte update.
+#
+# Why they are here at all: APEX claims the terminal developer's toolchain is
+# "unrestricted and excellent", naming bash/zsh/fish/nushell, tmux/zellij and
+# TUI agents. Four of those six were not in any Containerfile — the claim was a
+# claim about packages nobody had installed. zellij is not in Fedora and is
+# handled separately below.
 RUN set -eux; \
     dnf5 -y install \
         zsh zsh-autosuggestions zsh-syntax-highlighting \
+        fish nushell tmux \
         eza bat zoxide fzf ripgrep fd-find; \
-    dnf5 clean all
+    dnf5 clean all; \
+    # nushell's binary is `nu`, NOT `nushell`. A postcondition that assumed
+    # otherwise would fail a build that was fine; one that checked the package
+    # name instead of the binary would pass a build that shipped nothing.
+    command -v fish; \
+    command -v nu; \
+    command -v tmux
 
 # starship is NOT packaged in Fedora, and the COPRs offering it are unvetted
 # personal repos. Take the official static musl release, pinned by version AND
@@ -785,13 +2153,36 @@ RUN set -eux; \
     rm -f /tmp/starship.tgz; \
     starship --version
 
-# ── Plymouth engine (theme + default are set per EDITION, in the flavors) ──
-# The plymouth packages moved here from Containerfile.daily/.gaming, and the
-# reason is download size, not tidiness. Each flavor ran its own
+# zellij is likewise NOT packaged in Fedora 43 — `dnf search zellij` returns no
+# matches, and naming it in a transaction fails to RESOLVE, taking every other
+# package in that transaction down with it. So it gets the starship treatment:
+# the official static musl release, pinned by version AND verified against its
+# published sha256, because an unverified curl into /usr/bin is a supply-chain
+# hole rather than a convenience. The tarball has a single `zellij` member,
+# checked with `tar tzf` before this line was written.
+#
+# Deliberately NOT the `|| echo "fetch FAILED (non-fatal)"` shape the sing-box
+# block above uses. sing-box degrades one optional tab; a silently missing
+# zellij would reinstate exactly the defect this is closing — a product claim
+# naming a program the image does not ship.
+ARG ZELLIJ_VERSION=v0.45.1
+ARG ZELLIJ_SHA256=40bcc2e03f5d5ae8e054e39f676081fe12ab70871506996ba595834c3718eefc
+RUN set -eux; \
+    url="https://github.com/zellij-org/zellij/releases/download/${ZELLIJ_VERSION}/zellij-x86_64-unknown-linux-musl.tar.gz"; \
+    curl -fsSL "$url" -o /tmp/zellij.tgz; \
+    echo "${ZELLIJ_SHA256}  /tmp/zellij.tgz" | sha256sum -c -; \
+    tar xzf /tmp/zellij.tgz -C /usr/bin zellij; \
+    chmod 0755 /usr/bin/zellij; \
+    rm -f /tmp/zellij.tgz; \
+    zellij --version
+
+# ── Plymouth engine (theme + default are set in Containerfile.apex) ────────
+# The plymouth packages moved here from the retired flavor Containerfiles, and
+# the reason is download size, not tidiness. Each flavor ran its own
 # `dnf5 -y install plymouth …`, and every dnf transaction rewrites the ~200 MB
 # sqlite rpmdb baked into that layer — so both editions shipped an extra
 # rpmdb-sized layer that changed on every single build. Installing the engine
-# once here leaves the flavors with `plymouth-set-default-theme` + a dracut run,
+# once here leaves the image tier with `plymouth-set-default-theme` + a dracut run,
 # neither of which touches the rpmdb. dracut is invoked with --reproducible, so
 # an unchanged theme + unchanged kernel now produce a byte-identical initramfs
 # and bootc re-fetches nothing.
@@ -810,6 +2201,88 @@ RUN set -eux; \
     dnf5 -y install efibootmgr; \
     dnf5 clean all; \
     test -x /usr/sbin/efibootmgr -o -x /usr/bin/efibootmgr
+
+# ── systemd-boot and ukify: the pivot's dnf half ───────────────────────────
+#
+# Andre decided on 2026-09-20 that APEX moves to systemd-boot on every machine
+# (docs/boot-v2.md, "The pivot to systemd-boot"). The loader binary and the UKI
+# tooling are dnf transactions, so they belong here and not in the files tier.
+#
+# WHY THE LOADER MUST BE IN THE SHIPPED IMAGE, not just in CI:
+# `bootc install --bootloader systemd` copies systemd-boot OUT OF THE IMAGE
+# BEING INSTALLED. Measured in the lab: with systemd-boot-unsigned absent,
+# bootc printed "Installing bootloader via systemd-boot", exited 0, and left an
+# ESP holding an empty /EFI/BOOT, an empty /EFI/systemd, a kernel, an initrd
+# and a loader entry -- and no loader binary anywhere. The disk was unbootable
+# and the install reported success. bootc will not assert this; we do, below.
+#
+# ukify is here so that `bootc container ukify` can run inside a build derived
+# from this tier without a second dnf transaction. AGENTS.md boot-path rule 3
+# ("ukify, qemu, mkosi and virt-install are build-time tooling, not host
+# software") is about not dnf-installing them onto a RUNNING machine, which is
+# the machine drift the contract prohibits; putting a tool in the image is the
+# opposite of drift. If the UKI ends up being built only in CI, the pattern to
+# follow is the sbsigntools one further up this file -- install, use, remove in
+# a single RUN -- and this line moves there.
+#
+# checkpolicy and policycoreutils are made EXPLICIT for the same reason
+# efibootmgr is: Containerfile.base compiles the apex_sdboot policy module with
+# checkmodule/semodule_package/semodule, they are only present transitively
+# today, and a future core change that drops them would turn the boot blessing
+# back into a silent rollback loop.
+RUN set -eux; \
+    dnf5 -y install systemd-boot-unsigned systemd-ukify \
+                    checkpolicy policycoreutils python3-setools; \
+    dnf5 clean all; \
+    : '-- the loader binary bootc will copy onto an ESP --'; \
+    test -f /usr/lib/systemd/boot/efi/systemd-bootx64.efi; \
+    : '-- the stub every UKI is built around --'; \
+    test -f /usr/lib/systemd/boot/efi/linuxx64.efi.stub; \
+    : '-- and the tools --'; \
+    test -x /usr/bin/ukify; \
+    test -x /usr/bin/bootctl; \
+    test -x /usr/bin/checkmodule; \
+    test -x /usr/bin/semodule_package; \
+    test -x /usr/bin/semodule; \
+    python3 -c 'import setools'
+
+# ── the boot blessing has to be able to write a FAT ESP ───────────────────
+#
+# Measured on the APEX image in the VM lab, composefs + systemd-boot, SELinux
+# enforcing (ROADMAP/evidence/sdboot-image-20260920-decision.md):
+#
+#   systemd-bless-boot: Failed to rename '/loader/entries/…+2-1.conf'
+#                       to '/loader/entries/….conf': Permission denied
+#   avc: denied { rename } comm="systemd-bless-b"
+#        scontext=system_u:system_r:init_t:s0
+#        tcontext=system_u:object_r:dosfs_t:s0 tclass=file permissive=0
+#
+# In the same boot `mv` on the same file worked and the same binary re-run from
+# a shell worked, so it is the SELinux domain and nothing else. Unrepaired,
+# nothing ever strips the +N-M counter and every deployment rolls itself back
+# on its fourth boot. The module and the reasoning are in the .te file; the
+# drop-in that requests the transition ships from Containerfile.base.
+#
+# Compiled HERE and not in the files tier on purpose: this is compilation, and
+# `semodule -i` rewrites the binary policy under /etc. Measured in
+# ghcr.io/andrenijman/apex-os:daily: /etc/selinux grows by 466 bytes, but
+# policy.35 (3.8 MB) is rewritten whole, and an OCI layer carries a changed
+# file whole — so doing it in the thin tier would put ~4 MB into every update.
+# docs/update-cost.md, "What the systemd-boot pivot added".
+COPY files/system/selinux/apex_sdboot.te /usr/share/apex-os/selinux/apex_sdboot.te
+COPY files/system/selinux/verify-apex-sdboot.py \
+     /usr/share/apex-os/selinux/verify-apex-sdboot.py
+RUN set -eux; \
+    cd /usr/share/apex-os/selinux; \
+    : 'checkmodule refuses a module whose name differs from the .pp basename.'; \
+    checkmodule -M -m -o apex_sdboot.mod apex_sdboot.te; \
+    semodule_package -o apex_sdboot.pp -m apex_sdboot.mod; \
+    semodule -N -i apex_sdboot.pp; \
+    rm -f apex_sdboot.mod; \
+    semodule -l | grep -qx apex_sdboot; \
+    : '-- and the rule reached the BINARY policy, which is what the kernel'; \
+    : '-- enforces. `semodule -l` only proves a module is installed.'; \
+    python3 /usr/share/apex-os/selinux/verify-apex-sdboot.py
 
 # ── npm global prefix: per-user, not root-owned /usr/local (apex-logs 16) ────
 # Fedora's nodejs ships /etc/npmrc with `prefix=/usr/local`. On a bootc system
@@ -842,7 +2315,8 @@ RUN set -eux; \
         [ -f "$f" ] || continue; \
         sed -i 's|^prefix=/usr/local$|prefix=${HOME}/.local|' "$f"; \
         grep -q '^prefix=\${HOME}/.local$' "$f"; \
-        ! grep -q '^prefix=/usr/local$' "$f"; \
+        if grep -q '^prefix=/usr/local$' "$f" \
+            ; then echo "FATAL: the npm prefix still points at root-owned /usr/local"; exit 1; fi; \
     done; \
     grep -q '^prefix=\${HOME}/.local$' /etc/npmrc; \
     echo "npm global prefix -> \${HOME}/.local (was root-owned /usr/local)"
@@ -898,10 +2372,60 @@ RUN set -eux; \
 #     it as "Fedora release 43 (Forty Three)" is why the firmware boot menu said
 #     "Fedora". Content is rewritten in place — the file is NOT renamed, the
 #     symlink chain and `[ -f /etc/fedora-release ]` probes must keep working.
+#
+#     Writing /usr/lib and TRUSTING the /etc symlinks is what broke: every
+#     weekly `core` build from 2026-08-17 on failed CI's
+#     `grep "^APEX-OS release" /etc/system-release` while /usr/lib/fedora-release
+#     itself was branded correctly. fedora-release-common ships those three /etc
+#     entries as hardlinked symlinks inherited from the base layer
+#     (`/etc/system-release` and `/etc/redhat-release` share one inode, nlink=3);
+#     nothing in this file, and no package in any repo we enable, owns or
+#     rewrites them — verified with `dnf5 repoquery --whatprovides`, which names
+#     only fedora-release-common and generic-release-common.
+#
+#     What moved was the BUILDER. GitHub's ubuntu-24.04 runner image
+#     20260810.271 (published 2026-08-11) replaced the distro podman 4.9.3 with
+#     a bundled 5.8.4 — precisely the gap between the last green scheduled core
+#     (2026-08-03, image 20260720.247) and the first red one (2026-08-17, image
+#     20260810.271.1). GitHub withdrew it again in 20260831.293, citing
+#     "unexpected container storage behavior and reports of corrupted images"
+#     and "conflicts between the bundled and distribution-provided Podman
+#     installations" (actions/runner-images#14642). An /etc entry that this
+#     image only ever INHERITS and never writes is at the mercy of whatever the
+#     day's builder does when it flattens 45 layers.
+#
+#     That rollback also means the cron may go green on its own — which is the
+#     reason to fix it properly rather than wait: nothing here would have
+#     changed, and the next builder that mishandles an inherited symlink would
+#     ship a firmware boot entry labelled "Fedora" all over again.
+#
+#     So re-create the links here instead of assuming they survived. `ln -sfn`
+#     is a no-op against the correct state, and against a flattened one it puts
+#     a fresh symlink in THIS layer — written after the content it points at,
+#     by us, rather than carried through 40 layers of somebody else's copy-up.
+#     ALL SEVEN are re-created, not just the one CI happened to check: every
+#     file this block brands lives in /usr/lib and is only ever read through
+#     /etc, so os-release, the release trio, the CPE and issue{,.net} are the
+#     same bug waiting for a different symptom. A flattened /etc/os-release is
+#     the worst of them — /usr/lib/os-release would still pass every assertion
+#     while the whole system read Fedora's.
+#
+#     Then assert through /etc, which is the side that is actually consumed.
+#     This block checked /usr/lib/os-release three ways and checked nothing at
+#     all through /etc, which is why a wrong image built cleanly and only died
+#     45 minutes later in the CI verify — and only on the Monday cron, because
+#     push builds skip this tier. The verify check stays: it is the backstop
+#     for anything that goes wrong AFTER this RUN commits, which is exactly the
+#     class of bug that caused this.
 #   - /usr/lib/issue{,.net}: agetty expands \S to PRETTY_NAME (so the VT login
 #     banner brands itself), but the stock "Kernel \r on \m" line prints
 #     7.1.3-cachyos1.fc43.x86_64. Drop that line — the kernel release string
 #     itself cannot be changed without building the kernel from source.
+#     (That last clause stopped being true when APEX took over the kernel
+#     build: the release is now `cachyos1.apex<N>.fc<ver>`, set from
+#     kernel/kernel.pin. The line is still dropped — branding a VT banner is
+#     not a reason to touch a kernel release string — but the stated
+#     impossibility is no longer the reason.)
 #   - LOGO=apex-os-logo names an icon that is COPY'd in the base tier, so the
 #     hicolor cache rebuild lives there too — running it here would cache an
 #     icon theme that does not yet contain the spark. Same for `dconf update`,
@@ -913,7 +2437,10 @@ RUN set -eux; \
 #   - /usr/local -> ../var/usrlocal: /usr is read-only on bootc, so redirect
 #     /usr/local to writable per-machine state + a tmpfiles dir. (apex-logs 08)
 #   - /etc/environment: session-wide theme + default terminal + Claude autoupdate
-#     off, via pam_env so a greetd/Hyprland session (no uwsm) inherits them.
+#     off + the Electron platform hint, via pam_env so a greetd/Hyprland session
+#     (no uwsm) inherits them. ELECTRON_OZONE_PLATFORM_HINT=auto is what makes
+#     the shipped Electron apps (ChatGPT, Claude Desktop — stage 5a-aiapps) run
+#     as native Wayland clients instead of defaulting to XWayland.
 #   - /etc/bashrc: fastfetch greeting on every interactive terminal, colour by
 #     scheme, once per shell session. (apex-logs 33) The greeting script itself
 #     is COPY'd in the base tier; the source line is guarded with `-r`, so it is
@@ -941,11 +2468,23 @@ RUN set -eux; \
     printf '%s\n' 'cpe:/o:apexos:apex_os:43' > /usr/lib/system-release-cpe; \
     printf '%s\n\n' '\S' > /usr/lib/issue; \
     printf '%s\n' '\S' > /usr/lib/issue.net; \
+    ln -sfn ../usr/lib/os-release         /etc/os-release; \
+    ln -sfn ../usr/lib/fedora-release     /etc/fedora-release; \
+    ln -sfn fedora-release                /etc/system-release; \
+    ln -sfn fedora-release                /etc/redhat-release; \
+    ln -sfn ../usr/lib/system-release-cpe /etc/system-release-cpe; \
+    ln -sfn ../usr/lib/issue              /etc/issue; \
+    ln -sfn ../usr/lib/issue.net          /etc/issue.net; \
+    grep -q '^APEX-OS release' /etc/system-release; \
+    grep -q '^APEX-OS release' /etc/redhat-release; \
+    grep -q '^APEX-OS release' /etc/fedora-release; \
+    grep -q '^PRETTY_NAME="APEX-OS"$' /etc/os-release; \
+    grep -qx 'cpe:/o:apexos:apex_os:43' /etc/system-release-cpe; \
     systemctl mask serial-getty@ttyS0.service; \
     systemctl mask systemd-remount-fs.service; \
     rm -rf /usr/local && ln -s ../var/usrlocal /usr/local; \
     printf 'd /var/usrlocal 0755 root root -\n' > /usr/lib/tmpfiles.d/apex-usrlocal.conf; \
-    printf 'QT_QPA_PLATFORMTHEME=qt6ct\nTERMINAL=alacritty\nDISABLE_AUTOUPDATER=1\n' >> /etc/environment; \
+    printf 'QT_QPA_PLATFORMTHEME=qt6ct\nTERMINAL=alacritty\nDISABLE_AUTOUPDATER=1\nELECTRON_OZONE_PLATFORM_HINT=auto\n' >> /etc/environment; \
     printf '\n# APEX-OS fastfetch greeting. The logic lives in ONE file shared with zsh —\n# zsh is the default login shell, so a bash-only greeting was never seen by\n# real users (apex-logs 14). Guarded so a partial image cannot break bash.\n[ -r /usr/share/apex/shell/greeting.sh ] && . /usr/share/apex/shell/greeting.sh\n' >> /etc/bashrc
 
 # ── zsh becomes the default login shell for accounts created from here on ──
@@ -956,7 +2495,21 @@ RUN set -eux; \
 RUN set -eux; \
     sed -i 's|^SHELL=.*|SHELL=/bin/zsh|' /etc/default/useradd; \
     grep -q '^SHELL=/bin/zsh' /etc/default/useradd; \
-    grep -q '^/bin/zsh$' /etc/shells || echo /bin/zsh >> /etc/shells
+    grep -q '^/bin/zsh$' /etc/shells || echo /bin/zsh >> /etc/shells; \
+    # Installed is not the same as usable. `chsh` refuses a shell that is not
+    # listed in /etc/shells when a non-root user runs it, so an unlisted shell
+    # is one a user cannot actually switch to. fish and tmux add themselves
+    # from their own %post scriptlets (both write the /usr/bin and /bin forms);
+    # nushell's package does not, so APEX registers it.
+    for s in /usr/bin/nu /bin/nu; do \
+        grep -qx "$s" /etc/shells || echo "$s" >> /etc/shells; \
+    done; \
+    # Assert the scriptlet-registered entries actually landed. Checking only
+    # the lines written above would never notice a scriptlet that silently did
+    # not run, which is the failure mode worth catching here.
+    grep -qx /usr/bin/fish /etc/shells; \
+    grep -qx /usr/bin/tmux /etc/shells; \
+    grep -qx /usr/bin/nu /etc/shells
 
 # ── NO unattended OS updates, and NO unattended reboots ─────────────────────
 # fedora-bootc ships bootc-fetch-apply-updates.timer, which on this machine was

@@ -1,0 +1,16 @@
+# /etc/apex/guest-accounts — accounts that may be wiped at session end.
+#
+# One account name per line. `#` starts a comment; blank lines are ignored.
+#
+# THIS FILE SHIPS EMPTY, AND THAT IS THE POINT. /usr/libexec/apex-guest-wipe
+# refuses every account that is not named here — it does not guess from a name
+# prefix, a uid range or a home directory, because every one of those rules
+# matches somebody's real account on some machine. An APEX with no guest
+# configured cannot be talked into wiping anything, whatever it is handed.
+#
+# Adding a line here does NOT create the account, does not enable a guest
+# session, and does not wipe anything on its own. It says: if the wipe runs for
+# this account, it is allowed to. See
+# /usr/share/apex/shared-machine/README.md for the rest of the recipe.
+#
+# Never put the machine owner's account in this file.

@@ -160,6 +160,21 @@ pub enum Action {
     NvidiaResetGraphics { gpu: u32 },
     /// `nvidia-smi -i <gpu> -rmc`.
     NvidiaResetMemory { gpu: u32 },
+    /// Write an absolute GPU sysfs attribute — amdgpu's
+    /// `power_dpm_force_performance_level`, i915's `gt_min_freq_mhz`. `what` is
+    /// a log label.
+    ///
+    /// Generic on purpose, and separate from [`Action::FanVendorAttr`] on
+    /// purpose too: the two are the same write with different consequences, and
+    /// a plan that mixes them cannot be read to say which hardware it touches.
+    /// The values are validated where they are PLANNED (see [`crate::gpu`]),
+    /// because the driver answers an invalid one with `-EINVAL` and a refused
+    /// write is indistinguishable from an applied one at this level.
+    GpuSysfsAttr {
+        path: String,
+        value: String,
+        what: String,
+    },
     /// Write a CPU list to an absolute `/proc/irq/<n>/smp_affinity_list` path.
     /// Never fatal: many IRQs are kernel-managed and reject affinity writes.
     IrqAffinity { path: String, cpus: String },
@@ -218,6 +233,9 @@ impl Action {
                 format!("{path} <- {value} ({}%)", (*value as u32 * 100) / 255)
             }
             Action::FanVendorAttr { path, value, what } => {
+                format!("{what}: {path} <- {value}")
+            }
+            Action::GpuSysfsAttr { path, value, what } => {
                 format!("{what}: {path} <- {value}")
             }
             Action::FanSafeRestore {

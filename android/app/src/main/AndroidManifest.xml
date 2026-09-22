@@ -1,0 +1,204 @@
+<?xml version="1.0" encoding="utf-8"?>
+<manifest xmlns:android="http://schemas.android.com/apk/res/android">
+
+    <!-- Pairing reads a QR code off the desktop's screen. Requested at the
+         moment the camera is opened and not at install, and the app works
+         without it: a pairing payload can be pasted instead. -->
+    <uses-permission android:name="android.permission.CAMERA" />
+    <uses-feature android:name="android.hardware.camera.any" android:required="false" />
+
+    <!-- The LAN leg is a direct TCP connection to the desktop; the relay leg
+         is an outbound WebSocket. Both need the network and nothing else. -->
+    <uses-permission android:name="android.permission.INTERNET" />
+    <uses-permission android:name="android.permission.ACCESS_NETWORK_STATE" />
+
+    <!-- An agent waiting for you is the whole point of carrying this app, so
+         the notification is not decoration. Asked at the moment the Agent
+         Center first connects rather than at install, and the app works
+         without it: the same alerts are on the Agent Center's own list.
+
+         Since P1-058 there are two ways one arrives. The poll loop raises them
+         while the app is open; a UnifiedPush distributor delivers them when it
+         is not, with the screen off and this app's network suspended in Doze.
+         The second needs a distributor installed on this phone — ntfy, for
+         instance — and without one the app behaves exactly as it did before:
+         alerts while it is open, and none while it is closed. -->
+    <uses-permission android:name="android.permission.POST_NOTIFICATIONS" />
+
+    <!-- Keeping this app from drifting away from the machines it talks to.
+
+         This phone is not running APEX-OS. The APK is in no image and `apex
+         update` cannot reach it, so unlike the ChatGPT and Claude DESKTOP apps
+         — which must not self-update, because `sudo apex update` already moves
+         them — there is no other path here. Without this permission the app
+         only ever moves forward when its owner remembers to go and look, and a
+         client that falls behind the OS is the exact failure the protocol
+         window on the other side of this app exists to survive.
+
+         What it buys is narrow and worth stating, because the name sounds
+         broader than it is. It does NOT let this app install anything quietly,
+         and it does not let it install anything else: it earns the right to
+         ASK, and Android still draws its own "do you want to update this app?"
+         screen, which the user can refuse. GrapheneOS draws it too. The user
+         can also revoke it afterwards from Settings and the app keeps working
+         — the update row simply offers to send them there again.
+
+         The APK never becomes a file this app owns. It is streamed from the
+         release straight into a `PackageInstaller` session while its SHA-256
+         is computed, and the session is committed only if the digest matches
+         the one the release published — so there is no download directory, no
+         FileProvider, no content:// URI, and nothing for
+         `InsecureStorageTest`'s byte-by-byte walk of app storage to account
+         for. `ManifestTest` asserts that the permission list is exactly these
+         five and no more. -->
+    <uses-permission android:name="android.permission.REQUEST_INSTALL_PACKAGES" />
+
+    <!-- Push-to-talk, and what is NOT here is the point of it.
+
+         RECORD_AUDIO is absent, deliberately. Speech reaches this app through
+         `RecognizerIntent.ACTION_RECOGNIZE_SPEECH`: the system's own recogniser
+         opens, shows the system's own microphone indicator, and hands back
+         text. No audio ever enters this process, so there is no microphone
+         permission to grant, to forget about, or to be abused if this app is
+         ever compromised — and this is the app that shows which machine is
+         about to run something as root.
+
+         That is the same rule P1-059's fourth criterion states for the photo
+         library, applied to the microphone: take the Android-mediated
+         selection, never the blanket permission. Which is also why no storage
+         or media permission appears anywhere in this file; `ManifestTest`
+         asserts their absence rather than trusting it, because the moment a
+         file-handoff transport exists the obvious way to read the file is a
+         permission.
+
+         This `<queries>` entry is what package visibility on API 30 and later
+         requires for the recogniser to be visible at all. Without it,
+         `resolveActivity` answers null on a phone that HAS a recogniser, which
+         is refusal and absence confused in the direction that makes a working
+         feature look broken. -->
+    <queries>
+        <intent>
+            <action android:name="android.speech.action.RECOGNIZE_SPEECH" />
+        </intent>
+        <!-- The photo picker's backport, for P1-059's file handoff.
+
+             `ActivityResultContracts.PickVisualMedia` prefers
+             `MediaStore.ACTION_PICK_IMAGES` where the platform has it and
+             otherwise looks for a system fallback picker, which it finds with
+             `PackageManager.resolveActivity` on this action — read out of
+             activity-1.12.4's own bytecode, not assumed. Package visibility
+             filters that call on API 30 and later, and a null answer sends the
+             contract down the `ACTION_OPEN_DOCUMENT` path instead: not broken,
+             but not the camera roll a person expects when they press Photo.
+
+             Declaring it costs nothing and is the same fix the recogniser
+             above needed. NOT VERIFIED ON A DEVICE — there is no device and no
+             emulator here, so what is asserted is that the declaration is
+             present, and `ManifestTest` is where that assertion lives. -->
+        <intent>
+            <action android:name="androidx.activity.result.contract.action.PICK_IMAGES" />
+        </intent>
+        <!-- Opening any other file goes through the Storage Access Framework,
+             which needs no <queries> entry: `startActivity` is not filtered by
+             package visibility and the contract resolves nothing. Said here so
+             the absence is a decision and not an oversight. -->
+
+        <!-- Finding the UnifiedPush distributors installed on this phone
+             (P1-058). A distributor is identified by the receiver it declares
+             for this action, and package visibility on API 30 and later
+             filters `queryBroadcastReceivers` — so without this entry the
+             answer is an empty list on a phone that HAS a distributor, which
+             is refusal and absence confused in the direction that makes a
+             working feature look broken. Exactly the failure the recogniser
+             entry above exists to avoid. -->
+        <intent>
+            <action android:name="org.unifiedpush.android.distributor.REGISTER" />
+        </intent>
+    </queries>
+
+    <application
+        android:allowBackup="false"
+        android:dataExtractionRules="@xml/data_extraction_rules"
+        android:fullBackupContent="false"
+        android:icon="@mipmap/ic_launcher"
+        android:label="@string/app_name"
+        android:supportsRtl="true"
+        android:theme="@style/Theme.ApexRemote">
+
+        <!--
+          `allowBackup` is false and the extraction rules deny everything, on
+          purpose and not out of caution. A backup of this app's files would
+          copy the sealed device key to wherever the backup goes, and the
+          keystore key that unseals it does NOT travel — so the copy is useless
+          to its owner and is one more place the ciphertext exists for everyone
+          else. Re-pairing takes ten seconds and produces a fresh key; that is
+          the right recovery story.
+        -->
+
+        <activity
+            android:name=".MainActivity"
+            android:exported="true"
+            android:launchMode="singleTask"
+            android:configChanges="orientation|screenSize|screenLayout|keyboardHidden|uiMode"
+            android:windowSoftInputMode="adjustResize">
+            <intent-filter>
+                <action android:name="android.intent.action.MAIN" />
+                <category android:name="android.intent.category.LAUNCHER" />
+            </intent-filter>
+
+            <!-- A pairing payload opened from anywhere else: a camera app that
+                 resolves URIs, a message, a paste. The scheme is what makes it
+                 reach this app instead of a browser. -->
+            <intent-filter android:autoVerify="false">
+                <action android:name="android.intent.action.VIEW" />
+                <category android:name="android.intent.category.DEFAULT" />
+                <category android:name="android.intent.category.BROWSABLE" />
+                <data android:scheme="apex-remote" />
+            </intent-filter>
+        </activity>
+
+        <!-- Where `PackageInstaller` answers, and where the user's install
+             prompt is actually raised: `commit()` shows nothing by itself, it
+             broadcasts STATUS_PENDING_USER_ACTION carrying the intent that
+             draws the prompt.
+
+             Declared here rather than registered at runtime because the status
+             can arrive after this process has gone, and `exported="false"`
+             because the only sender that should ever reach it is the system
+             replying to a session this app created. -->
+        <receiver
+            android:name=".update.UpdateInstallReceiver"
+            android:exported="false">
+            <intent-filter>
+                <action android:name="com.apexos.remote.UPDATE_STATUS" />
+            </intent-filter>
+        </receiver>
+
+        <!-- Where a UnifiedPush distributor delivers (P1-058).
+
+             `exported="true"` is required and is not a hole. A distributor is
+             a separate app the user installed; it must be able to broadcast to
+             this receiver, and the UnifiedPush specification is built on
+             exactly that. What stops a hostile app abusing it is not the
+             manifest — it is that a message is only acted on if it DECRYPTS
+             under a key one paired machine holds and nothing else does, and
+             that its sequence number is higher than the last one seen. An app
+             that sends this receiver a broadcast gets nothing: no
+             notification, no state change, no answer.
+
+             All four connector actions are declared. Missing one fails
+             SILENTLY — the distributor simply never delivers that message and
+             nothing on the phone says so — which is why `ManifestTest` asserts
+             the set rather than trusting it. -->
+        <receiver
+            android:name=".push.PushReceiver"
+            android:exported="true">
+            <intent-filter>
+                <action android:name="org.unifiedpush.android.connector.MESSAGE" />
+                <action android:name="org.unifiedpush.android.connector.NEW_ENDPOINT" />
+                <action android:name="org.unifiedpush.android.connector.REGISTRATION_FAILED" />
+                <action android:name="org.unifiedpush.android.connector.UNREGISTERED" />
+            </intent-filter>
+        </receiver>
+    </application>
+</manifest>

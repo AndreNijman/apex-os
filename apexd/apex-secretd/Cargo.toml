@@ -1,0 +1,44 @@
+[package]
+name = "apex-secretd"
+description = "APEX-OS protected secret service: brokers credential-backed operations without ever returning a credential"
+version.workspace = true
+edition.workspace = true
+license.workspace = true
+authors.workspace = true
+repository.workspace = true
+rust-version.workspace = true
+
+[[bin]]
+name = "apex-secretd"
+path = "src/main.rs"
+
+[dependencies]
+apex-secret-core = { path = "../apex-secret-core" }
+anyhow.workspace = true
+serde.workspace = true
+serde_json.workspace = true
+libc.workspace = true
+
+# SigV4, for the S3 provider. Both are already in this workspace's graph
+# through `apex-backup-core` and `snow`, so this is not a new tree: `sha2`
+# brings `digest`, and `hmac` is the RFC 2104 construction over it.
+#
+# HMAC is not hand-rolled here on purpose. It is simple enough to write and
+# simple enough to write subtly wrong — a key longer than the block size, a
+# pad applied to the wrong buffer — and a signer that is wrong in a way that
+# still produces a stable string fails only against a real S3.
+sha2 = "0.10"
+hmac = "0.12"
+
+# The one TLS client in this daemon that is not `curl`. `present` carries a
+# browser's own connection rather than a request this daemon composed, so
+# there is no tool to drive: see `src/tls.rs`. Already in this workspace's
+# graph through `apex-remoted`, pinned to the same version so the two cannot
+# resolve to different rustls builds in one image.
+rustls = { version = "0.23.42", default-features = false, features = ["std", "ring", "tls12"] }
+rustls-native-certs = "0.8"
+rustls-pki-types = { version = "1", features = ["std"] }
+
+[dev-dependencies]
+# Fixtures live under /var/tmp; see the git provider's §36 tests.
+tempfile = "3"

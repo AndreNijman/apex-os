@@ -304,6 +304,14 @@ pub struct UpdateOptions {
     pub skip_packages: bool,
     /// Skip updating Flatpak applications.
     pub skip_flatpak: bool,
+    /// Ignore §26's rollout stop and update anyway.
+    pub force: bool,
+    /// Deploy an image whose signature §27's gate refused.
+    ///
+    /// Separate from `force` because the two gates answer different
+    /// questions, and a machine whose last update left it broken is not a
+    /// machine that should also stop checking who signed the next one.
+    pub allow_unverified: bool,
 }
 
 /// The system-extension package engine behind `apex install`/`remove`/`pkg`.
@@ -314,6 +322,243 @@ pub const PKG_ENGINE: &str = "/usr/libexec/apex-pkg";
 /// State file written by the engine. Its absence means "this machine has no
 /// user packages", which is the common case and must cost nothing.
 const PKG_STATE: &str = "/var/lib/apex/pkg/state.json";
+
+/// Where the engine records installed AppImages. Read here for one reason: an
+/// AppImage is NOT part of the system extension and writes no `PKG_STATE`, so
+/// a machine whose only user software is an AppImage has none of that file —
+/// and `packages_pass` below would then never run the engine at all, never
+/// print the line that says AppImages are pinned, and leave the user to find
+/// that out from a security advisory. `docs/packages.md` states the pinning as
+/// something `apex update` tells you; this is what makes that true.
+const PKG_APPIMAGE_DIR: &str = "/var/lib/apex/appimage";
+
+/// The capsule engine behind `apex env` (§8). Same shape as `PKG_ENGINE`: the
+/// policy lives in one shipped program so the CLI, the resolver and anything
+/// the shell drives cannot disagree about what a capsule is.
+pub const ENV_ENGINE: &str = "/usr/libexec/apex-env";
+
+/// The disposable-capsule engine behind `apex disposable` (§19).
+///
+/// A constant, like [`ENV_ENGINE`] and [`PKG_ENGINE`], and for the same reason:
+/// a caller-controlled variable naming a program is a hole even in an
+/// unprivileged command. It is a separate program from `apex-env` and a *mode
+/// of the same mechanism*: every environment it makes is an ordinary capsule
+/// created through `apex-env`, so `apex env list` sees it and `podman ps` sees
+/// it, and APEX has not grown a second container runtime.
+pub const DISPOSABLE_ENGINE: &str = "/usr/libexec/apex-disposable";
+
+/// The account engine behind `apex user` (P2-016).
+///
+/// A constant, like every other engine path here, and this one more than most:
+/// it runs `useradd`, `userdel` and `systemctl enable` as root, so a
+/// caller-controlled variable naming it would be a way to have `sudo apex
+/// user` execute somebody else's program.
+pub const USER_ENGINE: &str = "/usr/libexec/apex-user";
+
+/// The virtualization engine behind `apex vm` (P2-008).
+///
+/// A constant, like every other engine path here, and for the same reason: a
+/// caller-controlled variable naming a program is a hole. This one defines
+/// libvirt domains and deletes disk images, so it is the last one that should
+/// be reachable through the environment.
+pub const VM_ENGINE: &str = "/usr/libexec/apex-vm";
+
+/// P2-012's browser capsule engine.
+pub const BROWSER_ENGINE: &str = "/usr/libexec/apex-browser";
+
+/// The plugin CLI behind `apex plugin` (§16).
+///
+/// A constant, not an overridable variable — the same rule as [`PKG_ENGINE`]
+/// and [`ENV_ENGINE`]. Unlike `apex apply`'s capsule step there is no test that
+/// needs to redirect this one: `tests/test-apex-plugin.sh` drives the shipped
+/// script directly, the way the capsule and package suites do.
+pub const PLUGIN_ENGINE: &str = "/usr/libexec/apex-plugin";
+
+/// `apex plugin …`.
+///
+/// Unprivileged, and structurally so: every path it touches is under the
+/// invoking user's `~/.config/apex-shell`, which is the same directory APEX
+/// Shell reads. A root `apex plugin disable` would move a plugin belonging to
+/// root and leave the user's alone, which is a command that reports success
+/// and changes nothing the user can see.
+/// The firewall helper behind `apex firewall`.
+///
+/// Same shape as [`PKG_ENGINE`] and [`PLUGIN_ENGINE`], and for the same reason:
+/// a caller-controlled variable naming a program that runs under sudo is a hole
+/// whatever the program does. The default-drop policy itself is a shipped
+/// nftables file this helper does not edit — it manages the exception list in
+/// front of it, so a malformed exception cannot take the base policy with it.
+pub const FIREWALL_ENGINE: &str = "/usr/libexec/apex-firewall";
+
+/// The device enumeration behind `apex devices`.
+///
+/// A constant for the same reason as [`FIREWALL_ENGINE`] and [`PKG_ENGINE`].
+/// This one is never run under sudo — it reads, and every verb it has is
+/// unprivileged — but a caller-controlled variable naming a program is a hole
+/// whatever the program does, and the rule is worth more than the exception.
+pub const DEVICES_ENGINE: &str = "/usr/libexec/apex-devices";
+
+/// `apex devices …`.
+///
+/// Unprivileged, and it must stay that way. Running it as root would change
+/// what it reports rather than reveal more: root walks through the 0000
+/// directory whose refusal is the interesting answer, root has no seat, and
+/// root's `bluetoothctl` sees a different set of paired devices than the user
+/// whose desktop is asking. A diagnostic that has to be run as root to be
+/// believed cannot tell a user why their own session cannot see a device.
+pub fn devices(args: &[String]) -> i32 {
+    match Command::new(DEVICES_ENGINE).args(args).status() {
+        Ok(status) => status.code().unwrap_or(-1),
+        Err(e) => {
+            eprintln!("apex: cannot run the device enumeration: {e}");
+            eprintln!(
+                "apex: no device helper on this system — it predates `apex devices`.\n\
+                 \x20      run `sudo apex update` first."
+            );
+            1
+        }
+    }
+}
+
+/// `apex firewall …`.
+pub fn firewall(args: &[String]) -> i32 {
+    match Command::new(FIREWALL_ENGINE).args(args).status() {
+        Ok(status) => status.code().unwrap_or(-1),
+        Err(e) => {
+            eprintln!("apex: cannot run the firewall helper: {e}");
+            eprintln!(
+                "apex: no firewall helper on this system — it predates `apex firewall`.\n\
+                 \x20      run `sudo apex update` first."
+            );
+            1
+        }
+    }
+}
+
+pub fn plugin(args: &[String]) -> i32 {
+    match Command::new(PLUGIN_ENGINE).args(args).status() {
+        Ok(status) => status.code().unwrap_or(-1),
+        Err(e) => {
+            eprintln!("apex: cannot run the plugin helper: {e}");
+            eprintln!(
+                "apex: no plugin helper on this system — it predates `apex plugin`.\n\
+                 \x20      run `sudo apex update` first."
+            );
+            1
+        }
+    }
+}
+
+/// `apex env …`.
+///
+/// Unprivileged on purpose, and it must stay that way: capsules are rootless
+/// per-user podman containers. Routing this through sudo would put their images
+/// under /var/lib/containers, share one environment between every account on
+/// the machine, and need an authentication prompt to enter a shell.
+///
+/// `enter` replaces this process rather than waiting on a child, so an
+/// interactive capsule shell gets the terminal, the signals and the exit status
+/// directly.
+pub fn env(args: &[String]) -> i32 {
+    match Command::new(ENV_ENGINE).args(args).status() {
+        Ok(status) => status.code().unwrap_or(-1),
+        Err(e) => {
+            eprintln!("apex: cannot run the capsule engine: {e}");
+            eprintln!(
+                "apex: no capsule engine on this system — it predates `apex env`.\n\
+                 \x20      run `sudo apex update` first."
+            );
+            1
+        }
+    }
+}
+
+/// `apex disposable …`.
+///
+/// Unprivileged, structurally: a disposable capsule is a rootless per-user
+/// container and its throwaway home is under the user's own state directory.
+/// Running it as root would put the images under /var/lib/containers and need
+/// an authentication prompt to enter a shell — and a "disposable" environment
+/// that survives in root's storage is not disposable.
+///
+/// `status()` rather than `output()`: `run` gives the terminal to an
+/// interactive capsule shell, and the teardown has to happen when that shell
+/// exits.
+/// `apex user …`.
+///
+/// `status()` rather than `output()` for the same reason as the rest: the
+/// engine writes its refusals to stderr and the user needs to read them as
+/// they happen, and `apex user list` is a table that should stream.
+///
+/// Not made privileged here. `apex user list` is deliberately usable by
+/// anybody, and the engine refuses the verbs that need root with a sentence
+/// naming sudo — which is a better failure than this binary deciding on the
+/// caller's behalf that a read-only question needs a password.
+pub fn user(args: &[String]) -> i32 {
+    match Command::new(USER_ENGINE).args(args).status() {
+        Ok(status) => status.code().unwrap_or(-1),
+        Err(e) => {
+            eprintln!("apex: cannot run the account engine: {e}");
+            eprintln!(
+                "apex: no account engine on this system — it predates `apex user`.\n\
+                 \x20      run `sudo apex update` first."
+            );
+            1
+        }
+    }
+}
+
+pub fn disposable(args: &[String]) -> i32 {
+    match Command::new(DISPOSABLE_ENGINE).args(args).status() {
+        Ok(status) => status.code().unwrap_or(-1),
+        Err(e) => {
+            eprintln!("apex: cannot run the disposable engine: {e}");
+            eprintln!(
+                "apex: no disposable engine on this system — it predates `apex disposable`.\n\
+                 \x20      run `sudo apex update` first."
+            );
+            1
+        }
+    }
+}
+
+/// `apex vm …`.
+///
+/// Unprivileged, structurally: every domain is a per-user one at
+/// `qemu:///session` and every disk is under the user's own data directory.
+/// Running this as root would put the domains in libvirt's system namespace,
+/// where defining one needs polkit and where the `default` network is a host
+/// bridge — the three things `apex vm` exists to avoid.
+///
+/// `status()` rather than `output()`: `apex vm console` hands the terminal to
+/// a serial console the user detaches from with Ctrl-].
+pub fn browser(args: &[String]) -> i32 {
+    match Command::new(BROWSER_ENGINE).args(args).status() {
+        Ok(status) => status.code().unwrap_or(-1),
+        Err(e) => {
+            eprintln!("apex: cannot run the browser capsule engine: {e}");
+            eprintln!(
+                "apex: no browser capsule engine on this system — it predates `apex browser`.\n\
+                 \x20      run `sudo apex update` first."
+            );
+            1
+        }
+    }
+}
+
+pub fn vm(args: &[String]) -> i32 {
+    match Command::new(VM_ENGINE).args(args).status() {
+        Ok(status) => status.code().unwrap_or(-1),
+        Err(e) => {
+            eprintln!("apex: cannot run the virtualization engine: {e}");
+            eprintln!(
+                "apex: no VM engine on this system — it predates `apex vm`.\n\
+                 \x20      run `sudo apex update` first."
+            );
+            1
+        }
+    }
+}
 
 /// `apex install` / `apex remove` / `apex search` / `apex pkg …`.
 ///
@@ -344,7 +589,7 @@ pub fn pkg(args: &[String]) -> i32 {
 /// current on install day would quietly turn "the system is up to date" into a
 /// half-truth.
 fn packages_pass() -> i32 {
-    if !Path::new(PKG_STATE).exists() {
+    if !Path::new(PKG_STATE).exists() && !has_appimages() {
         return 0;
     }
     match run(PKG_ENGINE, &["upgrade"]) {
@@ -354,6 +599,23 @@ fn packages_pass() -> i32 {
             0
         }
     }
+}
+
+/// Does this machine have at least one AppImage the engine installed?
+///
+/// One record per application, so a directory containing any `*.json` is the
+/// question. Unreadable or missing answers false, which is the same direction
+/// `PKG_STATE`'s absence answers: an extra engine invocation is cheap, but
+/// refusing to look is not a reason to claim there is nothing there.
+fn has_appimages() -> bool {
+    let Ok(entries) = std::fs::read_dir(PKG_APPIMAGE_DIR) else {
+        return false;
+    };
+    entries.flatten().any(|e| {
+        e.file_name()
+            .to_str()
+            .is_some_and(|n| n.ends_with(".json"))
+    })
 }
 
 /// `apex update` -> pull a newer OS image, then refresh firmware via fwupd.
@@ -369,6 +631,167 @@ fn packages_pass() -> i32 {
 ///
 /// Now: refresh honours fwupd's own cache window, and the update pass runs only
 /// after `get-updates` says there is something to install.
+/// §27's enforcement pass: does the image this update would deploy actually
+/// verify, and is this machine configured to care?
+///
+/// `Some(code)` means `update` stops here with that code.
+///
+/// Roadmap §27's producer half has worked for months — every published digest
+/// is cosign-signed under a keyless GitHub identity and CI verifies its own
+/// work before moving a tag — and none of it reached the machine. P1-047
+/// landed the readout, so an APEX machine could finally say that nobody had
+/// checked. This is the half that checks.
+///
+/// Three placement decisions, each of which the obvious alternative gets
+/// wrong:
+///
+/// * **Before `record_update` and before `FsyncGuard::disable`.** Both of
+///   those write machine state. A refusal that fired after them would have
+///   recorded a health record for an update that never happened — which is
+///   exactly what §26's rollout stop then reasons about — and left ostree's
+///   per-object fsync switched off on a machine that is not updating.
+/// * **On the digest the registry would SERVE, not the booted one.** `apex
+///   trust --verify` answers "is what I am running signed"; a gate has to
+///   answer "is what I am about to run signed". Those differ for the same tag
+///   as a matter of routine here, because the four APEX tags are aliases for
+///   one digest that moves on every successful main build. Verifying the
+///   booted digest would wave an unsigned image through every time, while
+///   printing "verified".
+/// * **Not behind `--force`.** That flag is §26's escape, for a machine that
+///   came back from its last update broken. Sharing it would mean anybody
+///   working around a health stop silently stopped checking signatures too,
+///   and the two have nothing to do with each other. `--allow-unverified` is
+///   long on purpose.
+fn trust_gate(allow_unverified: bool) -> Option<i32> {
+    let roots = crate::trust::Roots::from_env();
+    let report = crate::trust::offline_report(&roots);
+    // The origin read is handed to the gate rather than unwrapped here. An
+    // early return on `image_error` is what made an unreadable /proc/cmdline
+    // deploy an image nobody checked, under `signature=enforce`, while
+    // printing a single line about it — the EACCES class this repository
+    // swept fourteen readers for, one layer up.
+    let g = crate::verify::gate(
+        &roots,
+        match (&report.image, &report.image_error) {
+            (Some(r), _) => Ok(Some(r.as_str())),
+            (None, Some(e)) => Err(e.as_str()),
+            (None, None) => Ok(None),
+        },
+    );
+    let refusal = crate::verify::refusal(
+        &g.verification,
+        &g.enforcement,
+        &g.decision,
+        "--allow-unverified",
+    );
+
+    // A fixture root means every trust fact in play is a file somebody wrote
+    // for a test. `bootc upgrade` is not run on the strength of those, in
+    // either direction — which is also what makes all three decisions
+    // exercisable through the real binary, headless, without a machine ever
+    // staging an image.
+    if roots.fixture.is_some() {
+        print!(
+            "{}",
+            crate::verify::render(&g.verification, &g.enforcement, &g.decision)
+        );
+        if let Some(why) = &refusal {
+            eprint!("{why}");
+        }
+        println!("apex: this program will not deploy on fixture facts");
+        return Some(i32::from(g.decision.refuses() && !allow_unverified));
+    }
+
+    match refusal {
+        None => {
+            // Warnings are printed even when nothing is refused: "provenance
+            // could not be established" is the normal state on every APEX
+            // machine today, and a gate that stays silent about it is a gate
+            // nobody knows is there.
+            if let crate::verify::Decision::ProceedWithWarnings(w) = &g.decision {
+                for line in w {
+                    eprintln!("apex: {line}");
+                }
+            }
+            None
+        }
+        Some(why) if allow_unverified => {
+            // Asked for, so granted — and still printed in full. Skipping the
+            // explanation would make `--allow-unverified` a way to not find
+            // out what was wrong with the image you just deployed.
+            eprint!("{why}");
+            eprintln!(
+                "apex: proceeding anyway because --allow-unverified was given."
+            );
+            None
+        }
+        Some(why) => {
+            eprint!("{why}");
+            Some(1)
+        }
+    }
+}
+
+/// The in-place move from ostree + GRUB to composefs + systemd-boot.
+///
+/// Returns true only when this machine actually migrated, in which case the
+/// caller must NOT also run `bootc upgrade` in the same invocation.
+///
+/// Exit codes are the engine's: 0 migrated, 10 refused (and it said why, at
+/// length, on stderr), anything else failed (likewise). Neither of the last
+/// two is fatal to `apex update`: the machine is on GRUB and GRUB works.
+fn migrate_boot_path() -> bool {
+    const ENGINE: &str = "/usr/libexec/apex-boot-migrate";
+    if !Path::new(ENGINE).exists() {
+        return false;
+    }
+    match run(ENGINE, &["auto"]) {
+        Ok(0) => true,
+        // 3 is "there is nothing to do here" — this machine has already
+        // migrated, or is booted on the new path. Silent on purpose: a
+        // migrated machine printing four lines about staying on GRUB on every
+        // single update would be worse than saying nothing.
+        Ok(3) => false,
+        Ok(10) => {
+            eprintln!(
+                "apex: this machine stays on GRUB for now — see the reason above, and\n\
+                 apex: `apex-boot-migrate precheck` to re-check it at any time."
+            );
+            false
+        }
+        Ok(code) => {
+            eprintln!(
+                "apex: the boot-path migration did not complete (exit {code}). Nothing was\n\
+                 apex: committed: this machine still boots the way it did."
+            );
+            false
+        }
+        Err(e) => {
+            eprintln!("apex: could not run the boot-path migration: {e}");
+            false
+        }
+    }
+}
+
+/// The tail of `update`: the passes that are independent of the OS image.
+/// Factored out so the migration can return early without skipping them.
+fn finish_update(started: Instant, mut worst: i32, opts: &UpdateOptions) -> i32 {
+    if !opts.skip_packages && !opts.firmware_only {
+        worst = worst.max(packages_pass());
+    }
+    if !opts.skip_flatpak && !opts.firmware_only {
+        worst = worst.max(flatpak_pass());
+    }
+    if !opts.skip_firmware {
+        worst = worst.max(firmware_pass());
+    }
+    println!(
+        "apex: update finished in {:.1}s",
+        started.elapsed().as_secs_f64()
+    );
+    worst
+}
+
 pub fn update(opts: UpdateOptions) -> i32 {
     let started = Instant::now();
     let mut worst = 0;
@@ -395,7 +818,55 @@ pub fn update(opts: UpdateOptions) -> i32 {
         return worst;
     }
 
+    // §26's rollout stop, and the reason it lives here rather than in the
+    // channel verb: a stop nobody's update path consults is a report. The gate
+    // permits every uncertain state — an unreadable file, a digest it could not
+    // resolve, an update that has not been rebooted into — and refuses exactly
+    // one: this machine took the last update and came back with a regression
+    // an image change could have caused. Advancing it again is how one bad
+    // release becomes two, and the user is at the keyboard of the machine that
+    // would do it.
+    if !opts.firmware_only && !opts.force {
+        if let Some(why) = crate::channel::halt_reason() {
+            eprint!("{why}");
+            return 1;
+        }
+    }
+
+    // §27's signature gate. Deliberately after §26's stop, which is a local
+    // file read and costs nothing, and deliberately before `record_update`
+    // and `FsyncGuard::disable` below, which both write. See `trust_gate`.
     if !opts.firmware_only {
+        if let Some(code) = trust_gate(opts.allow_unverified) {
+            return code;
+        }
+    }
+
+    // §26's staged rollout. The publisher's ramp, read from a signed document
+    // in the registry the machine already contacts — see
+    // `apexd_core::channel::decide_rollout` for why it is not a label and
+    // `docs/update-channels.md` for what that costs.
+    //
+    // Not an error and not a non-zero exit: a machine outside the ramp has
+    // nothing wrong with it and nothing to do about it. The OS image is left
+    // alone and packages, flatpaks and firmware still update, because a staged
+    // rollout is about the image and nothing else.
+    if !opts.firmware_only && !opts.force {
+        if let Some(why) = crate::channel::rollout_hold() {
+            print!("{why}");
+            return finish_update(started, worst, &opts);
+        }
+    }
+
+    if !opts.firmware_only {
+        // What the machine is running BEFORE the pull, so the next run can tell
+        // whether this one was rebooted into. Written first: a record written
+        // after a successful upgrade would be missing for exactly the update
+        // that crashed the machine, which is the one the gate exists for.
+        match crate::channel::current_tag() {
+            Ok(tag) => crate::channel::record_update(&tag),
+            Err(e) => eprintln!("apex: the update health gate is not armed: {e}"),
+        }
         // fsync off for the pull, restored when this drops — including on the
         // error paths below. See FsyncGuard for the measurements and the trade.
         let _fsync = if opts.keep_fsync {
@@ -404,6 +875,31 @@ pub fn update(opts: UpdateOptions) -> i32 {
         } else {
             Some(FsyncGuard::disable())
         };
+        // §22's boot-path migration, and it runs INSTEAD of the image update
+        // when it does anything at all. Andre, 2026-09-20: "active machines
+        // should automatically migrate with sudo apex install, not this
+        // dumbass reinstall shit." This is where that happens — the normal
+        // update path, no flag, nothing for the user to choose.
+        //
+        // Instead of, not as well as: the migration deploys the digest this
+        // machine is ALREADY running, so it changes the boot path and nothing
+        // else. Staging an ostree update in the same invocation would leave
+        // one shutdown with two finalize paths to run, which is exactly the
+        // kind of thing that turns a reboot into a recovery.
+        //
+        // A refusal is not a failure. A machine that must not migrate — Secure
+        // Boot with an unsigned loader, an ESP too small to hold two
+        // deployments — keeps booting GRUB and takes its update normally. The
+        // engine prints why, in full, and that is deliberate: it is the reason
+        // the machine is not getting a feature it was promised.
+        if migrate_boot_path() {
+            println!(
+                "apex: the boot path was migrated. Reboot when you like; this update did not\n\
+                 apex: change the OS image, and the next one will come through the new path."
+            );
+            return finish_update(started, worst, &opts);
+        }
+
         // Deliberately NOT preceded by `bootc upgrade --check`: bootc already
         // no-ops when the booted image is current, and checking first would add
         // a second registry round-trip to the exact path we are trying to make
@@ -424,23 +920,7 @@ pub fn update(opts: UpdateOptions) -> i32 {
         }
     }
 
-    if !opts.skip_packages && !opts.firmware_only {
-        worst = worst.max(packages_pass());
-    }
-
-    if !opts.skip_flatpak && !opts.firmware_only {
-        worst = worst.max(flatpak_pass());
-    }
-
-    if !opts.skip_firmware {
-        worst = worst.max(firmware_pass());
-    }
-
-    println!(
-        "apex: update finished in {:.1}s",
-        started.elapsed().as_secs_f64()
-    );
-    worst
+    finish_update(started, worst, &opts)
 }
 
 /// Update Flatpak applications as part of `apex update`.

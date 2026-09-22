@@ -1,0 +1,470 @@
+#!/bin/sh
+# Build a project's terminal layout in tmux or zellij, multiplexer-neutrally.
+#
+# The adapter layer for `apex project layout open`, in the same shape and for
+# the same reason as apex-project-windows is the adapter for the compositor:
+# the multiplexer is the only per-backend part, so keeping it here means one
+# program to fake in tests and no tmux or zellij knowledge inside the CLI.
+#
+#     apex-mux backends                          which are installed, one per line
+#     apex-mux kdl    <arr> <plan>               the zellij layout this would send
+#     apex-mux has    <mux> <session>            does that session exist
+#     apex-mux build  <mux> <session> <arr> <p>  create it, detached
+#     apex-mux open   <mux> <session> <arr> <p>  create it if needed, then attach
+#
+# <arr> is `main-vertical` (one large pane left, the rest stacked right) or
+# `tiled`. <p> is a PLAN FILE, and a file rather than stdin on purpose: `open`
+# ends by handing the terminal to the multiplexer, so stdin has to still be the
+# terminal.
+#
+# THE PLAN FORMAT
+#
+# One pane per line, TAB separated:
+#
+#     <title>	<cwd>	<argv…>
+#
+# Tabs and not a shell string, for the reason the window layout gives for
+# storing argv vectors: every field reaches the multiplexer as a separate
+# argument, so nothing in a pane command can be read as a shell metacharacter.
+# There is no shell anywhere below. A pane with no argv is a pane running the
+# shell the multiplexer would have started anyway.
+#
+# WHAT THIS DOES NOT DO
+#
+# It never runs an agent. An agent pane runs `apex agent attach` or `apex agent
+# run`, which talk to apex-agentd — the daemon owns every agent PTY, and the
+# multiplexer is a viewport onto sessions it owns. So killing the multiplexer,
+# or losing the terminal, leaves the agents running.
+#
+# It also never rebuilds a session that already exists: `build` on a live
+# session is a no-op and `open` attaches to it. Reopening a template must land
+# you back in your work, not on top of it.
+
+set -eu
+
+TAB="$(printf '\t')"
+
+# The name of the tab a built layout lands in. Named once because two things
+# have to agree on it: `zellij_kdl`, which writes it, and `zellij_landed`,
+# which is the only evidence that the layout was actually applied.
+ZTAB="apex"
+
+die() { printf 'apex-mux: %s\n' "$*" >&2; exit 1; }
+
+usage() {
+    cat >&2 <<'EOF'
+usage: apex-mux backends
+       apex-mux has   <tmux|zellij> <session>
+       apex-mux build <tmux|zellij> <session> <main-vertical|tiled> <plan-file>
+       apex-mux open  <tmux|zellij> <session> <main-vertical|tiled> <plan-file>
+EOF
+    exit 2
+}
+
+# ── tmux ─────────────────────────────────────────────────────────────────────
+
+tmux_has() {
+    # `=name` is an EXACT match. Without it tmux matches a prefix, so a session
+    # named apex-web would answer for apex-webhooks and the second project would
+    # silently attach to the first one's panes.
+    tmux has-session -t "=$1" 2>/dev/null
+}
+
+tmux_build() {
+    session=$1; arrangement=$2; plan=$3
+    tmux_has "$session" && return 0
+
+    index=0
+    while IFS= read -r line; do
+        [ -n "$line" ] || continue
+        # Split on tabs only, with globbing off: a pane command containing `*`
+        # is a command, not a pattern to expand against the project directory.
+        set -f
+        old_ifs=$IFS
+        IFS=$TAB
+        # shellcheck disable=SC2086  # deliberate: split on TAB, globbing is off
+        set -- $line
+        IFS=$old_ifs
+        set +f
+
+        title=$1
+        cwd=$2
+        shift 2
+
+        # Every pane is addressed by the %id tmux hands back, never by its
+        # index. An index is a POSITION: `split-window` renumbers the panes it
+        # pushes along, so addressing by index titles the wrong pane and puts
+        # the commands one place out — which is exactly what it did.
+        if [ "$index" -eq 0 ]; then
+            if [ "$#" -gt 0 ]; then
+                pane_id=$(tmux new-session -d -s "$session" -c "$cwd" -n apex \
+                    -P -F '#{pane_id}' -- "$@")
+            else
+                pane_id=$(tmux new-session -d -s "$session" -c "$cwd" -n apex \
+                    -P -F '#{pane_id}')
+            fi
+        elif [ "$#" -gt 0 ]; then
+            pane_id=$(tmux split-window -d -t "$pane_id" -c "$cwd" \
+                -P -F '#{pane_id}' -- "$@")
+        else
+            pane_id=$(tmux split-window -d -t "$pane_id" -c "$cwd" -P -F '#{pane_id}')
+        fi
+        # Splitting the pane just created keeps creation order and pane order
+        # the same, which is what `select-layout main-vertical` then reads to
+        # decide which pane is the large one on the left.
+        tmux select-pane -t "$pane_id" -T "$title"
+        index=$((index + 1))
+    done < "$plan"
+
+    [ "$index" -gt 0 ] || die "the plan is empty; nothing to build"
+
+    tmux select-layout -t "${session}:0" "$arrangement"
+    # A pane whose command finishes would otherwise close, and the layout would
+    # reflow around the hole. A template's whole value is that the shape stays
+    # put, so a finished command leaves a dead pane you can respawn instead.
+    tmux set-option -t "${session}:0" remain-on-exit on
+    tmux set-option -t "${session}:0" pane-border-status top
+}
+
+tmux_open() {
+    tmux_build "$1" "$2" "$3"
+    # tmux refuses to attach to a session from inside one, and it is right to:
+    # the inner and outer sessions would fight over the same key prefix.
+    if [ -n "${TMUX:-}" ]; then
+        tmux switch-client -t "=$1"
+    else
+        exec tmux attach-session -t "=$1"
+    fi
+}
+
+# ── zellij ───────────────────────────────────────────────────────────────────
+
+zellij_has() {
+    # `list-sessions --short` prints one name per line and nothing else, so this
+    # needs no parsing of the decorated form. Exited-but-resurrectable sessions
+    # are listed too, and that is correct here: attaching to one brings it back,
+    # which is what reopening a template should do.
+    zellij list-sessions --no-formatting --short 2>/dev/null | grep -qx -- "$1"
+}
+
+# KDL string escaping. Only two characters matter inside a quoted KDL string.
+kdl_escape() {
+    printf '%s' "$1" | sed 's/\\/\\\\/g; s/"/\\"/g'
+}
+
+# One `pane` node. Fields the plan did not give are simply absent rather than
+# empty: `command=""` is a pane that tries to run the empty string and dies.
+zellij_pane() {
+    indent=$1
+    title=$2
+    cwd=$3
+    shift 3
+    printf '%s pane cwd="%s" name="%s"' "$indent" "$(kdl_escape "$cwd")" "$(kdl_escape "$title")"
+    if [ "$#" -eq 0 ]; then
+        printf '\n'
+        return 0
+    fi
+    printf ' command="%s"' "$(kdl_escape "$1")"
+    shift
+    if [ "$#" -eq 0 ]; then
+        printf '\n'
+        return 0
+    fi
+    printf ' {\n%s     args' "$indent"
+    for a in "$@"; do
+        printf ' "%s"' "$(kdl_escape "$a")"
+    done
+    printf '\n%s }\n' "$indent"
+}
+
+# The plan as a zellij layout. zellij's own format, not a translation of tmux's:
+# `main-vertical` is a side-by-side split whose second half stacks the rest, and
+# `tiled` is a flat container zellij fills itself.
+zellij_kdl() {
+    arrangement=$1; plan=$2
+    printf 'layout {\n    tab name="%s" {\n' "$ZTAB"
+    if [ "$arrangement" = "main-vertical" ]; then
+        printf '        pane split_direction="vertical" {\n'
+    else
+        printf '        pane {\n'
+    fi
+
+    index=0
+    opened_stack=0
+    while IFS= read -r line; do
+        [ -n "$line" ] || continue
+        set -f
+        old_ifs=$IFS
+        IFS=$TAB
+        # shellcheck disable=SC2086  # deliberate: split on TAB, globbing is off
+        set -- $line
+        IFS=$old_ifs
+        set +f
+
+        if [ "$arrangement" = "main-vertical" ] && [ "$index" -eq 1 ]; then
+            printf '            pane {\n'
+            opened_stack=1
+        fi
+        if [ "$opened_stack" -eq 1 ]; then
+            zellij_pane "               " "$@"
+        else
+            zellij_pane "           " "$@"
+        fi
+        index=$((index + 1))
+    done < "$plan"
+
+    # An `if` and not `[ … ] && printf`: under `set -e` a failing AND-list is a
+    # failing statement, so the tiled arrangement — which never opens a stack —
+    # would exit here having written a truncated layout.
+    if [ "$opened_stack" -eq 1 ]; then
+        printf '            }\n'
+    fi
+    printf '        }\n    }\n}\n'
+}
+
+# Is the session's server answering yet? `attach --create-background` returns
+# as soon as it has forked, so the name can be listed before anything will take
+# an action for it. `dump-layout` is the cheapest read-only action there is.
+zellij_up() {
+    zellij --session "$1" action dump-layout >/dev/null 2>&1
+}
+
+# Did the layout actually become a tab? This is the ONLY honest evidence: every
+# client involved exits 0 whether or not the server applied what it was sent.
+zellij_landed() {
+    zellij --session "$1" action dump-layout 2>/dev/null \
+        | grep -q "tab name=\"${ZTAB}\""
+}
+
+zellij_build() {
+    session=$1; arrangement=$2; plan=$3
+    zellij_has "$session" && return 0
+    # zellij has no way to start a session with a layout WITHOUT attaching, so
+    # this is two steps: create it detached, then add the layout to it as a tab.
+    # The cost is one leftover default tab, which is a scratch shell and not a
+    # problem; the alternative was a separate code path for `build` and `open`,
+    # and only one of them would ever have been tested.
+    zellij attach --create-background "$session" >/dev/null 2>&1
+
+    # THE LAYOUT USED TO BE DROPPED, SILENTLY, AND WAITING MADE IT WORSE.
+    #
+    # What this used to run was `zellij --session NAME --layout-string KDL`.
+    # That is the command that STARTS a session; against one that already exists
+    # zellij documents it as adding the layout as a tab, and it exits 0 either
+    # way. So `build` returned success having built nothing — the session came
+    # up with only zellij's own scratch tab, and the CI failure read as an
+    # intermittent `mux-layouts` red on "the layout landed as a tab zellij can
+    # describe". Measured on zellij 0.45.1 with the variants INTERLEAVED in one
+    # 20-round loop, so load drift cannot be read as a difference between them:
+    #
+    #   send immediately after creating       0 bad / 20
+    #   send after a 1s pause                 3 bad / 20, every one rc=0
+    #   send after waiting for `zellij_has`   5 bad / 20, every one rc=0
+    #   this function as it now stands        0 bad / 20
+    #
+    # So "wait for the session first" is not the cure, it is the trigger, and a
+    # loaded CI runner is the slow caller that trips it. The real defect is
+    # underneath both: for a window after a session is created, its server
+    # ANSWERS `dump-layout` and ACCEPTS a tab request — `action new-tab` returns
+    # 0 and prints a tab id — and then discards it. Nothing in any exit code
+    # says so, and disabling the startup-tip plugin does not change it (still
+    # 1 drop in 20), so it is not the About pane holding focus. Nor is it a
+    # slow arrival: a separate run polled `dump-layout` for 30s after each send
+    # and saw 5 of 12 never arrive at all.
+    #
+    # Three things together are what make this reliable, and each was measured:
+    # wait for the server to answer at all; send the layout; and then VERIFY and
+    # RE-SEND, because a dropped request is cured by an identical one issued a
+    # moment later. If it never lands, this fails loudly rather than handing
+    # back a session the caller believes is set up.
+    #
+    # BOTH send forms are used, alternately, because the two environments this
+    # has to work in disagree about which is reliable. `action new-tab` is a
+    # request on the session server's IPC bus — the same channel `dump-layout`
+    # answers on, and the operation this actually is — and here it landed 20/20
+    # where the top-level form dropped 5/20. On a GitHub ubuntu-24.04 runner
+    # with the SAME zellij 0.45.1 the opposite held: run 35351419809 landed
+    # nothing in four `action new-tab` tries over twelve seconds, while the
+    # top-level form had been green on three of the four runs before it. The
+    # difference between the two machines is not understood and was not
+    # reproducible here under TERM=dumb. Neither form reports a refused layout
+    # in its exit code, so neither is trusted on its own and nothing is believed
+    # without reading the tab back. Alternating is confirmed on both: 16/16
+    # here, and run 35353055680 green on the runner at 47 passed, 0 failed.
+    layout="$(zellij_kdl "$arrangement" "$plan")"
+    waited=0
+    while [ "$waited" -lt 300 ]; do
+        zellij_up "$session" && break
+        waited=$((waited + 1))
+        sleep 0.1
+    done
+    zellij_up "$session" || die "the zellij session '$session' never came up"
+
+    # 3s of polling against a landing that is consistently under 300ms, so a
+    # re-send cannot race a slow first one into a second `apex` tab — and the
+    # suite asserts there is exactly one, so that is checked rather than hoped.
+    # WHAT EVERY SEND REPORTED IS NOW KEPT. `mux-layouts` was red on 4 of the 8
+    # most recent roadmap/v2.2 runs whose `Package engine` job actually ran —
+    # against a byte-identical apex-mux (blob afe43acead) and a byte-identical
+    # suite (d8658e648e) at every one of those SHAs, so this drop is the cause
+    # and no change is. Every one of those reds said exactly one thing: "never
+    # became a tab". Not which of the two forms was tried, not whether it even
+    # exited 0, not what it printed — because both sends had stdout AND stderr
+    # on /dev/null. The failure happens on a machine nobody can log in to, so
+    # the record below is the whole difference between a fifth red that says
+    # nothing and one that can be read.
+    #
+    # Twelve attempts rather than six, for the reason the loop exists at all
+    # and which is measured above: a request the server accepts and discards is
+    # cured by an identical one a moment later, and run 35624291380 exhausted
+    # all six. The ordinary case lands on the first send in under 300 ms and
+    # pays nothing for the other eleven; only the failing path spends the extra
+    # 18s, and it now spends it producing evidence.
+    #
+    # AND THEN TWELVE WAS MEASURED, and the sentence above does not hold on a
+    # GitHub runner. Run 35647154151, with the record below in place: all
+    # TWELVE sends returned rc=0 with empty stderr, alternating both forms, and
+    # `zellij list-sessions` showed the session alive with only its own
+    # `tab name="Tab #1"` 42 seconds in. So on that runner a re-send does NOT
+    # cure the drop — the server accepts and discards every request it is
+    # given. Twelve is kept because it costs nothing when the first send lands
+    # and because the value of the extra attempts is the RECORD each one
+    # leaves, not a cure. Do not spend a round raising it again.
+    attempt=0
+    zrec=""
+    zlanded=0
+    zerrf="$(mktemp 2>/dev/null)" || zerrf=""
+    [ -n "$zerrf" ] || zerrf="${TMPDIR:-/tmp}/apex-mux-zellij.$$.err"
+    while [ "$attempt" -lt 12 ]; do
+        zrc=0
+        if [ "$((attempt % 2))" -eq 0 ]; then
+            zform="action new-tab"
+            zellij --session "$session" action new-tab --layout-string "$layout" \
+                >/dev/null 2>"$zerrf" || zrc=$?
+        else
+            zform="top-level    "
+            zellij --session "$session" --layout-string "$layout" \
+                >/dev/null 2>"$zerrf" || zrc=$?
+        fi
+        zerr="$(tr '\n' ' ' < "$zerrf" 2>/dev/null | cut -c1-200)" || zerr=""
+        zrec="${zrec}
+    #$((attempt + 1)) ${zform}  rc=${zrc}  ${zerr}"
+        polled=0
+        while [ "$polled" -lt 30 ]; do
+            if zellij_landed "$session"; then zlanded=1; break; fi
+            polled=$((polled + 1))
+            sleep 0.1
+        done
+        if [ "$zlanded" = 1 ]; then break; fi
+        attempt=$((attempt + 1))
+    done
+    rm -f "$zerrf"
+    if [ "$zlanded" = 1 ]; then return 0; fi
+
+    # ── WHOSE FAULT WAS IT ──────────────────────────────────────────────────
+    #
+    # The comment above records the measurement that matters here: on a GitHub
+    # runner all twelve sends returned rc=0 with empty stderr and the server
+    # discarded every one. That is an environment that cannot do what zellij
+    # documents, and it is NOT a defect in this engine — the same four reds
+    # appeared against a byte-identical apex-mux and a byte-identical suite.
+    #
+    # Nothing downstream could tell the two apart, because both ended in one
+    # `die`. So a caller was told "apex-mux is broken" by a machine where
+    # zellij is. Exit 3 now means specifically: every send was ACCEPTED
+    # (rc=0, no stderr) and every one was DISCARDED. Any send that actually
+    # errored keeps the ordinary failure, because that is a real fault and must
+    # stay one.
+    #
+    # The diagnostic below prints either way. Exit 3 changes who is blamed, not
+    # how loudly it fails.
+    zaccepted=1
+    case "$zrec" in *"rc=0  "*) : ;; *) zaccepted=0 ;; esac
+    printf '%s\n' "$zrec" | grep -qE 'rc=[1-9]' && zaccepted=0
+
+    printf 'apex-mux: what each send reported —%s\n' "$zrec" >&2
+    printf 'apex-mux: zellij list-sessions —\n' >&2
+    zellij list-sessions 2>&1 | sed 's/^/    /' >&2 || :
+    # The tab names only. A whole dump-layout is ~300 lines of swap layouts
+    # that say nothing about the question, and burying the answer is how a
+    # diagnostic stops being one.
+    printf 'apex-mux: the tabs this session DOES have —\n' >&2
+    zellij --session "$session" action dump-layout 2>&1 \
+        | grep -E 'tab name=|^(error|Error)' | head -20 | sed 's/^/    /' >&2 || :
+    if [ "$zaccepted" = 1 ]; then
+        printf 'apex-mux: every send was accepted (rc=0, no stderr) and every one was discarded.\n' >&2
+        printf 'apex-mux: that is this machine'"'"'s zellij, not apex-mux. Exiting 3.\n' >&2
+        exit 3
+    fi
+    die "the zellij layout never became a tab in session '$session'"
+}
+
+zellij_open() {
+    zellij_build "$1" "$2" "$3"
+    if [ -n "${ZELLIJ:-}" ]; then
+        # zellij refuses to nest, and unlike tmux it has no switch-client.
+        printf 'apex-mux: the session is built. detach from this one, then: zellij attach %s\n' "$1"
+        return 0
+    fi
+    exec zellij attach "$1"
+}
+
+# ── dispatch ─────────────────────────────────────────────────────────────────
+
+[ "$#" -ge 1 ] || usage
+verb=$1
+shift
+
+case "$verb" in
+    backends)
+        for m in tmux zellij; do
+            command -v "$m" >/dev/null 2>&1 && printf '%s\n' "$m"
+        done
+        exit 0
+        ;;
+    kdl)
+        # The generated zellij layout, on stdout and nothing else. Here so the
+        # one failure mode a generated format has — a layout zellij's parser
+        # rejects — can be handed straight back to that parser, and so anybody
+        # debugging an odd pane can see what was actually sent.
+        [ "$#" -eq 2 ] || usage
+        case "$1" in
+            main-vertical|tiled) ;;
+            *) die "$1 is not an arrangement (main-vertical or tiled)" ;;
+        esac
+        [ -r "$2" ] || die "cannot read the plan file $2"
+        zellij_kdl "$1" "$2"
+        exit 0
+        ;;
+    has|build|open) ;;
+    *) usage ;;
+esac
+
+[ "$#" -ge 2 ] || usage
+mux=$1
+session=$2
+shift 2
+
+case "$mux" in
+    tmux|zellij) ;;
+    *) die "$mux is not a multiplexer this drives (tmux or zellij)" ;;
+esac
+command -v "$mux" >/dev/null 2>&1 || die "$mux is not installed"
+
+case "$verb" in
+    has)
+        "${mux}_has" "$session"
+        exit $?
+        ;;
+esac
+
+[ "$#" -eq 2 ] || usage
+arrangement=$1
+plan=$2
+case "$arrangement" in
+    main-vertical|tiled) ;;
+    *) die "$arrangement is not an arrangement (main-vertical or tiled)" ;;
+esac
+[ -r "$plan" ] || die "cannot read the plan file $plan"
+
+"${mux}_${verb}" "$session" "$arrangement" "$plan"

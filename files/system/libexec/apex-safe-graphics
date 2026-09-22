@@ -1,0 +1,420 @@
+#!/usr/bin/env bash
+# ─────────────────────────────────────────────────────────────────────────────
+#  APEX Safe Graphics — the desktop that comes up when the normal one cannot
+#  (roadmap P2-018)
+#
+#  This is a labwc session with a baked configuration, software rendering, and
+#  one client: a terminal. It is what a machine has left when the GPU driver,
+#  the compositor's configuration or APEX Shell is broken enough that the
+#  ordinary desktop does not paint.
+#
+#  ── The one property that makes it a recovery session ───────────────────────
+#  `labwc -C /usr/share/apex/safe-graphics` — a config DIRECTORY, not the
+#  user's. labwc reads `rc.xml`, `autostart`, `environment` and `menu.xml` from
+#  there and does not look in `~/.config/labwc` at all. That is the whole of
+#  P2-018's third criterion, and it matters because the user's `rc.xml` is a
+#  file APEX itself writes into: `apex-input-apply` splices a <libinput> block
+#  into it with ElementTree and `apex-labwc-keybinds` generates keybinds. A
+#  recovery session that read it would be a recovery session that inherits
+#  whatever broke the last one.
+#
+#  `-C` and not `XDG_CONFIG_HOME`: the compositor must be isolated from the
+#  user's configuration, and the CLIENTS must not be — a file manager with no
+#  config directory cannot save a bookmark, and a user in recovery still has a
+#  home directory they came here to reach.
+#
+#  ── Software rendering, and the one variable NOT set here ───────────────────
+#  WLR_RENDERER=pixman, LIBGL_ALWAYS_SOFTWARE=1, WLR_NO_HARDWARE_CURSORS=1 and
+#  QT_QUICK_BACKEND=software, because "the GPU does not work" is the case this
+#  exists for and a session that needs GL to tell you GL is broken is no use.
+#
+#  WLR_BACKENDS is deliberately NOT set. Unset, wlroots picks DRM on a real
+#  machine, which is what a person at the keyboard needs — and a test can put
+#  `headless` in the environment and have it honoured, which is the only way
+#  this session gets exercised without taking somebody's display away.
+#
+#  ── How a person reaches it ─────────────────────────────────────────────────
+#  1. From the greeter, as "APEX Safe Graphics".
+#  2. From a virtual console — Ctrl+Alt+F2, log in, run `apex-safe-graphics`.
+#     The greeter is itself a wlroots compositor on VT 1, so a machine with no
+#     working GL may not be able to show the picker at all. This route does not
+#     go through it.
+#
+#  There is deliberately no third route through a recovery BOOT entry: APEX
+#  never writes the ESP or an EFI variable from a shipped unit or helper
+#  (AGENTS.md boot-path rule 1, enforced by tests/test-boot-v2.sh), and a
+#  recovery entry is exactly that write. `docs/recovery.md` records the same
+#  decision for `apex recover`.
+#
+#  Verbs:
+#    apex-safe-graphics             start the session (what greetd runs)
+#    apex-safe-graphics check       can it run here, and what is missing
+#    apex-safe-graphics diagnose    write a diagnostics bundle and say where
+#
+#  ── The secondary-GPU display problem (measured, katana 2026-09-19 §5.5) ────
+#  Software rendering cannot light a screen on a SECOND GPU. wlroots' multi-GPU
+#  path feeds a secondary card's connector by importing a DMA-BUF, and pixman
+#  cannot import one:
+#
+#    [ERROR] backend/drm/renderer.c: Renderer did not support importing DMA-BUFs
+#    [ERROR] types/output/swapchain.c: Swapchain for output 'HDMI-A-1' failed test   (x60)
+#
+#  Zero such errors for `eDP-1`, which is on the primary card. On the Katana
+#  that meant the recovery session painted the laptop panel and left the user's
+#  only external monitor dark — and this is the session that exists for when
+#  everything else is broken, so "you cannot see it" is the worst possible
+#  place for that failure.
+#
+#  Two things are done about it, and a third is deliberately not.
+#
+#    * If every connected screen is on ONE card and that card is not the
+#      primary, wlroots is pointed at that card with `WLR_DRM_DEVICES`. One
+#      device means no import, so pixman works — a laptop with a dead panel in
+#      a dock gets a recovery session it can SEE. Unlike gamescope (which
+#      ignores the variable, evidence §6.1) labwc IS wlroots and honours it.
+#    * Otherwise — the mixed case, a working panel AND a monitor on the other
+#      card — the primary is kept and the session SAYS which outputs it will
+#      not be able to light, in `check` and in its own log. A recovery session
+#      that quietly shows half the screens is how §5.5 went unnoticed.
+#
+#  Not done: turning hardware rendering on automatically. "The GPU does not
+#  work" is the case this session exists for, and a recovery session that needs
+#  GL to tell you GL is broken is no use. It is available deliberately, with
+#  APEX_SAFE_GRAPHICS_RENDERER=auto, and says so when it is used.
+#
+#  Env overrides, for tests and for the operator at the keyboard:
+#    APEX_SAFE_GRAPHICS_CONFIG   the config directory
+#    APEX_SAFE_GRAPHICS_TERMINAL the terminal the autostart launches
+#    APEX_SAFE_GRAPHICS_DRM_DEVICE  force one DRM node, e.g. /dev/dri/card2
+#    APEX_SAFE_GRAPHICS_RENDERER    `auto` to let wlroots pick a hardware
+#                                   renderer instead of forcing pixman
+#    APEX_SAFE_GRAPHICS_SYS      the sysfs root the display probe reads
+#    APEX_SAFE_GRAPHICS_DEV_DRI  the DRM device directory the probe names
+# ─────────────────────────────────────────────────────────────────────────────
+# Not `set -e`: a diagnostics step that cannot run must be RECORDED as
+# "could not run" and the rest must continue. An early exit would produce a
+# bundle that is short for a reason nobody can see.
+set -uo pipefail
+
+CONFIG_DIR="${APEX_SAFE_GRAPHICS_CONFIG:-/usr/share/apex/safe-graphics}"
+SYS_ROOT="${APEX_SAFE_GRAPHICS_SYS:-/sys}"
+DEV_DRI="${APEX_SAFE_GRAPHICS_DEV_DRI:-/dev/dri}"
+
+log() { printf '[apex-safe-graphics] %s\n' "$*" >&2; }
+
+# ── The DRM topology, read and never guessed ────────────────────────────────
+# Every connected connector, one `cardN NAME` per line, sorted. A connector
+# whose `status` cannot be READ is a refusal and is printed as `cardN NAME ?`
+# rather than dropped: "permission denied is not absence" applies hardest to
+# the file that decides whether a user can see anything.
+connected_outputs() {
+    local node base card name status
+    for node in "${SYS_ROOT}"/class/drm/card*-*; do
+        [ -d "$node" ] || continue
+        base="${node##*/}"
+        card="${base%%-*}"
+        name="${base#*-}"
+        [ -n "$name" ] && [ "$name" != "$base" ] || continue
+        if ! status="$(cat "${node}/status" 2>/dev/null)"; then
+            printf '%s %s ?\n' "$card" "$name"
+            continue
+        fi
+        [ "$status" = "connected" ] && printf '%s %s\n' "$card" "$name"
+    done | sort
+}
+
+# The card wlroots will make primary when nothing points it elsewhere.
+#
+# wlroots sorts the GPUs it finds so that the firmware's display adapter comes
+# first (`boot_vga`), and falls back to enumeration order. Same rule here, so
+# "primary" in this script means the same card wlroots would pick.
+primary_card() {
+    local dev card
+    for dev in "${SYS_ROOT}"/class/drm/card*/device/boot_vga; do
+        [ -r "$dev" ] || continue
+        if [ "$(cat "$dev" 2>/dev/null)" = "1" ]; then
+            card="${dev#"${SYS_ROOT}"/class/drm/}"
+            printf '%s' "${card%%/*}"
+            return 0
+        fi
+    done
+    # No boot_vga anywhere — a machine with no firmware adapter at all, or a
+    # sysfs this account cannot read. The lowest-numbered card that owns a
+    # connector is the next best answer, and it is stated rather than assumed.
+    connected_outputs | awk 'NR==1 {print $1}'
+}
+
+# `<primary card>|<outputs it can light>|<outputs it cannot>`, so `check` and
+# the session start from ONE reading and cannot disagree about it.
+display_survey() {
+    local primary can cannot card name rest
+    primary="$(primary_card)"
+    can=""
+    cannot=""
+    while read -r card name rest; do
+        [ -n "$card" ] || continue
+        if [ "$card" = "$primary" ]; then
+            can="${can} ${name}"
+        else
+            cannot="${cannot} ${name}(${card})"
+        fi
+    done < <(connected_outputs)
+    printf '%s|%s|%s' "$primary" "${can# }" "${cannot# }"
+}
+
+# ── What has to be here for the session to start ────────────────────────────
+# A list rather than four `if`s, because `check` prints it and the session
+# refuses on it, and those two answers must not be able to disagree.
+missing_parts() {
+    local missing=""
+    command -v labwc >/dev/null 2>&1 || missing="$missing labwc"
+    [ -d "$CONFIG_DIR" ] || missing="$missing $CONFIG_DIR"
+    [ -r "${CONFIG_DIR}/rc.xml" ] || missing="$missing ${CONFIG_DIR}/rc.xml"
+    [ -r "${CONFIG_DIR}/autostart" ] || missing="$missing ${CONFIG_DIR}/autostart"
+    printf '%s' "${missing# }"
+}
+
+# The terminal the session opens. Two candidates, both in the image, and the
+# order is deliberate: foot is the smaller of the two and the one more likely
+# to start on a machine that is already unwell.
+pick_terminal() {
+    if [ -n "${APEX_SAFE_GRAPHICS_TERMINAL:-}" ]; then
+        printf '%s' "$APEX_SAFE_GRAPHICS_TERMINAL"
+        return 0
+    fi
+    local candidate
+    for candidate in foot alacritty xterm; do
+        if command -v "$candidate" >/dev/null 2>&1; then
+            printf '%s' "$candidate"
+            return 0
+        fi
+    done
+    return 1
+}
+
+do_check() {
+    local missing
+    missing="$(missing_parts)"
+    if [ -n "$missing" ]; then
+        log "cannot start: missing$([ -n "$missing" ] && printf ' %s' "$missing")"
+        return 1
+    fi
+    local term
+    if ! term="$(pick_terminal)"; then
+        # Not fatal. A session with no terminal still shows the menu, and the
+        # menu can still roll the machine back — which is more than a black
+        # screen offers.
+        log "no terminal found; the session will start with the menu only"
+        term="(none)"
+    fi
+    printf 'config      %s\n' "$CONFIG_DIR"
+    printf 'compositor  %s\n' "$(command -v labwc)"
+    printf 'terminal    %s\n' "$term"
+    if [ "${APEX_SAFE_GRAPHICS_RENDERER:-}" = "auto" ]; then
+        printf 'renderer    auto (hardware; APEX_SAFE_GRAPHICS_RENDERER=auto)\n'
+    else
+        printf 'renderer    pixman (software)\n'
+    fi
+
+    # The rows §5.5 needed and nobody had: WHICH screens this session expects
+    # to light, and which it does not. A recovery session that comes up blank
+    # is the failure this answers before it happens.
+    local survey primary can cannot
+    survey="$(display_survey)"
+    primary="${survey%%|*}"
+    can="${survey#*|}"; can="${can%%|*}"
+    cannot="${survey##*|}"
+    printf 'primary gpu %s\n' "${primary:-unknown}"
+    printf 'can light   %s\n' "${can:-none connected}"
+    if [ -n "$cannot" ]; then
+        if [ -z "$can" ]; then
+            printf 'cannot light%s\n' " ${cannot} — but they are the only screens connected,"
+            printf '            so the session will point wlroots at that card instead\n'
+        else
+            printf 'cannot light%s\n' " ${cannot} — on a secondary GPU; the software"
+            printf '            renderer cannot import DMA-BUFs to reach them\n'
+            printf '            force one with APEX_SAFE_GRAPHICS_DRM_DEVICE=%s/<card>\n' "$DEV_DRI"
+        fi
+    else
+        printf 'cannot light(nothing — every connected screen is on the primary gpu)\n'
+    fi
+    return 0
+}
+
+# ── Diagnostics ─────────────────────────────────────────────────────────────
+# Every step writes a file whether or not it worked, and a step that could not
+# run says so IN the file. A missing file and an empty file both read as "there
+# was nothing to report", which is the thing this must never say about a
+# command it was not allowed to execute.
+collect() {
+    local name="$1"
+    shift
+    local out="${BUNDLE}/${name}"
+    if ! command -v "$1" >/dev/null 2>&1; then
+        printf 'could-not-run: %s is not installed\n' "$1" > "$out"
+        return 0
+    fi
+    if ! "$@" > "$out" 2> "${out}.err"; then
+        {
+            printf '\n--- %s exited non-zero ---\n' "$1"
+            cat "${out}.err" 2>/dev/null
+        } >> "$out"
+    fi
+    rm -f "${out}.err"
+    # A command that succeeded and printed nothing is the third case, and it is
+    # the one that would otherwise leave an empty file behind — `journalctl -b
+    # --user` in a container with no user journal exits 0 with no output. An
+    # empty file reads as "there was nothing to report about this", which is
+    # true here and is NOT true of the two cases above, so all three say which
+    # one they are rather than leaving the reader to guess from a file size.
+    if [ ! -s "$out" ]; then
+        printf 'no-output: %s exited 0 and printed nothing\n' "$1" > "$out"
+    fi
+}
+
+do_diagnose() {
+    local dest="${1:-$HOME}"
+    if [ ! -d "$dest" ] || [ ! -w "$dest" ]; then
+        log "FATAL: $dest is not a directory this account can write to"
+        return 1
+    fi
+    local stamp
+    stamp="$(date +%Y%m%d-%H%M%S)"
+    BUNDLE="$(mktemp -d "${dest}/.apex-diagnostics-XXXXXX")" || return 1
+    trap 'rm -rf "$BUNDLE"' RETURN
+
+    collect boot.log journalctl -b -p warning --no-pager
+    collect session.log journalctl -b --user --no-pager
+    collect recover.json apex recover status --json
+    collect doctor.json apex doctor --json
+    collect graphics.txt lspci -k
+    collect modules.txt cat /proc/modules
+    collect compositor.txt sh -c 'printf "XDG_CURRENT_DESKTOP=%s\nWAYLAND_DISPLAY=%s\nXDG_SESSION_TYPE=%s\n" \
+        "${XDG_CURRENT_DESKTOP:-}" "${WAYLAND_DISPLAY:-}" "${XDG_SESSION_TYPE:-}"'
+
+    local archive="${dest}/apex-diagnostics-${stamp}.tar.gz"
+    if ! tar -czf "$archive" -C "$BUNDLE" . 2>/dev/null; then
+        log "FATAL: could not write $archive"
+        return 1
+    fi
+    printf '%s\n' "$archive"
+    return 0
+}
+
+# ── The session ─────────────────────────────────────────────────────────────
+start_session() {
+    local missing
+    missing="$(missing_parts)"
+    if [ -n "$missing" ]; then
+        # Exiting non-zero here returns the user to the greeter, which is the
+        # same fail-safe `apex-gaming-session` takes: a recovery session that
+        # cannot start must never be a black screen with no way out.
+        log "FATAL: cannot start, missing: $missing"
+        log "returning to the greeter rather than starting a broken session"
+        exit 1
+    fi
+
+    # ── Which screens this session will be able to light ────────────────────
+    # Printed BEFORE the compositor starts and whatever the answer is, because
+    # §5.5's whole failure was invisible: the session came up, painted the
+    # laptop panel, and said nothing at all about the monitor it had left dark.
+    local survey primary can cannot only_card
+    survey="$(display_survey)"
+    primary="${survey%%|*}"
+    can="${survey#*|}"; can="${can%%|*}"
+    cannot="${survey##*|}"
+    log "primary gpu: ${primary:-unknown}; connected on it: ${can:-none}"
+
+    # ── Pointing wlroots at a secondary GPU when it is the only one with a
+    #    screen ────────────────────────────────────────────────────────────
+    # One DRM device means wlroots never has to import a DMA-BUF between
+    # cards, which is the exact thing pixman cannot do — so software rendering
+    # works on the secondary card as long as it is the ONLY card in play.
+    # labwc is wlroots and honours WLR_DRM_DEVICES; gamescope does not, and
+    # that difference is measured (§6.1), not assumed.
+    if [ -n "${APEX_SAFE_GRAPHICS_DRM_DEVICE:-}" ]; then
+        export WLR_DRM_DEVICES="${APEX_SAFE_GRAPHICS_DRM_DEVICE}"
+        log "WLR_DRM_DEVICES=${WLR_DRM_DEVICES} (forced by APEX_SAFE_GRAPHICS_DRM_DEVICE)"
+    elif [ -n "$cannot" ] && [ -z "$can" ]; then
+        # Every connected screen is off the primary card. `cannot` holds
+        # `NAME(cardN)` entries; they are all on one card when there is one
+        # distinct cardN among them.
+        only_card="$(printf '%s\n' $cannot | sed -n 's/.*(\(card[0-9]*\))$/\1/p' | sort -u)"
+        if [ -n "$only_card" ] && [ "$(printf '%s\n' "$only_card" | wc -l)" -eq 1 ]; then
+            export WLR_DRM_DEVICES="${DEV_DRI}/${only_card}"
+            log "every connected screen (${cannot}) is on ${only_card}, not the primary gpu."
+            log "  pointing wlroots at ${WLR_DRM_DEVICES}: one device needs no DMA-BUF import,"
+            log "  so the software renderer can drive it. Evidence §5.5."
+        else
+            log "WARNING: the only connected screens (${cannot}) are spread across several"
+            log "  secondary GPUs; wlroots cannot be pointed at all of them at once."
+            log "  Force one with APEX_SAFE_GRAPHICS_DRM_DEVICE=${DEV_DRI}/<card>."
+        fi
+    elif [ -n "$cannot" ]; then
+        log "WARNING: ${cannot} will stay dark. They are on a secondary GPU, and the"
+        log "  software renderer cannot import DMA-BUFs to reach them (evidence §5.5)."
+        log "  ${can} will paint. To recover on the other screen instead, start with"
+        log "  APEX_SAFE_GRAPHICS_DRM_DEVICE=${DEV_DRI}/<card>."
+    fi
+
+    # Software rendering. Exported rather than written into the config dir's
+    # `environment` alone, because labwc applies that file to the compositor
+    # and its clients — and the compositor has already chosen a renderer by
+    # then.
+    #
+    # `auto` is the deliberate opt-out, not a fallback this script takes on its
+    # own: the case this session exists for is a broken GPU, and a recovery
+    # session that needs GL to report that GL is broken is no recovery session.
+    # It is here because a hybrid machine whose panel is dead and whose monitor
+    # hangs off a WORKING discrete card is a real shape, and on that machine
+    # hardware rendering is the difference between a screen and a blank one.
+    if [ "${APEX_SAFE_GRAPHICS_RENDERER:-}" = "auto" ]; then
+        log "APEX_SAFE_GRAPHICS_RENDERER=auto — letting wlroots pick a renderer."
+        log "  If the GPU driver is what broke, this session will fail the same way the"
+        log "  desktop did. Unset it to get the software renderer back."
+        export WLR_NO_HARDWARE_CURSORS=1
+        export QT_QUICK_BACKEND=software
+    else
+        export WLR_RENDERER=pixman
+        export WLR_NO_HARDWARE_CURSORS=1
+        export LIBGL_ALWAYS_SOFTWARE=1
+        export GALLIUM_DRIVER=llvmpipe
+        export QT_QUICK_BACKEND=software
+    fi
+
+    # A broken GPU setup is often a broken vendor SELECTION, and those live in
+    # the environment. Unset rather than overridden: the right value is
+    # whatever the software stack picks on its own.
+    unset __GLX_VENDOR_LIBRARY_NAME GBM_BACKEND MESA_LOADER_DRIVER_OVERRIDE
+    unset __NV_PRIME_RENDER_OFFLOAD VK_ICD_FILENAMES
+
+    export XDG_CURRENT_DESKTOP=labwc
+    export XDG_SESSION_TYPE=wayland
+    if [ -n "$(pick_terminal 2>/dev/null)" ]; then
+        APEX_SAFE_GRAPHICS_TERMINAL="$(pick_terminal)"
+        export APEX_SAFE_GRAPHICS_TERMINAL
+    fi
+
+    # `exec`, and the last thing this script does. greetd holds the
+    # compositor's own pid and signals it at logout; a wrapper left in the
+    # middle would be a process holding the VT and DRM master on a machine
+    # nobody can log into. `apex-greet-session` carries the same rule and
+    # Containerfile.base asserts it there.
+    exec labwc -C "$CONFIG_DIR"
+}
+
+case "${1:-session}" in
+    session) start_session ;;
+    check) do_check ;;
+    diagnose)
+        shift
+        do_diagnose "${1:-$HOME}"
+        ;;
+    -h | --help | help)
+        sed -n '/^#  Verbs:/,/^#    APEX_SAFE_GRAPHICS_TERMINAL/p' "$0" | sed 's/^#  \{0,2\}//'
+        ;;
+    *)
+        log "FATAL: '$1' is not a verb; try: session, check, diagnose"
+        exit 2
+        ;;
+esac

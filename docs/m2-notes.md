@@ -213,7 +213,7 @@ deps, and fonts, but is otherwise missing the shell's runtime)
 | Media / MPRIS | `playerctl`, `mpv-mpris`, `mpd-mpris` | `mpd-mpris` may need COPR. |
 | Backlight | `brightnessctl` | |
 | Clipboard / input | `wl-clipboard`, `slurp`, `wtype`, `cliphist` | |
-| XDG | `xdg-user-dirs`, `xdg-desktop-portal-hyprland` | portal likely already pulled by hyprland. |
+| XDG | `xdg-user-dirs`, `xdg-desktop-portal-hyprland` | **Checked, and the guess was wrong — see below.** `xdg-user-dirs` is installed explicitly. |
 | Power / sensors | `upower`, `libnotify`, `lm_sensors`, `rfkill` | |
 | Visualizer | `cava` | |
 | Screen record | `wf-recorder` | |
@@ -225,6 +225,38 @@ deps, and fonts, but is otherwise missing the shell's runtime)
 
 The Nerd Font the shell wants (`JetBrainsMono Nerd Font`) is already installed by
 the base (Stage 3).
+
+#### `xdg-desktop-portal-hyprland` is NOT pulled in by hyprland
+
+This row said "portal likely already pulled by hyprland" and nothing ever
+checked it, which made a guess the only thing behind Hyprland's portal
+support. Measured 2026-09-04, against the package the image itself uses:
+
+```
+$ rpm -q hyprland                       # sdegler/hyprland COPR, the one
+hyprland-0.56.2-1.fc43.x86_64           # Containerfile.core enables
+
+$ rpm -q --requires   hyprland | grep -i portal    # nothing
+$ rpm -q --recommends hyprland | grep -i portal    # nothing
+$ rpm -q --whatrequires xdg-desktop-portal-hyprland
+no package requires xdg-desktop-portal-hyprland
+```
+
+No Requires, no Recommends, and nothing else in the transaction depends on it
+— so `install_weak_deps` does not change the answer either. It is also absent
+from `Containerfile.core`'s desktop-stack install list, so the image does not
+install it any other way. The portals the image DOES get come from elsewhere:
+`labwc` Requires `xdg-desktop-portal-wlr`, and `Containerfile.base` asserts
+`wlr.portal` and `gtk.portal` exist at build time — but it makes no assertion
+about `hyprland.portal`, which is why the absence went unnoticed.
+
+Two caveats on the strength of this. The measurement is against the version
+installed on the developer's machine from that COPR, not against a fresh image
+build, so a future package could add the dependency. And what a Hyprland
+session's screen capture actually falls back to without that backend was NOT
+tested here — the claim is only that the package is not being pulled in.
+Whether it should be added is a decision, not a fact, and this note does not
+make it.
 
 ## 5. Testing in a VM (best-effort — not run here)
 

@@ -4,17 +4,53 @@
 //! tier planning work even when `apexd` is not running. Every D-Bus verb
 //! degrades gracefully — a clear message, a non-zero exit, never a panic.
 
+mod account;
 mod agent;
+mod ai;
+mod backup;
+mod blueprint;
+mod channel;
+mod boot;
+mod browser;
+mod cloudflare;
+mod connector;
+mod digest;
+mod dispatch;
+mod disposable;
+mod firmware;
+mod gaming;
+mod gitshim;
+mod host;
+mod lid;
+mod mcp;
+mod migrate;
+mod mode;
+mod oauth_device;
 mod ops;
+mod permissions;
+mod provenance;
 mod proxy;
+mod qualify;
+mod recover;
+mod remote;
+mod schema;
+mod request;
+mod secret;
+mod skill;
+mod storage;
+mod task;
 mod touchpad;
+mod trust;
+mod user;
+mod verify;
+mod vm;
 
 use std::net::{SocketAddr, TcpStream};
-use std::path::Path;
+use std::path::{Path, PathBuf};
 use std::time::Duration;
 
 use apexd_core::tier::Tier;
-use clap::{Args, Parser, Subcommand};
+use clap::{Args, Parser, Subcommand, ValueEnum};
 
 use crate::ops::LocalView;
 use crate::proxy::{
@@ -49,6 +85,212 @@ enum Cmd {
         #[command(subcommand)]
         cmd: GameCmd,
     },
+    /// Named operating modes: daily, gaming, development, creator, ai, battery,
+    /// couch, server.
+    ///
+    /// A mode is a named combination of things `apex tier` and `apex game`
+    /// already do — it is not another image, and it adds no new hardware lever.
+    /// The active mode is derived from what apexd reports rather than stored,
+    /// so it cannot go stale and needs no root.
+    Mode {
+        #[command(subcommand)]
+        cmd: Option<mode::ModeCmd>,
+    },
+    /// What the machine is measured to be doing, and what that suggests.
+    ///
+    /// Reports the workload, the signals behind it, and the signals this
+    /// hardware cannot produce. Applies nothing: acting on it is an explicit
+    /// `apex mode set --auto`, and APEX ships no timer that does it for you.
+    Workload(mode::WorkloadArgs),
+    /// Performance Lab: CPU/GPU clocks, power, temperatures, VRAM, scheduler.
+    ///
+    /// Read-only and root-free. Frame time is reported as unavailable with the
+    /// reason, because no generic source for it exists and APEX will not
+    /// substitute a number it did not measure.
+    Perf(mode::PerfArgs),
+    /// Whether this machine can boot straight into a controller-first Gaming
+    /// Mode, and whether it is set to.
+    ///
+    /// Read-only. `apex game` is the hardware lever (cpuset, IRQ steering, GPU
+    /// clocks); this is the §12 experience around it — the greeter's Gaming
+    /// Mode entry, the gamescope session, the Desktop<->Gaming switch and any
+    /// attached controllers. Exits non-zero when Gaming Mode would not start,
+    /// so it is usable as a check.
+    Gaming(gaming::GamingArgs),
+    /// Keep working with the lid shut, and say what that cost (P1-063).
+    ///
+    /// The lever is a logind `handle-lid-switch` block inhibitor held only
+    /// while there is live work, never an edit to `HandleLidSwitch=`: a machine
+    /// with nothing running must suspend in a bag exactly as it does today.
+    /// Thermal and battery guards suspend anyway and name themselves, and
+    /// `apex lid report` says what the last closed period actually did — how
+    /// long, what ran, whether the VPN held, what it cost in battery.
+    Lid {
+        #[command(subcommand)]
+        cmd: Option<lid::LidCmd>,
+    },
+    /// What applications may touch, who enforces it, and what a revocation
+    /// would actually do (P1-061).
+    ///
+    /// Read-only unless you ask for `revoke`. Every row carries the enforcer
+    /// beside the answer, because they are not the same statement: a Flatpak
+    /// whose manifest says `devices=all` opens /dev/video0 directly and is no
+    /// more restrained than a native binary, and there is no microphone portal
+    /// at all in any version of xdg-desktop-portal. `revoke` exits non-zero
+    /// with the reason where nothing can be revoked, rather than reporting a
+    /// success it did not achieve.
+    Permissions {
+        #[command(subcommand)]
+        cmd: Option<permissions::PermCmd>,
+    },
+    /// What verified this boot, and what the boot counter believes (§22).
+    ///
+    /// Read-only. APEX is moving every machine to systemd-boot, and `apex
+    /// update` migrates one in place when it can be done safely; a machine
+    /// still on GRUB is reported as the normal state rather than as a fault.
+    /// Boot counting, signed UKIs and TPM-bound unlock all live on the
+    /// systemd-boot path, and this is the command that says which of them is
+    /// actually in effect on this machine.
+    Boot {
+        #[command(subcommand)]
+        cmd: boot::BootCmd,
+    },
+    /// Which update channel this machine follows, and how the last update
+    /// went (§26).
+    ///
+    /// stable, candidate, beta and edge are four tags on one image. `status`
+    /// says which one this machine is on — including the answer for a machine
+    /// installed before channels existed, which is edge under an older name.
+    /// `set` moves between them; moving toward stable usually deploys an older
+    /// image, so that direction pins the current deployment first.
+    Channel {
+        #[command(subcommand)]
+        cmd: channel::ChannelCmd,
+    },
+    /// What this class of machine is known to do, and who established it (§33).
+    ///
+    /// A local database, kept only with explicit consent and sent nowhere.
+    /// Every check has three answers rather than two: a row nobody has tried
+    /// reads as not known, with the sentence saying who can settle it, because
+    /// "nobody has suspended this machine" is not "suspend is broken".
+    Qualify {
+        #[command(subcommand)]
+        cmd: qualify::QualifyCmd,
+    },
+    /// The disks in this machine, their health, and what nobody could ask
+    /// them (§48).
+    ///
+    /// Wear, temperature, TRIM, encryption, mount state and free space, with
+    /// every row carrying either a measurement or the reason there is none.
+    /// Reading needs no root except for the SMART log, which reports as
+    /// unavailable with the remedy rather than disappearing.
+    Storage {
+        #[command(subcommand)]
+        cmd: storage::StorageCmd,
+    },
+    /// Firmware: what this machine carries and what has an update waiting
+    /// (§P2-015).
+    ///
+    /// Reads fwupd's own JSON and never its exit status — measured, that
+    /// status means "nothing to do" when it is non-zero and accompanies an
+    /// explicit error document when it is zero. Secure Boot key and
+    /// revocation stores are listed apart from hardware, because most of what
+    /// fwupd calls updatable is one of those rather than a component.
+    Firmware {
+        #[command(subcommand)]
+        cmd: firmware::FirmwareCmd,
+    },
+    /// Persistent state: which schema each store is on, and what a rollback
+    /// would do to it (§25).
+    ///
+    /// `bootc rollback` puts /usr back and leaves /etc, /var and your home
+    /// exactly as the newer build left them. `status` says which files that
+    /// applies to and whether the older APEX can still read each one;
+    /// `migrate` runs the machine-written ones forward, keeping a copy of what
+    /// each was. Neither needs root, and `migrate` is a dry run without
+    /// --commit.
+    Schema {
+        #[command(subcommand)]
+        cmd: schema::SchemaCmd,
+    },
+    /// Whether the image this machine runs is the one APEX published (§27).
+    ///
+    /// Reports what was checked when the booted image was pulled, what the
+    /// signature policy will check on the next update, and — with `--verify` —
+    /// whether the registry holds a cosign signature and an SBOM attestation
+    /// for the digest running right now. The offline half reads files only, so
+    /// it needs no root and no network; a registry that cannot be reached is
+    /// reported as unavailable with the reason, never as unsigned.
+    Trust(trust::TrustArgs),
+    /// Local model inference as an OS service (§14).
+    ///
+    /// One endpoint every application and agent client can use — a Unix socket
+    /// in your `$XDG_RUNTIME_DIR` speaking the runtime's own
+    /// OpenAI-compatible HTTP API — with APEX owning the model store, the
+    /// backend choice (CUDA, ROCm, Vulkan or CPU), how much fits in VRAM, and
+    /// when an idle model is unloaded.
+    ///
+    /// The service is **per-user**, like `apex agent`, and for a stronger
+    /// reason: it turns your prompts into generated text, so it must not be a
+    /// privileged daemon shared between accounts. The weights are shared
+    /// instead — one root-owned, read-only copy under /var that no session can
+    /// alter, including its own.
+    ///
+    /// What it deliberately does NOT do: listen on a TCP port. A TCP
+    /// connection carries no peer credential, so a listener on 127.0.0.1 is
+    /// reachable by every account on the machine and by every sandboxed
+    /// application that holds the network permission. `--listen` exists only to
+    /// say so. It also ships no inference runtime — llama.cpp with CUDA is
+    /// gigabytes, and `Containerfile.core` is the tier a rebuild makes the
+    /// whole fleet download — so `apex ai status` names the `apex install` or
+    /// `apex env` command that provides one.
+    ///
+    /// Needs the per-user service: `systemctl --user enable --now apex-aid`.
+    Ai {
+        #[command(subcommand)]
+        cmd: ai::AiCmd,
+    },
+    /// Trusted APEX devices, and what each one can do (§20).
+    ///
+    /// A device is named by an ssh destination — normally an alias already in
+    /// `~/.ssh/config`, which is why there is no address, key or port to repeat
+    /// here. APEX generates no key and holds no passphrase: authentication,
+    /// host identity and transport are whatever `ssh <destination>` already
+    /// does, including a ProxyCommand or a Match exec that picks a route per
+    /// network.
+    ///
+    /// Capabilities are *probed*, never assumed. An APEX peer answers
+    /// `apex host describe --json` with the same struct this side parses; a
+    /// host that is not APEX gets a portable shell probe so `list` still says
+    /// something true about it.
+    Host(host::HostArgs),
+    /// Build this project, here or on a trusted device (§20).
+    ///
+    /// Without `--on` it builds locally, running the same command it would
+    /// dispatch — so a local run and a remote one cannot drift apart about
+    /// what "the build" is. The command is detected from the project's marker
+    /// files and *printed*, because a detector silently choosing between five
+    /// possibilities is one nobody can correct; give it explicitly after `--`
+    /// to override.
+    ///
+    /// The remote directory is assumed to be the same absolute path and then
+    /// **verified** — it must exist and be the same repository, compared by
+    /// `origin` URL — because the failure mode of a wrong guess is a build
+    /// that succeeds against the wrong source.
+    Build(dispatch::BuildArgs),
+    /// Send files or the clipboard to a trusted device (§20).
+    ///
+    /// Files land under their own name, not the sender's directory layout, and
+    /// an existing file is NOT overwritten unless `--force` says so: a send
+    /// that replaced something on another machine is not recoverable from this
+    /// end.
+    Send(dispatch::SendArgs),
+    /// Open a URL or a path on a trusted device's screen (§20).
+    ///
+    /// Needs a graphical session there, and checks for one: an ssh command has
+    /// no session bus, and a machine sitting at its greeter would otherwise
+    /// report success and open something nobody can see.
+    Open(dispatch::OpenArgs),
     /// Print the hardware fingerprint and layered profile selection.
     Fingerprint,
     /// Pin the current deployment (ostree admin pin 0). Requires root.
@@ -76,11 +318,21 @@ enum Cmd {
     /// needs no root.
     Metrics(MetricsArgs),
     /// Diagnose the power stack.
-    Doctor,
+    ///
+    /// `--json` is §19's "expose `apex doctor` results graphically" from the OS
+    /// side: the same checks, in the shape a UI renders. Not a second set of
+    /// checks — the list is built once and rendered either way, because two
+    /// diagnostic implementations disagree and the one the user reads would be
+    /// the one wired to nothing.
+    Doctor {
+        /// Emit machine-readable JSON instead of PASS/WARN lines.
+        #[arg(long)]
+        json: bool,
+    },
     /// Show the booted image and its changelog labels.
     Changelog,
-    /// Install packages from the enabled repositories, a Flatpak id, or a local
-    /// .rpm file. Requires root.
+    /// Install packages from the enabled repositories, Flathub, a capsule, a
+    /// local .rpm file, or an AppImage. Requires root, except `--source capsule`.
     ///
     /// Each argument is a package name from Fedora/RPM Fusion/an enabled COPR, a
     /// reverse-DNS Flatpak id (org.gimp.GIMP), or a path to an .rpm file. A local
@@ -89,8 +341,16 @@ enum Cmd {
     ///
     /// Packages go into a systemd system extension, NOT an rpm-ostree layer, so
     /// the OS keeps updating normally and `apex rollback` still works.
+    ///
+    /// An AppImage is different and the difference is worth knowing before you
+    /// install one: it is unpacked once into /usr/local, never executed as a
+    /// file, never part of the extension — and PINNED. `apex update` does not
+    /// move it and it cannot update itself; a newer version means running this
+    /// command again with the newer file. Every AppImage needs
+    /// --allow-unsigned, because none of them carries a signature APEX can
+    /// check. See docs/packages.md.
     Install {
-        #[arg(required = true, value_name = "PACKAGE|FILE.rpm")]
+        #[arg(required = true, value_name = "PACKAGE|FILE.rpm|FILE.AppImage")]
         packages: Vec<String>,
         /// Skip weak dependencies (smaller install, fewer optional features).
         #[arg(long)]
@@ -98,19 +358,51 @@ enum Cmd {
         /// Also consider a repository that is disabled by default.
         #[arg(long, value_name = "REPO")]
         enable_repo: Vec<String>,
-        /// Install a local .rpm file that no trusted key covers. Applies only to
-        /// the files named on this command line, never to repository packages,
-        /// and the decision is recorded per file so `apex pkg list` and
-        /// `apex pkg verify` keep reporting it.
+        /// Install a local .rpm file that no trusted key covers, or an
+        /// AppImage (no AppImage is ever verifiable, so all of them need it).
+        /// Applies only to the files named on this command line, never to
+        /// repository packages, and the decision is recorded per file so
+        /// `apex pkg list` and `apex pkg verify` keep reporting it.
         #[arg(long)]
         allow_unsigned: bool,
+        /// Pick the source yourself instead of letting APEX rank them:
+        /// rpm (the system extension), flatpak, or capsule.
+        ///
+        /// Applies to bare names only. A path is always an RPM and an
+        /// application id is always a Flatpak, so naming a source that
+        /// contradicts one of those is refused rather than quietly resolved.
+        /// `apex resolve <name>` shows what would happen without it.
+        #[arg(long, value_name = "SOURCE")]
+        source: Option<String>,
+        /// Which capsule `--source capsule` installs into. Defaults to your
+        /// first one.
+        #[arg(long, value_name = "CAPSULE")]
+        env: Option<String>,
+    },
+    /// Show which source APEX would install a name from, and why.
+    ///
+    /// Prints every candidate across the repositories, Flathub and your
+    /// capsules, what vouches for each one, the choice APEX would make, and
+    /// the exact command for every alternative. Read-only, so it needs no
+    /// root — "what would this do" should never cost a password.
+    Resolve {
+        #[arg(value_name = "NAME")]
+        name: String,
     },
     /// Remove packages installed with `apex install`. Requires root.
+    ///
+    /// A package installed from a local .rpm is removed by its package name;
+    /// an AppImage by the command name it installed, or by the path to the
+    /// very file it came from — that one is matched by checksum, so the same
+    /// download in a different directory still resolves.
     Remove {
-        #[arg(required = true, value_name = "PACKAGE")]
+        #[arg(required = true, value_name = "PACKAGE|FILE.AppImage")]
         packages: Vec<String>,
     },
-    /// Search all enabled package repositories.
+    /// Search every package source: the enabled repositories and Flathub.
+    ///
+    /// `apex resolve <name>` then says which of them APEX would actually use
+    /// for a given name, and why.
     Search {
         #[arg(required = true, value_name = "TERM")]
         terms: Vec<String>,
@@ -125,6 +417,21 @@ enum Cmd {
         #[command(subcommand)]
         cmd: PkgCmd,
     },
+    /// APEX Capsules: development environments that leave the host alone.
+    ///
+    /// /usr is read-only and packages come from a system extension, which is
+    /// the right shape for an operating system and the wrong one for
+    /// ecosystems that expect a mutable userspace — `pip install --user`,
+    /// `npm -g`, an SDK that wants /opt, a package manager that wants
+    /// /etc/apt. A capsule gives each of those its own rootless container
+    /// that still sees your home, your terminal and your devices.
+    ///
+    /// Unprivileged: capsules belong to you, not to the machine, so none of
+    /// these verbs needs (or accepts) root.
+    Env {
+        #[command(subcommand)]
+        cmd: EnvCmd,
+    },
     /// Run and supervise coding agents on managed terminals.
     ///
     /// APEX owns the PTY, the sandbox and the project state; the agent itself
@@ -137,10 +444,448 @@ enum Cmd {
         #[command(subcommand)]
         cmd: agent::AgentCmd,
     },
+    /// APEX Shell plugins: what is installed, and whether the shell will load it.
+    ///
+    /// The shell's plugin platform (§16) owns every rule about a manifest — the
+    /// permission vocabulary, which permissions apiVersion 1 will actually
+    /// grant, the import allowlist, the forbidden constructs. This command asks
+    /// that validator rather than reimplementing it, so a verdict here is the
+    /// verdict the shell will reach. If the shell is not installed, it refuses
+    /// instead of guessing.
+    ///
+    /// Unprivileged: plugins live in your own `~/.config/apex-shell/plugins`.
+    Plugin {
+        #[command(subcommand)]
+        cmd: PluginCmd,
+    },
+    /// Agent skills: where each came from, what it hashes to, and whether it
+    /// ships a program.
+    ///
+    /// `apex agent profile doctor` already counts skills and names the ones
+    /// with no `SKILL.md`. This is the inventory rather than the health check:
+    /// per skill, its origin, a digest of the files on disk, and whether it is
+    /// executable or reference-only — none of which anything recorded before.
+    ///
+    /// Unprivileged, and read-only: it never writes to a skill.
+    Skill {
+        #[command(subcommand)]
+        cmd: SkillCmd,
+    },
+    /// Where an agent plugin came from, and whether what is on disk is still
+    /// what arrived.
+    ///
+    /// **Not `apex plugin`**, which is apex-shell's QML plugin platform. This
+    /// is the agent's plugins — Claude Code's, under `~/.claude/plugins`,
+    /// installed from marketplaces.
+    ///
+    /// The registry already records a marketplace, a version and an install
+    /// path, and nothing has ever checked any of it against the bytes on disk:
+    /// there is no hash in it at all. This re-hashes each installed tree every
+    /// run and compares it with a recorded baseline, so a plugin edited after
+    /// it was installed is a finding rather than a green tick.
+    ///
+    /// Unprivileged. `show` is read-only; `record` writes only APEX's own
+    /// baseline store.
+    Provenance {
+        #[command(subcommand)]
+        cmd: ProvenanceCmd,
+    },
+    /// The incoming firewall: what is dropped, and the exceptions you opened.
+    ///
+    /// APEX drops inbound traffic by default. Reading needs no privilege;
+    /// changing an exception needs root.
+    Firewall {
+        #[command(subcommand)]
+        cmd: FirewallCmd,
+    },
+    /// Printers, scanners, shares, cards, links, radios and docks: what is
+    /// there, what is not, and what could not be looked at.
+    ///
+    /// The third answer is the point. A failed stat is falsy and an empty list
+    /// is falsy, so one line of code turns "permission denied" and "there are
+    /// none" into the same report — which is how `apex recover status` came to
+    /// tell users with packages installed that they had none. Nothing here
+    /// folds an unreadable path, an absent daemon or a refused D-Bus call into
+    /// an absence.
+    ///
+    /// It also names the firewall where a service this machine offers is what
+    /// the policy is dropping, because "the printer does not work" is what the
+    /// user sees and "631 is closed" is what is true.
+    ///
+    /// Unprivileged, and read-only: it pairs nothing, scans for nothing,
+    /// authorises no dock and changes no connection. Every one of those is a
+    /// polkit action, and a status command that raises an authentication dialog
+    /// is a status command nobody runs twice.
+    Devices {
+        /// Which area to report. Everything, if you do not say.
+        #[arg(value_enum)]
+        area: Option<DeviceArea>,
+    },
+    /// APEX Remote: pair a phone with this machine, and take it away again.
+    ///
+    /// The phone talks to `apex-remoted`, a per-user unprivileged service that
+    /// is a client of the agent runtime rather than part of it. Everything it
+    /// forwards is recorded as `claude-remote-control`, so a remote request can
+    /// edit a project, run tests and push — and cannot approve a root
+    /// operation or start a break-glass session, whichever device asks.
+    ///
+    /// Reading and revoking need no privilege. Pairing needs you: an agent
+    /// cannot pair a device on your behalf.
+    Remote {
+        #[command(subcommand)]
+        cmd: remote::RemoteCmd,
+    },
     /// Projects, agent worktrees and checkpoints.
     Project {
         #[command(subcommand)]
         cmd: agent::ProjectCmd,
+    },
+    /// What you are working on: the binder that can be put down and picked back
+    /// up (§21).
+    ///
+    /// A task NAMES a project, a capsule, an agent worktree and the agents you
+    /// run, and `apex task resume` checks that every one of them is still there
+    /// before telling you how to continue — a task whose capsule was deleted or
+    /// whose worktree was removed is refused by name rather than half-resumed.
+    ///
+    /// It creates none of those things and it grants nothing. There is
+    /// deliberately no window list (windows come from
+    /// `apex project layout save`) and no permission of any kind: §4's brokers
+    /// own those, and a permission in a hand-editable file would be a grant
+    /// nobody reviewed.
+    ///
+    /// Unprivileged: a task is yours, kept in your own `~/.config/apex` and
+    /// `~/.local/state/apex`, so none of these verbs needs (or accepts) root.
+    Task(task::TaskArgs),
+    /// Structured privilege requests: how a sandboxed agent asks for a system
+    /// change, and how you decide.
+    ///
+    /// An agent has no sudo, no root shell, and a sandbox that cannot reach the
+    /// system bus. It files a request naming one of a closed set of operations
+    /// and a reason; you review it and either refuse or approve, and approving
+    /// runs the operation with YOUR privilege. There is deliberately no verb
+    /// for an arbitrary command.
+    Request {
+        #[command(subcommand)]
+        cmd: request::RequestCmd,
+    },
+    /// Connect a Cloudflare account, and see what this project binds.
+    ///
+    /// `apex cf connect` runs OAuth by device code: it prints a URL and a short
+    /// code for you to enter on any device that has a browser, and launches
+    /// nothing here. `--token` pastes a scoped token instead, from stdin.
+    /// Either way the credential goes into `apex-secretd`'s root-owned store —
+    /// not a dotfile, which an agent could read.
+    #[command(visible_alias = "cf")]
+    Cloudflare {
+        #[command(subcommand)]
+        cmd: cloudflare::CloudflareCmd,
+    },
+
+    /// Encrypted backups: local, NAS or an R2 bucket through the broker.
+    ///
+    /// A snapshot is sealed to a public key, so taking one needs no privilege
+    /// and no secret. Only the private half opens one, and it is root-owned —
+    /// which is what stops anything running as you from reading what your
+    /// backups hold.
+    Backup {
+        #[command(subcommand)]
+        cmd: backup::BackupCmd,
+    },
+
+    /// Online accounts: Nextcloud, Google, Microsoft, WebDAV, S3/R2.
+    ///
+    /// An account is a credential in the same root-owned store `apex secret`
+    /// uses, under a reserved name, so there is no second place a cloud
+    /// credential can be. What this adds is the provider table: it knows the
+    /// endpoint, how the credential is presented, and which operation a scope
+    /// like `files.read` grants.
+    Account {
+        #[command(subcommand)]
+        cmd: account::AccountCmd,
+    },
+
+    /// The secret service: let an agent USE a credential without holding it.
+    ///
+    /// `apex-secretd` keeps every credential in a root-owned store, performs
+    /// the operation itself, and returns the result. It has no verb that
+    /// returns a credential. A git credential helper cannot achieve that — git
+    /// runs inside the sandbox, so whatever the helper prints is readable by
+    /// the agent.
+    Secret {
+        #[command(subcommand)]
+        cmd: secret::SecretCmd,
+    },
+
+    /// The `git` a managed session finds first on its PATH. Not typed by hand.
+    ///
+    /// Runs `push`, `fetch` and `ls-remote` through the broker when the remote
+    /// has a stored credential, and execs the real git for everything else. It
+    /// holds no credential and enforces nothing — `/usr/bin/git` is still
+    /// there, and reaches the same remotes with no credential at all.
+    #[command(hide = true)]
+    GitShim {
+        /// Everything the session typed after `git`.
+        #[arg(trailing_var_arg = true, allow_hyphen_values = true)]
+        args: Vec<String>,
+    },
+
+    /// MCP servers APEX brokers, so a bearer token is not in the agent's config.
+    ///
+    /// `apex mcp bridge <service>` is an MCP server on stdin and stdout that
+    /// carries each message through `apex-secretd`, which holds the credential
+    /// and attaches it. Meant to be spawned by an agent rather than typed;
+    /// `apex secret migrate` is what puts it in an agent's configuration.
+    Mcp {
+        #[command(subcommand)]
+        cmd: mcp::McpCmd,
+    },
+
+    /// The declarative APEX Blueprint: what this machine should be.
+    ///
+    /// One TOML file — `~/.config/apex/blueprint.toml` — describes the desktop,
+    /// applications, development languages, agent defaults and gaming. `apex
+    /// blueprint diff` shows how the machine differs from it and `apex apply`
+    /// converges it.
+    ///
+    /// The blueprint is yours: nothing in APEX rewrites it. `apex apply` writes
+    /// its own record somewhere else (`apex blueprint show` prints where), so
+    /// generated state and the file you edit never share a path.
+    Blueprint {
+        #[command(subcommand)]
+        cmd: BlueprintCmd,
+    },
+
+    /// Converge this machine toward its blueprint.
+    ///
+    /// Idempotent: running it twice does nothing the second time, because the
+    /// plan is recomputed from a fresh measurement of the machine every time
+    /// rather than from a record of what was done last.
+    ///
+    /// It converges only the privilege domain it is already running in and
+    /// reports the other. `apex apply` sets your desktop colour scheme and
+    /// agent defaults; `sudo apex apply` selects the session and installs
+    /// applications. Nothing here ever calls sudo itself, so `apply` cannot
+    /// raise an authentication prompt — and a root run can never write
+    /// root-owned files into your ~/.config.
+    ///
+    /// Applications are added, never removed. A package missing from the
+    /// blueprint is left alone: reading a deleted line as "uninstall it" turns
+    /// an edit into data loss.
+    ///
+    /// Setting APEX_BLUEPRINT_NO_APPLY to any non-empty value makes this refuse
+    /// to change anything. --dry-run keeps working with it set.
+    Apply(ApplyArgs),
+
+    /// Carry settings, applications and projects to another APEX machine.
+    ///
+    /// `apex sync export` writes one file; `apex sync import` reads it on the
+    /// other machine. The bundle carries the blueprint, which projects exist
+    /// and where they came from, and nothing else — no credentials of any
+    /// kind, because this is a file people put in a git repository.
+    ///
+    /// `import` never converges anything. It writes the blueprint and records
+    /// the projects, and leaves `apex blueprint diff` and `apex apply` as
+    /// separate decisions.
+    Sync {
+        #[command(subcommand)]
+        cmd: SyncCmd,
+    },
+
+    /// Recovery, repair and rollback, in one surface (§19).
+    ///
+    /// `status` reports every component §19 names — the booted deployment, the
+    /// rollback target, Secure Boot, the filesystem, the GPU driver, APEX
+    /// Shell, the network and the package extension — with the action that
+    /// addresses each one. It spawns no subprocess and contacts nothing, so it
+    /// is safe for APEX Settings to poll and can never raise an authentication
+    /// prompt.
+    ///
+    /// `repair` runs only steps that are idempotent and remove no data.
+    /// `reset` is the scoped factory reset, and it is a dry run unless it is
+    /// given both --commit and a token derived from the plan it printed.
+    ///
+    /// Rolling back is `apex rollback`, which already exists; this surface
+    /// makes it visible rather than adding a second name for it.
+    Recover {
+        #[command(subcommand)]
+        cmd: recover::RecoverCmd,
+    },
+
+    /// Disposable environments: a capsule that is deleted when you close it (§19).
+    ///
+    /// A mode of `apex env`, not a second mechanism. Every disposable
+    /// environment is an ordinary APEX capsule created through the same engine
+    /// and visible to `apex env list` — it just gets its own throwaway home,
+    /// an explicit copy-in/copy-out boundary, and a teardown that removes the
+    /// container and the directory together.
+    ///
+    /// It is a disposable ENVIRONMENT, not a security boundary: distrobox
+    /// mounts the host filesystem at /run/host inside every capsule, and
+    /// `apex disposable plan` prints that in full before anything starts. For
+    /// confinement — a default-deny mount namespace with $HOME masked — the
+    /// mechanism is `apex agent`'s sandbox.
+    ///
+    /// Unprivileged, like `apex env`, and for the same reason.
+    Disposable {
+        #[command(subcommand)]
+        cmd: disposable::DisposableCmd,
+    },
+    /// Accounts on a shared machine: standard vs administrator, and guests
+    /// (P2-016).
+    ///
+    /// APEX enforced the standard/administrator distinction long before it
+    /// could make one. polkit's `auth_admin` guards both agent actions with
+    /// `allow_any=no` and `allow_inactive=no`, and that is asserted at build
+    /// time — but `installer/apex-install` puts the one account it creates in
+    /// `wheel` unconditionally and its GUI offers no choice, so every account
+    /// APEX has ever made is an administrator and a standard one could not be
+    /// reached from any APEX surface. This is that surface.
+    ///
+    /// `apex user list` needs no root. Everything that changes an account
+    /// does, and says so before it does anything.
+    User {
+        #[command(subcommand)]
+        cmd: user::UserCmd,
+    },
+    /// Virtual machines: a full guest with its own kernel (P2-008).
+    ///
+    /// Not a second `apex env`. A capsule shares this kernel and this home; a
+    /// VM shares neither, which is what makes it the right tool for booting
+    /// another operating system, testing the installer, or running something
+    /// that may take its kernel down with it.
+    ///
+    /// Rootless and session-scoped: every domain lives at `qemu:///session`,
+    /// so there is no system daemon, no polkit prompt, and no `virbr0` left
+    /// behind on the host. Headless: the console is serial, there is no
+    /// viewer.
+    ///
+    /// The stack it drives — qemu, libvirt, OVMF, swtpm, virtiofsd — is
+    /// userspace and is NOT in the image; the KVM kernel modules are, because
+    /// a kernel module cannot be added at runtime under Secure Boot and
+    /// userspace can. `apex vm doctor` prints the one command that installs
+    /// the rest.
+    Vm {
+        #[command(subcommand)]
+        cmd: vm::VmCmd,
+    },
+    /// P2-012's browser automation capsule: a browser that automates a site
+    /// without going near the one you use.
+    ///
+    /// Its own profile, its own cookie jar, its own download directory, no
+    /// route onto the network except the destinations you name, and nothing
+    /// left behind. It is not a new sandbox: a capsule is a confined,
+    /// allowlisted `apex agent` session, so the masked home and the egress
+    /// proxy have one implementation rather than two.
+    ///
+    /// Headless, and structurally so — the capsule's /run is a tmpfs, so
+    /// there is no compositor socket for a window to appear on.
+    Browser {
+        #[command(subcommand)]
+        cmd: browser::BrowserCmd,
+    },
+}
+
+#[derive(Subcommand)]
+enum SyncCmd {
+    /// Write a bundle for another machine. Prints to stdout without --output.
+    Export {
+        /// Where to write it. Omit to print to stdout.
+        #[arg(long, short, value_name = "PATH")]
+        output: Option<PathBuf>,
+        /// Export this blueprint rather than the one on the search path.
+        #[arg(long, value_name = "PATH")]
+        file: Option<PathBuf>,
+        /// Leave projects out. A project entry carries a local path and a git
+        /// remote, which is the only machine-specific data in a bundle.
+        #[arg(long)]
+        no_projects: bool,
+    },
+    /// Print a bundle without importing it.
+    Show {
+        #[arg(value_name = "PATH")]
+        path: PathBuf,
+    },
+    /// Install a bundle's blueprint and record its projects. Converges nothing.
+    Import {
+        #[arg(value_name = "PATH")]
+        path: PathBuf,
+        /// Replace an existing blueprint that differs. The current one is kept
+        /// alongside it as blueprint.toml.previous.
+        #[arg(long)]
+        force: bool,
+    },
+}
+
+#[derive(Args)]
+struct ApplyArgs {
+    /// Read this blueprint instead of the usual search path.
+    #[arg(long, value_name = "PATH")]
+    file: Option<PathBuf>,
+    /// Report exactly what would change and perform none of it.
+    ///
+    /// The plan is computed once, so this prints the same steps a live run
+    /// executes — it is a report, not a rehearsal of a different code path.
+    #[arg(long)]
+    dry_run: bool,
+    /// Emit the plan as JSON.
+    #[arg(long)]
+    json: bool,
+}
+
+#[derive(Subcommand)]
+enum BlueprintCmd {
+    /// Print the blueprint, where it came from, and when it was last applied.
+    Show {
+        /// Read this file instead of the usual search path.
+        #[arg(long, value_name = "PATH")]
+        file: Option<PathBuf>,
+        /// Emit JSON.
+        #[arg(long)]
+        json: bool,
+    },
+    /// How the machine currently differs from the blueprint.
+    ///
+    /// Exits 0 when converged and 1 when there is drift `apex apply` could
+    /// close, so it reads like `diff(1)` in a script. Changes that cannot be
+    /// converged at all — a Gaming edition asked of a Daily machine — are
+    /// reported but do not set the exit code, because no number of `apply`
+    /// runs would ever clear them.
+    Diff {
+        #[arg(long, value_name = "PATH")]
+        file: Option<PathBuf>,
+        #[arg(long)]
+        json: bool,
+    },
+    /// Write a commented starting blueprint to ~/.config/apex/blueprint.toml.
+    ///
+    /// Every section arrives commented out, so the new file manages nothing
+    /// until it is edited.
+    Init {
+        /// Overwrite an existing blueprint.
+        #[arg(long)]
+        force: bool,
+    },
+    /// Replace the blueprint with one supplied as JSON on stdin.
+    ///
+    /// The write path for §10's GUI editor. Without it the shell would have to
+    /// author TOML itself, which means a second implementation of the schema
+    /// that drifts the first time a field is added — and the lossless
+    /// round-trip is the property the whole design rests on.
+    ///
+    /// The JSON goes through the same normalise + validate as a hand-edited
+    /// file, so what the editor writes is indistinguishable from what a human
+    /// types, and an invalid one is refused with the same messages. It writes
+    /// desired state only: it converges nothing, never touches the generated
+    /// applied-state file, and does not escalate.
+    ///
+    ///     apex blueprint show --json | jq … | apex blueprint set --json -
+    Set {
+        /// Read the blueprint as JSON from this source. Only `-` (stdin) is
+        /// supported: a path would invite passing the live blueprint's own
+        /// path and truncating it mid-read.
+        #[arg(long, value_name = "-")]
+        json: Option<String>,
     },
 }
 
@@ -167,6 +912,276 @@ enum PkgCmd {
     /// Convert rpm-ostree layered packages into APEX packages, so that OS
     /// updates work again without losing the software. Requires root.
     Adopt,
+}
+
+/// `apex env <verb>` — the capsule surface (§8).
+///
+/// A separate enum rather than a raw argument passthrough so that `apex env
+/// --help` documents the real thing and a typo is caught before a process is
+/// spawned. The engine still owns every decision; this only builds its argv.
+#[derive(Subcommand)]
+enum EnvCmd {
+    /// Create a capsule.
+    ///
+    /// A name that is also an image alias (fedora, ubuntu, arch, debian,
+    /// python, cuda, rocm) brings that alias's image and device profile with
+    /// it, so `apex env create cuda` is a capsule that can see the GPU.
+    Create {
+        #[arg(value_name = "NAME")]
+        name: String,
+        /// Any container image reference, instead of the alias's default.
+        #[arg(long, value_name = "REF")]
+        image: Option<String>,
+        /// Device access: nvidia (host driver passthrough), amd (/dev/kfd and
+        /// the render group, for ROCm), hw (USB buses, for hardware work), or
+        /// none. Defaults to none — a capsule holding a device open is a
+        /// capsule that stops the machine suspending.
+        #[arg(long, value_name = "PROFILE")]
+        gpu: Option<String>,
+        /// Give the capsule its own home directory instead of sharing yours.
+        /// For ecosystems whose caches litter $HOME badly enough to contain.
+        #[arg(long, value_name = "DIR")]
+        home: Option<String>,
+    },
+    /// Capsules on this machine, with their image and device profile.
+    List {
+        #[arg(long)]
+        json: bool,
+    },
+    /// The full record for one capsule: image, digest, profile, package manager.
+    Info {
+        #[arg(value_name = "NAME")]
+        name: String,
+    },
+    /// Open an interactive shell in a capsule.
+    Enter {
+        #[arg(value_name = "NAME")]
+        name: String,
+        /// Run this instead of a login shell.
+        #[arg(trailing_var_arg = true, allow_hyphen_values = true)]
+        command: Vec<String>,
+    },
+    /// Run one command in a capsule with no TTY. For scripts and agents.
+    Exec {
+        #[arg(value_name = "NAME")]
+        name: String,
+        #[arg(required = true, trailing_var_arg = true, allow_hyphen_values = true)]
+        command: Vec<String>,
+    },
+    /// Install packages with the capsule's own package manager.
+    ///
+    /// This is what `apex install --source capsule` routes to: software that
+    /// exists only as a package for a distribution APEX is not.
+    Install {
+        #[arg(value_name = "NAME")]
+        name: String,
+        #[arg(required = true, value_name = "PACKAGE")]
+        packages: Vec<String>,
+    },
+    /// Remove a capsule. Only ones APEX created, unless --force.
+    Rm {
+        #[arg(value_name = "NAME")]
+        name: String,
+        /// Say where a custom home directory is rather than reporting it gone.
+        #[arg(long)]
+        keep_home: bool,
+        /// Remove a container APEX has no record of.
+        #[arg(long)]
+        force: bool,
+    },
+    /// The image aliases and what they resolve to on this release.
+    Images,
+    /// Put a GUI application from a capsule into the host's launcher (§8).
+    ///
+    /// `distrobox-export` runs INSIDE the capsule and writes the .desktop file
+    /// into your own `~/.local/share/applications`, so this needs no root and
+    /// cannot raise an authentication prompt. `apex env rm` takes the launcher
+    /// entry with it.
+    Export {
+        #[arg(value_name = "NAME")]
+        name: String,
+        /// The application as the capsule knows it — a bare name, not a path.
+        #[arg(value_name = "APPLICATION")]
+        app: String,
+    },
+    /// Take an exported application back out of the host's launcher.
+    Unexport {
+        #[arg(value_name = "NAME")]
+        name: String,
+        #[arg(value_name = "APPLICATION")]
+        app: String,
+    },
+    /// What a capsule has exported, as distrobox sees it and as APEX recorded it.
+    Exports {
+        #[arg(value_name = "NAME")]
+        name: String,
+    },
+    /// Make a capsule that provides a language, and record that it does.
+    ///
+    /// This is what `apex apply` runs for the blueprint's `[development]
+    /// languages`. A toolchain goes into a capsule, never onto the read-only
+    /// host — that is the whole point of §8. The language is recorded only
+    /// after the toolchain answers from inside the capsule.
+    Provision {
+        #[arg(value_name = "LANGUAGE")]
+        language: String,
+    },
+    /// The language table: which capsule provides what, and from which packages.
+    Languages,
+}
+
+/// `apex plugin <verb>` — the OS side of §16's plugin platform.
+///
+/// A separate enum rather than an argument passthrough, for the same reason
+/// `EnvCmd` is one: `apex plugin --help` documents the real surface and a typo
+/// is caught before a process is spawned.
+#[derive(Subcommand)]
+enum FirewallCmd {
+    /// What the policy is, and which exceptions you have added.
+    Status {
+        /// Report as JSON, for a program rather than a person.
+        ///
+        /// APEX Shell's Firewall settings page reads this. It used to parse
+        /// the helper's PROSE, and that broke the first time a line moved —
+        /// silently, because a sentence has no shape to fail against. The
+        /// contract the helper answers with is written at `cmd_status_json`
+        /// in `files/system/libexec/apex-firewall`.
+        ///
+        /// This flag has to exist HERE and not only in the helper: `apex` is
+        /// clap, `firewall_argv` rebuilds the helper's argv verb by verb from
+        /// typed fields, and a `--json` clap does not model is rejected before
+        /// any process is spawned. The helper growing the flag on its own
+        /// would have left `apex firewall status --json` failing with
+        /// "unexpected argument" while the helper it wraps supported it.
+        #[arg(long)]
+        json: bool,
+    },
+    /// The services you can open, by name.
+    List,
+    /// Open one service on every interface. Requires root.
+    Allow {
+        #[arg(value_name = "SERVICE")]
+        name: String,
+    },
+    /// Close one again. Requires root.
+    Deny {
+        #[arg(value_name = "SERVICE")]
+        name: String,
+    },
+    /// Reapply the recorded exceptions. Requires root.
+    Reload,
+}
+
+/// The areas `apex devices` can report on.
+///
+/// A `ValueEnum` rather than a free string so a misspelling is answered by clap
+/// with the list of real areas, before anything is executed.
+#[derive(Clone, Copy, Debug, PartialEq, Eq, ValueEnum)]
+enum DeviceArea {
+    /// Printers, CUPS queues, mDNS discovery, and sharing one from here.
+    Print,
+    /// Scanners, and why the list may not arrive at all.
+    Scan,
+    /// SMB, NFS, WebDAV, MTP, cameras — and whether they exist outside GTK.
+    Share,
+    /// SD cards, USB disks, auto-mounting, and the seat it needs.
+    Media,
+    /// Links, captive portals, VPN, WireGuard, enterprise Wi-Fi, hotspot.
+    Network,
+    /// Adapters, radio blocks, paired devices, headset codecs.
+    Bluetooth,
+    /// Hotplug, Thunderbolt authorisation, USB-C ports and partners.
+    Dock,
+    /// Every area.
+    All,
+}
+
+/// `apex skill <verb>` — P1-025's inventory.
+///
+/// Two verbs, and the split is the one `apex mcp` uses: `list` is the readout,
+/// `audit` is the same measurement reduced to what is wrong with it and an
+/// exit status a script can branch on.
+#[derive(Subcommand)]
+enum SkillCmd {
+    /// Every skill, with its origin, digest and type.
+    ///
+    /// Exits non-zero if a skills directory could not be read — an incomplete
+    /// inventory is not a successful one, because the count it prints is the
+    /// number somebody would rely on to say nothing unexpected is installed.
+    List {
+        #[arg(long)]
+        json: bool,
+    },
+    /// What is wrong: unreadable directories, missing manifests, links out of
+    /// a skill, and every skill that ships a program.
+    ///
+    /// Exits non-zero when there is a problem.
+    Audit {
+        #[arg(long)]
+        json: bool,
+    },
+}
+
+/// `apex provenance <verb>` — P1-026.
+///
+/// `show` measures; `record` is the only thing here that writes, and it writes
+/// nothing but APEX's own baselines. Recording is deliberately a separate verb
+/// rather than something `show` does on first sight: a check that silently
+/// adopted whatever it found as the truth could never report a change, because
+/// the change would become the new baseline before anybody read it.
+#[derive(Subcommand)]
+enum ProvenanceCmd {
+    /// Every marketplace and installed plugin: its origin, its revision, the
+    /// digest of its files, whether that digest still matches the recorded
+    /// one, and what confines each kind of executable content it ships.
+    ///
+    /// Exits non-zero when there is a finding, or when the report could not be
+    /// completed — an inventory that could not read a registry is not a
+    /// machine with no plugins.
+    Show {
+        #[arg(long)]
+        json: bool,
+    },
+    /// Record the current digest of every installed plugin as the baseline
+    /// that later runs compare against.
+    ///
+    /// A tree that could not be hashed is not recorded, and a tree that had
+    /// CHANGED since the last record is named on stderr as it is overwritten —
+    /// re-recording is how a real finding gets erased, so it never happens
+    /// quietly.
+    Record,
+}
+
+#[derive(Subcommand)]
+enum PluginCmd {
+    /// Installed plugins, whether each one is valid, and why not.
+    List {
+        #[arg(long)]
+        json: bool,
+    },
+    /// One plugin in full: its grant, its permissions, or its refusal reason.
+    Info {
+        #[arg(value_name = "ID")]
+        id: String,
+    },
+    /// Move a plugin into the directory the shell scans.
+    ///
+    /// The shell scans exactly one directory and has no allowlist file, so this
+    /// is a directory move — which is what actually takes effect against the
+    /// shipped shell. It takes effect at the next shell start; nothing here can
+    /// load a plugin into a running shell.
+    Enable {
+        #[arg(value_name = "ID")]
+        id: String,
+    },
+    /// Move a plugin out of the directory the shell scans.
+    ///
+    /// Nothing is deleted and no file is rewritten. The running shell keeps a
+    /// plugin it has already loaded until it restarts.
+    Disable {
+        #[arg(value_name = "ID")]
+        id: String,
+    },
 }
 
 #[derive(Subcommand)]
@@ -209,6 +1224,15 @@ enum GameCmd {
         /// PID to move into the game cpuset.
         #[arg(long)]
         pid: Option<u32>,
+        /// PID whose death ends the session. apexd watches it and releases
+        /// game mode itself when it goes, which is the ONLY path that works
+        /// once logind has deactivated the session: `apex game stop` is a
+        /// polkit `allow_active=yes` action and an inactive session's call is
+        /// refused (katana 2026-09-19, evidence §3.4). The owner is watched,
+        /// not pinned — combine with `--pid` if it should also be in the
+        /// cpuset. `apex-gaming-session` passes its own `$$` here.
+        #[arg(long)]
+        owner_pid: Option<u32>,
     },
     /// Leave game mode, restoring everything it changed.
     Stop,
@@ -216,6 +1240,16 @@ enum GameCmd {
     Status,
     /// Attach another PID to a running session.
     Attach { pid: u32 },
+    /// Per-game profiles (roadmap §12): a stored composition of a mode, a tier
+    /// and a fan mode, per title.
+    ///
+    /// Stored in `~/.config/apex/games.toml` — a separate user-owned file
+    /// rather than a blueprint section, because the blueprint's contract is
+    /// that no program rewrites it and `set` is a program that writes.
+    Profile {
+        #[command(subcommand)]
+        cmd: gaming::ProfileCmd,
+    },
 }
 
 #[derive(Args)]
@@ -235,6 +1269,25 @@ struct UpdateArgs {
     /// Skip updating Flatpak applications.
     #[arg(long)]
     skip_flatpak: bool,
+    /// Update even though the last one left this machine with a regression.
+    ///
+    /// §26's rollout stop refuses a second update on a machine that came back
+    /// from the first one broken, because that is how one bad release becomes
+    /// two. This is the way past it when you know better — for instance when
+    /// the fix is in the release being held.
+    #[arg(long)]
+    force: bool,
+    /// Deploy the next image even though its signature does not verify.
+    ///
+    /// §27's gate refuses an update whose image the machine cannot verify —
+    /// see `docs/trust-enforcement.md` for what "cannot" covers and how to
+    /// change it permanently. This is the one-off way past it.
+    ///
+    /// Deliberately not `--force`: that is §26's rollout stop, for a machine
+    /// that came back from its last update broken. Working around a health
+    /// stop must not silently stop checking signatures.
+    #[arg(long)]
+    allow_unverified: bool,
     /// Keep ostree's per-object fsync on during the pull. Roughly halves update
     /// speed (measured: ~8 MiB/s with it, ~14.6 without, because 179k objects at
     /// 2.98 ms of fsync each outweighs the download itself) in exchange for
@@ -307,6 +1360,25 @@ enum ShellCmd {
     Focus,
     /// Start the screen-recorder setup strip.
     Record,
+    /// Start or stop push-to-talk.
+    ///
+    /// A toggle rather than hold-to-talk because niri has no bind that fires
+    /// on key release, so press-and-hold would work on Hyprland and labwc and
+    /// do nothing useful on niri. The shell shows a microphone indicator
+    /// naming the session the words are going to, and stops on its own after
+    /// ninety seconds.
+    Voice,
+    /// Drive the Alt-Tab window switcher: next | prev | commit | cancel.
+    ///
+    /// Bound by the compositor, not typed: ALT+Tab runs `next`, releasing ALT
+    /// runs `commit`. `/usr/libexec/apex-switcher` is the wrapper the keybinds
+    /// actually name — it skips the IPC entirely when no switcher is open,
+    /// because the release binding fires on every ALT release.
+    Switcher {
+        /// next | prev | commit | cancel
+        #[arg(value_name = "ACTION")]
+        action: String,
+    },
     /// List every target this wrapper knows, with the IPC call behind it.
     List,
     /// Call an arbitrary target/function, for anything not covered above.
@@ -347,22 +1419,38 @@ struct BatteryArgs {
     calibrate: bool,
 }
 
-#[tokio::main]
-async fn main() {
-    let cli = Cli::parse();
-
-    // Root-only verbs bail HERE — before any sysfs probe, D-Bus connect or
-    // subprocess — so an unprivileged `apex update` costs nothing and answers
-    // instantly with the command to run instead. See ops::require_root for why
-    // this covers exactly these four and not the whole CLI (the desktop's power
-    // tab drives `apex tier` as the session user).
-    let privileged = match &cli.command {
+/// Which verbs refuse to run without root, and under what name.
+///
+/// A function rather than a `match` inside `main` so the privilege set is an
+/// assertion instead of a reading exercise. It covers exactly these and not
+/// the whole CLI: the desktop's power tab drives `apex tier` as the session
+/// user, and every read-only verb has to stay usable without a password.
+/// See `ops::require_root` for what the refusal says.
+fn privileged_verb(cmd: &Cmd) -> Option<&'static str> {
+    match cmd {
         Cmd::Update(_) => Some("update"),
         Cmd::Rollback => Some("rollback"),
         Cmd::Pin => Some("pin"),
+        // Only `set`. It is `bootc switch`, which rewrites the deployment
+        // origin, and on the backwards direction `ostree admin pin` as well.
+        // `status`, `list` and `report` read the origin file, /etc/machine-id
+        // and /var/lib/apex — all world-readable — so gating them would put a
+        // password in front of "which channel am I on", which is the question
+        // somebody asks when they are already in trouble.
+        Cmd::Channel { cmd: channel::ChannelCmd::Set { .. } } => Some("channel set"),
+        // `--source capsule` writes nothing the system owns: it installs into
+        // a rootless per-user container. Demanding root for it would be worse
+        // than pointless — root has no capsules, so `sudo apex install
+        // --source capsule` reports an empty list on every machine, and the
+        // user who typed sudo because the CLI asked for it gets a refusal from
+        // the engine instead of a package.
+        Cmd::Install {
+            source: Some(s), ..
+        } if s == "capsule" => None,
         // Package verbs that write: they build an extension into /var/lib and
         // ask systemd to re-merge /usr. The read-only ones (list/status/info/
-        // verify) and `search` stay usable as an ordinary user on purpose.
+        // verify), `search` and `resolve` stay usable as an ordinary user on
+        // purpose.
         Cmd::Install { .. } => Some("install"),
         Cmd::Remove { .. } => Some("remove"),
         Cmd::Pkg {
@@ -383,9 +1471,22 @@ async fn main() {
         Cmd::Fan {
             cmd: Some(FanCmd::Restore { local: true }),
         } => Some("fan restore --local"),
+        // `apex env` is deliberately absent: capsules are rootless per-user
+        // containers, and running one as root would put its images under
+        // /var/lib/containers, share it between every account, and need an
+        // authentication prompt to open a shell.
         _ => None,
-    };
-    if let Some(verb) = privileged {
+    }
+}
+
+#[tokio::main]
+async fn main() {
+    let cli = Cli::parse();
+
+    // Root-only verbs bail HERE — before any sysfs probe, D-Bus connect or
+    // subprocess — so an unprivileged `apex update` costs nothing and answers
+    // instantly with the command to run instead.
+    if let Some(verb) = privileged_verb(&cli.command) {
         if let Err(code) = ops::require_root(verb) {
             std::process::exit(code);
         }
@@ -398,11 +1499,110 @@ async fn main() {
         // as long as the user stays attached.
         Cmd::Agent { cmd } => agent::agent(cmd),
         Cmd::Project { cmd } => agent::project_cmd(cmd),
+        // Reads the task file, the capsule engine's records, the project's
+        // checkpoints and the agent runtime's session list; writes only the
+        // task file and the task's own state file. No D-Bus, no root, and
+        // nothing that can raise a prompt — routed here, before anything
+        // connects to the system bus, for the reason `apex ai` is.
+        Cmd::Task(args) => task::run(args),
+        Cmd::Request { cmd } => request::main(cmd),
+        Cmd::Cloudflare { cmd } => cloudflare::main(cmd),
+        Cmd::Backup { cmd } => backup::main(cmd),
+        Cmd::Account { cmd } => account::main(cmd),
+        Cmd::Secret { cmd } => secret::main(cmd),
+        Cmd::Mcp { cmd } => mcp::main(cmd),
+        Cmd::GitShim { args } => gitshim::main(args),
+        // Read-only, so no root gate: seeing what the machine should be must
+        // not require privilege. `apex apply` is the verb that changes things,
+        // and it converges only the privilege domain it is already in.
+        Cmd::Blueprint { cmd } => match cmd {
+            BlueprintCmd::Show { file, json } => blueprint::cmd_show(file.as_deref(), json),
+            BlueprintCmd::Diff { file, json } => blueprint::cmd_diff(file.as_deref(), json),
+            BlueprintCmd::Init { force } => blueprint::cmd_init(force),
+            BlueprintCmd::Set { json } => blueprint::cmd_set(json.as_deref() == Some("-")),
+        },
+        // Deliberately NOT in the root-only list above. `apply` is a mixed
+        // verb: it converges the domain it is in and reports the other, so
+        // gating the whole command on root would make the user half — colour
+        // scheme, agent defaults — reachable only by running it as the wrong
+        // user, which is precisely the mistake the domain split exists to
+        // prevent.
+        Cmd::Apply(args) => blueprint::cmd_apply(args.file.as_deref(), args.dry_run, args.json),
+        // `sync` writes only the user's own blueprint and project records, so
+        // it needs no privilege and must not ask for any.
+        Cmd::Sync { cmd } => match cmd {
+            SyncCmd::Export {
+                output,
+                file,
+                no_projects,
+            } => blueprint::cmd_sync_export(file.as_deref(), output.as_deref(), no_projects),
+            SyncCmd::Show { path } => blueprint::cmd_sync_show(&path),
+            SyncCmd::Import { path, force } => blueprint::cmd_sync_import(&path, force),
+        },
         Cmd::Tier { name } => cmd_tier(name).await,
         Cmd::Profile => cmd_profile().await,
         Cmd::Battery(args) => cmd_battery(args).await,
         Cmd::Fan { cmd } => cmd_fan(cmd.unwrap_or(FanCmd::Status)).await,
-        Cmd::Game { cmd } => cmd_game(cmd).await,
+        // `profile` is intercepted HERE rather than inside `cmd_game`, and the
+        // reason is the guard: `cmd_game` connects to the system bus as its
+        // first act, before it looks at the verb at all. Routing
+        // `profile apply` through it would put a bus connection ahead of
+        // APEX_MODE_NO_APPLY, so on a machine with no bus the command would
+        // fail for the wrong reason and the guard's ordering proof would be
+        // vacuous. `apex mode set` has the same rule; this is the same rule.
+        Cmd::Game { cmd } => match cmd {
+            GameCmd::Profile { cmd } => gaming::profile_main(cmd).await,
+            other => cmd_game(other).await,
+        },
+        // Read-only by default and deliberately absent from the privileged set:
+        // `mode set` mutates through apexd's polkit-authorised D-Bus API as the
+        // session user, exactly as `apex tier` does.
+        Cmd::Mode { cmd } => mode::main(cmd.unwrap_or(mode::ModeCmd::Status)).await,
+        Cmd::Workload(args) => mode::workload_main(args),
+        Cmd::Perf(args) => mode::perf_main(args),
+        // Read-only, like `perf` and `workload`, and for the same reason it is
+        // not in the privileged set: it measures and reports.
+        Cmd::Gaming(args) => gaming::gaming_main(args),
+        // Also read-only, and deliberately not in the privileged set even
+        // though the boot chain is the most privileged thing on the machine.
+        // Reading the ESP does need root, and `status` reports that as
+        // "unavailable, and why" rather than demanding a password to answer
+        // "what verified my boot".
+        Cmd::Boot { cmd } => boot::boot_main(cmd),
+        Cmd::Lid { cmd } => lid::main(cmd),
+        Cmd::Permissions { cmd } => permissions::main(cmd),
+        // Same shape as `boot`, and for the same reason: the honest answer to
+        // "is my operating system signed" must not cost a password, so the
+        // offline half is file reads and `--verify` is the only path that
+        // leaves the machine.
+        // Read-only for `status`, and a dry run for `migrate` unless it is
+        // given --commit. Every path it touches is in the user's own home, so
+        // there is no root gate and nothing here can raise a prompt.
+        // `status`, `list` and `report` are read-only and root-free. `set` is
+        // `bootc switch`, which is in the privileged set below beside Update,
+        // Rollback and Pin.
+        Cmd::Channel { cmd } => channel::main(cmd),
+        Cmd::Qualify { cmd } => qualify::main(cmd),
+        Cmd::Storage { cmd } => storage::main(cmd),
+        Cmd::Firmware { cmd } => firmware::main(cmd),
+        Cmd::Schema { cmd } => schema::main(cmd),
+        Cmd::Trust(args) => trust::main(args),
+        // Read-only except for `add`/`remove`/`probe`, which write only the
+        // registry and the probe cache in the user's own home. Nothing here
+        // touches apexd or needs root.
+        // Routed here, before anything connects to the system bus: `apex ai`
+        // talks to a per-user daemon and to the model store, never to `apexd`,
+        // so a system-bus connection ahead of it would be a dependency the
+        // feature does not have — and on a machine with no `apexd` it would be
+        // a failure the user cannot act on.
+        Cmd::Ai { cmd } => ai::main(cmd),
+        Cmd::Host(args) => host::run(args),
+        // Local by default; `--on` is the only thing that makes any of these
+        // touch the network. None of them needs root: they run ssh as the
+        // invoking user and write nothing outside the user's own home.
+        Cmd::Build(args) => dispatch::build(args),
+        Cmd::Send(args) => dispatch::send(args),
+        Cmd::Open(args) => dispatch::open(args),
         Cmd::Fingerprint => cmd_fingerprint(),
         Cmd::Pin => ops::pin(),
         Cmd::Rollback => ops::rollback(),
@@ -413,22 +1613,44 @@ async fn main() {
             keep_fsync: args.fsync,
             skip_packages: args.skip_packages,
             skip_flatpak: args.skip_flatpak,
+            force: args.force,
+            allow_unverified: args.allow_unverified,
         }),
         Cmd::Shell { cmd } => cmd_shell(cmd),
         Cmd::Metrics(args) => cmd_metrics(args).await,
-        Cmd::Doctor => cmd_doctor().await,
+        Cmd::Doctor { json } => cmd_doctor(json).await,
+        // Read-only and subprocess-free, so deliberately not in the privileged
+        // set: "what state is my machine in, and how do I get back" must never
+        // cost a password. `repair` converges the domain it is already in and
+        // reports the other, and `reset` refuses to run as root outright —
+        // root's home is not the user's, so a `sudo` run would reset the wrong
+        // account while reporting success.
+        Cmd::Recover { cmd } => recover::main(cmd),
+        // Unprivileged for the same structural reason `apex env` is: a
+        // disposable capsule is a rootless per-user container.
+        Cmd::Disposable { cmd } => ops::disposable(&disposable::argv(cmd)),
+        // Accounts. The engine decides everything and refuses what it
+        // must; this only builds the argv, and `user::argv` pins it.
+        Cmd::User { cmd } => ops::user(&user::argv(cmd)),
+        Cmd::Vm { cmd } => ops::vm(&vm::argv(cmd)),
+        Cmd::Browser { cmd } => ops::browser(&browser::argv(cmd)),
         Cmd::Changelog => ops::changelog(),
         Cmd::Install {
             packages,
             no_weak_deps,
             enable_repo,
             allow_unsigned,
+            source,
+            env,
         } => ops::pkg(&install_argv(
             packages,
             no_weak_deps,
             enable_repo,
             allow_unsigned,
+            source,
+            env,
         )),
+        Cmd::Resolve { name } => ops::pkg(&["resolve".to_string(), name]),
         Cmd::Remove { packages } => {
             let mut argv = vec!["remove".to_string()];
             argv.extend(packages);
@@ -466,6 +1688,19 @@ async fn main() {
             };
             ops::pkg(&argv)
         }
+        Cmd::Env { cmd } => ops::env(&env_argv(cmd)),
+        Cmd::Firewall { cmd } => ops::firewall(&firewall_argv(cmd)),
+        Cmd::Devices { area } => ops::devices(&devices_argv(area)),
+        Cmd::Remote { cmd } => remote::remote(cmd),
+        Cmd::Plugin { cmd } => ops::plugin(&plugin_argv(cmd)),
+        Cmd::Skill { cmd } => match cmd {
+            SkillCmd::List { json } => skill::list(json),
+            SkillCmd::Audit { json } => skill::audit(json),
+        },
+        Cmd::Provenance { cmd } => match cmd {
+            ProvenanceCmd::Show { json } => provenance::show(json),
+            ProvenanceCmd::Record => provenance::record(),
+        },
     };
     std::process::exit(code);
 }
@@ -481,6 +1716,8 @@ fn install_argv(
     no_weak_deps: bool,
     enable_repo: Vec<String>,
     allow_unsigned: bool,
+    source: Option<String>,
+    env: Option<String>,
 ) -> Vec<String> {
     let mut argv = vec!["install".to_string()];
     argv.extend(packages);
@@ -493,7 +1730,146 @@ fn install_argv(
     if allow_unsigned {
         argv.push("--allow-unsigned".to_string());
     }
+    // The engine validates the value and refuses an unknown one. Not
+    // re-validated here: two lists of legal sources would be one list too
+    // many, and the engine's is the one that decides.
+    if let Some(s) = source {
+        argv.push(format!("--source={s}"));
+    }
+    if let Some(e) = env {
+        argv.push(format!("--env={e}"));
+    }
     argv
+}
+
+/// Build the engine argv for `apex env`.
+///
+/// Split out for the same reason `install_argv` is: the engine is a separate
+/// process, so a dropped flag is not a compile error but a silent policy
+/// change. `--gpu` decides whether a capsule can see the GPU at all, and
+/// `--force` decides whether `rm` will destroy a container APEX did not
+/// create.
+///
+/// The `--` before a trailing command is not cosmetic. Without it the engine
+/// cannot tell `apex env exec box -- ls -l` (run `ls -l`) from a flag of its
+/// own, and clap has already stripped the separator the user typed.
+fn env_argv(cmd: EnvCmd) -> Vec<String> {
+    match cmd {
+        EnvCmd::Create {
+            name,
+            image,
+            gpu,
+            home,
+        } => {
+            let mut a = vec!["create".to_string(), name];
+            if let Some(i) = image {
+                a.push(format!("--image={i}"));
+            }
+            if let Some(g) = gpu {
+                a.push(format!("--gpu={g}"));
+            }
+            if let Some(h) = home {
+                a.push(format!("--home={h}"));
+            }
+            a
+        }
+        EnvCmd::List { json } => {
+            let mut a = vec!["list".to_string()];
+            if json {
+                a.push("--json".to_string());
+            }
+            a
+        }
+        EnvCmd::Info { name } => vec!["info".to_string(), name],
+        EnvCmd::Enter { name, command } => {
+            let mut a = vec!["enter".to_string(), name];
+            if !command.is_empty() {
+                a.push("--".to_string());
+                a.extend(command);
+            }
+            a
+        }
+        EnvCmd::Exec { name, command } => {
+            let mut a = vec!["exec".to_string(), name, "--".to_string()];
+            a.extend(command);
+            a
+        }
+        EnvCmd::Install { name, packages } => {
+            let mut a = vec!["install".to_string(), name];
+            a.extend(packages);
+            a
+        }
+        EnvCmd::Rm {
+            name,
+            keep_home,
+            force,
+        } => {
+            let mut a = vec!["rm".to_string(), name];
+            if keep_home {
+                a.push("--keep-home".to_string());
+            }
+            if force {
+                a.push("--force".to_string());
+            }
+            a
+        }
+        EnvCmd::Images => vec!["images".to_string()],
+        EnvCmd::Export { name, app } => vec!["export".to_string(), name, app],
+        EnvCmd::Unexport { name, app } => vec!["unexport".to_string(), name, app],
+        EnvCmd::Exports { name } => vec!["exports".to_string(), name],
+        EnvCmd::Provision { language } => vec!["provision".to_string(), language],
+        EnvCmd::Languages => vec!["languages".to_string()],
+    }
+}
+
+/// Kept a pure function, like `plugin_argv`, so the argv this hands a
+/// root-run helper can be asserted without running it.
+fn firewall_argv(cmd: FirewallCmd) -> Vec<String> {
+    match cmd {
+        FirewallCmd::Status { json } => {
+            let mut a = vec!["status".to_string()];
+            if json {
+                a.push("--json".to_string());
+            }
+            a
+        }
+        FirewallCmd::List => vec!["list".to_string()],
+        FirewallCmd::Allow { name } => vec!["allow".to_string(), name],
+        FirewallCmd::Deny { name } => vec!["deny".to_string(), name],
+        FirewallCmd::Reload => vec!["reload".to_string()],
+    }
+}
+
+/// Pure, like `firewall_argv`: the helper is a separate process, so a wrong
+/// word here is not a compile error but a diagnostic that reports the wrong
+/// area — or, with no default, no area at all.
+fn devices_argv(area: Option<DeviceArea>) -> Vec<String> {
+    vec![match area.unwrap_or(DeviceArea::All) {
+        DeviceArea::Print => "print",
+        DeviceArea::Scan => "scan",
+        DeviceArea::Share => "share",
+        DeviceArea::Media => "media",
+        DeviceArea::Network => "network",
+        DeviceArea::Bluetooth => "bluetooth",
+        DeviceArea::Dock => "dock",
+        DeviceArea::All => "all",
+    }
+    .to_string()]
+}
+
+fn plugin_argv(cmd: PluginCmd) -> Vec<String> {
+    match cmd {
+        PluginCmd::List { json } => {
+            let mut a = vec!["list".to_string()];
+            if json {
+                a.push("--json".to_string());
+            }
+            a
+        }
+        PluginCmd::Info { id } => vec!["info".to_string(), id],
+        PluginCmd::Enable { id } => vec!["enable".to_string(), id],
+        PluginCmd::Disable { id } => vec!["disable".to_string(), id],
+    }
 }
 
 fn cmd_fingerprint() -> i32 {
@@ -505,6 +1881,19 @@ fn cmd_fingerprint() -> i32 {
 async fn cmd_status() -> i32 {
     let v = LocalView::detect();
     print!("{}", ops::render_fingerprint(&v.fingerprint, &v.selection));
+
+    // §27: "`apex status` should surface trust state clearly." Placed before
+    // the daemon section because it must appear on a machine where apexd is
+    // not running — that branch returns early, and a trust readout only the
+    // healthy machines get is the wrong way round.
+    //
+    // Offline only. Nothing here contacts the registry, so `apex status` keeps
+    // costing one set of file reads and cannot hang on a dead network.
+    println!();
+    print!(
+        "{}",
+        trust::render_block(&trust::offline_report(&trust::Roots::from_env()))
+    );
 
     let conn = connect().await;
     let running = match &conn {
@@ -940,19 +2329,43 @@ async fn cmd_game(cmd: GameCmd) -> i32 {
                         if topo.ecore_list().is_empty() { "(none)".into() } else { topo.ecore_list() },
                         topo.source.as_str()
                     );
-                    println!(
-                        "nvidia-smi: {}",
-                        if apexd_core::gpu::nvidia_smi_available() { "present" } else { "absent" }
-                    );
+                    // The STATE, not merely whether the file exists. On a
+                    // machine that ships nvidia-smi with no driver loaded —
+                    // the L16, measured — "present" is true and tells somebody
+                    // debugging absent clock locks nothing at all.
+                    println!("nvidia-smi: {}", apexd_core::gpu::nvidia_smi_state().as_str());
+                    // Same rule, one tier over. Without this the degraded view
+                    // said nothing at all about sched-ext, so the one surface
+                    // a user reaches when the daemon is down was the one that
+                    // could not tell them their kernel refuses every
+                    // scheduler. `scx_state` needs the daemon; this does not.
+                    let btf = apexd_core::kernelbtf::scx_btf_support(Path::new("/sys"));
+                    println!("scx       : {}", cfg.scx);
+                    println!("scx_btf   : {}", btf.verdict());
+                    if btf.blocks_loading() {
+                        println!("            {}", btf.describe());
+                    }
                 }
             }
             0
         }
-        GameCmd::Start { pid } => match &proxy {
+        GameCmd::Start { pid, owner_pid } => match &proxy {
             Some(p) => {
-                let res = match pid {
-                    Some(pid) => p.start_for_pid(pid).await,
-                    None => p.set_active(true).await,
+                // The owner is the atomic part: entering game mode and naming
+                // the process that ends it must not be two calls with a window
+                // between them in which the machine is tuned and unwatched.
+                // A `--pid` given alongside is attached afterwards, because
+                // that is a cpuset question and not a lifetime one.
+                let res = match (owner_pid, pid) {
+                    (Some(owner), _) => match p.start_owned_by(owner).await {
+                        Ok(()) => match pid {
+                            Some(pid) => p.attach_pid(pid).await,
+                            None => Ok(()),
+                        },
+                        Err(e) => Err(e),
+                    },
+                    (None, Some(pid)) => p.start_for_pid(pid).await,
+                    (None, None) => p.set_active(true).await,
                 };
                 match res {
                     Ok(()) => {
@@ -986,6 +2399,18 @@ async fn cmd_game(cmd: GameCmd) -> i32 {
                 1
             }
         },
+        // Normally unreachable: the dispatch in `main` routes `profile` here
+        // BEFORE this function, because everything above has already connected
+        // to the system bus and `apex game profile apply`'s guard is only
+        // meaningful when it is reached first.
+        //
+        // Routed rather than panicked on, because this crate's contract is a
+        // clear message and a non-zero exit, never a panic — and routed rather
+        // than wildcarded, so adding a verb to `GameCmd` is still a compile
+        // error here. Reaching it costs a wasted bus connection and nothing
+        // else: a connection raises no polkit prompt, and no mutating method
+        // has been called at this point.
+        GameCmd::Profile { cmd } => gaming::profile_main(cmd).await,
         GameCmd::Attach { pid } => match &proxy {
             Some(p) => match p.attach_pid(pid).await {
                 Ok(()) => {
@@ -1047,6 +2472,11 @@ fn shell_targets() -> Vec<(&'static str, &'static str, &'static str)> {
         ("network hotspot", "hotspot-toggle", "toggle"),
         ("focus", "focus-toggle", "toggle"),
         ("record", "screenrec-on", "toggle"),
+        ("voice", "voice-ptt", "toggle"),
+        ("switcher next", "window-switcher", "next"),
+        ("switcher prev", "window-switcher", "prev"),
+        ("switcher commit", "window-switcher", "commit"),
+        ("switcher cancel", "window-switcher", "cancel"),
     ]
 }
 
@@ -1256,6 +2686,24 @@ fn cmd_shell(cmd: ShellCmd) -> i32 {
         ShellCmd::Power => shell_ipc("PowerMenu-toggle", "toggle", &[]),
         ShellCmd::Focus => shell_ipc("focus-toggle", "toggle", &[]),
         ShellCmd::Record => shell_ipc("screenrec-on", "toggle", &[]),
+        ShellCmd::Voice => shell_ipc("voice-ptt", "toggle", &[]),
+
+        // Four functions on one target rather than four targets, because they
+        // are four operations on one piece of state and the shell has to see
+        // them arrive in order.
+        ShellCmd::Switcher { action } => {
+            let func = match action.as_str() {
+                "next" | "prev" | "commit" | "cancel" => action.as_str(),
+                other => {
+                    eprintln!(
+                        "apex: unknown switcher action '{other}' \
+                         (try: next, prev, commit, cancel)"
+                    );
+                    return 1;
+                }
+            };
+            shell_ipc("window-switcher", func, &[])
+        }
 
         ShellCmd::Audio { which } => {
             let target = match which.as_str() {
@@ -1455,7 +2903,7 @@ fn json_value(v: &zvariant::OwnedValue) -> String {
     inner(v)
 }
 
-fn json_string(s: &str) -> String {
+pub(crate) fn json_string(s: &str) -> String {
     let mut out = String::with_capacity(s.len() + 2);
     out.push('"');
     for c in s.chars() {
@@ -1477,7 +2925,7 @@ fn json_string(s: &str) -> String {
     out
 }
 
-async fn cmd_doctor() -> i32 {
+async fn cmd_doctor(json: bool) -> i32 {
     let v = LocalView::detect();
     let conn = connect().await;
     let running = match &conn {
@@ -1485,102 +2933,72 @@ async fn cmd_doctor() -> i32 {
         None => false,
     };
 
-    line(running, "apexd running (owns org.apexos.Apexd1)");
-    line(true, &format!("profile resolved: active={} class={} device={}",
-        v.selection.active, v.selection.class_or_empty(), v.selection.device_or_empty()));
-
-    // Every check below reports what this machine has; a WARN is information,
-    // not a fault. Nothing here is required for apexd to work.
-    let driver = v.fingerprint.cpu.scaling_driver.as_deref().unwrap_or("");
-    line(
-        !driver.is_empty(),
-        &format!(
-            "cpufreq scaling driver present ({})",
-            if driver.is_empty() { "none" } else { driver }
-        ),
-    );
-    line(
-        v.fingerprint.cpu.amd_pstate() || v.fingerprint.cpu.intel_pstate(),
-        &format!(
-            "EPP-capable scaling driver ({}) — without it, tiers use the governor alone",
-            if driver.is_empty() { "none" } else { driver }
-        ),
-    );
-    line(
-        Path::new("/sys/firmware/acpi/platform_profile").exists(),
-        &format!(
-            "ACPI platform_profile present (choices: {})",
-            read_sys("firmware/acpi/platform_profile_choices").unwrap_or_else(|| "none".into())
-        ),
-    );
-
-    let inv = apexd_core::BatteryInventory::detect();
-    line(!inv.is_empty(), &format!("battery discovery: {}", inv.summary()));
-    if !inv.is_empty() {
-        line(
-            inv.supports_thresholds(),
-            &format!(
-                "charge threshold control present ({})",
-                inv.threshold_support().as_str()
-            ),
-        );
-    }
-
-    for (ok, what) in touchpad::doctor_lines() {
-        line(ok, &what);
-    }
-
-    let s2idle = read_sys("power/mem_sleep").map(|s| s.contains("[s2idle]")).unwrap_or(false);
-    line(s2idle, "s2idle is the active suspend mode");
-
-    // ── M6: fan control and game orchestration ───────────────────────────────
-    let fan_cfg = v.active_profile().fan_config();
-    let inv = apexd_core::fan::FanInventory::discover(Path::new("/sys"), &fan_cfg);
-    line(
-        inv.controllable(),
-        &format!(
-            "fan control channel present, write access unverified ({})",
-            if inv.controls.is_empty() && inv.msi_ec.is_none() {
-                "none".to_string()
-            } else {
-                let mut s: Vec<String> = inv.controls.iter().map(|c| c.id.clone()).collect();
-                if inv.msi_ec.is_some() {
-                    s.push("msi-ec".into());
-                }
-                s.join(", ")
-            }
-        ),
-    );
-    let topo = apexd_core::CoreTopology::detect_from(Path::new("/sys"));
-    if v.fingerprint.cpu.hybrid {
-        line(
-            topo.is_hybrid(),
-            &format!(
-                "P/E split detected via {} (P={} E={})",
-                topo.source.as_str(),
-                topo.pcore_list(),
-                topo.ecore_list()
-            ),
-        );
-    }
-    if v.fingerprint.gpus.iter().any(|g| g.vendor == apexd_core::GpuVendor::Nvidia) {
-        line(
-            apexd_core::gpu::nvidia_smi_available(),
-            "nvidia-smi on PATH (needed for game-mode clock locks)",
-        );
-    }
-    line(
-        Path::new("/sys/fs/cgroup/cgroup.controllers").exists(),
-        "cgroup v2 present (needed for game-mode cpuset pinning)",
-    );
-
-    let metrics_up = TcpStream::connect_timeout(
+    // The checks themselves live in `recover`, so §19's graphical surface and
+    // this command are the same list rendered twice rather than two lists that
+    // can disagree. Everything except the metrics probe is a file read, and
+    // the probe stays here because it is the one check that needs a socket.
+    let mut checks = recover::doctor_checks(&v, running);
+    // A refused connection and a connection nobody could attempt are different
+    // facts about this machine, and `.is_ok()` returned false for both — so
+    // the line a person read was the same sentence either way. That is this
+    // repository's "permission denied is not absence", one layer down: a
+    // machine whose networking is gone was told its metrics endpoint is not
+    // reachable, which is a claim about apexd made out of a syscall that never
+    // left the box.
+    //
+    // The boolean stays, and both remain a WARN, because neither state is a
+    // machine whose endpoint is reachable — `Check` has no third arm and
+    // inventing one here would be a judgement the other checks do not make
+    // (see `render_doctor`'s note on severity). What changes is the sentence,
+    // which is the part somebody acts on.
+    //
+    // tests/chaos/cases/network-loss.sh holds this, by running the same verb
+    // in three real network namespaces — loopback down, loopback up with
+    // nothing listening, and a listener bound — and asserting the first two do
+    // not read identically.
+    let metrics = TcpStream::connect_timeout(
         &"127.0.0.1:9723".parse::<SocketAddr>().unwrap(),
         Duration::from_millis(200),
-    )
-    .is_ok();
-    line(metrics_up, "metrics endpoint reachable on 127.0.0.1:9723");
+    );
+    let (metrics_up, metrics_what) = match &metrics {
+        Ok(_) => (true, "metrics endpoint reachable on 127.0.0.1:9723".to_string()),
+        Err(e) if e.kind() == std::io::ErrorKind::ConnectionRefused => (
+            false,
+            "metrics endpoint on 127.0.0.1:9723 refused the connection — nothing \
+             is listening there, so apexd is not serving metrics"
+                .to_string(),
+        ),
+        Err(e) => (
+            false,
+            format!(
+                "metrics endpoint on 127.0.0.1:9723 could not be probed at all \
+                 ({e}) — this machine's networking did not answer, so whether \
+                 apexd is serving metrics is unknown"
+            ),
+        ),
+    };
+    checks.push(recover::Check {
+        ok: metrics_up,
+        what: metrics_what,
+    });
 
+    // §48: disk-health warnings reach the doctor. Only the rows with something
+    // to do become a WARN — a row nobody could measure is printed with its
+    // reason and passes, because `apex doctor` runs unprivileged and a SMART
+    // log nobody could open must not turn every run red.
+    for (ok, what) in storage::doctor_lines(&storage::Roots::from_env()) {
+        checks.push(recover::Check { ok, what });
+    }
+
+    // §P2-015: the same rule for firmware. An update waiting is a WARN; a
+    // machine where fwupd could not be consulted at all passes with the
+    // reason on the line, because `apex doctor` runs unprivileged and
+    // measured, nothing in any Containerfile installs fwupd today.
+    for (ok, what) in firmware::doctor_lines(&firmware::Roots::from_env()) {
+        checks.push(recover::Check { ok, what });
+    }
+
+    print!("{}", recover::render_doctor(&checks, json));
     0
 }
 
@@ -1634,11 +3052,11 @@ fn print_kv(key: &str, val: Option<String>) {
     }
 }
 
-fn line(ok: bool, what: &str) {
-    println!("[{}] {}", if ok { "PASS" } else { "WARN" }, what);
-}
-
-fn read_sys(rel: &str) -> Option<String> {
+/// `pub(crate)` because the doctor's checks moved to `recover`, where §19's
+/// JSON rendering of them lives. The reader stays here rather than being
+/// duplicated: two `/sys` readers with different trimming rules would answer
+/// the same question two ways.
+pub(crate) fn read_sys(rel: &str) -> Option<String> {
     read_abs(&format!("/sys/{rel}"))
 }
 
@@ -1657,21 +3075,87 @@ mod tests {
     use super::*;
     use clap::CommandFactory;
 
-    fn install(argv: &[&str]) -> (Vec<String>, bool, Vec<String>, bool) {
+    /// The parsed pieces of an `apex install`, in the order `install_argv`
+    /// takes them.
+    struct Install {
+        packages: Vec<String>,
+        no_weak_deps: bool,
+        enable_repo: Vec<String>,
+        allow_unsigned: bool,
+        source: Option<String>,
+        env: Option<String>,
+    }
+
+    fn install(argv: &[&str]) -> Install {
         match Cli::try_parse_from(argv).expect("parses").command {
             Cmd::Install {
                 packages,
                 no_weak_deps,
                 enable_repo,
                 allow_unsigned,
-            } => (packages, no_weak_deps, enable_repo, allow_unsigned),
+                source,
+                env,
+            } => Install {
+                packages,
+                no_weak_deps,
+                enable_repo,
+                allow_unsigned,
+                source,
+                env,
+            },
             _ => panic!("not an install"),
         }
+    }
+
+    /// The engine argv an `apex install` command line produces.
+    fn install_engine_argv(argv: &[&str]) -> Vec<String> {
+        let i = install(argv);
+        install_argv(
+            i.packages,
+            i.no_weak_deps,
+            i.enable_repo,
+            i.allow_unsigned,
+            i.source,
+            i.env,
+        )
     }
 
     #[test]
     fn the_cli_definition_is_internally_consistent() {
         Cli::command().debug_assert();
+    }
+
+    #[test]
+    fn only_the_channel_verb_that_writes_needs_root() {
+        // The whole point of the readout is that it works when the machine is
+        // in trouble. A password prompt in front of "which channel am I on"
+        // would be exactly the wrong time to ask.
+        for argv in [
+            vec!["apex", "channel", "status"],
+            vec!["apex", "channel", "list"],
+            vec!["apex", "channel", "report"],
+        ] {
+            let cli = Cli::try_parse_from(&argv).expect("parses");
+            assert_eq!(privileged_verb(&cli.command), None, "{argv:?}");
+        }
+        let cli = Cli::try_parse_from(["apex", "channel", "set", "stable"]).expect("parses");
+        assert_eq!(privileged_verb(&cli.command), Some("channel set"));
+        // A name nobody has heard of is refused by clap, BEFORE the root gate.
+        // It was the other way round, and the user was told to type sudo and
+        // then told they had made a typo.
+        let e = match Cli::try_parse_from(["apex", "channel", "set", "nightly"]) {
+            Ok(_) => panic!("an invented channel must not parse"),
+            Err(e) => e.to_string(),
+        };
+        for name in ["stable", "candidate", "beta", "edge"] {
+            assert!(e.contains(name), "the refusal must name {name}: {e}");
+        }
+        assert!(!e.contains("root"), "the refusal must not ask for a password: {e}");
+        // And a dry run still needs it: it is the same verb, and classifying
+        // by flag is how a refusal ends up depending on argument order.
+        let cli =
+            Cli::try_parse_from(["apex", "channel", "set", "stable", "--dry-run"]).expect("parses");
+        assert_eq!(privileged_verb(&cli.command), Some("channel set"));
     }
 
     #[test]
@@ -1840,11 +3324,44 @@ mod tests {
         }
         // `apex shell list` is documentation, so it must actually cover the
         // verbs that exist rather than drifting from them.
-        for expect in ["launcher", "settings", "lock", "power", "focus", "record"] {
+        for expect in [
+            "launcher",
+            "settings",
+            "lock",
+            "power",
+            "focus",
+            "record",
+            "switcher next",
+            "switcher commit",
+        ] {
             assert!(
                 rows.iter().any(|(v, ..)| *v == expect),
                 "{expect} missing from the target table"
             );
+        }
+    }
+
+    #[test]
+    fn switcher_actions_parse_and_are_bounded() {
+        match shell_cmd(&["apex", "shell", "switcher", "next"]) {
+            ShellCmd::Switcher { action } => assert_eq!(action, "next"),
+            _ => panic!("not switcher"),
+        }
+        match shell_cmd(&["apex", "shell", "switcher", "commit"]) {
+            ShellCmd::Switcher { action } => assert_eq!(action, "commit"),
+            _ => panic!("not switcher"),
+        }
+        // The action is a free string at the clap layer, so the rejection of a
+        // wrong one lives in the dispatch arm. What is asserted here is that
+        // every action the compositor configs actually bind is in the table —
+        // a verb the keybinds use and the CLI rejects is a dead shortcut.
+        let rows = shell_targets();
+        for action in ["next", "prev", "commit", "cancel"] {
+            let verb = format!("switcher {action}");
+            let row = rows.iter().find(|(v, ..)| *v == verb);
+            let (_, target, func) = row.unwrap_or_else(|| panic!("{verb} missing"));
+            assert_eq!(*target, "window-switcher");
+            assert_eq!(*func, action);
         }
     }
 
@@ -1982,7 +3499,7 @@ mod tests {
     fn install_takes_a_local_rpm_path_as_a_package() {
         // The engine decides what is a file and what is a package name; the CLI
         // must not filter, reorder or reject either form.
-        let (packages, ..) = install(&[
+        let i = install(&[
             "apex",
             "install",
             "/media/usb/google-chrome-stable.rpm",
@@ -1990,7 +3507,7 @@ mod tests {
             "org.gimp.GIMP",
         ]);
         assert_eq!(
-            packages,
+            i.packages,
             vec![
                 "/media/usb/google-chrome-stable.rpm".to_string(),
                 "htop".to_string(),
@@ -2001,32 +3518,29 @@ mod tests {
 
     #[test]
     fn a_path_with_spaces_survives_as_one_argument() {
-        let (packages, ..) = install(&["apex", "install", "/media/My Stick/an app.rpm"]);
-        assert_eq!(packages, vec!["/media/My Stick/an app.rpm".to_string()]);
+        let i = install(&["apex", "install", "/media/My Stick/an app.rpm"]);
+        assert_eq!(i.packages, vec!["/media/My Stick/an app.rpm".to_string()]);
     }
 
     #[test]
     fn the_unverified_opt_in_is_off_unless_asked_for() {
-        let (_, _, _, allow_unsigned) = install(&["apex", "install", "./x.rpm"]);
-        assert!(!allow_unsigned);
-        assert!(!install_argv(vec!["./x.rpm".into()], false, vec![], false)
+        assert!(!install(&["apex", "install", "./x.rpm"]).allow_unsigned);
+        assert!(!install_engine_argv(&["apex", "install", "./x.rpm"])
             .contains(&"--allow-unsigned".to_string()));
     }
 
     #[test]
     fn every_flag_reaches_the_engine_argv() {
-        let (packages, no_weak_deps, enable_repo, allow_unsigned) = install(&[
-            "apex",
-            "install",
-            "--allow-unsigned",
-            "--no-weak-deps",
-            "--enable-repo",
-            "extra",
-            "./x.rpm",
-        ]);
-        assert!(allow_unsigned && no_weak_deps);
         assert_eq!(
-            install_argv(packages, no_weak_deps, enable_repo, allow_unsigned),
+            install_engine_argv(&[
+                "apex",
+                "install",
+                "--allow-unsigned",
+                "--no-weak-deps",
+                "--enable-repo",
+                "extra",
+                "./x.rpm",
+            ]),
             vec![
                 "install".to_string(),
                 "./x.rpm".to_string(),
@@ -2037,12 +3551,423 @@ mod tests {
         );
     }
 
+    // ── the firewall helper's argv ──────────────────────────────────────────
+    //
+    // `firewall_argv`'s own doc comment says it is kept pure "so the argv this
+    // hands a root-run helper can be asserted without running it". Nothing
+    // asserted it. That is the shape of defect this program keeps finding — a
+    // stated property with no test behind it — and it mattered the moment
+    // `status` grew a flag, because `apex` is clap: a word this function does
+    // not emit is a word the helper never sees, however well the helper
+    // supports it.
+
+    /// The helper argv an `apex firewall ...` command line produces, through
+    /// clap, rather than by constructing the enum by hand — so a flag that
+    /// clap would reject cannot pass here.
+    fn firewall_engine_argv(argv: &[&str]) -> Vec<String> {
+        match Cli::parse_from(argv).command {
+            Cmd::Firewall { cmd } => firewall_argv(cmd),
+            _ => panic!("not a firewall command"),
+        }
+    }
+
+    #[test]
+    fn status_is_prose_unless_json_is_asked_for() {
+        assert_eq!(
+            firewall_engine_argv(&["apex", "firewall", "status"]),
+            vec!["status".to_string()]
+        );
+    }
+
+    #[test]
+    fn the_json_flag_reaches_the_helper() {
+        assert_eq!(
+            firewall_engine_argv(&["apex", "firewall", "status", "--json"]),
+            vec!["status".to_string(), "--json".to_string()]
+        );
+    }
+
+    #[test]
+    fn every_firewall_verb_reaches_the_helper_by_its_own_name() {
+        // The helper dispatches on this word. A verb renamed here and not
+        // there is not a compile error — it is `apex firewall reload` exiting
+        // 2 with the helper's usage, which reads like the user's mistake.
+        assert_eq!(
+            firewall_engine_argv(&["apex", "firewall", "list"]),
+            vec!["list".to_string()]
+        );
+        assert_eq!(
+            firewall_engine_argv(&["apex", "firewall", "reload"]),
+            vec!["reload".to_string()]
+        );
+        assert_eq!(
+            firewall_engine_argv(&["apex", "firewall", "allow", "mdns"]),
+            vec!["allow".to_string(), "mdns".to_string()]
+        );
+        assert_eq!(
+            firewall_engine_argv(&["apex", "firewall", "deny", "mdns"]),
+            vec!["deny".to_string(), "mdns".to_string()]
+        );
+    }
+
+    #[test]
+    fn a_service_name_is_passed_as_one_word_however_it_is_spelt() {
+        // The helper takes this straight into a path under
+        // /etc/apex/firewall.d and refuses it there. What must not happen on
+        // THIS side is the name arriving split or reshaped, because then the
+        // helper's own refusal is about a different string than the user typed.
+        assert_eq!(
+            firewall_engine_argv(&["apex", "firewall", "deny", "../../etc/issue"]),
+            vec!["deny".to_string(), "../../etc/issue".to_string()]
+        );
+        assert_eq!(
+            firewall_engine_argv(&["apex", "firewall", "deny", "a b"]),
+            vec!["deny".to_string(), "a b".to_string()]
+        );
+    }
+
+    // ── §9: the resolver's escape hatch ─────────────────────────────────────
+
+    #[test]
+    fn no_source_is_named_unless_the_user_named_one() {
+        // The empty case is the one that matters: `apex install htop` must
+        // reach the engine exactly as it did before the resolver existed, or
+        // this is a behaviour change on a shipped command.
+        assert_eq!(
+            install_engine_argv(&["apex", "install", "htop"]),
+            vec!["install".to_string(), "htop".to_string()]
+        );
+    }
+
+    #[test]
+    fn the_chosen_source_reaches_the_engine() {
+        assert_eq!(
+            install_engine_argv(&["apex", "install", "--source", "flatpak", "discord"]),
+            vec![
+                "install".to_string(),
+                "discord".to_string(),
+                "--source=flatpak".to_string(),
+            ]
+        );
+        assert_eq!(
+            install_engine_argv(&[
+                "apex", "install", "--source", "capsule", "--env", "arch", "yay",
+            ]),
+            vec![
+                "install".to_string(),
+                "yay".to_string(),
+                "--source=capsule".to_string(),
+                "--env=arch".to_string(),
+            ]
+        );
+    }
+
+    #[test]
+    fn a_capsule_install_does_not_demand_root() {
+        // Root has no capsules. Demanding root here would make the CLI ask for
+        // a password and the engine then refuse the privileged invocation —
+        // the user gets two refusals and no package.
+        assert_eq!(
+            privilege(&["apex", "install", "--source", "capsule", "htop"]),
+            None
+        );
+        // Every other source still writes something the system owns.
+        assert_eq!(
+            privilege(&["apex", "install", "--source", "rpm", "htop"]),
+            Some("install")
+        );
+        assert_eq!(
+            privilege(&["apex", "install", "--source", "flatpak", "discord"]),
+            Some("install")
+        );
+    }
+
+    #[test]
+    fn asking_what_would_happen_never_needs_a_password() {
+        assert_eq!(privilege(&["apex", "resolve", "discord"]), None);
+        match Cli::try_parse_from(["apex", "resolve", "discord"])
+            .expect("parses")
+            .command
+        {
+            Cmd::Resolve { name } => assert_eq!(name, "discord"),
+            _ => panic!("not a resolve"),
+        }
+    }
+
+    fn privilege(argv: &[&str]) -> Option<&'static str> {
+        privileged_verb(&Cli::try_parse_from(argv).expect("parses").command)
+    }
+
     #[test]
     fn install_is_still_a_root_only_verb() {
         // Adding a flag must not accidentally move `install` out of the
         // privileged set: it writes an extension and re-merges /usr.
-        let cli = Cli::try_parse_from(["apex", "install", "--allow-unsigned", "./x.rpm"]).unwrap();
-        assert!(matches!(cli.command, Cmd::Install { .. }));
+        assert_eq!(
+            privilege(&["apex", "install", "--allow-unsigned", "./x.rpm"]),
+            Some("install")
+        );
+        assert_eq!(privilege(&["apex", "remove", "htop"]), Some("remove"));
+        assert_eq!(privilege(&["apex", "pkg", "upgrade"]), Some("pkg upgrade"));
     }
 
+    #[test]
+    fn reading_never_needs_a_password() {
+        // Each of these is driven from the desktop as the session user. A
+        // password prompt here is not a security improvement, it is a shell
+        // that stops working.
+        for argv in [
+            vec!["apex", "search", "htop"],
+            vec!["apex", "pkg", "list"],
+            vec!["apex", "pkg", "verify"],
+            vec!["apex", "status"],
+            vec!["apex", "tier"],
+            vec!["apex", "fan", "status"],
+        ] {
+            assert_eq!(privilege(&argv), None, "{argv:?} demanded root");
+        }
+    }
+
+    // ── apex devices ────────────────────────────────────────────────────────
+
+    fn devices(argv: &[&str]) -> Vec<String> {
+        match Cli::try_parse_from(argv).expect("parses").command {
+            Cmd::Devices { area } => devices_argv(area),
+            _ => panic!("not a devices verb"),
+        }
+    }
+
+    #[test]
+    fn every_area_reaches_the_helper_by_the_name_the_helper_dispatches_on() {
+        // The helper's `case` arms are these words. A rename on one side is not
+        // a compile error on the other: it is `apex devices dock` printing the
+        // usage text and exiting 2.
+        for (typed, sent) in [
+            ("print", "print"),
+            ("scan", "scan"),
+            ("share", "share"),
+            ("media", "media"),
+            ("network", "network"),
+            ("bluetooth", "bluetooth"),
+            ("dock", "dock"),
+            ("all", "all"),
+        ] {
+            assert_eq!(devices(&["apex", "devices", typed]), vec![sent]);
+        }
+    }
+
+    #[test]
+    fn no_area_asks_for_everything_rather_than_for_nothing() {
+        // The helper defaults to `all` on its own, but only because nothing is
+        // passed. Sending an empty argv would work by coincidence; sending the
+        // word means the default survives a change to the helper's dispatch.
+        assert_eq!(devices(&["apex", "devices"]), vec!["all"]);
+    }
+
+    #[test]
+    fn an_area_that_does_not_exist_is_refused_before_anything_runs() {
+        // A free-string argument would hand "dcok" to the helper, which prints
+        // usage to stderr and exits 2. clap answers with the list instead, and
+        // no subprocess starts.
+        assert!(Cli::try_parse_from(["apex", "devices", "dcok"]).is_err());
+    }
+
+    #[test]
+    fn reading_the_devices_is_never_a_privileged_verb() {
+        // Root would report something different rather than something more: it
+        // walks through the 0000 directory whose refusal is the answer, it has
+        // no seat, and its bluetoothctl sees a different set of paired devices
+        // than the session asking the question.
+        for argv in [
+            vec!["apex", "devices"],
+            vec!["apex", "devices", "media"],
+            vec!["apex", "devices", "network"],
+            vec!["apex", "devices", "dock"],
+        ] {
+            assert_eq!(privilege(&argv), None, "{argv:?} demanded root");
+        }
+    }
+
+    // ── apex plugin (§16) ───────────────────────────────────────────────────
+
+    fn plugin(argv: &[&str]) -> Vec<String> {
+        match Cli::try_parse_from(argv).expect("parses").command {
+            Cmd::Plugin { cmd } => plugin_argv(cmd),
+            _ => panic!("not a plugin verb"),
+        }
+    }
+
+    #[test]
+    fn the_plugin_verbs_reach_the_helper_unchanged() {
+        assert_eq!(plugin(&["apex", "plugin", "list"]), vec!["list"]);
+        assert_eq!(
+            plugin(&["apex", "plugin", "list", "--json"]),
+            vec!["list", "--json"]
+        );
+        assert_eq!(
+            plugin(&["apex", "plugin", "info", "apex-worldclock"]),
+            vec!["info", "apex-worldclock"]
+        );
+        assert_eq!(
+            plugin(&["apex", "plugin", "enable", "apex-worldclock"]),
+            vec!["enable", "apex-worldclock"]
+        );
+        assert_eq!(
+            plugin(&["apex", "plugin", "disable", "apex-worldclock"]),
+            vec!["disable", "apex-worldclock"]
+        );
+    }
+
+    #[test]
+    fn a_plugin_id_is_passed_through_and_never_interpreted_here() {
+        // The id is validated by the helper — for path safety in shell, and
+        // against apex-shell's own `validId` through node. This side must not
+        // pre-filter it: a CLI that silently dropped or rewrote an id would
+        // make the helper's refusal unreachable, and the refusal is the thing
+        // that keeps a traversal out of a filesystem path.
+        assert_eq!(
+            plugin(&["apex", "plugin", "info", "../../etc/passwd"]),
+            vec!["info", "../../etc/passwd"]
+        );
+    }
+
+    #[test]
+    fn plugins_are_never_a_privileged_verb() {
+        // Every path `apex plugin` touches is under the invoking user's
+        // ~/.config/apex-shell, which is the directory APEX Shell itself
+        // reads. A root `apex plugin disable` would move root's plugins and
+        // leave the user's alone — a command that reports success and changes
+        // nothing the user can see.
+        for argv in [
+            vec!["apex", "plugin", "list"],
+            vec!["apex", "plugin", "info", "x"],
+            vec!["apex", "plugin", "enable", "x"],
+            vec!["apex", "plugin", "disable", "x"],
+        ] {
+            assert_eq!(privilege(&argv), None, "{argv:?} demanded root");
+        }
+    }
+
+    #[test]
+    fn the_plugin_helper_is_an_absolute_path_in_libexec() {
+        // Not a PATH lookup. `apex plugin` drives a shipped program, and
+        // resolving it through PATH would let anything on the user's PATH
+        // answer for the shell's plugin rules.
+        assert!(ops::PLUGIN_ENGINE.starts_with('/'));
+        assert_ne!(ops::PLUGIN_ENGINE, ops::ENV_ENGINE);
+        assert_ne!(ops::PLUGIN_ENGINE, ops::PKG_ENGINE);
+    }
+
+    // ── apex env (§8 capsules) ──────────────────────────────────────────────
+
+    fn env(argv: &[&str]) -> Vec<String> {
+        match Cli::try_parse_from(argv).expect("parses").command {
+            Cmd::Env { cmd } => env_argv(cmd),
+            _ => panic!("not an env verb"),
+        }
+    }
+
+    #[test]
+    fn env_create_passes_the_name_and_nothing_it_was_not_given() {
+        assert_eq!(env(&["apex", "env", "create", "fedora"]), vec!["create", "fedora"]);
+    }
+
+    #[test]
+    fn the_device_profile_reaches_the_engine() {
+        // The one flag that decides whether a capsule can see the GPU. A
+        // silently dropped `--gpu` produces a capsule that looks right and
+        // cannot compute, which is a bug report about drivers.
+        assert_eq!(
+            env(&["apex", "env", "create", "ml", "--gpu", "amd"]),
+            vec!["create", "ml", "--gpu=amd"]
+        );
+        assert_eq!(
+            env(&["apex", "env", "create", "box", "--image", "docker.io/library/ubuntu:24.04"]),
+            vec!["create", "box", "--image=docker.io/library/ubuntu:24.04"]
+        );
+    }
+
+    #[test]
+    fn a_trailing_command_is_separated_from_the_engines_own_flags() {
+        // Without the `--` the engine cannot tell a command's flags from its
+        // own, and clap has already consumed the separator the user typed.
+        assert_eq!(
+            env(&["apex", "env", "exec", "box", "ls", "-l"]),
+            vec!["exec", "box", "--", "ls", "-l"]
+        );
+        assert_eq!(
+            env(&["apex", "env", "enter", "box", "--", "bash", "-lc", "echo hi"]),
+            vec!["enter", "box", "--", "bash", "-lc", "echo hi"]
+        );
+    }
+
+    #[test]
+    fn entering_without_a_command_asks_for_a_login_shell() {
+        // `enter box --` with an empty command must not reach the engine, or it
+        // would report a usage error for a request that is perfectly valid.
+        assert_eq!(env(&["apex", "env", "enter", "box"]), vec!["enter", "box"]);
+    }
+
+    #[test]
+    fn removing_a_capsule_does_not_inherit_force() {
+        assert_eq!(env(&["apex", "env", "rm", "box"]), vec!["rm", "box"]);
+        assert_eq!(
+            env(&["apex", "env", "rm", "box", "--force", "--keep-home"]),
+            vec!["rm", "box", "--keep-home", "--force"]
+        );
+    }
+
+    #[test]
+    fn the_gui_export_reaches_the_engine_with_both_halves() {
+        // §8's launcher integration. The application name is a positional, not
+        // a flag, and the engine refuses anything that is not a bare name — so
+        // a dropped argument here would become a usage error rather than an
+        // export of something else.
+        assert_eq!(
+            env(&["apex", "env", "export", "py", "gimp"]),
+            vec!["export", "py", "gimp"]
+        );
+        assert_eq!(
+            env(&["apex", "env", "unexport", "py", "gimp"]),
+            vec!["unexport", "py", "gimp"]
+        );
+        assert_eq!(env(&["apex", "env", "exports", "py"]), vec!["exports", "py"]);
+    }
+
+    #[test]
+    fn provisioning_a_language_names_the_language_and_not_a_capsule() {
+        // The capsule a language lives in is the ENGINE's decision — c and cpp
+        // share one, javascript and typescript share one — so the CLI must not
+        // pass a capsule name here or it would be a second answer to the same
+        // question.
+        assert_eq!(
+            env(&["apex", "env", "provision", "rust"]),
+            vec!["provision", "rust"]
+        );
+        assert_eq!(env(&["apex", "env", "languages"]), vec!["languages"]);
+    }
+
+    #[test]
+    fn capsules_are_never_a_privileged_verb() {
+        // Capsules are rootless per-user containers. If `apex env` ever landed
+        // in the privileged set it would create them under
+        // /var/lib/containers, shared by every account, and need an
+        // authentication prompt to enter a shell.
+        //
+        // `export` and `provision` are in this list for a sharper reason than
+        // the others: both are reachable from `apex apply`, and the blueprint's
+        // whole claim to never raising an authentication prompt is that it
+        // converges the privilege domain it is already in. A privileged capsule
+        // verb would break that claim from the outside.
+        for argv in [
+            vec!["apex", "env", "create", "fedora"],
+            vec!["apex", "env", "rm", "fedora"],
+            vec!["apex", "env", "install", "fedora", "htop"],
+            vec!["apex", "env", "enter", "fedora"],
+            vec!["apex", "env", "export", "fedora", "gimp"],
+            vec!["apex", "env", "unexport", "fedora", "gimp"],
+            vec!["apex", "env", "provision", "rust"],
+        ] {
+            assert_eq!(privilege(&argv), None, "{argv:?} demanded root");
+        }
+    }
 }

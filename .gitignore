@@ -1,7 +1,28 @@
 # Compiled / generated
 *.qmlc
-target/
 node_modules/
+
+# wrangler's local state and build scratch. `wrangler dev --local` writes
+# miniflare's sqlite files and a bundled copy of the Worker under here; they
+# are a cache of a local run, not source, and they name Durable Object
+# instances from whatever last ran on somebody's laptop.
+.wrangler/
+
+# Cargo build directories, ANCHORED. This was a bare `target/` for the life of
+# the repository, and an unanchored directory pattern matches at every depth —
+# so `apexd/apex-backup-core/src/target/`, a SOURCE module holding the backup
+# backends, was invisible to git. The crate declared `pub mod target;`, the
+# whole module was untracked, and the branch that added it could not compile on
+# any machine but the one that wrote it: about 40 KB of implementation, the
+# filesystem and R2 targets, plus their tests.
+#
+# It is the same shape as `*.pem` swallowing the pinned Sigstore root in
+# September — a rule written for build output that also matched something the
+# build needs. Anchored here, so only a real cargo directory at a known path is
+# ignored and a module named `target` is a normal source file again.
+/target/
+apexd/target/
+installer/target/
 
 # Build artifacts — disk and installer images (large, never versioned)
 *.img
@@ -12,6 +33,21 @@ node_modules/
 *.priv
 *.pem
 *.p12
+
+# ...with one deliberate exception, because the rule above silently ate it.
+# files/system/trust/fulcio-root.pem is a PUBLIC certificate — the pinned
+# Sigstore root that a signing certificate must chain to — and it is shipped by
+# Containerfile.base, which fails the build if its fingerprint is not the
+# expected one. It is not signing material and there is no private half.
+#
+# It was committed once and did not arrive: `*.pem` matched it, `git status`
+# said nothing, and the branch was green because the file existed untracked in
+# the worktree that wrote it. On a clean checkout the file is absent, and under
+# the shipped default (signature=enforce) a missing root is CouldNotRun, which
+# REFUSES — so the omission would not have broken a feature, it would have
+# stopped every machine in the fleet from updating. Negated by exact path
+# rather than by directory, so the next .pem to land here is a decision.
+!files/system/trust/fulcio-root.pem
 
 # OS cruft
 .DS_Store
@@ -24,3 +60,7 @@ output/
 # development; its cache must never ship in the image build context.
 __pycache__/
 *.pyc
+
+# tests/run-clippy.sh builds here so it never shares a target dir with cargo test
+/target-clippy/
+apexd/target-clippy/

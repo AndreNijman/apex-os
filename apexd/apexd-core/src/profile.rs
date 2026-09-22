@@ -208,6 +208,41 @@ impl Default for NvidiaConfig {
     }
 }
 
+/// What a game session asks of a non-NVIDIA GPU.
+///
+/// Deliberately small. These are the two controls whose whole range is safe:
+/// amdgpu's DPM level is a documented enum the driver validates, and i915's
+/// frequency floor is clamped by the driver to the limits it publishes. Neither
+/// changes a voltage, neither can be set to a value that damages a card, and
+/// both are restored on the way out.
+///
+/// What is NOT here, and will not be without hardware to test it on:
+/// `pp_od_clk_voltage` (amdgpu overclocking, requires `amdgpu.ppfeaturemask`
+/// and can hang a card) and any power-limit write.
+#[derive(Debug, Clone, PartialEq, Eq, Deserialize)]
+#[serde(default)]
+pub struct SysfsGpuConfig {
+    pub enabled: bool,
+    /// amdgpu `power_dpm_force_performance_level` while the game runs.
+    /// `auto` is the shipped default and means "leave it alone".
+    pub amd_perf_level: String,
+    /// i915 frequency floor while the game runs, as a percentage of the range
+    /// the hardware reports between `gt_RPn_freq_mhz` and `gt_RP0_freq_mhz`.
+    /// 0 leaves the floor alone.
+    pub intel_floor_percent: u8,
+}
+
+impl Default for SysfsGpuConfig {
+    fn default() -> SysfsGpuConfig {
+        SysfsGpuConfig {
+            enabled: true,
+            amd_perf_level: "high".to_string(),
+            intel_floor_percent: 0,
+        }
+    }
+}
+
+
 fn default_cgroup() -> String {
     "/sys/fs/cgroup/apex-game".to_string()
 }
@@ -240,6 +275,14 @@ pub struct GameModeConfig {
     /// Interrupt handler names that belong *on* the game's cores.
     pub irq_pin_to_game: Vec<String>,
     pub nvidia: NvidiaConfig,
+    /// The AMD and Intel half of the same job. Named for the mechanism rather
+    /// than the vendor because one config drives both: the fields that do not
+    /// apply to the card in front of it are simply not planned.
+    ///
+    /// It exists because `[gamemode]` had an `[nvidia]` section and nothing
+    /// else, so an APEX machine with an AMD or Intel GPU — which is most of
+    /// them — got cpuset pinning and IRQ steering and no GPU handling at all.
+    pub gpu: SysfsGpuConfig,
     /// sched-ext scheduler to load for the duration of a game session.
     /// Empty string = leave the kernel's own scheduler alone.
     ///
@@ -253,10 +296,12 @@ pub struct GameModeConfig {
     /// than naming it per-profile is what makes Gaming Mode tuned on ANY
     /// machine instead of only on the author's Katana.
     ///
-    /// That is safe for the Daily edition by construction, not by luck:
-    /// `scxctl` is a D-Bus client for scx_loader, and scx_loader.service is
-    /// enabled ONLY in Containerfile.gaming. On Daily the switch is a logged
-    /// no-op. A profile can still opt out explicitly with `scx = ""`.
+    /// Safe on a machine that never games, by construction rather than luck:
+    /// `scxctl` is a D-Bus client for scx_loader, whose unit is `Type=dbus` and
+    /// is NOT enabled at boot — it is activated by the first call, so no
+    /// scheduler daemon runs on a laptop that never enters game mode, and the
+    /// shipped /usr/share/scx_loader/config.toml leaves `default_sched`
+    /// commented out. A profile can still opt out explicitly with `scx = ""`.
     pub scx: String,
 }
 
@@ -272,6 +317,7 @@ impl Default for GameModeConfig {
             irq: default_irq(),
             irq_pin_to_game: Vec::new(),
             nvidia: NvidiaConfig::default(),
+            gpu: SysfsGpuConfig::default(),
             scx: "scx_lavd".to_string(),
         }
     }

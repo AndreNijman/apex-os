@@ -1,5 +1,11 @@
 # APEX-OS — fastfetch greeting for interactive terminals (apex-logs 33, 14)
 #
+# shellcheck shell=bash
+# No shebang because this is sourced, by /etc/bashrc for bash and by the seeded
+# ~/.zshrc for zsh. bash is declared because it is the only one of the two that
+# the linter can read, and the two dialects agree on everything in this file:
+# there is no $ZSH_VERSION branch here, unlike agent.sh next door.
+#
 # ONE file, sourced by BOTH shells: /etc/bashrc for bash and the seeded ~/.zshrc
 # for zsh. It used to be an inline block appended only to /etc/bashrc — but zsh is
 # the DEFAULT LOGIN SHELL on APEX-OS (see /etc/default/useradd), so in practice no
@@ -52,14 +58,40 @@ if [ "${_apex_greet}" = 1 ]; then
     case "$(gsettings get org.gnome.desktop.interface color-scheme 2>/dev/null)" in
         *light*) _apex_logo_color=black ;;
     esac
-    if [ -r /etc/fastfetch/config.jsonc ]; then
+    # Accent colour, so the greeting tracks the desktop palette instead of the
+    # static brand chartreuse it used to be built around. APEX Shell's matugen
+    # pipeline rewrites this file on every wallpaper change, already formatted as
+    # an SGR parameter string (38;2;R;G;B) — the greeting is POSIX sh and has no
+    # business doing hex arithmetic to use a colour.
+    _apex_accent_file="${XDG_CACHE_HOME:-$HOME/.cache}/apex-shell/accent-ansi"
+    _apex_accent=""
+    if [ -r "${_apex_accent_file}" ]; then
+        read -r _apex_accent < "${_apex_accent_file}" || _apex_accent=""
+    fi
+    # Only digits and semicolons reach a terminal escape. A truncated or
+    # part-written file (matugen rewrites it under the running shell) would
+    # otherwise be pasted straight into the output.
+    case "${_apex_accent}" in
+        ""|*[!0-9\;]*) _apex_accent="" ;;
+    esac
+
+    # No accent yet — a first login before any wallpaper has been picked — means
+    # no --color at all, leaving the config's own default rather than forcing
+    # some colour that may not suit the scheme. Spelled out as four branches
+    # because this file is SOURCED: building the argument list with `set --`
+    # would overwrite the calling shell's positional parameters.
+    if [ -r /etc/fastfetch/config.jsonc ] && [ -n "${_apex_accent}" ]; then
+        fastfetch --config /etc/fastfetch/config.jsonc --logo-color-1 "${_apex_logo_color}" --color "${_apex_accent}"
+    elif [ -r /etc/fastfetch/config.jsonc ]; then
         fastfetch --config /etc/fastfetch/config.jsonc --logo-color-1 "${_apex_logo_color}"
-    else
+    elif [ -n "${_apex_accent}" ]; then
         # Config missing (a partial image, or a user deleted it): still greet
         # rather than silently printing nothing at all.
+        fastfetch --logo-color-1 "${_apex_logo_color}" --color "${_apex_accent}"
+    else
         fastfetch --logo-color-1 "${_apex_logo_color}"
     fi
-    unset _apex_logo_color
+    unset _apex_logo_color _apex_accent _apex_accent_file
 fi
 
 unset _apex_greet

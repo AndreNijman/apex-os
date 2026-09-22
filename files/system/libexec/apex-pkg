@@ -58,6 +58,48 @@
 # repeating the command with --allow-unsigned, which records the decision against
 # that file's exact bytes so `apex pkg list` and `apex pkg verify` keep telling
 # the truth about where the software came from.
+#
+# AND A LOCAL .deb FILE, FOR THE SOFTWARE THAT SHIPS AS NOTHING ELSE
+# Anthropic publishes Claude Desktop for Linux only as a .deb — five rpm/yum
+# prefixes under downloads.claude.ai all answer 404 — and it is not alone:
+# Electron applications are packaged for apt and for nothing else all the time.
+# Until now the answer on this machine was to hand-unpack it into /usr/local and
+# run a per-app update timer, which this repository's own CLAUDE.md calls the
+# wrong model in as many words. So `apex install ./thing.deb` goes through the
+# SAME extension, the same cache, the same requested list and the same rollback
+# as everything else.
+#
+# What a .deb does NOT get is a second package manager. Specifically:
+#
+#   * its maintainer scripts are NEVER executed. They assume dpkg, apt and a
+#     Debian filesystem; Claude Desktop's postinst writes an apt source, which
+#     on this machine would be a second update channel the product decision
+#     explicitly forbids. A package whose entry point exists only because its
+#     postinst creates it is REFUSED rather than half-installed — the same
+#     lesson `apex install wine` taught with rpm scriptlets, where twelve
+#     /usr/bin entries shipped as dangling symlinks and the install reported
+#     success.
+#   * its Debian dependencies are NEVER resolved. `libgtk-3-0` is not a Fedora
+#     package name and no mapping between the two is honest. They are printed,
+#     recorded in state.json, and left to the user.
+#   * its payload may only land in /usr and /opt, and a shared library that
+#     would sit in a linker search path or a Debian multiarch directory is
+#     refused. See deb_layout_ok for why translating /usr/lib/x86_64-linux-gnu
+#     to /usr/lib64 is the worst of the three options.
+#   * it is never verified. Debian signs the apt INDEX, not the package file,
+#     so a .deb on disk is only as trustworthy as where it came from, and every
+#     one of them needs --allow-unsigned.
+#
+# There is no apt-repository client here: APEX fetches no .deb, resolves no
+# Debian dependency graph and tracks no Debian release. A .deb is installed
+# from a file the user already has, and that is the whole of it.
+# AND AN APPIMAGE, WHICH IS NOT A PACKAGE AT ALL
+# `apex install ./Thing.AppImage` unpacks that file once and installs the
+# application it contains — launcher entry, icon and command — WITHOUT ever
+# running it and without any part of the extension machinery. See the AppImage
+# section below for why libfuse.so.2 (absent from this image) never comes into
+# it, and for what `apex update` does with one, which is nothing: an installed
+# AppImage is pinned to the bytes that were installed.
 # ─────────────────────────────────────────────────────────────────────────────
 set -euo pipefail
 
@@ -78,12 +120,33 @@ readonly STATE="${PKG_ROOT}/state.json"
 # NEVRA cannot be split back into a name unambiguously (is `foo-bar-1.0-1` the
 # package `foo-bar` or `foo`?), and the EVR is in the RPM header anyway.
 readonly LOCAL_DIR="${PKG_ROOT}/local"
+# Local .deb files, cached by package NAME under a directory of their own.
+# NOT merged into LOCAL_DIR: every function that touches that directory globs
+# `*.rpm`, reads an RPM header out of what it finds, and stores the result as
+# `local:<NAME>`. A second archive format sharing that namespace would make
+# `local:chrome` ambiguous the first time someone had both.
+readonly DEB_DIR="${PKG_ROOT}/deb"
 readonly ETC_SAVE="${PKG_ROOT}/etc"
 readonly ETC_LIST="${PKG_ROOT}/etc.list"
 readonly VAR_LIST="${PKG_ROOT}/var.list"
 readonly ROLLBACK_DIR="${PKG_ROOT}/rollback"
 readonly COPR_KEY_DB="${PKG_ROOT}/copr-keyring"
 readonly COPR_KEYS="${PKG_ROOT}/copr-keys"
+# AppImages. NOT under PKG_ROOT, which is 0700 root: `apex pkg list` and
+# `apex pkg verify` run unprivileged, and an AppImage's metadata is not a
+# secret — the unpacked application is world-readable by construction.
+#
+# The registry holds the accepted bytes plus one manifest, one trust marker and
+# one record per application; the unpacked payloads live under /usr/local,
+# which is a symlink to ../var/usrlocal on this OS and therefore writable. That
+# location is not a convenience: /usr/local/bin is already on PATH,
+# /usr/local/share is already in XDG_DATA_DIRS, and SELinux's
+# `/var/usrlocal -> /usr/local` substitution gives the tree bin_t/lib_t instead
+# of var_lib_t, which is what lets the desktop session execute it.
+readonly APPIMAGE_REG=/var/lib/apex/appimage
+readonly APPIMAGE_PREFIX=/usr/local
+readonly APPIMAGE_APPS="${APPIMAGE_PREFIX}/lib/apex-appimage"
+
 # Staging lives under /var/lib, NOT /var/tmp: rpm cannot take its transaction
 # lock inside a tmp-labelled tree under SELinux, and the resulting "can't create
 # transaction lock" error would be printed on every single install.
@@ -91,17 +154,50 @@ readonly WORK_ROOT="${PKG_ROOT}/work"
 readonly LOCK="${PKG_ROOT}/.lock"
 # Increment whenever a newly baked image package may overlap existing user
 # extensions, or whenever the on-disk layout under PKG_ROOT changes. A mismatch
-# triggers one rebuild even within the same VERSION_ID.
+# triggers one rebuild even within the same VERSION_ID — which is the whole
+# point, because VERSION_ID is `43` before and after an APEX image build and
+# nothing else in an extension's state notices that the image moved.
+#
+# BOTH guards read this, and until 2026-09-19 only one of them did:
+# cmd_rebuild --if-needed compares it before downloading anything, and
+# ext_up_to_date compares it again after the download, on the path every
+# install, remove, upgrade and rebuild funnels through. A bump is only as good
+# as the second one; see the comment on ext_up_to_date for what a bump without
+# it does.
 #   1 -> 2: added ${PKG_ROOT}/local (cached local .rpm files) and the
 #           `local:<NAME>` requested-list form. A level-1 state.json has neither,
 #           so its requested list rebuilds unchanged; the only effect is one
 #           extra rebuild on the first boot after the update.
-readonly PKG_COMPAT_LEVEL=2
+#   2 -> 3: pkg-share (merge 5de97037) changed what the 32-bit pass carries: a
+#           path now arrives only when neither the running image nor this
+#           transaction's own native pass already provides it. Every extension
+#           built before it therefore holds files the image owns. Measured on
+#           katana on 2026-09-19 against one built at level 2: 177 image paths
+#           shadowed, 14 of them a 32-bit binary over a 64-bit one, and zero
+#           i686 Vulkan ICDs where the fixed engine produces 13 — including
+#           nvidia_icd.i686.json, which a live recovery had to hand-write in
+#           September. Nothing else in that state.json moves across the image
+#           build that carries the fix, so this number is what makes the
+#           machine rebuild.
+#   3 -> NOT BUMPED for .deb support, deliberately. The level exists to force a
+#           rebuild when an existing extension's CONTENTS would come out
+#           different, and a machine running level 3 has no `deb:` entry in its
+#           requested list — there is no such thing as an extension built
+#           before this that holds a .deb. Bumping would re-download every rpm
+#           on every machine in the fleet to rebuild a byte-identical image.
+readonly PKG_COMPAT_LEVEL=3
 
 # Packages that must never come from an extension. The first group needs an
 # initramfs/deployment; the second is the running userspace ABI floor — shadowing
 # any of it with a second copy on an overlay is unrecoverable without a rollback.
 readonly REFUSE_RE='^(kernel|kernel-core|kernel-modules(-.*)?|kernel-devel(-.*)?|kernel-cachyos.*|kmod-.*|akmod-.*|.*-kmod|glibc|glibc-common|systemd|systemd-libs|systemd-udev|rpm|rpm-libs|librpm.*|dnf5?|libdnf5.*|bootc|ostree|libostree.*|rpm-ostree|filesystem|setup|shadow-utils|bash|coreutils|selinux-policy.*|grub2-.*|shim.*|dracut.*|plymouth.*)$'
+
+# The account a package scriptlet is dropped to before it is allowed to run, and
+# how long it may run for. See alternatives_record() for what is executed and
+# why. root is not an option here: nothing in this engine runs package code with
+# privileges.
+readonly ALT_SCRIPTLET_USER=nobody
+readonly ALT_SCRIPTLET_TIMEOUT=30
 
 # Progress goes to stderr, never stdout: stdout is reserved for data (paths,
 # listings) and functions like build_payload return their result through it.
@@ -165,11 +261,60 @@ local_cache()  { printf '%s/%s.rpm'   "$LOCAL_DIR" "$(local_name "$1")"; }
 local_marker() { printf '%s/%s.trust' "$LOCAL_DIR" "$(local_name "$1")"; }
 
 # Does requested-list entry $1 name the same package the user typed as $2?
-# `apex remove chrome` has to match the entry `local:chrome`, because the user
-# installed it by path and a path is not what ends up in the list.
+# `apex remove chrome` has to match the entry `local:chrome` (a local .rpm) or
+# `deb:chrome` (a local .deb), because the user installed it by path and a path
+# is not what ends up in the list.
 requested_matches() {
-    [ "$1" = "$2" ] || [ "$1" = "local:${2}" ]
+    [ "$1" = "$2" ] || [ "$1" = "local:${2}" ] || [ "$1" = "deb:${2}" ]
 }
+
+# ── local .deb files ─────────────────────────────────────────────────────────
+# A .deb is an `ar` archive of three members: `debian-binary` (the format
+# version, "2.0"), `control.tar.*` (metadata and the maintainer scripts) and
+# `data.tar.*` (the payload). Some vendors append a fourth, `_gpgorigin` — a
+# debsigs signature. Cisco's Packet Tracer .deb on this developer's machine
+# carries one; see deb_trust_refusal for why APEX does not treat it as
+# verification.
+#
+# `dpkg-deb` is not in the image and is not wanted: it would bring dpkg's
+# database with it, and there is no world in which APEX maintains a second
+# package database. `ar` and `tar` are enough, and `ar` is already in the image
+# — Containerfile.core's 5a-aiapps stage unpacks the Claude Desktop .deb with it
+# and FATALs if binutils is absent, which is the same assertion made here.
+deb_magic_ok() {
+    local magic
+    magic="$(head -c8 -- "$1" 2>/dev/null | od -An -tx1 | tr -d ' \n')"
+    [ "$magic" = 213c617263683e0a ]   # !<arch>\n
+}
+
+# Is this argument meant to be a local .deb file? Same three narrow rules as
+# is_local_rpm_arg, and it MUST be asked first: is_local_rpm_arg answers true
+# for any argument containing a slash, so `apex install ./claude.deb` would
+# otherwise be refused as "not an RPM package".
+is_local_deb_arg() {
+    case "$1" in
+        *.deb) return 0 ;;   # named as a file, whether or not it exists yet
+        */*)   [ -f "$1" ] && deb_magic_ok "$1" ;;
+        *)     return 1 ;;
+    esac
+}
+
+# Debian policy says a package name is lowercase. Real vendor .debs are not:
+# Cisco ships `Package: PacketTracer`. Refusing those would be pedantry, so the
+# rule enforced here is the one that matters — the name out of an untrusted
+# archive becomes a path under DEB_DIR in a script running as root, so no
+# slash, no traversal, no leading dash, nothing a shell would reinterpret.
+valid_deb_name() {
+    [[ "$1" =~ ^[A-Za-z0-9][A-Za-z0-9+._-]*$ ]]
+}
+
+deb_id()         { printf 'deb:%s' "$1"; }
+is_deb_id()      { case "$1" in deb:?*) return 0 ;; esac; return 1; }
+deb_name()       { printf '%s' "${1#deb:}"; }
+deb_cache()      { printf '%s/%s.deb'   "$DEB_DIR" "$(deb_name "$1")"; }
+deb_marker()     { printf '%s/%s.trust' "$DEB_DIR" "$(deb_name "$1")"; }
+deb_entry_file() { printf '%s/%s.entry' "$DEB_DIR" "$(deb_name "$1")"; }
+deb_manifest()   { printf '%s/%s.files' "$DEB_DIR" "$(deb_name "$1")"; }
 
 have_flatpak() { command -v flatpak >/dev/null 2>&1; }
 
@@ -183,10 +328,21 @@ need_root() {
 
 # Serialise every mutation. A second `apex install` racing a rebuild would
 # publish an image built from a half-written requested list.
+#
+# Idempotent since 2026-09-22, and that is not a tidy-up: `apex install
+# ./a.AppImage htop` and `apex remove hello htop` both take the lock for the
+# AppImage half and then reach the rpm half, which takes it again. A second
+# `exec 9>"$LOCK"` CLOSES the first descriptor — releasing the flock — before
+# reopening it, so the engine would drop its own lock mid-transaction and could
+# then fail to get it back.
 take_lock() {
+    if [ "${LOCK_HELD:-0}" = 1 ]; then
+        return 0
+    fi
     mkdir -p "$PKG_ROOT"
     exec 9>"$LOCK"
     flock -n 9 || die "another apex package operation is in progress"
+    LOCK_HELD=1
 }
 
 os_id()      { . /usr/lib/os-release; printf '%s' "$ID"; }
@@ -329,6 +485,282 @@ cache_local_rpm() {
     fi
 }
 
+# ── .deb: reading the archive ────────────────────────────────────────────────
+
+# The member names, one per line. `ar` is asserted rather than probed for
+# because a missing one has to be a refusal, not a silent non-unpack.
+deb_members() {
+    command -v ar >/dev/null 2>&1 \
+        || die "installing a .deb needs 'ar' (from binutils), which this system does not have"
+    ar t -- "$1" 2>/dev/null
+}
+
+# Print one member on stdout. `ar p` exits 0 and prints NOTHING for a member
+# that is not in the archive (measured), so every caller checks the name
+# against deb_members first — otherwise a .deb with no control.tar would read
+# as one whose control file is empty, and every field would come back blank
+# instead of the file being refused.
+deb_member() {
+    ar p -- "$1" "$2" 2>/dev/null
+}
+
+# Run tar over a compressed member, streamed straight out of the ar archive.
+#
+# The decompressor is chosen from the member's NAME rather than left to tar,
+# because `tar -xf -` does not autodetect compression on a pipe: measured on
+# GNU tar 1.35, `ar p x.deb control.tar.xz | tar -tf -` answers "Archive is
+# compressed. Use -J option" and exits 2. dpkg names the member after the
+# compression it used, so the suffix is the declaration; a .deb whose suffix
+# lies simply fails to unpack, which is a refusal either way.
+deb_tar() {
+    local deb="$1" member="$2"; shift 2
+    local -a pre=()
+    case "$member" in
+        *.tar)      ;;
+        *.tar.gz)   pre=(-z) ;;
+        *.tar.xz)   pre=(-J) ;;
+        *.tar.bz2)  pre=(-j) ;;
+        *.tar.zst)  pre=(--zstd) ;;
+        *.tar.lzma) pre=(--lzma) ;;
+        *) die "the .deb member '${member}' uses a compression APEX cannot read" ;;
+    esac
+    ar p -- "$deb" "$member" | tar ${pre[@]+"${pre[@]}"} "$@"
+}
+
+# One field out of a Debian control file, with RFC822 continuation lines folded
+# onto it. `Depends:coreutils,libc-bin` — no space after the colon — is what
+# Cisco's Packet Tracer .deb actually ships, so the split is on the colon, not
+# on whitespace.
+deb_control_field() {
+    awk -v want="$2" '
+        BEGIN { want = tolower(want) ":"; out = ""; on = 0 }
+        /^[ \t]/ { if (on) { line = $0; sub(/^[ \t]+/, "", line); out = out " " line } ; next }
+        {
+            i = index($0, ":")
+            if (i > 0 && tolower(substr($0, 1, i)) == want) {
+                on = 1
+                out = substr($0, i + 1)
+                sub(/^[ \t]+/, "", out)
+            } else { on = 0 }
+        }
+        END { sub(/[ \t]+$/, "", out); print out }
+    ' "$1"
+}
+
+# Just the package name, for `apex remove ./thing.deb`. Deliberately NOT
+# inspect_local_deb: remove must work for a package the image has since started
+# shipping, and inspect_local_deb refuses exactly that case.
+deb_name_of() {
+    local deb="$1" members ctl name
+    members="$(deb_members "$deb")" || return 1
+    local cm
+    cm="$(grep -m1 -E '^control\.tar(\.[a-z0-9]+)?$' <<<"$members")" || return 1
+    ctl="$(mktemp -d "${TMPDIR:-/tmp}/apex-deb.XXXXXX")" || return 1
+    if deb_tar "$deb" "$cm" -xf - -C "$ctl" >/dev/null 2>&1 && [ -f "${ctl}/control" ]; then
+        name="$(deb_control_field "${ctl}/control" Package)"
+    fi
+    rm -rf "$ctl"
+    [ -n "${name:-}" ] || return 1
+    printf '%s' "$name"
+}
+
+# `<name>-<version>.<arch>`, the .deb answer to an rpm's NEVRA. Used for the
+# resolved set, so a state file says what is installed in one readable line.
+deb_identity() {
+    local deb="$1" members cm ctl out=""
+    members="$(deb_members "$deb")" || return 1
+    cm="$(grep -m1 -E '^control\.tar(\.[a-z0-9]+)?$' <<<"$members")" || return 1
+    ctl="$(mktemp -d "${TMPDIR:-/tmp}/apex-deb.XXXXXX")" || return 1
+    if deb_tar "$deb" "$cm" -xf - -C "$ctl" >/dev/null 2>&1 && [ -f "${ctl}/control" ]; then
+        out="$(deb_control_field "${ctl}/control" Package)"
+        out="${out}-$(deb_control_field "${ctl}/control" Version)"
+        out="${out}.$(deb_control_field "${ctl}/control" Architecture)"
+    fi
+    rm -rf "$ctl"
+    case "$out" in ''|-.) return 1 ;; esac
+    printf '%s' "$out"
+}
+
+# The exact package set this transaction would install: one NEVRA per rpm, one
+# identity per .deb, sorted. ext_up_to_date compares it and write_state records
+# it, so the decision to skip a rebuild and the record of what was built can
+# never disagree about the same machine.
+#
+# A .deb's line carries twelve hex of its sha256 as well as its version, and
+# that is not decoration: a vendor reissuing a download without moving the
+# version string is ordinary, and on the version alone `apex update` would
+# compare two different files and conclude nothing had changed.
+resolved_set() {
+    local destdir="$1"; shift
+    {
+        local f d id sum
+        for f in "$destdir"/*.rpm; do
+            [ -e "$f" ] || continue
+            rpm -qp --nosignature --qf '%{NAME}-%{EVR}.%{ARCH}\n' "$f" 2>/dev/null
+        done
+        for d in "$@"; do
+            [ -e "$d" ] || continue
+            id="$(deb_identity "$d")" || id="${d##*/}"
+            sum="$(sha "$d")"
+            printf 'deb:%s+%s\n' "$id" "${sum:0:12}"
+        done
+    } | LC_ALL=C sort
+}
+
+# Does a Debian architecture describe this machine? `all` is Debian's noarch.
+# i386 is deliberately NOT accepted on x86_64: the multilib machinery in this
+# engine is rpm's, a 32-bit Debian application would need a 32-bit Debian
+# userspace, and half-installing one is worse than refusing it.
+deb_arch_matches() {
+    local a="$1" host; host="$(uname -m)"
+    case "$a" in
+        all)     return 0 ;;
+        amd64)   [ "$host" = x86_64 ] ;;
+        arm64)   [ "$host" = aarch64 ] ;;
+        armhf)   [ "$host" = armv7l ] ;;
+        ppc64el) [ "$host" = ppc64le ] ;;
+        s390x|riscv64) [ "$host" = "$a" ] ;;
+        *) return 1 ;;
+    esac
+}
+
+# Everything that can be wrong with a .deb the user pointed at, decided here,
+# once, BEFORE anything is copied or extracted. Sets LD_PATH, LD_NAME,
+# LD_VERSION, LD_ARCH, LD_DEPENDS, LD_SCRIPTS and LD_DATA_MEMBER; dies
+# otherwise. Globals rather than a printed value for the same reason
+# inspect_local_rpm uses them: `die` inside a command substitution kills only
+# the subshell, and the caller would carry on with an empty value.
+inspect_local_deb() {
+    local arg="$1" members cm ctl fmt installed
+    [ -e "$arg" ] || die "no such file: ${arg}"
+    [ -f "$arg" ] || die "not a regular file: ${arg}"
+    [ -r "$arg" ] || die "cannot read ${arg} (permission denied)"
+    LD_PATH="$(readlink -f -- "$arg")" || die "cannot resolve the path ${arg}"
+    [ -f "$LD_PATH" ] || die "not a regular file: ${arg}"
+    deb_magic_ok "$LD_PATH" \
+        || die "${arg} is not a Debian package (it does not begin with the ar archive magic '!<arch>')"
+
+    members="$(deb_members "$LD_PATH")"
+    grep -qx 'debian-binary' <<<"$members" \
+        || die "${arg} has no debian-binary member — it is an ar archive, but not a .deb"
+    fmt="$(deb_member "$LD_PATH" debian-binary)"
+    fmt="${fmt%%$'\n'*}"
+    [ "$fmt" = "2.0" ] \
+        || die "${arg} declares .deb format '${fmt:-(empty)}'; APEX reads format 2.0"
+
+    cm="$(grep -m1 -E '^control\.tar(\.[a-z0-9]+)?$' <<<"$members")" \
+        || die "${arg} has no control archive"
+    LD_DATA_MEMBER="$(grep -m1 -E '^data\.tar(\.[a-z0-9]+)?$' <<<"$members")" \
+        || die "${arg} has no data archive — there is nothing in it to install"
+
+    ctl="$(mktemp -d "${TMPDIR:-/tmp}/apex-deb.XXXXXX")" || die "cannot create a temporary directory"
+    deb_tar "$LD_PATH" "$cm" -xf - -C "$ctl" >/dev/null 2>&1 \
+        || { rm -rf "$ctl"; die "cannot read the control archive of ${arg}"; }
+    if [ ! -f "${ctl}/control" ]; then
+        rm -rf "$ctl"
+        die "${arg} has no control file, so nothing states what package it is"
+    fi
+    LD_NAME="$(deb_control_field "${ctl}/control" Package)"
+    LD_VERSION="$(deb_control_field "${ctl}/control" Version)"
+    LD_ARCH="$(deb_control_field "${ctl}/control" Architecture)"
+    LD_DEPENDS="$(deb_control_field "${ctl}/control" Depends)"
+    local pre; pre="$(deb_control_field "${ctl}/control" Pre-Depends)"
+    if [ -n "$pre" ]; then
+        LD_DEPENDS="${pre}${LD_DEPENDS:+, }${LD_DEPENDS}"
+    fi
+    # Which maintainer scripts exist. Recorded so the refusal and the warning
+    # can NAME them; not one of them is ever executed.
+    LD_SCRIPTS=""
+    local s
+    for s in preinst postinst prerm postrm config; do
+        [ -f "${ctl}/${s}" ] && LD_SCRIPTS="${LD_SCRIPTS}${LD_SCRIPTS:+ }${s}"
+    done
+    rm -rf "$ctl"
+
+    [ -n "$LD_NAME" ] && [ -n "$LD_VERSION" ] && [ -n "$LD_ARCH" ] \
+        || die "the control file of ${arg} has no name/version/architecture"
+    valid_deb_name "$LD_NAME" \
+        || die "refusing ${arg}: its package name '${LD_NAME}' is not a name APEX will turn into a path"
+    deb_arch_matches "$LD_ARCH" \
+        || die "refusing ${arg}: it is built for Debian architecture '${LD_ARCH}', this machine is $(uname -m)"
+
+    if [[ "$LD_NAME" =~ $REFUSE_RE ]]; then
+        die "refusing ${arg}: '${LD_NAME}' is a kernel or core-system package, which must ship in the APEX image, not an extension"
+    fi
+    if installed="$(rpm -q --qf '%{EVR}' -- "$LD_NAME" 2>/dev/null)"; then
+        die "refusing ${arg}: APEX-OS already ships ${LD_NAME}-${installed}. Replacing an image package from an extension is an OS update, not a package install"
+    fi
+}
+
+# ── .deb: trust ──────────────────────────────────────────────────────────────
+# There is no such thing as a verified local .deb, and pretending otherwise
+# would be a weaker rule than the RPM path's rather than the same one.
+#
+# Debian's trust model signs the apt INDEX a package is fetched through, not
+# the package file: `Release`/`InRelease` is signed, it names the `Packages`
+# index by hash, and `Packages` names each .deb by sha256. Detach the file from
+# that chain — download it from a website, copy it off a USB stick — and every
+# link is gone. Containerfile.core's 5a-aiapps stage reconstructs the whole
+# chain for the image build, key fingerprint pinned in this repository, and it
+# takes twenty lines and a network fetch to do it.
+#
+# `_gpgorigin` (debsigs) is not treated as verification either. APEX carries no
+# deb keyring and no policy file saying which keys may sign what, and a
+# signature checked against a key taken from the thing it signs proves nothing
+# — the same reasoning that made the image PIN both vendors' fingerprints.
+#
+# So every local .deb needs --allow-unsigned, and the acceptance is recorded
+# against that file's exact bytes under DEB_DIR, exactly as it is for an RPM.
+deb_trust_refusal() {
+    local file="$1" name="$2" depends="$3"
+    {
+        printf 'apex-pkg: error: %s\n' \
+            "cannot verify ${file}" \
+            "" \
+            "A .deb carries no signature APEX can check. Debian signs the apt" \
+            "INDEX a package is downloaded through, not the package file, so a" \
+            ".deb sitting on disk is worth exactly as much as wherever you got" \
+            "it from. APEX has no deb keyring and does not accept a '_gpgorigin'" \
+            "member as proof of anything." \
+            ""
+        if [ -n "$depends" ]; then
+            printf 'apex-pkg: error: %s\n' \
+                "APEX also resolves NONE of its dependencies. Debian package" \
+                "names do not exist on Fedora, and '${name}' declares these:"
+            printf '%s\n' "$depends" | tr ',' '\n' | sed 's/^[[:space:]]*/apex-pkg: error:     /'
+            printf 'apex-pkg: error: %s\n' \
+                "Anything in that list APEX-OS does not already provide under" \
+                "some other name is yours to install." \
+                ""
+        fi
+        printf 'apex-pkg: error: %s\n' \
+            "If the vendor's own site is where it came from and you accept both:" \
+            "  sudo apex install --allow-unsigned ${file}"
+    } >&2
+    exit 1
+}
+
+# Has the user accepted THIS .deb, and are these still the bytes they accepted?
+trusted_deb() {
+    local marker; marker="$(deb_marker "$1")"
+    [ -f "$marker" ] || return 1
+    [ "$(cat "$marker" 2>/dev/null)" = "$(sha "$2")" ]
+}
+
+# Copy the .deb into PKG_ROOT so every later rebuild has it, the same contract
+# cache_local_rpm keeps: `apex update` and the post-OS-upgrade rebuild must
+# still work when the download is long deleted.
+cache_local_deb() {
+    local src="$1" name="$2" dest marker
+    install -d -m0700 "$DEB_DIR"
+    dest="$(deb_cache "$name")"
+    marker="$(deb_marker "$name")"
+    cp -f -- "$src" "${dest}.tmp"
+    mv -f "${dest}.tmp" "$dest"
+    sha "$dest" > "${marker}.tmp"
+    mv -f "${marker}.tmp" "$marker"
+}
+
 # ── build ────────────────────────────────────────────────────────────────────
 
 # Download the requested packages plus every dependency the IMAGE does not
@@ -338,6 +770,13 @@ download_rpms() {
     local destdir="$1"; shift
     local -a args=(-y --setopt=keepcache=True download --resolve \
         --arch="$(uname -m)" --arch=noarch --destdir "$destdir")
+    # Resolve the 32-bit closure too. RPM Fusion's steam (and every other
+    # multilib application) declares its 32-bit libraries as requires, and
+    # dnf will not fetch a provider outside the declared arch set — without
+    # i686 here the extension ships a client that cannot load its own UI
+    # modules ("Could not load module 'vgui2_s.so'"). The guard already
+    # treats a protected name in this architecture as purely additive.
+    [ "$(uname -m)" = x86_64 ] && args+=(--arch=i686)
     [ "${NO_WEAK_DEPS:-0}" = 1 ] && args+=(--setopt=install_weak_deps=False)
     local repo
     for repo in ${ENABLE_REPOS:-}; do args+=(--enable-repo "$repo"); done
@@ -457,33 +896,116 @@ stage_local_rpms() {
 }
 
 # Everything that must be true BEFORE we extract a single file.
+# True when every requirement, across every other RPM in the set, that names
+# the package $2 is already satisfied by what the image ships. Asked of libdnf5
+# because it honours version ranges, exactly like installed_provides.
+newer_satisfied_by_image() {
+    local destdir="$1" name="$2" other req cap
+    for other in "$destdir"/*.rpm; do
+        while IFS= read -r req; do
+            [ -n "$req" ] || continue
+            case "$req" in rpmlib\(*) continue ;; esac
+            cap="${req%% *}"
+            [ "$cap" = "$name" ] || continue
+            # An unversioned requirement of the package name is satisfied by the
+            # installed build by definition; only ranges can demand newer.
+            [ "$req" = "$cap" ] && continue
+            # No `--`: dnf5 repoquery refuses it and prints nothing, so this
+            # test answered "not satisfied" for every versioned requirement
+            # ever asked about, and guard_rpms refused packages it was written
+            # to omit. Same defect as probe_rpm's, same file, found with it.
+            # installed_provides() above has always been spelled correctly;
+            # this line is why they now look the same.
+            dnf5 repoquery --installed --whatprovides "$req" --qf '%{name}\n' 2>/dev/null | grep -q . || return 1
+        done < <(rpm -qp --nosignature --requires -- "$other" 2>/dev/null)
+    done
+    return 0
+}
+
 guard_rpms() {
     local destdir="$1"
-    local rpmfile name evr installed bad=0
+    local rpmfile name evr arch installed bad=0
+    local -A host_evr=()
+    for rpmfile in "$destdir"/*.rpm; do
+        arch="$(rpm -qp --nosignature --qf '%{ARCH}' "$rpmfile" 2>/dev/null)" || continue
+        [ "$arch" = "$(uname -m)" ] || continue
+        name="$(rpm -qp --nosignature --qf '%{NAME}' "$rpmfile" 2>/dev/null)" || continue
+        host_evr["$name"]="$(rpm -qp --nosignature --qf '%{EVR}' "$rpmfile" 2>/dev/null)"
+    done
 
     for rpmfile in "$destdir"/*.rpm; do
         name="$(rpm -qp --nosignature --qf '%{NAME}' "$rpmfile" 2>/dev/null)" \
             || die "cannot read $rpmfile"
         evr="$(rpm -qp --nosignature --qf '%{EVR}' "$rpmfile" 2>/dev/null)"
+        arch="$(rpm -qp --nosignature --qf '%{ARCH}' "$rpmfile" 2>/dev/null)"
 
-        if [[ "$name" =~ $REFUSE_RE ]]; then
-            warn "refusing '${name}': kernel- or core-system packages must ship in the APEX image, not an extension"
+        # Already in the image — of the SAME architecture? Then this is either a
+        # no-op (same EVR: the overlay would carry a byte-identical copy, so it
+        # is skipped) or a REPLACEMENT (different EVR: exactly the class of
+        # change that breaks a running system). The check MUST be
+        # architecture-qualified: on a multilib system `rpm -q "$name"` returns
+        # the x86_64 build, and its EVR says nothing about whether the i686
+        # build is present. Judged by name alone, every 32-bit library a 32-bit
+        # client needs is silently dropped here as "already provided" and the
+        # application then fails to launch with a missing library.
+        if [ "$arch" = noarch ]; then
+            installed="$(rpm -q --qf '%{EVR}' -- "$name" 2>/dev/null)" || installed=""
+        else
+            installed="$(rpm -q --qf '%{EVR}' -- "${name}.${arch}" 2>/dev/null)" || installed=""
+        fi
+        if [ -n "$installed" ]; then
+            if [ "$installed" = "$evr" ]; then
+                warn "skipping '${name}-${evr}.${arch}': already provided by APEX-OS"
+                rm -f "$rpmfile"
+                continue
+            fi
+            # The repositories carry a NEWER build of an installed package. The
+            # overlay must never shadow the image's copy, but core is frozen at
+            # image build time while resolution always sees current repos — so
+            # dnf routinely pulls a newer provider for a capability the
+            # installed build already satisfies. Overlaying is then also
+            # UNNECESSARY: omit the package and keep the image's copy, but only
+            # when every requirement that names it is already satisfied by the
+            # image. Something that genuinely needs the newer build is refused —
+            # that is an OS update, not a package install.
+            if newer_satisfied_by_image "$destdir" "$name"; then
+                warn "omitting '${name}-${evr}.${arch}': newer than the image's build, but every requirement naming it is already satisfied — keeping the image's copy"
+                rm -f "$rpmfile"
+                continue
+            fi
+            warn "refusing '${name}': needs ${evr} but the image ships ${installed} — that requires an OS update, not a package install"
             bad=1
+            rm -f "$rpmfile"
             continue
         fi
 
-        # Already in the image? Then this is a REPLACEMENT, and an overlay
-        # carrying a second copy of an installed package is exactly the class of
-        # change that breaks a running system.
-        if installed="$(rpm -q --qf '%{EVR}' "$name" 2>/dev/null)"; then
-            if [ "$installed" = "$evr" ]; then
-                warn "skipping '${name}-${evr}': already provided by APEX-OS"
-            else
-                warn "refusing '${name}': needs ${evr} but the image ships ${installed} — that requires an OS update, not a package install"
-                bad=1
-            fi
+        # Not installed at all. A protected name on the host architecture (or
+        # noarch) belongs in the image and is refused: kernels and akmods need a
+        # real deployment, and a core package the image does not ship is one the
+        # image wants absent. But a 32-bit MULTILIB sibling (i686 on x86_64)
+        # shadows nothing — the image ships none of that architecture — and
+        # refusing it made every 32-bit application, Steam included,
+        # uninstallable through the documented `apex install` path.
+        # A 32-bit twin whose 64-bit sibling is in this set with a DIFFERENT
+        # EVR is an application fork, not a multilib library: rpm cannot
+        # install both (the older one reads as a downgrade, and the shared
+        # launcher/data files collide). The 32-bit LIBRARIES the machine needs
+        # are separate packages that share the EVR across arches — those are
+        # kept; this copy is dropped.
+        if [ "$arch" != "$(uname -m)" ] && [ "$arch" != noarch ] \
+            && [ -n "${host_evr[$name]:-}" ] && [ "${host_evr[$name]}" != "$evr" ]; then
+            warn "dropping '${name}-${evr}.${arch}': a 32-bit copy of the application (the set has ${name}-${host_evr[$name]}.$(uname -m)); a 32-bit package is libraries, not a second copy of the program"
             rm -f "$rpmfile"
             continue
+        fi
+
+        if [[ "$name" =~ $REFUSE_RE ]]; then
+            if [ "$arch" = "$(uname -m)" ] || [ "$arch" = noarch ]; then
+                warn "refusing '${name}': kernel- or core-system packages must ship in the APEX image, not an extension"
+                bad=1
+                continue
+            fi
+            warn "allowing '${name}-${evr}.${arch}': multilib sibling of a core package; the image ships none of this architecture"
         fi
     done
 
@@ -522,6 +1044,111 @@ guard_rpms() {
     fi
 }
 
+# Merge the non-host-architecture tree into the payload, carrying only what
+# nothing else already provides.
+#
+# ONE RULE: a file from the 32-bit pass is carried if, and only if, neither the
+# running image nor this transaction's own native pass already provides that
+# exact path.
+#
+# That single sentence replaces the list of --excludepath directories this
+# function used to carry, and it replaces it because the list was wrong twice
+# over, in OPPOSITE directions, on the same machine on the same day
+# (ROADMAP/evidence/katana-qualification-20260919.md, §3 and §6.5):
+#
+#   TOO NARROW. /usr/bin, /usr/sbin, /usr/share and /etc were excluded and
+#   nothing else, so i686 helper EXECUTABLES under /usr/libexec walked straight
+#   in. A plain `apex install steam` shadowed 14 image binaries, because
+#   at-spi2-core.i686, dconf.i686, glib2.i686, glib-networking.i686,
+#   glycin-loaders.i686, gstreamer1.i686 and p11-kit.i686 are all in
+#   steam.i686's dependency closure. gst-plugin-scanner is the one that bites:
+#   GStreamer probes every plugin through it out of process, so a 32-bit scanner
+#   loads no 64-bit plugin and the registry fell from 1344 usable features to 2.
+#   The greeter was left running a 32-bit accessibility bus by the same route.
+#
+#   TOO BLUNT. --excludepath /usr/share threw away every *_icd.i686.json while
+#   keeping the .so files those manifests name, so /usr/share/vulkan/icd.d held
+#   13 x86_64 ICDs and zero i686 ones. Steam's client is ubuntu12_32/steam, so
+#   it needs 32-bit Vulkan, and it died with VK_ERROR_INCOMPATIBLE_DRIVER. A
+#   manifest called nvidia_icd.i686.json cannot shadow anything — nothing else
+#   on the system has that name — and the rule above keeps it for that reason,
+#   while still dropping the /usr/share/doc, /usr/share/man, icon and locale
+#   copies the exclusion was written for, because the image owns those paths.
+#
+# Adding /usr/libexec to the old list would have fixed seven packages and
+# nothing about the eighth directory nobody had thought of yet. The list was the
+# defect, not its contents.
+#
+# `--excludepath` is prefix-based and all-or-nothing, so "keep only what is
+# unclaimed" cannot be expressed to rpm at all. The foreign set is therefore
+# unpacked into a scratch root of its own and merged from here.
+#
+# The image half of the test is the same question install_etc's removal pass
+# asks before it deletes anything, and for the same reason: the rpmdb is the
+# only thing on this machine that knows which paths belong to the OS.
+#
+# FAILING CLOSED HERE IS THE OPPOSITE OF image_owns(). There, "cannot tell who
+# owns it" must mean KEEP the file — a wrongly deleted /etc/fonts/fonts.conf is
+# unrecoverable. Here it must mean REFUSE THE WHOLE MERGE, because an empty
+# owner list reads as "the image owns nothing" and would carry every 32-bit copy
+# of every image path into the extension: precisely the disaster this pass
+# exists to prevent. So an rpm that cannot answer, or answers with nothing, is a
+# hard stop.
+merge_multilib() {
+    local scratch="$1" root="$2"
+    local idx="${scratch}.image-paths"
+    local all="${scratch}.all" unowned="${scratch}.unowned"
+    local keep="${scratch}.keep" drop="${scratch}.drop"
+
+    rpm -qal > "$idx" 2>/dev/null \
+        || die "cannot ask the rpmdb which files the image owns — refusing to merge the 32-bit set blind"
+    [ -s "$idx" ] \
+        || die "the system rpmdb listed no files at all — refusing to merge the 32-bit set blind"
+    LC_ALL=C sort -u -o "$idx" "$idx"
+
+    ( cd "$scratch" && find . -mindepth 1 \( -type f -o -type l \) -printf '/%P\n' ) \
+        | LC_ALL=C sort > "$all"
+
+    # Not owned by any package installed in the image …
+    LC_ALL=C awk 'NR==FNR { own[$0]; next } !($0 in own)' "$idx" "$all" > "$unowned"
+
+    # … and not already placed by this transaction's native pass. That second
+    # clause is what keeps fontconfig.i686's /usr/bin/fc-list out when the set
+    # carries fontconfig.x86_64 too: the image-owner test cannot see a package
+    # that is not installed yet.
+    : > "$keep"
+    local rel
+    while IFS= read -r rel; do
+        if [ -e "${root}${rel}" ] || [ -L "${root}${rel}" ]; then
+            continue
+        fi
+        printf '%s\n' "$rel" >> "$keep"
+    done < "$unowned"
+
+    local n_all n_unowned n_keep
+    n_all=$(wc -l < "$all"); n_unowned=$(wc -l < "$unowned"); n_keep=$(wc -l < "$keep")
+    msg "multilib: carrying ${n_keep} of ${n_all} file(s) from the 32-bit set ($((n_all - n_unowned)) already owned by the image, $((n_unowned - n_keep)) already placed by this set's native packages)"
+
+    LC_ALL=C comm -23 "$all" "$keep" > "$drop"
+    if [ -s "$drop" ]; then
+        sed "s|^|${scratch}|" "$drop" | tr '\n' '\0' | xargs -0 -r rm -f
+    fi
+    # Directories emptied by that must not be carried either: every
+    # /usr/share/doc/<pkg>, /usr/share/licenses/<pkg> and
+    # /usr/share/locale/*/LC_MESSAGES the image already owns would otherwise
+    # reach the extension as an empty directory.
+    find "$scratch" -mindepth 1 -depth -type d -empty -delete 2>/dev/null || true
+
+    if [ -n "$(ls -A "$scratch" 2>/dev/null)" ]; then
+        # || die rather than || true: the only way this fails is a path that is
+        # a directory in one tree and a file in the other, and silently half
+        # merging a payload is how you ship an extension nobody can explain.
+        cp -a "${scratch}/." "${root}/" \
+            || die "merging the 32-bit set into the payload failed"
+    fi
+    rm -f "$idx" "$all" "$unowned" "$keep" "$drop"
+}
+
 extract_rpms() {
     local destdir="$1" root="$2"
     mkdir -p "$root"
@@ -534,10 +1161,776 @@ extract_rpms() {
     # in guard_rpms. This throwaway root has an empty keyring, so leaving it on
     # would print a NOKEY warning per package that means nothing.
     rpm --root "$root" --initdb
-    rpm --root "$root" -Uvh --nodeps --noscripts --notriggers --noplugins \
-        --nosignature --replacefiles --replacepkgs --excludepath /boot \
-        "$destdir"/*.rpm >&2 || die "extraction failed"
+
+    # Multilib is extracted in a SECOND pass, and merged rather than unpacked
+    # straight onto the first.
+    #
+    # A 32-bit package is not a 32-bit version of an application; it is the
+    # libraries a 32-bit application needs. `fontconfig.i686` still carries
+    # /usr/bin/fc-list, /usr/share and /etc, byte-for-byte the same paths as the
+    # x86_64 build. One `rpm -Uvh --replacefiles` over both arches lets whichever
+    # lands last win, and on this machine i686 won: /usr/bin/fc-list became an
+    # ELF 32-bit i386 binary shadowing the image's own, `fc-list` then returned
+    # zero fonts, and Steam drew its interface with no text at all. dnf never
+    # hits this because multilib packages are filtered to libraries before they
+    # are ever unpacked together.
+    #
+    # So: native and noarch into the payload root, then everything else into a
+    # scratch root of its own, and merge_multilib decides file by file what may
+    # cross. /boot is the one thing still excluded outright in both passes — a
+    # system extension merges /usr and /opt, and a kernel or bootloader file has
+    # no way to reach the running system from here even in principle.
+    local -a native=() foreign=() host
+    host="$(uname -m)"
+    local f arch
+    for f in "$destdir"/*.rpm; do
+        arch="$(rpm -qp --nosignature --qf '%{ARCH}' -- "$f" 2>/dev/null)"
+        if [ "$arch" = "$host" ] || [ "$arch" = noarch ]; then
+            native+=("$f")
+        else
+            foreign+=("$f")
+        fi
+    done
+
+    if [ ${#native[@]} -gt 0 ]; then
+        rpm --root "$root" -Uvh --nodeps --noscripts --notriggers --noplugins \
+            --nosignature --replacefiles --replacepkgs --excludepath /boot \
+            "${native[@]}" >&2 || die "extraction failed"
+    fi
+    if [ ${#foreign[@]} -gt 0 ]; then
+        # Next to $root, which under build_extension means inside $WORK, so the
+        # existing RETURN trap removes it on every `die` path too.
+        local scratch="${root}.multilib"
+        rm -rf "$scratch"
+        mkdir -p "$scratch"
+        rpm --root "$scratch" --initdb
+        rpm --root "$scratch" -Uvh --nodeps --noscripts --notriggers --noplugins \
+            --nosignature --replacefiles --replacepkgs --excludepath /boot \
+            "${foreign[@]}" >&2 || die "extraction of the multilib set failed"
+        rm -rf "${scratch}/usr/share/rpm" "${scratch}/var/lib/rpm" \
+               "${scratch}/usr/lib/sysimage/rpm"
+        merge_multilib "$scratch" "$root"
+        rm -rf "$scratch"
+    fi
     rm -rf "${root}/usr/share/rpm" "${root}/var/lib/rpm" "${root}/usr/lib/sysimage/rpm"
+}
+
+# ── .deb: where the image really is ──────────────────────────────────────────
+# NOT `/usr`. While an extension is merged, /usr is an overlay whose upper
+# layers ARE the extension this function is deciding about, so asking the
+# running /usr would report every path the previous build placed as belonging
+# to the image, and `apex update` would then refuse to rebuild what it built
+# itself. Measured on this machine: /usr is mounted `overlay sysext ...
+# lowerdir=/run/systemd/sysext/meta/usr:/run/systemd/sysext/extensions/apex-user/usr:/usr`.
+#
+# NOT the rpmdb either, which is what image_owns() asks for RPM paths. The
+# rpmdb is BLIND to the one application this whole route exists for:
+# Containerfile.core's 5a-aiapps stage puts Claude Desktop into
+# /usr/lib/claude-desktop with `cp -a` (Anthropic publishes no rpm — five
+# rpm/yum prefixes under downloads.claude.ai all 404), so no package owns a
+# single one of its 1,190 files and `rpm -qf` answers "not owned" for every
+# one. A guard built on the rpmdb would wave a .deb straight over the image's
+# own copy of the app.
+#
+# The booted ostree deployment is the pristine image, files and all, and the
+# kernel command line says which one it is. Failing CLOSED here is the same
+# choice merge_multilib makes and the opposite of image_owns(): "I cannot tell
+# what the image has" must stop a .deb from shadowing /usr, because an empty
+# answer reads as "the image owns nothing".
+image_hierarchy_root() {
+    if [ ! -e /run/ostree-booted ]; then
+        # Not an image-based system at all — a container, a CI runner, a test
+        # fixture. There is no extension overlaying anything there, so the live
+        # root IS the image.
+        printf '/'
+        return 0
+    fi
+    local param dir
+    param="$(awk '{for (i = 1; i <= NF; i++) if ($i ~ /^ostree=/) { print substr($i, 8); exit }}' /proc/cmdline)"
+    [ -n "$param" ] \
+        || die "cannot tell which deployment is booted (no ostree= on the kernel command line) — refusing to decide what the image owns"
+    dir="$(readlink -f -- "$param" 2>/dev/null)" || dir=""
+    { [ -n "$dir" ] && [ -d "${dir}/usr" ]; } \
+        || die "the booted deployment '${param}' has no /usr — refusing to decide what the image owns blind"
+    printf '%s' "$dir"
+}
+
+# ── .deb: the payload ────────────────────────────────────────────────────────
+
+# Collapse `.` and `..` out of a path without touching the filesystem. Used on
+# symlink targets, which may legitimately be relative: claude-desktop's own
+# /usr/bin/claude-desktop is `../lib/claude-desktop/claude-desktop`, so a blunt
+# "no .. in a link target" rule would refuse the driver package for this route.
+deb_norm_path() {
+    local rest="${1}/" out="" seg
+    while [ -n "$rest" ]; do
+        seg="${rest%%/*}"
+        rest="${rest#*/}"
+        case "$seg" in
+            ''|.) ;;
+            ..)   out="${out%/*}" ;;
+            *)    out="${out}/${seg}" ;;
+        esac
+    done
+    printf '%s' "${out:-/}"
+}
+
+# Every member name in the data archive, checked BEFORE a byte is written.
+#
+# GNU tar 1.35 does defend itself against the classic symlink escape — measured
+# here with an archive holding `usr/evil -> ../../outside` followed by
+# `usr/evil/victim`: it refuses with "Cannot open: Not a directory", exits 2,
+# and the file outside the extraction root is untouched. This pass is the layer
+# that does not depend on that: an absolute member name or a `..` component is
+# refused outright, and so is a name carrying an escape sequence, because the
+# walk that judges the extracted tree reads one path per line and a name
+# containing a newline would split into two.
+deb_names_ok() {
+    local deb="$1" member="$2" name="$3"
+    local names n bad=0
+    names="$(deb_tar "$deb" "$member" --quoting-style=escape -tf -)" \
+        || die "cannot list the contents of ${name}'s data archive"
+    [ -n "$names" ] || die "refusing '${name}': its data archive is empty"
+    while IFS= read -r n; do
+        [ -n "$n" ] || continue
+        case "$n" in
+            /*)   warn "refusing '${name}': it ships an absolute path '${n}'"; bad=1 ;;
+            *\\*) warn "refusing '${name}': the member name '${n}' contains an escape sequence"; bad=1 ;;
+        esac
+        case "/${n}/" in
+            */../*) warn "refusing '${name}': the member name '${n}' climbs out of the package"; bad=1 ;;
+        esac
+    done <<<"$names"
+    [ "$bad" = 0 ] || die "refusing '${name}': its data archive names paths outside itself"
+}
+
+# type, path and (for a symlink) its target, one entry per line, for a tree the
+# .deb has been unpacked into.
+deb_walk() {
+    ( cd "$1" && find . -mindepth 1 -printf '%y\t/%P\t%l\n' )
+}
+
+# Is this the Debian multiarch directory (x86_64-linux-gnu, arm-linux-gnueabihf)?
+deb_is_multiarch_dir() {
+    [[ "$1" =~ ^[a-z0-9_]+-linux-(gnu|musl)[a-z0-9]*$ ]]
+}
+
+# WHAT A .deb IS ALLOWED TO PLACE, and the three reasons the list is this short.
+#
+# 1. A system extension merges /usr and /opt, and NOTHING else. rpm's own
+#    extractions get /etc and /var lifted out by split_out_of_image and folded
+#    from /lib and /bin by the same function, because measured cases demanded
+#    it. There is no such case for a .deb and there are two reasons not to
+#    invent one: /etc holds Debian CONFFILES whose whole lifecycle is dpkg's
+#    (and install_etc's removal pass is the one that ate 26 image-owned /etc
+#    files in September), and a Debian package has been merged-usr since
+#    bookworm, so a payload outside /usr and /opt is a package APEX does not
+#    understand rather than one it should silently reshape. All three real
+#    .debs measured while writing this — claude-desktop, opencode, Cisco Packet
+#    Tracer — ship only ./usr and ./opt.
+#
+# 2. DEBIAN LIBRARIES GO WHERE FEDORA DOES NOT LOOK, AND WHERE THEY DO GET
+#    LOOKED AT THEY ARE THE WRONG ONES. Debian puts shared libraries in
+#    /usr/lib/x86_64-linux-gnu; Fedora's dynamic linker searches /usr/lib64.
+#    Translating between them is not an option: a Debian libfoo.so.1 dropped
+#    into /usr/lib64 is found by EVERY program on the machine, and it was built
+#    against a different glibc and a different soname set. That is the
+#    fontconfig.i686 defect over again — /usr/bin/fc-list became a 32-bit
+#    binary, fc-list returned zero fonts and Steam drew no text — except an
+#    extension cannot be un-merged by rebooting. Symlinking the multiarch
+#    directory has the same effect by another route. Leaving it verbatim is
+#    honest but useless: nothing on Fedora reads that path, so the package
+#    installs and then does not work. So a .deb that ships a shared library
+#    into a search path or a multiarch directory is REFUSED, and says why.
+#
+#    A library under the package's OWN directory is a different thing and is
+#    carried: /usr/lib/claude-desktop/libEGL.so is found by claude-desktop's
+#    own RPATH and by nothing else. That is the Electron case, which is most of
+#    what ships as a .deb and nothing else.
+#
+# 3. Kernel modules need an initramfs and a real deployment, which is the same
+#    refusal split_out_of_image makes for an rpm.
+deb_layout_ok() {
+    local scratch="$1" name="$2"
+    local t p l bad=0 tgt d comp rest files=0
+    while IFS=$'\t' read -r t p l; do
+        case "$p" in
+            # /usr/local is a SYMLINK to ../var/usrlocal on an ostree system,
+            # so a payload directory there does not land inside the hierarchy
+            # the extension merges — it lands on top of the symlink itself. The
+            # shadow guard happens to catch it today, but only because that
+            # symlink dangles in the deployment tree, which is an accident of
+            # /var/usrlocal not existing there rather than a rule. Debian
+            # policy forbids a package shipping /usr/local anyway.
+            /usr/local|/usr/local/*)
+                warn "refusing '${name}': it ships '${p}', and /usr/local on APEX is a symlink into /var that an extension cannot merge"
+                bad=1; continue ;;
+            /usr|/opt|/usr/*|/opt/*) ;;
+            *)
+                warn "refusing '${name}': it ships '${p}', and a system extension merges only /usr and /opt"
+                bad=1; continue ;;
+        esac
+        if [ "$t" = l ]; then
+            case "$l" in
+                /*) tgt="$(deb_norm_path "$l")" ;;
+                *)  tgt="$(deb_norm_path "${p%/*}/${l}")" ;;
+            esac
+            case "$tgt" in
+                /usr|/opt|/usr/*|/opt/*) ;;
+                *)
+                    warn "refusing '${name}': the symlink '${p}' points at '${tgt}', outside the hierarchies an extension can merge"
+                    bad=1; continue ;;
+            esac
+        fi
+        case "$p" in
+            /usr/lib/modules/*|/usr/lib/firmware/*)
+                warn "refusing '${name}': it ships '${p}' — kernel modules and firmware need an image build, not an extension"
+                bad=1; continue ;;
+        esac
+        # Directories carry no code; only a file or a link can shadow a library.
+        [ "$t" = d ] && continue
+        files=$((files + 1))
+        d="${p%/*}"
+        # Every path component, without word splitting: a component holding a
+        # glob character would otherwise be expanded against the real
+        # filesystem by `for comp in ${p//\// }`.
+        rest="${p#/}"
+        while [ -n "$rest" ]; do
+            comp="${rest%%/*}"
+            if [ "$rest" = "$comp" ]; then rest=""; else rest="${rest#*/}"; fi
+            if deb_is_multiarch_dir "$comp"; then
+                warn "refusing '${name}': it ships '${p}' into a Debian multiarch directory. Fedora's dynamic linker never looks there, and moving it to /usr/lib64 would put a Debian build of a library in front of the one APEX-OS runs on"
+                bad=1
+                continue 2
+            fi
+        done
+        case "${p##*/}" in
+            *.so|*.so.*)
+                case "$d" in
+                    /lib|/lib64|/usr/lib|/usr/lib64)
+                        warn "refusing '${name}': it ships the shared library '${p}' where the system linker looks. An extension putting a Debian build of a library in front of the image's own is not recoverable without a rollback"
+                        bad=1; continue ;;
+                esac ;;
+        esac
+    done < <(deb_walk "$scratch")
+    # A data archive of nothing but directories installs nothing and reports
+    # success, which is the shape of every defect this engine has had.
+    [ "$files" -gt 0 ] \
+        || die "refusing '${name}': its payload contains no files at all, only directories"
+    [ "$bad" = 0 ] \
+        || die "refusing '${name}': see above. A .deb whose payload cannot be placed is refused rather than half-installed"
+}
+
+# THE PACKAGE MUST BRING ITS OWN WAY IN.
+#
+# A .deb's maintainer scripts are never run, and for a whole class of packages
+# the maintainer script is what creates the program's entry point. This engine
+# already learned that shape from rpm: `apex install wine` extracted with
+# --noscripts produced /usr/bin/wine32 and wine64 as real files, /usr/bin/wine
+# ABSENT, and twelve dangling symlinks pointing at it — and reported success.
+#
+# The rule here is read off the PAYLOAD rather than off the scripts, because a
+# script grep gets this wrong in both directions. opencode's postinst runs
+# `update-alternatives --install /usr/bin/ai.opencode.desktop ...`, which looks
+# exactly like the wine case; but its .desktop entry already says
+# `Exec=/opt/OpenCode/ai.opencode.desktop`, a path the package ships, so it
+# launches from a menu with no script run at all. Cisco's Packet Tracer ships
+# /opt/pt and NOTHING else — no binary on PATH, no .desktop — and is refused,
+# correctly, because without its postinst there is no way to start it.
+#
+# Prints the entry point it found; returns non-zero when there is none.
+deb_entry_point() {
+    local scratch="$1"
+    local p desktop line first
+    for p in "${scratch}/usr/bin"/* "${scratch}/usr/sbin"/*; do
+        { [ -e "$p" ] || [ -L "$p" ]; } || continue
+        [ -d "$p" ] && continue
+        printf '%s' "/${p#"${scratch}/"}"
+        return 0
+    done
+    for desktop in "${scratch}/usr/share/applications"/*.desktop; do
+        [ -f "$desktop" ] || continue
+        line="$(grep -m1 '^Exec=' "$desktop" 2>/dev/null)" || continue
+        first="${line#Exec=}"
+        first="${first%% *}"
+        [ -n "$first" ] || continue
+        case "$first" in
+            /*) { [ -e "${scratch}${first}" ] || [ -L "${scratch}${first}" ]; } || continue
+                printf '%s' "$first"; return 0 ;;
+            *)  { [ -e "${scratch}/usr/bin/${first}" ] || [ -L "${scratch}/usr/bin/${first}" ]; } || continue
+                printf '%s' "/usr/bin/${first}"; return 0 ;;
+        esac
+    done
+    return 1
+}
+
+# Nothing a .deb ships may sit on top of something the image already provides,
+# or on top of a path this same transaction's RPMs have already placed.
+#
+# $3 is the image hierarchy root rather than a constant so the suite can drive
+# this over a fixture tree — the same reason state_kind() takes the state path
+# as a parameter instead of reading an environment override in a script that
+# runs as root.
+deb_shadow_ok() {
+    local scratch="$1" root="$2" imgroot="$3" name="$4"
+    local t p l bad=0 img
+    img="${imgroot%/}"
+    while IFS=$'\t' read -r t p l; do
+        if [ "$t" = d ]; then
+            # Two packages sharing /usr/bin is not a conflict; a package whose
+            # directory lands where the image keeps a file is.
+            if { [ -e "${img}${p}" ] || [ -L "${img}${p}" ]; } && [ ! -d "${img}${p}" ]; then
+                warn "refusing '${name}': it needs '${p}' to be a directory and APEX-OS has a file there"
+                bad=1
+            fi
+            continue
+        fi
+        # -e is false for a dangling symlink, which is a file that exists.
+        if [ -e "${img}${p}" ] || [ -L "${img}${p}" ]; then
+            warn "refusing '${name}': APEX-OS already provides '${p}'. An extension may not shadow the image — that is an OS update, not a package install"
+            bad=1
+            continue
+        fi
+        if [ -e "${root}${p}" ] || [ -L "${root}${p}" ]; then
+            warn "refusing '${name}': '${p}' is also shipped by a package already in this transaction"
+            bad=1
+        fi
+    done < <(deb_walk "$scratch")
+    [ "$bad" = 0 ] || die "refusing '${name}': see above; nothing was changed"
+}
+
+# Has an image update started shipping what this .deb provides? Then the .deb
+# must leave, exactly as rebuild_extension drops an rpm the image has adopted.
+#
+# Fails OPEN — "cannot tell" means keep — which is the opposite direction from
+# deb_shadow_ok above and the same asymmetry image_owns() documents: a package
+# wrongly kept is refused loudly by the shadow guard a moment later, while a
+# package wrongly dropped is software that silently disappears.
+deb_superseded_by_image() {
+    local id="$1" entry imgroot
+    entry="$(cat "$(deb_entry_file "$id")" 2>/dev/null)" || return 1
+    [ -n "$entry" ] || return 1
+    # image_hierarchy_root dies on a machine whose deployment it cannot find;
+    # inside this substitution that ends the subshell and returns non-zero,
+    # which is the fail-open answer this caller wants.
+    imgroot="$(image_hierarchy_root 2>/dev/null)" || return 1
+    [ -n "$imgroot" ] || return 1
+    imgroot="${imgroot%/}"
+    [ -e "${imgroot}${entry}" ] || [ -L "${imgroot}${entry}" ]
+}
+
+# Unpack the cached .deb files into the payload the RPM passes have already
+# built.
+#
+# It runs AFTER extract_rpms and BEFORE fix_caches, and neither is arbitrary.
+# After, so the shadow guard can see every path this transaction's RPMs placed
+# and refuse a collision instead of letting `cp -a` decide it. Before, so the
+# desktop, MIME and GSettings caches are rebuilt over the union of image,
+# RPMs and .debs — which is precisely the `update-desktop-database` and
+# `update-mime-database` work the maintainer script would have done, done by
+# the engine over a tree it understands instead of by vendor code running as
+# root.
+extract_debs() {
+    local root="$1"; shift
+    local imgroot
+    imgroot="$(image_hierarchy_root)" || die "cannot locate the image hierarchy"
+    [ -n "$imgroot" ] || die "cannot locate the image hierarchy"
+
+    local deb name scratch entry
+    for deb in "$@"; do
+        inspect_local_deb "$deb"
+        name="$LD_NAME"
+        msg "unpacking ${name}-${LD_VERSION} (.deb)"
+        scratch="${root}.deb-${name}"
+        rm -rf "$scratch"
+        mkdir -p "$scratch"
+
+        deb_names_ok "$deb" "$LD_DATA_MEMBER" "$name"
+        # --no-same-owner: a .deb records numeric ids, and a member owned by
+        # uid 1000 would otherwise land in /usr owned by whoever happens to
+        # hold that id. -p keeps the modes, which matters for exactly one
+        # thing in practice: claude-desktop ships chrome-sandbox as 4755 and
+        # Chromium refuses to start when it finds that helper present but not
+        # setuid.
+        deb_tar "$deb" "$LD_DATA_MEMBER" -xf - -C "$scratch" --no-same-owner -p \
+            || die "unpacking ${name}'s data archive failed"
+
+        deb_layout_ok "$scratch" "$name"
+        deb_shadow_ok "$scratch" "$root" "$imgroot" "$name"
+        # No program, and a maintainer script that would have created one, is
+        # the refusal this rule exists for. No program and NO maintainer script
+        # is a data package — a font, an icon theme, a set of headers — which
+        # has nothing to start and nothing that was ever going to create one.
+        # Refusing that would be refusing it for a reason that is not true.
+        if entry="$(deb_entry_point "$scratch")"; then
+            :
+        elif [ -n "$LD_SCRIPTS" ]; then
+            die "refusing '${name}': it ships no program APEX can start — no executable in /usr/bin and no desktop entry whose Exec is a path the package ships. Its entry point is created by its maintainer script(s) (${LD_SCRIPTS}), and APEX never runs those: they assume dpkg, apt and a Debian filesystem"
+        else
+            entry=""
+            msg "'${name}': a data package — it ships no program, and no maintainer script that would have created one"
+        fi
+
+        if [ -n "$LD_SCRIPTS" ]; then
+            warn "'${name}': its maintainer script(s) — ${LD_SCRIPTS} — were NOT run. They assume dpkg and a Debian layout; APEX extracts the payload only"
+        fi
+        if [ -n "$LD_DEPENDS" ]; then
+            warn "'${name}': APEX resolved none of its Debian dependencies (${LD_DEPENDS}). Debian package names do not exist on Fedora; anything APEX-OS does not already provide under another name is yours to install"
+        fi
+
+        cp -a "${scratch}/." "${root}/" \
+            || die "merging ${name} into the payload failed"
+
+        # The record of what this .deb contributed. `rpm -qf` can never answer
+        # for these paths, so this file is the equivalent: it is what
+        # `apex pkg verify` reads, and it is what a future pass over /usr has
+        # to consult before deciding a path is unowned.
+        install -d -m0700 "$DEB_DIR"
+        deb_walk "$scratch" | awk -F'\t' '$1 != "d" { print $2 }' | LC_ALL=C sort \
+            > "$(deb_manifest "$name")"
+        # The witness deb_superseded_by_image asks about on every later
+        # rebuild. A data package has no entry point, so the first path it
+        # ships stands in: the question is only ever "has the image started
+        # providing this", and any path the package owns answers it.
+        [ -n "$entry" ] || entry="$(head -1 "$(deb_manifest "$name")")"
+        printf '%s\n' "$entry" > "$(deb_entry_file "$name")"
+        printf '%s\n' "$LD_DEPENDS" > "${DEB_DIR}/${name}.depends"
+        msg "${name}: $(wc -l < "$(deb_manifest "$name")") file(s), entry point ${entry}"
+        rm -rf "$scratch"
+    done
+}
+
+# ── alternatives ─────────────────────────────────────────────────────────────
+# extract_rpms runs rpm with --noscripts, and a package that publishes its
+# binaries through `alternatives` creates them IN ITS SCRIPTLETS. Nothing else
+# in the payload creates them, so they are simply absent, and every symlink the
+# package ships that points at one of them dangles.
+#
+# Measured on katana on 2026-09-22 (ROADMAP/evidence/katana-p1038-apps-20260922.md):
+# `apex install wine` produced a payload with /usr/bin/wine32, wine64,
+# wineserver32 and wineserver64 as real files, /usr/bin/wine and
+# /usr/bin/wineserver ABSENT, and twelve /usr/bin entries — msidb, msiexec,
+# notepad, regedit, regsvr32, wineboot, winecfg, wineconsole, winedbg, winefile,
+# winemine, winepath — as dangling symlinks to `wine`. The install reported
+# success. `command -v` answered, `wine64 --version` printed a version, and only
+# actually running a program failed. Wine is the example, not the bug: java,
+# the iptables/nftables compatibility wrappers, `nc`, editors and compilers all
+# publish through the same mechanism.
+#
+# ── Why the scriptlet is EXECUTED rather than read ──────────────────────────
+# The declaration we need is the argv of `alternatives --install`, and the
+# scriptlet is the only place the package states it. Three ways to get it were
+# on the table; the other two are rejected on measurements, not taste.
+#
+#   * PARSE the scriptlet text. Dies on the real corpus. iptables-nft builds
+#     every one of its three invocations out of shell variables —
+#     `pfx=/usr/bin/iptables … update-alternatives --install $pfx iptables
+#     $pfx-nft 10 --follower $pfx6 …` — so the tokens a parser would read are
+#     `$pfx`, not paths. A text parser cannot resolve them without being a
+#     shell.
+#
+#   * RUN the real `alternatives` against the payload. It cannot be relocated.
+#     `alternatives --altdir "$root"/etc/alternatives --install "$root"/usr/bin/wine
+#     wine /usr/bin/wine64 20` writes `"$root"/usr/bin/wine -> "$root"/etc/alternatives/wine`
+#     and records the prefixed link path in the admin file: the build-time root
+#     baked into a runtime symlink. Measured, not assumed.
+#
+#   * REPRODUCE the full alternatives triangle by hand — link -> /etc/alternatives/<name>
+#     -> target, plus a state file in /etc/alternatives-admindir. That state
+#     file is a candidate LIST the image may already have an entry in, in an
+#     undocumented format, and it would have to reach the real /etc through
+#     install_etc — the pass that once deleted 26 image-owned /etc files. The
+#     cost of not doing it is that `alternatives --display`/`--config` do not
+#     know about extension-provided links and the user cannot switch them. That
+#     is stated in docs rather than hidden; it is not worse than a link that
+#     does not exist.
+#
+# So: the scriptlet's own shell is executed, and the ONLY thing that can come
+# back out of it is the argv of `alternatives`.
+#
+# ── What we are willing to run, exactly ─────────────────────────────────────
+# The scriptlet body, with `/bin/sh -c`, and nothing else:
+#
+#   * as `nobody`, never as root, via setpriv with --no-new-privs, an empty
+#     inheritable set and an empty bounding set — so `/usr/bin/su` or a setuid
+#     binary invoked by absolute path cannot climb back. If privileges cannot be
+#     dropped, THE SCRIPTLET IS NOT RUN AT ALL and the pass says so. There is no
+#     path through this function that executes package code as root.
+#   * with PATH containing one directory that holds one program: the recorder.
+#     `rm`, `systemctl`, `useradd`, `ldconfig` are not found. An absolute path
+#     to a real binary still resolves, which is why the privilege drop above is
+#     the load-bearing half and the PATH is only the cheap half.
+#   * with the environment emptied (`env -i`), stdin on /dev/null so nothing can
+#     block on a read, and a hard timeout.
+#   * WITHOUT `-e`. rpm does not run scriptlets with errexit either, and the
+#     first `rm: not found` must not abort the shell before the alternatives
+#     line is reached.
+#
+# Interception is by two means together, because one is not enough: PATH gets
+# the bare `alternatives` / `update-alternatives` form that iptables-nft uses,
+# and a rewrite of `(/usr)?/s?bin/(update-)?alternatives` inside the body gets
+# the absolute form that wine-core, nmap-ncat and java-latest-openjdk-headless
+# use. The rewrite points at the recorder's own absolute path rather than at a
+# bare word, so a scriptlet that guards itself with `[ -x /usr/bin/alternatives ]`
+# still finds something executable there.
+#
+# Only `%post` and `%posttrans` are read. wine-core's are in `%posttrans`;
+# nmap-ncat's and iptables-nft's in `%post`. A `<lua>` scriptlet is skipped —
+# wine-core has one, and all it does is `--remove`.
+alternatives_record() {
+    local destdir="$1" out="$2"
+    : > "$out"
+
+    local setpriv timeout_bin
+    setpriv="$(command -v setpriv 2>/dev/null)" || setpriv=""
+    timeout_bin="$(command -v timeout 2>/dev/null)" || timeout_bin=""
+    if [ -z "$setpriv" ] || [ -z "$timeout_bin" ]; then
+        warn "setpriv or timeout is missing, so package scriptlets cannot be confined — not reading any 'alternatives' declaration. Packages that publish binaries through alternatives will install with those binaries absent"
+        return 0
+    fi
+    if ! id -u "$ALT_SCRIPTLET_USER" >/dev/null 2>&1; then
+        warn "the '${ALT_SCRIPTLET_USER}' account does not exist, so package scriptlets cannot be dropped to it — not reading any 'alternatives' declaration"
+        return 0
+    fi
+
+    # 0755 on the sandbox and 0666 on the record: the scriptlet runs as nobody
+    # and has to traverse into one and append to the other. mktemp -d makes 0700.
+    local sandbox rec
+    sandbox="$(mktemp -d)" || { warn "cannot make a scriptlet sandbox"; return 0; }
+    chmod 0755 "$sandbox"
+    rec="${sandbox}/record"
+    : > "$rec"; chmod 0666 "$rec"
+
+    # The record path is baked into the recorder rather than passed in the
+    # environment, so a scriptlet that unsets or rewrites variables cannot make
+    # the recorder silently write nowhere. Arguments are NUL-separated and an
+    # empty field ends an invocation, because an argument may contain anything
+    # except NUL.
+    local prog
+    for prog in alternatives update-alternatives; do
+        cat > "${sandbox}/${prog}" <<EOF
+#!/bin/sh
+for a in "\$@"; do printf '%s\0' "\$a"; done >> '${rec}'
+printf '\0' >> '${rec}'
+exit 0
+EOF
+        chmod 0755 "${sandbox}/${prog}"
+    done
+
+    local rpmfile name tag prog_tag body
+    for rpmfile in "$destdir"/*.rpm; do
+        [ -e "$rpmfile" ] || continue
+        name="$(rpm -qp --nosignature --qf '%{NAME}' -- "$rpmfile" 2>/dev/null)" || continue
+        for tag in POSTIN POSTTRANS; do
+            body="$(rpm -qp --nosignature --qf "%{${tag}}" -- "$rpmfile" 2>/dev/null)"
+            [ -n "$body" ] && [ "$body" != "(none)" ] || continue
+            case "$body" in *alternatives*) ;; *) continue ;; esac
+            prog_tag="$(rpm -qp --nosignature --qf "%{${tag}PROG}" -- "$rpmfile" 2>/dev/null)"
+            case "$prog_tag" in
+                */sh|*/sh\ *|*/bash|*/bash\ *) ;;
+                *)  warn "'${name}' declares alternatives in a ${tag} scriptlet run by '${prog_tag}', which is not a shell — not read"
+                    continue ;;
+            esac
+            body="$(printf '%s' "$body" \
+                | sed -E "s#(/usr)?/s?bin/(update-)?alternatives#${sandbox}/\2alternatives#g")"
+            env -i PATH="$sandbox" HOME=/nonexistent SHELL=/bin/sh \
+                "$setpriv" --reuid="$ALT_SCRIPTLET_USER" --regid="$ALT_SCRIPTLET_USER" \
+                    --clear-groups --no-new-privs --inh-caps=-all --bounding-set=-all \
+                "$timeout_bin" "$ALT_SCRIPTLET_TIMEOUT" /bin/sh -c "$body" "$name" 1 \
+                </dev/null >/dev/null 2>&1 || true
+        done
+    done
+
+    cp -f "$rec" "$out" 2>/dev/null || : > "$out"
+    rm -rf "$sandbox"
+    return 0
+}
+
+# Follow a symlink the way the MERGED system will see it, which is neither what
+# `find -xtype l` nor `readlink -e` does. A system extension's /usr is overlaid
+# on the image's, so an absolute target may be satisfied by the payload OR by
+# the image, and during the build the payload is not mounted anywhere — an
+# absolute target has to be tried against $root first and the live filesystem
+# second. `find -xtype l` resolves it against the live root only, and calls
+# every correct link in a payload built inside a container dangling.
+payload_link_resolves() {
+    local root="$1" cur="$2" hops=0 t dir
+    while [ -L "$cur" ] && [ "$hops" -lt 16 ]; do
+        t="$(readlink "$cur")" || return 1
+        case "$t" in
+            /*) if [ -e "${root}${t}" ] || [ -L "${root}${t}" ]; then
+                    cur="${root}${t}"
+                elif [ -e "$t" ] || [ -L "$t" ]; then
+                    cur="$t"
+                else
+                    return 1
+                fi ;;
+            *)  dir="${cur%/*}"; cur="${dir}/${t}" ;;
+        esac
+        hops=$((hops + 1))
+    done
+    [ -e "$cur" ]
+}
+
+# Every symlink in the payload that will still be dangling once the extension is
+# merged, printed as the path it will have at runtime. Used by the pass below to
+# warn, and by tests/test-apex-pkg-alternatives.sh to measure — deliberately the
+# same code, so the suite cannot pass against a checker production does not use.
+dangling_links() {
+    local root="$1" l
+    while IFS= read -r l; do
+        payload_link_resolves "$root" "$l" || printf '%s\n' "${l#"$root"}"
+    done < <(find "$root" -type l 2>/dev/null)
+}
+
+# Replay the recorded declarations into the payload.
+#
+# `alternatives --install <link> <name> <path> <priority>` is turned into
+# `<link> -> <path>`, a direct symlink in the payload's own /usr, and each
+# `--slave`/`--follower <link> <name> <path>` into another one at the parent's
+# priority. The option walk is driven by each flag's real arity — --slave and
+# --follower take three arguments, --initscript, --family, --altdir and
+# --admindir take one, the rest take none — because counting positionals
+# happens to work on wine's invocations and would silently mis-read the next
+# package's.
+#
+# Three refusals, and each one is a defect this engine has already shipped once
+# in some other form:
+#
+#   * a link the IMAGE owns is never created. Asked of the rpmdb with
+#     `rpm -qf`, not of the filesystem: after this fix ships, /usr/bin/wine
+#     exists on a live machine BECAUSE the extension put it there, and a
+#     filesystem test would refuse to build it again on the next rebuild. The
+#     rpmdb is the only thing that knows what belongs to the OS — same oracle
+#     merge_multilib and install_etc's removal pass use.
+#   * a target that is in neither the payload nor the image is not linked to.
+#     That is what keeps a scriptlet's conditional branch, taken for a
+#     situation that does not apply here, from creating a NEW dangling link.
+#   * nothing outside /usr and /opt is touched. A system extension merges those
+#     two and nothing else, and an alternatives link under /etc would have to go
+#     through install_etc to reach the machine at all.
+#
+# When two packages in the set claim the same link, the higher priority wins,
+# which is what alternatives itself would do. It falls out of applying the
+# candidates in descending priority order and never replacing a link that
+# already resolves.
+alternatives_replay() {
+    local rec="$1" root="$2"
+    [ -s "$rec" ] || { msg "alternatives: no package in this set declares one"; return 0; }
+
+    local cand="${rec}.candidates"
+    : > "$cand"
+
+    local -a argv=()
+    local tok
+    while IFS= read -r -d '' tok; do
+        if [ -z "$tok" ]; then
+            alternatives_candidates "$cand" "${argv[@]}"
+            argv=()
+        else
+            argv+=("$tok")
+        fi
+    done < "$rec"
+    [ ${#argv[@]} -eq 0 ] || alternatives_candidates "$cand" "${argv[@]}"
+
+    local declared placed=0 skipped=0
+    declared=$(wc -l < "$cand")
+    [ "$declared" -gt 0 ] || { msg "alternatives: no --install declaration in this set"; rm -f "$cand"; return 0; }
+
+    local prio link target
+    while IFS=$'\t' read -r prio link target; do
+        if alternatives_place "$root" "$link" "$target"; then
+            placed=$((placed + 1))
+        else
+            skipped=$((skipped + 1))
+        fi
+    done < <(LC_ALL=C sort -t"$(printf '\t')" -k1,1nr -s "$cand")
+
+    msg "alternatives: ${placed} of ${declared} declared link(s) created, ${skipped} skipped"
+    rm -f "$cand"
+
+    local still
+    still="$(dangling_links "$root" | wc -l)"
+    [ "$still" -eq 0 ] \
+        || warn "${still} symlink(s) in this payload still point at something neither it nor the image provides; 'apex verify' lists them"
+    return 0
+}
+
+# One recorded invocation -> zero or more "priority<TAB>link<TAB>target" lines.
+alternatives_candidates() {
+    local out="$1"; shift
+    local -a a=("$@")
+    local n=${#a[@]} i=0
+    [ "$n" -gt 0 ] || return 0
+
+    # --test asks alternatives to decide and change nothing. Honour it by
+    # dropping the whole invocation rather than by half-applying it.
+    for ((i = 0; i < n; i++)); do
+        [ "${a[i]}" = "--test" ] && return 0
+    done
+
+    local prio="" have=0
+    i=0
+    while [ "$i" -lt "$n" ]; do
+        case "${a[i]}" in
+            --install)
+                [ $((i + 4)) -lt "$n" ] || return 0
+                prio="${a[i+4]}"
+                case "$prio" in ''|*[!0-9]*) return 0 ;; esac
+                printf '%s\t%s\t%s\n' "$prio" "${a[i+1]}" "${a[i+3]}" >> "$out"
+                have=1
+                i=$((i + 5)) ;;
+            --slave|--follower)
+                [ "$have" = 1 ] || { i=$((i + 4)); continue; }
+                [ $((i + 3)) -lt "$n" ] || return 0
+                printf '%s\t%s\t%s\n' "$prio" "${a[i+1]}" "${a[i+3]}" >> "$out"
+                i=$((i + 4)) ;;
+            --initscript|--family|--altdir|--admindir)
+                i=$((i + 2)) ;;
+            *)
+                i=$((i + 1)) ;;
+        esac
+    done
+    return 0
+}
+
+alternatives_place() {
+    local root="$1" link="$2" target="$3"
+
+    case "$link" in /usr/*|/opt/*) ;; *) warn "alternatives: refusing '${link}' — a system extension merges /usr and /opt only"; return 1 ;; esac
+    case "$target" in /usr/*|/opt/*) ;; *) warn "alternatives: refusing '${link}' — its target '${target}' is outside /usr and /opt"; return 1 ;; esac
+    case "$link$target" in *..*) warn "alternatives: refusing '${link}' — '..' in a path"; return 1 ;; esac
+
+    if image_owns "$link"; then
+        warn "alternatives: not creating '${link}' — APEX-OS already owns it, and the overlay must never shadow the image's copy"
+        return 1
+    fi
+    if [ ! -e "${root}${target}" ] && [ ! -L "${root}${target}" ] && ! image_owns "$target"; then
+        warn "alternatives: not creating '${link}' — '${target}' is in neither this package set nor the image"
+        return 1
+    fi
+    if [ -e "${root}${link}" ] && [ ! -L "${root}${link}" ]; then
+        warn "alternatives: not creating '${link}' — this package set ships a real file there"
+        return 1
+    fi
+    # Already satisfied: either a higher-priority candidate got here first, or
+    # the package shipped a link that works. Leave it.
+    if [ -L "${root}${link}" ] && payload_link_resolves "$root" "${root}${link}"; then
+        return 1
+    fi
+
+    mkdir -p "${root}${link%/*}" || return 1
+    ln -sfn "$target" "${root}${link}" || return 1
+    return 0
+}
+
+# The pass itself.
+apply_alternatives() {
+    local destdir="$1" root="$2"
+    local rec="${root}.alternatives"
+    alternatives_record "$destdir" "$rec"
+    alternatives_replay "$rec" "$root"
+    rm -f "$rec"
 }
 
 # Caches that are a SINGLE file describing a whole directory are the one real
@@ -630,6 +2023,21 @@ split_out_of_image() {
         [ -d "${root}/${d}" ] && find "${root}/${d}" -mindepth 1 -print >> "${WORK}/refused.paths" 2>/dev/null || true
         rm -rf "${root:?}/${d}"
     done
+    # Legacy top-level paths: rpm still ships 32-bit libraries in /lib even on
+    # merged-usr Fedora (libgcc.i686 carries /lib/libgcc_s.so.1). A sysext
+    # merges /usr and /opt ONLY, so a file left at the tree root silently
+    # never reaches the running system. Fold these into their canonical /usr
+    # location — exactly what the merged-/usr filesystem does at boot.
+    local legacy dst
+    for legacy in lib:usr/lib lib64:usr/lib64 bin:usr/bin sbin:usr/bin; do
+        d="${legacy%%:*}"; dst="${legacy##*:}"
+        if [ -d "${root:?}/${d}" ]; then
+            mkdir -p "${root:?}/${dst}"
+            cp -a "${root:?}/${d}/." "${root:?}/${dst}/" \
+                || die "cannot fold /${d} into /${dst}"
+            rm -rf "${root:?}/${d}"
+        fi
+    done
     if [ -s "${WORK}/refused.paths" ]; then
         warn "ignored files outside /usr, /opt, /etc and /var:"
         sed 's/^/  /' "${WORK}/refused.paths" >&2
@@ -710,28 +2118,123 @@ payload_bytes() {
 # ── /etc and /var placement ──────────────────────────────────────────────────
 sha() { sha256sum "$1" 2>/dev/null | cut -d' ' -f1; }
 
+# Does a package in the system rpmdb own this path?
+#
+# `rpm -qf` answers with the owning package and exits 0, or exits non-zero for
+# an unowned path. Failing CLOSED here is deliberate: if the query cannot run at
+# all, treat the path as owned and keep the file. A wrongly kept file is a stale
+# config; a wrongly deleted one is /etc/fonts/fonts.conf.
+image_owns() {
+    local path="$1"
+    command -v rpm >/dev/null 2>&1 || return 0
+    rpm -qf --quiet -- "$path" 2>/dev/null
+}
+
+# Hand every path install_etc wrote to restorecon, which asks the LOADED POLICY
+# what each one's context should be.
+#
+# Deriving it from the policy is the whole point. `cp -a` preserves the SOURCE
+# label and the source is an rpm extraction tree under /var/lib, so without this
+# every file `apex install` puts in /etc arrives carrying the extraction tree's
+# type. Measured on katana on 2026-09-20 (ROADMAP/evidence/katana-pwd-lock-selinux-20260920.md):
+# 7 of the 11 tracked paths were rpm_var_lib_t, among them /etc/.pwd.lock, which
+# policy wants as passwd_file_t. systemd takes that lock before it will allocate
+# a dynamic UID, so EVERY DynamicUser=yes unit on the machine broke at once —
+# capsule@.service, rpm-ostreed.service, fwupd-refresh.service and three more,
+# each failing at step USER with 217/USER. Nothing logged an AVC: the denial is
+# in PID 1 before any domain transition, and the only line naming the file
+# exists at debug level. It cost four rounds of probing to find.
+#
+# A hardcoded map of filenames here would be the same mistake as the
+# --excludepath list the multilib pass had to abandon, and it would have missed
+# .pwd.lock — a transaction artefact no package owns and nobody would have
+# thought to list.
+relabel_etc() {
+    local list="$1"
+    [ -s "$list" ] || return 0
+    if ! command -v restorecon >/dev/null 2>&1; then
+        warn "restorecon is absent — files installed into /etc keep the label they were copied with"
+        return 0
+    fi
+    # A machine with SELinux off has no labels to get wrong, and restorecon
+    # there relabels nothing while still exiting 0 — so the warning below could
+    # never fire and would mean nothing if it did.
+    if command -v selinuxenabled >/dev/null 2>&1 && ! selinuxenabled; then
+        return 0
+    fi
+    # -F is not tidiness. A bare `restorecon` silently declines to touch any
+    # file whose current type is in the policy's customizable_types list —
+    # "not reset as customized by admin", one line per file, and then exit 0.
+    # That exemption is for labels an ADMIN chose; a file this function has
+    # just written is not one of those, and inheriting the exemption would make
+    # this pass run, report success and change nothing. -i makes a path that
+    # has since been removed a no-op rather than an error.
+    #
+    # Stderr is deliberately NOT swallowed: this defect reported nothing at all
+    # for months, and restorecon's own message is the only thing that would
+    # name a path it could not set.
+    restorecon -F -i -f "$list" >&2 \
+        || warn "relabelling /etc reported problems — see above, then: restorecon -nv -f ${list}"
+    # The saved copies are engine-owned from the top of the tree down, so -R is
+    # unambiguous here in a way it could never be under /etc. They are written
+    # by the same `cp -a` and arrive with the same wrong label.
+    if [ -d "$ETC_SAVE" ]; then
+        restorecon -F -R "$ETC_SAVE" >&2 \
+            || warn "relabelling ${ETC_SAVE} reported problems"
+    fi
+}
+
 install_etc() {
     local etcroot="$1"
     local -a kept=()
+    # Every path this function creates or overwrites, collected AS IT GOES for
+    # the relabel pass at the end. Built here rather than derived afterwards
+    # because only the branch that ran knows which path it actually wrote: the
+    # two `.apexnew` branches leave $target alone, and a directory that already
+    # existed was not created by us.
+    local relist
+    relist="$(mktemp)" || die "cannot create a temporary file"
     if [ -d "$etcroot" ]; then
         local rel target saved
         while IFS= read -r rel; do
             target="/etc/${rel}"
             saved="${ETC_SAVE}/${rel}"
             if [ -d "${etcroot}/${rel}" ]; then
-                mkdir -p "$target"
+                # A directory we create inherits its parent's type by
+                # transition, which is wrong wherever policy has an opinion —
+                # /etc/cron.d is system_cron_spool_t, not etc_t. One that was
+                # already there is not ours to relabel.
+                if [ ! -d "$target" ]; then
+                    mkdir -p "$target"
+                    printf '%s\n' "$target" >> "$relist"
+                fi
                 continue
             fi
+            # cp -a, NEVER install: rpm ships /etc symlinks that point back into
+            # /usr RELATIVE (fontconfig's conf.d -> ../../../usr/share/...), and
+            # split_out_of_image has already moved this tree out of the payload
+            # root, so here the link is dangling at its current location. `install`
+            # dereferences and dies on it; cp -a copies the link as a link, and it
+            # resolves again the moment it reaches its real place in /etc.
             if [ -e "$target" ] && [ -f "$saved" ] && [ "$(sha "$target")" != "$(sha "$saved")" ]; then
                 # The user edited it. Their file wins; the new one is left beside it.
-                install -Dm0644 "${etcroot}/${rel}" "${target}.apexnew"
+                mkdir -p "$(dirname "${target}.apexnew")"
+                cp -a -- "${etcroot}/${rel}" "${target}.apexnew"
                 warn "kept your edited ${target}; new version saved as ${target}.apexnew"
+                # The edited file is still one this engine put there, so its
+                # label stays ours to keep right even though its content is not.
+                printf '%s\n%s\n' "${target}.apexnew" "$target" >> "$relist"
             elif [ -e "$target" ] && [ ! -f "$saved" ]; then
-                install -Dm0644 "${etcroot}/${rel}" "${target}.apexnew"
+                mkdir -p "$(dirname "${target}.apexnew")"
+                cp -a -- "${etcroot}/${rel}" "${target}.apexnew"
                 warn "${target} already exists and is not ours; new version saved as ${target}.apexnew"
+                # Only the file we wrote. $target predates this engine, and its
+                # label belongs to whoever put it there.
+                printf '%s\n' "${target}.apexnew" >> "$relist"
             else
                 mkdir -p "$(dirname "$target")"
                 cp -a "${etcroot}/${rel}" "$target"
+                printf '%s\n' "$target" >> "$relist"
             fi
             mkdir -p "$(dirname "$saved")"
             cp -a "${etcroot}/${rel}" "$saved"
@@ -740,7 +2243,23 @@ install_etc() {
     fi
 
     # Anything we installed last time and no longer ship is removed, but only if
-    # the user has not touched it.
+    # the user has not touched it AND the image does not own it.
+    #
+    # The image clause is not belt-and-braces; without it this loop deletes the
+    # operating system's own configuration. A 32-bit rpm ships the same /etc
+    # paths as its 64-bit sibling, byte for byte — fontconfig.i686 carries
+    # /etc/fonts/fonts.conf exactly as the image's fontconfig.x86_64 does. So a
+    # run that installed the i686 set recorded those paths as "ours", the next
+    # run stopped shipping them (the multilib pass excluded /etc outright then,
+    # and merge_multilib drops them by image ownership now — either way they
+    # stop arriving), and the user-has-not-touched-it test passed precisely
+    # BECAUSE the file was pristine. It ate 26 image-owned files on the author's machine in one
+    # rebuild, among them /etc/fonts/fonts.conf, /etc/ld.so.conf, /etc/krb5.conf,
+    # /etc/pki/tls/openssl.cnf and both /etc/pki/nssdb databases.
+    #
+    # Ask the system rpmdb who owns the path. If any installed package claims
+    # it, the file is the image's and this loop has no business removing it —
+    # forget the bookkeeping and leave the file alone.
     if [ -f "$ETC_LIST" ]; then
         local old
         while IFS= read -r old; do
@@ -749,13 +2268,28 @@ install_etc() {
                 continue
             fi
             local t="/etc/${old}" s="${ETC_SAVE}/${old}"
-            if [ -f "$t" ] && [ -f "$s" ] && [ "$(sha "$t")" = "$(sha "$s")" ]; then
+            if [ -f "$t" ] && [ -f "$s" ] && [ "$(sha "$t")" = "$(sha "$s")" ] \
+                && ! image_owns "$t"; then
                 rm -f "$t"
+            elif [ -e "$t" ] && ! image_owns "$t"; then
+                # Kept because the user edited it: a file this engine installed
+                # and no longer ships. The content is theirs; the label is still
+                # ours. /etc/security/limits.d/10-gamemode.conf on katana was
+                # exactly this — tracked, no longer shipped, owned by no
+                # package, still mislabelled, and the same defect rather than a
+                # separate accident.
+                #
+                # An image-owned survivor is deliberately NOT here. It reaches
+                # $ETC_LIST because a 32-bit rpm shipped the same path, but this
+                # function never wrote it, and its label is the image's.
+                printf '%s\n' "$t" >> "$relist"
             fi
             rm -f "$s"
         done < "$ETC_LIST"
     fi
     printf '%s\n' "${kept[@]:-}" | awk 'NF' > "$ETC_LIST"
+    relabel_etc "$relist"
+    rm -f "$relist"
 }
 
 install_var_dirs() {
@@ -799,38 +2333,58 @@ merged() {
 #
 # Runs only after save_requested has committed a successful build, so a failed
 # install can never take a user's cached RPM with it.
-gc_local_cache() {
-    [ -d "$LOCAL_DIR" ] || return 0
+# One cache directory's worth of retirement: everything under $1 whose package
+# name the requested list no longer carries is moved into the spool $2, so
+# `apex pkg rollback` can put it back. $3 is the requested-list prefix that
+# owns the directory — `local:` for .rpm files, `deb:` for .deb files.
+#
+# The name is the basename minus its LAST extension, which is what lets one
+# package own several side files: chrome.rpm and chrome.trust, or
+# claude-desktop.deb, .trust, .entry and .files.
+gc_cache_dir() {
+    local dir="$1" spool="$2" prefix="$3"
+    [ -d "$dir" ] || return 0
     local -a keep=()
-    mapfile -t keep < <(load_requested | sed -n 's/^local://p')
-    install -d -m0700 "${ROLLBACK_DIR}/local"
-    find "${ROLLBACK_DIR}/local" -mindepth 1 -maxdepth 1 -delete 2>/dev/null || true
+    mapfile -t keep < <(load_requested | sed -n "s/^${prefix}//p")
+    install -d -m0700 "$spool"
+    find "$spool" -mindepth 1 -maxdepth 1 -delete 2>/dev/null || true
     local f base name k found
-    for f in "$LOCAL_DIR"/*.rpm "$LOCAL_DIR"/*.trust; do
+    for f in "$dir"/*; do
         [ -e "$f" ] || continue
         base="${f##*/}"
-        name="${base%.rpm}"; name="${name%.trust}"
+        name="${base%.*}"
         found=0
         for k in "${keep[@]:-}"; do
             [ "$k" = "$name" ] && found=1
         done
         [ "$found" = 1 ] && continue
-        mv -f "$f" "${ROLLBACK_DIR}/local/${base}"
+        mv -f "$f" "${spool}/${base}"
     done
+}
+
+gc_local_cache() {
+    gc_cache_dir "$LOCAL_DIR" "${ROLLBACK_DIR}/local" 'local:'
+    gc_cache_dir "$DEB_DIR"   "${ROLLBACK_DIR}/deb"   'deb:'
 }
 
 # The other half of gc_local_cache, and deliberately NOT part of
 # restore_previous: a failed merge undoes the extension while the requested list
 # and the cache are still untouched, so putting the previous generation back
 # there would resurrect packages nobody asked for.
-restore_local_cache() {
-    [ -d "${ROLLBACK_DIR}/local" ] || return 0
-    install -d -m0700 "$LOCAL_DIR"
+restore_cache_dir() {
+    local spool="$1" dir="$2"
+    [ -d "$spool" ] || return 0
+    install -d -m0700 "$dir"
     local f
-    for f in "${ROLLBACK_DIR}/local"/*; do
+    for f in "$spool"/*; do
         [ -e "$f" ] || continue
-        mv -f "$f" "${LOCAL_DIR}/${f##*/}"
+        mv -f "$f" "${dir}/${f##*/}"
     done
+}
+
+restore_local_cache() {
+    restore_cache_dir "${ROLLBACK_DIR}/local" "$LOCAL_DIR"
+    restore_cache_dir "${ROLLBACK_DIR}/deb"   "$DEB_DIR"
 }
 
 restore_previous() {
@@ -875,28 +2429,42 @@ activate_payload() {
 }
 
 write_state() {
-    local destdir="$1"
+    local destdir="$1"; shift
     mkdir -p "$PKG_ROOT"
     local resolved requested
-    resolved="$(for f in "$destdir"/*.rpm; do
-                    rpm -qp --nosignature --qf '%{NAME}-%{EVR}.%{ARCH}\n' "$f" 2>/dev/null
-                done | sort | json_string_array)"
+    resolved="$(resolved_set "$destdir" "$@" | json_string_array)"
     requested="$(load_requested | json_string_array)"
     # Provenance, recorded so `apex pkg list` and `apex pkg verify` can say where
     # each package came from instead of presenting a vendor RPM as if a Fedora
     # mirror had signed it.
-    local locals unsigned n
+    local locals unsigned n debfiles debdeps
     locals="$(load_requested | sed -n 's/^local://p' | sort | json_string_array)"
-    unsigned="$(load_requested | sed -n 's/^local://p' | sort | while IFS= read -r n; do
-                    [ -n "$n" ] || continue
-                    [ -f "$(local_marker "$n")" ] && printf '%s\n' "$n"
-                    true
-                done | json_string_array)"
+    debfiles="$(load_requested | sed -n 's/^deb://p' | sort | json_string_array)"
+    # Every .deb is in this list by construction, not by a marker: there is no
+    # such thing as a verified local .deb, so `apex pkg verify` must say so
+    # about all of them. See deb_trust_refusal.
+    unsigned="$( { load_requested | sed -n 's/^local://p' | while IFS= read -r n; do
+                       [ -n "$n" ] || continue
+                       [ -f "$(local_marker "$n")" ] && printf '%s\n' "$n"
+                       true
+                   done
+                   load_requested | sed -n 's/^deb://p'
+                 } | sort | json_string_array)"
+    # What each .deb says it needs, recorded verbatim because APEX resolves none
+    # of it: Debian dependency names are not Fedora package names and guessing a
+    # mapping would be worse than printing the truth.
+    debdeps="$(load_requested | sed -n 's/^deb://p' | sort | while IFS= read -r n; do
+                   [ -n "$n" ] || continue
+                   printf '%s\t%s\n' "$n" "$(cat "${DEB_DIR}/${n}.depends" 2>/dev/null || true)"
+               done | jq -R -s 'split("\n") | map(select(length > 0)) | map(split("\t"))
+                                | map({(.[0]): (.[1] // "")}) | add // {}')"
     local payload; payload="$(current_payload)"
     jq -n \
         --argjson requested "$requested" \
         --argjson resolved "$resolved" \
         --argjson local_files "$locals" \
+        --argjson deb_files "$debfiles" \
+        --argjson deb_depends "$debdeps" \
         --argjson unsigned "$unsigned" \
         --arg os_id "$(os_id)" \
         --arg os_version "$(os_version)" \
@@ -906,11 +2474,55 @@ write_state() {
         --arg size "$(payload_bytes "$payload")" \
         --argjson compat_level "$PKG_COMPAT_LEVEL" \
         '{requested:$requested, resolved:$resolved, local_files:$local_files,
+          deb_files:$deb_files, deb_depends:$deb_depends,
           unsigned_accepted:$unsigned, os_id:$os_id,
           os_version_id:$os_version, built:$built, image:$image,
           image_sha256:$sha, image_bytes:($size|tonumber),
           pkg_compat_level:$compat_level}' > "${STATE}.tmp"
     mv -f "${STATE}.tmp" "$STATE"
+}
+
+# Is the extension on disk already exactly what this transaction would build?
+# $1 = the state file to judge, $2 = the resolved NEVRA set this run produced,
+# already sorted. Returns 0 only when every one of five things agrees, and a
+# caller that gets 0 skips the whole build.
+#
+# The state path is a PARAMETER rather than $STATE so this decision can be run
+# against a file in a temp directory — tests/test-apex-pkg-update.sh holds the
+# resolved set constant and varies one field at a time, which is the only way to
+# tell a rebuild caused by the compat level from one caused by a package update.
+#
+# THE COMPAT-LEVEL CLAUSE IS LOAD-BEARING, and its absence was a shipped defect
+# (ROADMAP/evidence/katana-image-qual-20260919.md §0.2 and §1.2). `os_version`
+# is VERSION_ID out of /usr/lib/os-release, which is `43` before and after an
+# APEX image build, and the resolved set comes from Fedora's repositories, which
+# have nothing to do with what APEX baked. So when an image update changes what
+# the IMAGE provides — which is exactly what the extension's contents are
+# computed against, since extract_rpms carries a 32-bit path only when the
+# running image does not already own it — neither of the other two signals
+# moves, and PKG_COMPAT_LEVEL is the only thing left that can say so.
+#
+# Measured on katana on 2026-09-19: an existing machine took the image that
+# carried the pkg-share fix, apex-sysext-rebuild.service started and finished in
+# the same second reporting success, and re-merged a byte-identical extension
+# with 177 image paths shadowed and zero i686 Vulkan ICDs. Bumping the level
+# WITHOUT this clause is worse than doing nothing: `cmd_rebuild --if-needed`
+# checks the level, so it would announce a rebuild, re-download every rpm, stop
+# here on the unchanged set, and then write_state would stamp the new level into
+# state.json — consuming the marker without building anything, so the next boot
+# sees a match and no-ops for ever.
+ext_up_to_date() {
+    local state=$1 new_set=$2
+    [ -f "$state" ] || return 1
+    merged || return 1
+    [ -n "$(current_payload)" ] || return 1
+    [ "$(jq -r '.os_version_id // empty' "$state")" = "$(os_version)" ] || return 1
+    # `// 0` on purpose: a state.json written before the field existed must read
+    # as "older than anything this engine ships" and rebuild, not as a match.
+    [ "$(jq -r '.pkg_compat_level // 0' "$state")" = "$PKG_COMPAT_LEVEL" ] || return 1
+    local old_set
+    old_set="$(jq -r '.resolved[]?' "$state" | sort)"
+    [ "$new_set" = "$old_set" ]
 }
 
 # Build the one extension from the requested list. Every mutation funnels here,
@@ -938,7 +2550,15 @@ rebuild_extension() {
     for a in "${want[@]}"; do
         probe="$a"
         is_local_id "$a" && probe="$(local_name "$a")"
+        is_deb_id "$a"   && probe="$(deb_name "$a")"
         if rpm -q -- "$probe" >/dev/null 2>&1; then
+            msg "dropping '$probe' from the extension: now provided by APEX-OS"
+        elif is_deb_id "$a" && deb_superseded_by_image "$a"; then
+            # A .deb's files have no rpm owner, so the query above cannot see an
+            # image that has STARTED shipping the same application — and that is
+            # not hypothetical: Claude Desktop reaches the image as a `cp -a` of
+            # exactly this .deb. Without this arm the next `apex update` would
+            # reach the shadow guard and refuse to rebuild anything at all.
             msg "dropping '$probe' from the extension: now provided by APEX-OS"
         else
             missing+=("$a")
@@ -969,13 +2589,17 @@ rebuild_extension() {
     # originally typed may have been a USB stick, and this same function runs
     # from `apex update` and from apex-sysext-rebuild.service after an OS
     # upgrade, long after that path stopped existing.
-    local -a specs=() cached=()
+    local -a specs=() cached=() debcached=()
     local cachefile
     for a in "${want[@]}"; do
         if is_local_id "$a"; then
             cachefile="$(local_cache "$a")"
             [ -f "$cachefile" ] || die "the cached copy of local package '$(local_name "$a")' is missing (${cachefile}); reinstall it from the .rpm file, or drop it with: sudo apex remove $(local_name "$a")"
             cached+=("$cachefile")
+        elif is_deb_id "$a"; then
+            cachefile="$(deb_cache "$a")"
+            [ -f "$cachefile" ] || die "the cached copy of local package '$(deb_name "$a")' is missing (${cachefile}); reinstall it from the .deb file, or drop it with: sudo apex remove $(deb_name "$a")"
+            debcached+=("$cachefile")
         else
             specs+=("$a")
         fi
@@ -1000,28 +2624,41 @@ rebuild_extension() {
     if [ "${#cached[@]}" -gt 0 ]; then
         stage_local_rpms "$rpms" "${cached[@]}"
     fi
-    guard_rpms "$rpms"
+    # A request made entirely of .deb files leaves this directory empty, and
+    # then every `for f in "$destdir"/*.rpm` below iterates over the UNMATCHED
+    # glob and asks rpm to read a header out of a path that does not exist —
+    # guard_rpms dies on it and extract_rpms treats it as a foreign-arch
+    # package. So the rpm half of the pipeline runs only when there is one.
+    local have_rpms=0
+    compgen -G "${rpms}/*.rpm" >/dev/null && have_rpms=1
+    if [ "$have_rpms" = 1 ]; then
+        guard_rpms "$rpms"
+    elif [ "${#debcached[@]}" -eq 0 ]; then
+        die "every requested package is already part of APEX-OS — nothing to install"
+    fi
 
     # `apex update` calls this on every run. Rebuilding an identical extension
     # would burn minutes and, worse, re-merge /usr underneath a running desktop
     # for no reason — so an unchanged package set stops here.
-    local new_set old_set
-    new_set="$(for f in "$rpms"/*.rpm; do
-                   rpm -qp --nosignature --qf '%{NAME}-%{EVR}.%{ARCH}\n' "$f" 2>/dev/null
-               done | sort)"
-    if [ -f "$STATE" ] && merged && [ -n "$(current_payload)" ] \
-       && [ "$(jq -r '.os_version_id // empty' "$STATE")" = "$(os_version)" ]; then
-        old_set="$(jq -r '.resolved[]?' "$STATE" | sort)"
-        if [ "$new_set" = "$old_set" ]; then
-            msg "already up to date"
-            save_requested "${want[@]}"
-            gc_local_cache
-            write_state "$rpms"
-            return 0
-        fi
+    local new_set
+    new_set="$(resolved_set "$rpms" ${debcached[@]+"${debcached[@]}"})"
+    if ext_up_to_date "$STATE" "$new_set"; then
+        msg "already up to date"
+        save_requested "${want[@]}"
+        gc_local_cache
+        write_state "$rpms" ${debcached[@]+"${debcached[@]}"}
+        return 0
     fi
 
-    extract_rpms "$rpms" "$root"
+    if [ "$have_rpms" = 1 ]; then
+        extract_rpms "$rpms" "$root"
+        apply_alternatives "$rpms" "$root"
+    else
+        mkdir -p "$root"
+    fi
+    if [ "${#debcached[@]}" -gt 0 ]; then
+        extract_debs "$root" "${debcached[@]}"
+    fi
     fix_caches "$root"
     split_out_of_image "$root" "$etcroot"
     write_extension_release "$root"
@@ -1035,7 +2672,7 @@ rebuild_extension() {
     # Only now is this set the truth about the machine.
     save_requested "${want[@]}"
     gc_local_cache
-    write_state "$rpms"
+    write_state "$rpms" ${debcached[@]+"${debcached[@]}"}
 
     msg "done — $(jq -r '.resolved | length' "$STATE") package(s), $(numfmt --to=iec "$(jq -r .image_bytes "$STATE")")B extension"
 }
@@ -1077,24 +2714,859 @@ cmd_flatpak_upgrade() {
     fi
 }
 
+# ── AppImages ────────────────────────────────────────────────────────────────
+# An AppImage is a single executable file with a filesystem glued to its back:
+# an ELF "runtime" first, then a squashfs image starting at the byte after the
+# ELF's section headers. Run it and the runtime FUSE-mounts that squashfs on a
+# temporary directory and execs `AppRun` inside it.
+#
+# THAT LAST SENTENCE IS THE PROBLEM, AND IT IS WHY NOTHING HERE EVER RUNS THE
+# APPIMAGE. Measured on the APEX image: `fusermount3` is present, `fusermount`
+# (the libfuse2 helper) is ABSENT, `libfuse.so.2` is ABSENT and `squashfuse` is
+# absent. The classic AppImage runtime dlopens libfuse.so.2, so a type-2
+# AppImage started as-is on this OS dies with
+#
+#   dlopen(): error loading libfuse.so.2
+#
+# There were three ways out and only one of them is honest on a bootc system:
+#
+#   1. ship a fuse2 compatibility package. Rejected: it puts a deprecated,
+#      unmaintained ABI into /usr for every APEX machine in the fleet — whether
+#      or not that machine will ever see an AppImage — so that a format APEX
+#      does not control can mount itself. The engine also refuses to let an
+#      extension shadow an image library, so libfuse.so.2 would have to be
+#      baked into the image, which is the most expensive place to put it.
+#   2. run every launch with `--appimage-extract-and-run`. Rejected twice over:
+#      it unpacks the entire payload to a temporary directory on EVERY start
+#      (hundreds of megabytes for an Electron app, before the splash screen),
+#      and it does it by EXECUTING the vendor's runtime. This engine refuses to
+#      run a .deb's maintainer scripts and runs an rpm's %post as `nobody` under
+#      a timeout; handing a downloaded binary a root shell at install time to
+#      save writing thirty lines of arithmetic would be the weakest rule in the
+#      file.
+#   3. UNPACK IT ONCE, AT INSTALL TIME, AND RUN THE UNPACKED TREE. Chosen.
+#      The squashfs offset is `e_shoff + e_shentsize * e_shnum` read straight
+#      out of the ELF header — the same number `--appimage-offset` prints, but
+#      computed with `od` and shell arithmetic instead of by asking the file
+#      about itself. `unsquashfs -o <offset>` then does the rest. FUSE is never
+#      involved, at install time or at run time; the machine needs no
+#      libfuse.so.2, no fusermount, no squashfuse and no kernel mount at all.
+#
+# It also happens to fit the OS. /usr is read-only composefs, so RPM packages
+# have to become a systemd system extension; an AppImage does not, because it
+# is self-contained and /var is writable. So an AppImage is NOT part of
+# apex-user.raw and appears nowhere in the requested list, state.json or the
+# resolved set. It survives an OS upgrade, a `bootc rollback`, a sysext rebuild
+# and `apex remove` of every rpm on the machine, because none of those touch it.
+#
+# WHERE IT LANDS
+#   /var/lib/apex/appimage/<name>.AppImage   the accepted bytes, kept
+#   /var/lib/apex/appimage/<name>.{trust,files,json}
+#   /usr/local/lib/apex-appimage/<name>/     the unpacked payload (AppRun & co)
+#   /usr/local/bin/<name>                    a generated launcher
+#   /usr/local/share/applications/<id>.desktop
+#   /usr/local/share/icons/hicolor/**/apps/<icon>.*
+#
+# /usr/local, not /var directly: on this OS /usr/local is a symlink to
+# ../var/usrlocal (Containerfile.core), so it is writable; it is already on
+# PATH and already in XDG_DATA_DIRS, so the launcher and the desktop entry need
+# no PATH games and no environment.d drop-in; and SELinux's
+# `/var/usrlocal -> /usr/local` substitution gives the tree bin_t/lib_t rather
+# than var_lib_t, which is what lets the desktop session execute it. Claude
+# Desktop has been installed at /usr/local/lib/claude-desktop on the author's
+# machine since September and is the standing proof.
+#
+# WHAT `apex update` DOES WITH AN APPIMAGE: NOTHING. It is pinned to the bytes
+# that were installed, and `apex pkg list`, `apex pkg upgrade` and the docs all
+# say so rather than leaving the user to work it out. There is no repository to
+# ask for a newer one — an AppImage comes from a download page — and the
+# alternative is the thing docs/packages.md:320 already named as the reason Zen
+# Browser is a Flatpak: "both would need APEX to write and maintain its own
+# updater". This design does not pay that cost, it declines it, in writing.
+#
+# Self-update is not merely forbidden, it is impossible: the app runs out of a
+# root-owned 0755 tree and $APPIMAGE points at a root-owned 0644 file in
+# /var/lib/apex/appimage, so an AppImage that tries to rewrite itself gets
+# EACCES instead of a second update channel beside `apex update`.
+#
+# TRUST. An AppImage is never verified, so every one of them needs
+# --allow-unsigned. Some embed a signature in a `.sha256_sig` ELF section with
+# the signing key in `.sig_key` — a key taken from the thing it signs proves
+# nothing, which is the same conclusion the .deb path reached about debsigs and
+# the same reason the image PINS both AI vendors' fingerprints. The acceptance
+# is recorded against the file's exact bytes, exactly as it is for an rpm.
+
+# Little-endian unsigned integer of $3 bytes at offset $2 of file $1.
+# Assembled a byte at a time rather than with `od -tu8` so the answer does not
+# depend on the endianness of the machine doing the reading, and so a short
+# read (an offset past EOF) is a failure instead of a zero.
+le_int() {
+    local file=$1 off=$2 n=$3 b v=0 s=0 c=0
+    for b in $(od -An -v -tu1 -j "$off" -N "$n" -- "$file" 2>/dev/null); do
+        v=$(( v + (b << s) )); s=$(( s + 8 )); c=$(( c + 1 ))
+    done
+    [ "$c" = "$n" ] || return 1
+    printf '%s' "$v"
+}
+
+# Which kind of AppImage $1 is: prints 2 (squashfs), 1 (ISO 9660) or 0 and
+# fails. The type magic is three bytes at offset 8, inside the ELF's e_ident
+# padding: 0x41 0x49 ('A' 'I') then the type. An ELF without it is some other
+# ELF, and APEX will not guess — guessing is how `apex install ./setup.sh`
+# would become an install.
+appimage_type() {
+    local m
+    m="$(od -An -v -tx1 -j0 -N4 -- "$1" 2>/dev/null | tr -d ' \n')"
+    if [ "$m" != 7f454c46 ]; then printf '0'; return 1; fi
+    m="$(od -An -v -tx1 -j8 -N3 -- "$1" 2>/dev/null | tr -d ' \n')"
+    case "$m" in
+        414901) printf '1'; return 0 ;;
+        414902) printf '2'; return 0 ;;
+    esac
+    printf '0'; return 1
+}
+
+# Is this argument meant to be a local AppImage file?
+#
+# Deliberately narrower than is_local_rpm_arg, which answers true for ANY
+# argument containing a slash: a bare word is never an AppImage here, so
+# `apex install code` installs the repository package even in a directory that
+# happens to contain a file called `code`. Name it `./code` and it is a file.
+#
+# It MUST be asked before is_local_rpm_arg for the same reason the .deb test
+# must: the rpm test would claim `./Foo.AppImage` and refuse it as "not an RPM
+# package", and before is_flatpak_id because that regex matches
+# `org.foo.Bar.AppImage`.
+is_appimage_arg() {
+    case "$1" in
+        *.AppImage|*.appimage) return 0 ;;
+        */*) [ -f "$1" ] && appimage_type "$1" >/dev/null ;;
+        *) return 1 ;;
+    esac
+}
+
+appimage_machine_name() {
+    case "$1" in
+        3) printf 'i386' ;; 40) printf 'arm' ;; 62) printf 'x86_64' ;;
+        183) printf 'aarch64' ;; 243) printf 'riscv64' ;;
+        *) printf 'ELF machine %s' "$1" ;;
+    esac
+}
+
+# Does ELF e_machine $1 describe this machine? Refusing a mismatch is the same
+# call inspect_local_rpm makes about %{ARCH}: the file will never run, and
+# saying so before unpacking half a gigabyte is the whole point of a guard.
+appimage_machine_matches() {
+    local want
+    case "$(uname -m)" in
+        x86_64)  want=62 ;;
+        aarch64) want=183 ;;
+        riscv64) want=243 ;;
+        armv7l)  want=40 ;;
+        *) return 1 ;;
+    esac
+    [ "$1" = "$want" ]
+}
+
+# Is $2 inside $1, after resolving every symlink on both?
+#
+# This is the guard on everything read OUT of an untrusted payload. `.DirIcon`
+# is conventionally a symlink and the .desktop file may be one; a payload whose
+# .DirIcon points at ../../../../etc/shadow would otherwise have a root process
+# copy that file into /usr/local/share/icons, where every user can read it.
+path_within() {
+    local root target
+    root="$(readlink -f -- "$1")" || return 1
+    target="$(readlink -f -- "$2")" || return 1
+    case "$target" in
+        "$root") return 0 ;;
+        "$root"/*) return 0 ;;
+    esac
+    return 1
+}
+
+# One key out of the [Desktop Entry] group of a .desktop file. Anchored at the
+# start of the line so `Name[de]=` never answers for `Name`, and group-aware so
+# a `[Desktop Action new-window]` Exec cannot be mistaken for the main one.
+desktop_key() {
+    awk -v k="$2" '
+        /^\[/ { ing = ($0 == "[Desktop Entry]"); next }
+        ing && index($0, k "=") == 1 { print substr($0, length(k) + 2); exit }
+    ' "$1"
+}
+
+# Everything that can be wrong with an AppImage the user pointed at, decided
+# BEFORE anything is copied or unpacked. Sets AI_PATH, AI_OFFSET and AI_SIZE;
+# dies otherwise. Globals for the same reason inspect_local_rpm uses them: a
+# `die` inside a command substitution kills only the subshell.
+inspect_appimage() {
+    local arg=$1 t machine shoff shentsize shnum
+    [ -e "$arg" ] || die "no such file: ${arg}"
+    [ -f "$arg" ] || die "not a regular file: ${arg}"
+    [ -r "$arg" ] || die "cannot read ${arg} (permission denied)"
+    AI_PATH="$(readlink -f -- "$arg")" || die "cannot resolve the path ${arg}"
+    [ -f "$AI_PATH" ] || die "not a regular file: ${arg}"
+
+    t="$(appimage_type "$AI_PATH")" \
+        || die "${arg} is not an AppImage (no ELF header, or no 'AI' type magic at offset 8)"
+    if [ "$t" = 1 ]; then
+        die "refusing ${arg}: it is a type-1 AppImage, whose payload is an ISO 9660 image. Type 1 was superseded in 2016 and APEX unpacks only the type-2 (squashfs) format. Ask the vendor for a current build"
+    fi
+
+    [ "$(le_int "$AI_PATH" 4 1)" = 2 ] \
+        || die "refusing ${arg}: its runtime is a 32-bit ELF, which APEX does not unpack"
+    [ "$(le_int "$AI_PATH" 5 1)" = 1 ] \
+        || die "refusing ${arg}: its runtime is a big-endian ELF, which APEX does not unpack"
+    machine="$(le_int "$AI_PATH" 18 2)" || die "cannot read the ELF header of ${arg}"
+    appimage_machine_matches "$machine" \
+        || die "refusing ${arg}: it is built for $(appimage_machine_name "$machine"), this machine is $(uname -m)"
+
+    # The squashfs begins immediately after the ELF section header table. This
+    # is the arithmetic `--appimage-offset` performs, done here so the file
+    # never has to be executed to answer a question about itself.
+    shoff="$(le_int "$AI_PATH" 40 8)"      || die "cannot read the ELF header of ${arg}"
+    shentsize="$(le_int "$AI_PATH" 58 2)"  || die "cannot read the ELF header of ${arg}"
+    shnum="$(le_int "$AI_PATH" 60 2)"      || die "cannot read the ELF header of ${arg}"
+    AI_OFFSET=$(( shoff + shentsize * shnum ))
+    AI_SIZE="$(stat -c %s -- "$AI_PATH")" || die "cannot size ${arg}"
+    { [ "$AI_OFFSET" -gt 0 ] && [ "$AI_OFFSET" -lt "$AI_SIZE" ]; } \
+        || die "refusing ${arg}: its payload offset (${AI_OFFSET}) is not inside the file (${AI_SIZE} bytes)"
+    # Checked here so a malformed file is reported as one, rather than as an
+    # unsquashfs error the user has no way to act on.
+    [ "$(od -An -v -tx1 -j "$AI_OFFSET" -N4 -- "$AI_PATH" 2>/dev/null | tr -d ' \n')" = 68737173 ] \
+        || die "refusing ${arg}: there is no squashfs filesystem at offset ${AI_OFFSET}, where its ELF header says the payload starts"
+}
+
+# The zsync update channel an AppImage advertises, out of its `.upd_info` ELF
+# section. Best effort, and NEVER a decision: printed once at install time so
+# the user knows the vendor expected AppImageUpdate to keep this file current
+# and that APEX will not run it. Empty when the section is absent or readelf is
+# not installed.
+appimage_update_info() {
+    command -v readelf >/dev/null 2>&1 || return 0
+    local out
+    out="$(readelf -p .upd_info "$1" 2>/dev/null || true)"
+    printf '%s' "$(printf '%s\n' "$out" \
+        | sed -n 's/^[[:space:]]*\[[[:space:]]*[0-9a-fx]*\][[:space:]]*//p' \
+        | sed -n '1p')"
+}
+
+# Take away everything an untrusted squashfs may claim about ownership and
+# privilege. Both halves are load-bearing:
+#
+#   * setuid/setgid. A FUSE-mounted AppImage is mounted `nosuid`, so the format
+#     as designed never grants either — preserving a 4755 chrome-sandbox out of
+#     a downloaded archive into a root-owned tree would hand it strictly MORE
+#     than running the AppImage normally ever does. Electron on Fedora 43 uses
+#     the user-namespace sandbox and does not need the helper.
+#   * ownership. A squashfs records uids, and unsquashfs run as root restores
+#     them. A payload built on the packager's laptop records uid 1000 — which
+#     is the desktop user on almost every APEX machine — and that user could
+#     then rewrite the application under itself. Forcing root:root with no
+#     group or other write is what makes "an AppImage cannot self-update" a
+#     property of the filesystem rather than a promise.
+#
+# `go+rX` is the other half of that second point and is NOT tidiness. A FUSE
+# mount by the user enforces none of the recorded modes — squashfuse does not
+# ask, and the mount carries no `default_permissions` — so a file recorded 0600
+# runs perfectly well inside a normally-launched AppImage. Give that file to
+# root without also opening it, and the application that worked as an AppImage
+# stops working the moment APEX installs it. Directories and already-executable
+# files get `x` with it; nothing else does.
+appimage_harden() {
+    local dest=$1
+    if [ "$(id -u)" = 0 ]; then
+        chown -R --no-dereference root:root -- "$dest" || return 1
+    fi
+    chmod -R u-s,g-s,go-w,go+rX -- "$dest" || return 1
+}
+
+# Unpack the squashfs payload of $1, which starts at offset $2, into $3.
+#
+# -no-xattrs: the payload carries whatever extended attributes the packager's
+# machine had, `security.selinux` among them. Restoring a foreign label into a
+# tree the desktop session has to execute is how an application becomes
+# unlaunchable with no AVC anyone thinks to look for.
+appimage_extract() {
+    local file=$1 off=$2 dest=$3
+    command -v unsquashfs >/dev/null 2>&1 \
+        || die "installing an AppImage needs 'unsquashfs' (from squashfs-tools), which this system does not have"
+    rm -rf -- "$dest"
+    mkdir -p -- "$(dirname -- "$dest")" || return 1
+    unsquashfs -no-xattrs -f -d "$dest" -o "$off" "$file" >/dev/null 2>&1 || { rm -rf -- "$dest"; return 1; }
+    [ -d "$dest" ] || { rm -rf -- "$dest"; return 1; }
+    appimage_harden "$dest"
+}
+
+# Read the identity of an unpacked AppImage out of its payload. Sets AI_DESKTOP,
+# AI_ID, AI_CMD and AI_ICON; dies otherwise. $2 is the name to blame in a
+# refusal.
+#
+# The AppImage specification puts exactly ONE .desktop file at the root of the
+# payload. Zero means nothing states what the application is called or how it is
+# launched, and several means APEX would be choosing on the vendor's behalf —
+# both are refusals rather than a guess, because the answer becomes a root-owned
+# path and a launcher entry the user will click.
+inspect_appdir() {
+    local appdir=$1 blame=$2 execval first
+    local -a desktops=()
+    mapfile -t desktops < <(find "$appdir" -maxdepth 1 -name '*.desktop' 2>/dev/null | LC_ALL=C sort)
+    if [ "${#desktops[@]}" -eq 0 ]; then
+        die "refusing ${blame}: there is no .desktop file at the root of its payload, so nothing says what application it is. APEX installs AppImages into the launcher, and one with no desktop entry would appear nowhere"
+    fi
+    if [ "${#desktops[@]}" -gt 1 ]; then
+        die "refusing ${blame}: its payload has ${#desktops[@]} .desktop files at the root (the format allows exactly one), so which application this is would be APEX's guess: $(printf '%s ' "${desktops[@]##*/}")"
+    fi
+    AI_DESKTOP="${desktops[0]}"
+    path_within "$appdir" "$AI_DESKTOP" \
+        || die "refusing ${blame}: its .desktop file resolves to a path outside the AppImage"
+    [ -f "$AI_DESKTOP" ] \
+        || die "refusing ${blame}: its .desktop file is not a regular file"
+
+    AI_ID="${AI_DESKTOP##*/}"; AI_ID="${AI_ID%.desktop}"
+    # Same check, same reason, as the RPM path's: this becomes a file name under
+    # /usr/local/share/applications in a script running as root.
+    valid_pkg_name "$AI_ID" \
+        || die "refusing ${blame}: its desktop entry is named '${AI_ID}.desktop', which is not a name APEX will turn into a path"
+
+    # The command name the launcher gets. `Exec=AppRun --no-sandbox %U` is what
+    # every Electron AppImage ships, and AppRun is the format's entry point
+    # rather than the application's name — so that case falls back to the last
+    # segment of the desktop id, which is the convention Flatpak and the
+    # desktop-entry spec both settled on.
+    execval="$(desktop_key "$AI_DESKTOP" Exec)"
+    first="${execval%% *}"
+    first="${first#\"}"; first="${first%\"}"
+    first="${first##*/}"
+    case "$first" in
+        ''|AppRun|AppRun.wrapped) AI_CMD="${AI_ID##*.}"; AI_CMD="${AI_CMD,,}" ;;
+        *) AI_CMD="$first" ;;
+    esac
+    valid_pkg_name "$AI_CMD" \
+        || die "refusing ${blame}: the command name read out of its desktop entry ('${AI_CMD}') is not a name APEX will turn into a path"
+
+    AI_ICON="$(desktop_key "$AI_DESKTOP" Icon)"
+    case "$AI_ICON" in
+        */*|'') AI_ICON="" ;;   # a path is not an icon NAME; the theme cannot use it
+    esac
+}
+
+# ── AppImages: integration ───────────────────────────────────────────────────
+
+# Does any AppImage APEX installed claim $2? Reads the manifests, which are the
+# only record of what this engine put under /usr/local.
+appimage_registry_owns() {
+    local reg=$1 path=$2 f
+    [ -d "$reg" ] || return 1
+    for f in "$reg"/*.files; do
+        [ -e "$f" ] || continue
+        grep -qxF -- "$path" "$f" && return 0
+    done
+    return 1
+}
+
+# Refuse before unpacking anything if this AppImage would hide something the OS
+# already provides.
+#
+# apex-pkg decides image ownership by asking the rpmdb, and an AppImage's files
+# have no rpm owner — so the question is asked the other way round, about the
+# PATH THIS INSTALL WOULD SHADOW. /usr/local/bin comes before /usr/bin on PATH
+# and /usr/local/share before /usr/share in XDG_DATA_DIRS, so an AppImage
+# called `firefox` would silently take over the browser for every user on the
+# machine. Anything already at the /usr path is refused whether it belongs to
+# the image or to the user's own extension: both are wrong to shadow, and
+# `rpm -qf` is asked only to NAME the owner in the message.
+#
+# $1 command, $2 desktop id, $3 install prefix, $4 system root, $5 registry.
+# The last two are parameters so the whole decision can be driven over a
+# fixture tree without root — the same reason state_kind takes its path.
+appimage_shadow_check() {
+    local cmd=$1 id=$2 prefix=$3 sysroot=$4 reg=$5 p owner sr="${4%/}"
+    for p in "${sr}/usr/bin/${cmd}" "${sr}/usr/sbin/${cmd}"; do
+        if [ -e "$p" ] || [ -L "$p" ]; then
+            owner=""
+            if [ "$sysroot" = / ]; then
+                owner="$(rpm -qf --qf '%{NAME}' -- "$p" 2>/dev/null)" || owner=""
+            fi
+            die "refusing this AppImage: it would install ${prefix}/bin/${cmd}, which comes before ${p} on PATH and would shadow ${owner:-a program APEX-OS already provides}. Software the OS ships is updated by \`sudo apex update\`; replacing it with a downloaded file is not something APEX will do behind your back"
+        fi
+    done
+    p="${sr}/usr/share/applications/${id}.desktop"
+    if [ -e "$p" ] || [ -L "$p" ]; then
+        owner=""
+        if [ "$sysroot" = / ]; then
+            owner="$(rpm -qf --qf '%{NAME}' -- "$p" 2>/dev/null)" || owner=""
+        fi
+        die "refusing this AppImage: its desktop entry is '${id}.desktop', and ${p} already exists${owner:+ (from ${owner})}. ${prefix}/share comes first in XDG_DATA_DIRS, so installing it would replace that launcher entry for every user"
+    fi
+    for p in "${prefix}/bin/${cmd}" "${prefix}/share/applications/${id}.desktop"; do
+        if { [ -e "$p" ] || [ -L "$p" ]; } && ! appimage_registry_owns "$reg" "$p"; then
+            die "refusing this AppImage: ${p} already exists and no AppImage APEX installed owns it. Move it aside first — APEX does not overwrite files it did not put there"
+        fi
+    done
+}
+
+# Copy one file into place and record it. Refuses rather than overwriting
+# anything not already recorded in THIS install's manifest, so a payload that
+# names two icons the same thing cannot quietly clobber the first.
+appimage_place() {
+    local src=$1 dest=$2 mode=$3 manifest=$4
+    if [ -e "$dest" ] || [ -L "$dest" ]; then
+        grep -qxF -- "$dest" "$manifest" 2>/dev/null \
+            || die "refusing to overwrite ${dest}, which this AppImage did not install"
+    fi
+    install -D -m "$mode" -- "$src" "$dest" || return 1
+    printf '%s\n' "$dest" >> "$manifest"
+}
+
+# The launcher. It reconstructs the four environment variables the AppImage
+# runtime would have set — APPDIR, APPIMAGE, ARGV0 and OWD — because AppRun
+# scripts read them, and a tree unpacked by someone else is exactly the case
+# where they are not already right. APPIMAGE deliberately points at the
+# root-owned copy under /var/lib/apex/appimage: an application that tries to
+# update itself in place finds a file it cannot write.
+appimage_wrapper() {
+    local cmd=$1 appdir=$2 imagefile=$3 dest=$4 manifest=$5 tmp
+    tmp="$(mktemp "${TMPDIR:-/tmp}/apex-appimage.XXXXXX")" || return 1
+    {
+        printf '%s\n' '#!/bin/sh'
+        printf '%s\n' "# Generated by apex-pkg for the AppImage '${cmd}'. Do not edit:"
+        printf '%s\n' '# `sudo apex remove` and a reinstall both rewrite this file.'
+        printf '%s\n' "APPDIR='${appdir}'" \
+                      "APPIMAGE='${imagefile}'" \
+                      'ARGV0="$0"' \
+                      'OWD="$(pwd)"' \
+                      'export APPDIR APPIMAGE ARGV0 OWD' \
+                      'exec "$APPDIR/AppRun" "$@"'
+    } > "$tmp" || { rm -f "$tmp"; return 1; }
+    local rc=0
+    appimage_place "$tmp" "$dest" 0755 "$manifest" || rc=$?
+    rm -f "$tmp"
+    return "$rc"
+}
+
+# The desktop entry, rewritten to point at the launcher.
+#
+# Exec is rewritten in EVERY group, not just [Desktop Entry]: an application
+# that ships desktop actions ("New Window", "New Private Window") has one Exec
+# per action, and leaving those pointing at AppRun gives the user right-click
+# entries that do nothing. Only the first word is replaced — Electron ships
+# `Exec=AppRun --no-sandbox %U` and dropping the tail would drop the flag the
+# application needs to start.
+#
+# DBusActivatable is deleted. It promises a D-Bus service file that is not
+# installed, and GIO honours the promise: the launch attempt goes to a name
+# nothing owns and the user sees nothing happen.
+appimage_rewrite_desktop() {
+    local src=$1 dest=$2 cmd=$3 prefix=$4 icon=$5 manifest=$6 tmp rc
+    tmp="$(mktemp "${TMPDIR:-/tmp}/apex-appimage.XXXXXX")" || return 1
+    awk -v exe="${prefix}/bin/${cmd}" -v icon="$icon" '
+        index($0, "Exec=") == 1 {
+            rest = substr($0, 6)
+            sub(/^[ \t]+/, "", rest)
+            tail = ""
+            if (match(rest, /[ \t]/)) tail = substr(rest, RSTART)
+            print "Exec=" exe tail
+            next
+        }
+        index($0, "TryExec=") == 1 { print "TryExec=" exe; next }
+        index($0, "DBusActivatable=") == 1 { next }
+        index($0, "Icon=") == 1 { if (icon != "") print "Icon=" icon; next }
+        { print }
+    ' "$src" > "$tmp" || { rm -f "$tmp"; return 1; }
+    rc=0
+    appimage_place "$tmp" "$dest" 0644 "$manifest" || rc=$?
+    rm -f "$tmp"
+    return "$rc"
+}
+
+# The icons, and ONLY the ones named by the Icon= key.
+#
+# Copying the payload's whole icon theme would let an AppImage drop an
+# index.theme and any other application's icon into /usr/local/share/icons,
+# where they outrank /usr/share for every user on the machine. So the search is
+# restricted to `**/apps/<icon>.{png,svg,svgz,xpm}` inside the payload's own
+# hicolor tree, with the root-level `<icon>.png` and `.DirIcon` conventions as
+# fallbacks. Every candidate is resolved and required to stay inside the
+# payload first, because `.DirIcon` is conventionally a symlink.
+appimage_install_icons() {
+    local appdir=$1 prefix=$2 icon=$3 manifest=$4 f base rel dest found=0
+    [ -n "$icon" ] || return 0
+    if [ -d "${appdir}/usr/share/icons/hicolor" ]; then
+        while IFS= read -r f; do
+            base="${f##*/}"
+            case "$base" in
+                "${icon}.png"|"${icon}.svg"|"${icon}.svgz"|"${icon}.xpm") ;;
+                *) continue ;;
+            esac
+            case "$f" in */apps/*) ;; *) continue ;; esac
+            path_within "$appdir" "$f" || continue
+            [ -f "$f" ] || continue
+            rel="${f#"${appdir}"/usr/share/icons/}"
+            dest="${prefix}/share/icons/${rel}"
+            appimage_place "$f" "$dest" 0644 "$manifest" || return 1
+            found=1
+        done < <(find "${appdir}/usr/share/icons/hicolor" \( -type f -o -type l \) 2>/dev/null)
+    fi
+    [ "$found" = 0 ] || return 0
+    for f in "${appdir}/${icon}.svg" "${appdir}/${icon}.png" "${appdir}/${icon}.xpm" "${appdir}/.DirIcon"; do
+        [ -e "$f" ] || continue
+        path_within "$appdir" "$f" || continue
+        [ -f "$f" ] || continue
+        case "$f" in
+            *.svg) dest="${prefix}/share/icons/hicolor/scalable/apps/${icon}.svg" ;;
+            *.xpm) dest="${prefix}/share/icons/hicolor/48x48/apps/${icon}.xpm" ;;
+            *)     dest="${prefix}/share/icons/hicolor/256x256/apps/${icon}.png" ;;
+        esac
+        # .DirIcon has no extension of its own; ask the bytes rather than the
+        # name, because a PNG written to a path ending in .svg renders nothing.
+        if [ "${f##*/}" = .DirIcon ]; then
+            if [ "$(od -An -v -tx1 -j0 -N4 -- "$f" 2>/dev/null | tr -d ' \n')" = 89504e47 ]; then
+                dest="${prefix}/share/icons/hicolor/256x256/apps/${icon}.png"
+            else
+                dest="${prefix}/share/icons/hicolor/scalable/apps/${icon}.svg"
+            fi
+        fi
+        appimage_place "$f" "$dest" 0644 "$manifest" || return 1
+        found=1
+        break
+    done
+    [ "$found" = 1 ] || warn "this AppImage ships no icon named '${icon}'; its launcher entry will use the fallback icon"
+    return 0
+}
+
+# Everything that lands outside the unpacked tree, in one call, recording each
+# path as it goes. Parameterised end to end so the suite can run it into a
+# throwaway prefix as an ordinary user.
+appimage_integrate() {
+    local appdir=$1 prefix=$2 cmd=$3 icon=$4 imagefile=$5 desktop=$6 dest_id=$7 manifest=$8
+    : > "$manifest"
+    appimage_wrapper "$cmd" "$appdir" "$imagefile" "${prefix}/bin/${cmd}" "$manifest" || return 1
+    appimage_rewrite_desktop "$desktop" "${prefix}/share/applications/${dest_id}.desktop" \
+        "$cmd" "$prefix" "$icon" "$manifest" || return 1
+    appimage_install_icons "$appdir" "$prefix" "$icon" "$manifest" || return 1
+}
+
+# ── AppImages: the registry ──────────────────────────────────────────────────
+
+appimage_image()    { printf '%s/%s.AppImage' "$APPIMAGE_REG" "$1"; }
+appimage_marker()   { printf '%s/%s.trust'    "$APPIMAGE_REG" "$1"; }
+appimage_manifest() { printf '%s/%s.files'    "$APPIMAGE_REG" "$1"; }
+appimage_record()   { printf '%s/%s.json'     "$APPIMAGE_REG" "$1"; }
+appimage_appdir()   { printf '%s/%s'          "$APPIMAGE_APPS" "$1"; }
+
+# Every AppImage APEX installed, one name per line. Reads the registry rather
+# than the requested list, which is the rpm extension's and holds none of these.
+appimage_installed() {
+    local reg="${1:-$APPIMAGE_REG}" f n
+    [ -d "$reg" ] || return 0
+    for f in "$reg"/*.json; do
+        [ -e "$f" ] || continue
+        n="${f##*/}"
+        printf '%s\n' "${n%.json}"
+    done
+}
+
+# Which installed AppImage the user means by $2: a bare name, or the path to
+# the very file they installed (matched by checksum, so the same download in a
+# different directory still resolves).
+appimage_lookup() {
+    local reg=$1 arg=$2 n sum
+    if [ -f "${reg}/${arg}.json" ]; then printf '%s' "$arg"; return 0; fi
+    if [ -f "$arg" ]; then
+        sum="$(sha "$arg")"
+        while IFS= read -r n; do
+            [ -n "$n" ] || continue
+            [ "$(sha "${reg}/${n}.AppImage" 2>/dev/null)" = "$sum" ] || continue
+            printf '%s' "$n"; return 0
+        done < <(appimage_installed "$reg")
+    fi
+    return 1
+}
+
+# Undo one install. The manifest is the record of what was placed, and nothing
+# outside the install prefix is ever removed from it — the file is root-owned
+# under a 0755 directory, but a wrong line in it must not become `rm /etc/passwd`.
+appimage_uninstall() {
+    local name=$1 reg=$2 prefix=$3 apps=$4 p
+    [ -n "$name" ] || return 1
+    if [ -f "${reg}/${name}.files" ]; then
+        while IFS= read -r p; do
+            [ -n "$p" ] || continue
+            case "$p" in "${prefix%/}/"*) ;; *) warn "not removing ${p}: it is outside ${prefix}"; continue ;; esac
+            rm -f -- "$p"
+        done < "${reg}/${name}.files"
+    fi
+    rm -rf -- "${apps:?}/${name:?}"
+    rm -f -- "${reg}/${name}.files" "${reg}/${name}.AppImage" \
+             "${reg}/${name}.trust" "${reg}/${name}.json"
+}
+
+# The refusal a user sees for an AppImage, which is every AppImage. Same shape
+# as refuse_unsigned: name the file, say what is and is not known about it, and
+# give the exact command that proceeds.
+refuse_unsigned_appimage() {
+    local file=$1 upd; upd="$(appimage_update_info "$file")"
+    {
+        printf 'apex-pkg: error: %s\n' \
+            "cannot verify ${file}" \
+            "" \
+            "An AppImage carries no signature APEX can check. Some embed one in" \
+            "a '.sha256_sig' section together with the signing key in '.sig_key'" \
+            "— a key taken from the file it signs proves nothing, so APEX does" \
+            "not accept it as verification. There is no AppImage keyring and no" \
+            "repository index vouching for this file: it is worth exactly as" \
+            "much as wherever you downloaded it from."
+        if [ -n "$upd" ]; then
+            printf 'apex-pkg: error: %s\n' \
+                "" \
+                "This one also advertises its own update channel:" \
+                "  ${upd}" \
+                "APEX will not follow it. An installed AppImage is PINNED — see" \
+                "below."
+        fi
+        printf 'apex-pkg: error: %s\n' \
+            "" \
+            "Once installed it is pinned to these bytes. 'sudo apex update' does" \
+            "not change it, and it cannot update itself: it runs from a" \
+            "root-owned tree. A newer version means running this command again" \
+            "with the newer file." \
+            "" \
+            "If the vendor's own site is where it came from and you accept that:" \
+            "  sudo apex install --allow-unsigned ${file}"
+    } >&2
+    exit 1
+}
+
+# What turns "the files are present" into "the launcher shows it". Deliberately
+# NOT post_merge: that runs ldconfig, sysusers, tmpfiles and a udev reload for
+# an extension merged onto /usr, and an AppImage changes none of those.
+appimage_refresh_caches() {
+    local prefix=$1
+    if command -v update-desktop-database >/dev/null 2>&1; then
+        update-desktop-database "${prefix}/share/applications" >/dev/null 2>&1 || true
+    fi
+    if command -v gtk-update-icon-cache >/dev/null 2>&1; then
+        gtk-update-icon-cache -qtf "${prefix}/share/icons/hicolor" >/dev/null 2>&1 || true
+    fi
+    return 0
+}
+
+# Install one AppImage. Root only; every caller has been through need_root.
+appimage_install_one() {
+    local arg=$1 appdir upd sum
+    inspect_appimage "$arg"
+    install -d -m0755 "$APPIMAGE_REG" "$APPIMAGE_APPS"
+
+    # A refusal below exits the process outright, so the RETURN trap never
+    # fires and a staging tree can be left behind. Sweep before making a new one.
+    find "$APPIMAGE_APPS" -maxdepth 1 -name '.staging.*' -exec rm -rf {} + 2>/dev/null || true
+    # Global rather than local, like rebuild_extension's WORK and for the same
+    # reason: bash runs a RETURN trap after the function's locals are gone, so
+    # `trap 'rm -rf "$stage"' RETURN` on a local dies with "unbound variable"
+    # under `set -u` — measured, not assumed.
+    AI_STAGE="$(mktemp -d "${APPIMAGE_APPS}/.staging.XXXXXX")" || die "cannot create a staging directory under ${APPIMAGE_APPS}"
+    # RETURN rather than EXIT: this function is called once per file and the
+    # next one needs its own staging directory cleaned up on the way out.
+    trap 'rm -rf "$AI_STAGE"' RETURN
+
+    msg "unpacking ${AI_PATH} (squashfs payload at offset ${AI_OFFSET}, no FUSE involved)"
+    appimage_extract "$AI_PATH" "$AI_OFFSET" "${AI_STAGE}/payload" \
+        || die "cannot unpack the squashfs payload of ${arg}"
+    inspect_appdir "${AI_STAGE}/payload" "$arg"
+    [ -e "${AI_STAGE}/payload/AppRun" ] \
+        || die "refusing ${arg}: its payload has no AppRun, which is the entry point every AppImage is required to provide"
+    chmod 0755 "${AI_STAGE}/payload/AppRun" 2>/dev/null || true
+
+    appimage_shadow_check "$AI_CMD" "$AI_ID" "$APPIMAGE_PREFIX" / "$APPIMAGE_REG"
+
+    if [ -f "$(appimage_record "$AI_CMD")" ]; then
+        msg "replacing the installed AppImage '${AI_CMD}'"
+        appimage_uninstall "$AI_CMD" "$APPIMAGE_REG" "$APPIMAGE_PREFIX" "$APPIMAGE_APPS"
+    fi
+
+    appdir="$(appimage_appdir "$AI_CMD")"
+    rm -rf -- "$appdir"
+    mv -f -- "${AI_STAGE}/payload" "$appdir"
+
+    # The accepted bytes, kept: the trust marker is a checksum OF THEM, so
+    # `apex pkg verify` can still tell the truth months later, and $APPIMAGE
+    # has to point at a file that exists.
+    cp -f -- "$AI_PATH" "$(appimage_image "$AI_CMD").tmp"
+    mv -f -- "$(appimage_image "$AI_CMD").tmp" "$(appimage_image "$AI_CMD")"
+    chmod 0644 "$(appimage_image "$AI_CMD")"
+    sum="$(sha "$(appimage_image "$AI_CMD")")"
+    printf '%s\n' "$sum" > "$(appimage_marker "$AI_CMD")"
+
+    appimage_integrate "$appdir" "$APPIMAGE_PREFIX" "$AI_CMD" "$AI_ICON" \
+        "$(appimage_image "$AI_CMD")" "${appdir}/${AI_DESKTOP##*/}" "$AI_ID" \
+        "$(appimage_manifest "$AI_CMD")" \
+        || die "could not integrate ${arg} into the desktop"
+
+    upd="$(appimage_update_info "$AI_PATH")"
+    jq -n --arg name "$AI_CMD" --arg id "$AI_ID" --arg icon "$AI_ICON" \
+          --arg appdir "$appdir" --arg image "$(appimage_image "$AI_CMD")" \
+          --arg sha "$sum" --arg bytes "$AI_SIZE" --arg upd "$upd" \
+          --arg built "$(date -u +%Y-%m-%dT%H:%M:%SZ)" \
+          --argjson files "$(json_string_array < "$(appimage_manifest "$AI_CMD")")" \
+        '{name:$name, desktop_id:$id, icon:$icon, appdir:$appdir, image:$image,
+          image_sha256:$sha, image_bytes:($bytes|tonumber), installed:$built,
+          update_information:$upd, signature_verified:false, pinned:true,
+          files:$files}' > "$(appimage_record "$AI_CMD").tmp"
+    mv -f -- "$(appimage_record "$AI_CMD").tmp" "$(appimage_record "$AI_CMD")"
+
+    if command -v restorecon >/dev/null 2>&1; then
+        restorecon -RF "$appdir" "${APPIMAGE_PREFIX}/bin/${AI_CMD}" \
+                       "${APPIMAGE_PREFIX}/share/applications/${AI_ID}.desktop" >/dev/null 2>&1 \
+            || warn "could not relabel the installed AppImage for SELinux"
+    fi
+    appimage_refresh_caches "$APPIMAGE_PREFIX"
+
+    msg "installed AppImage '${AI_CMD}' -> ${APPIMAGE_PREFIX}/bin/${AI_CMD} (${AI_ID}.desktop)"
+    if [ -n "$upd" ]; then
+        msg "it advertises the update channel '${upd}'; APEX does not follow it — this AppImage is pinned"
+    else
+        msg "it is pinned: 'apex update' will not change it. Install a newer file to move it"
+    fi
+}
+
+# Every file is judged BEFORE any of them is unpacked, for the same reason the
+# rpm path decides every signature first: refusing the second of two must not
+# leave the first one installed.
+appimage_install_all() {
+    local f
+    for f in "$@"; do
+        [ "${ALLOW_UNSIGNED:-0}" = 1 ] || refuse_unsigned_appimage "$f"
+    done
+    for f in "$@"; do
+        warn "accepting ${f} unverified because you passed --allow-unsigned"
+        appimage_install_one "$f"
+    done
+}
+
 # ── verbs ────────────────────────────────────────────────────────────────────
 cmd_install() {
-    [ "$#" -gt 0 ] || die "usage: apex install <package|/path/to/file.rpm>..."
+    [ "$#" -gt 0 ] || die "usage: apex install <package|/path/to/file.rpm|/path/to/App.AppImage>..."
 
     # Route first, then validate every named file — both BEFORE the root check.
     # A mistyped path is not a privileged question, and answering it after a sudo
     # round trip instead of before one costs the user a second attempt for
     # nothing. Nothing here writes; the root gate still comes before every
     # mutation below.
-    local -a files=() flatpaks=() names=() p
+    local -a appimages=() files=() debs=() flatpaks=() names=() p
     for p in "$@"; do
-        if is_local_rpm_arg "$p"; then
+        # AppImage and .deb are both tested BEFORE the RPM test, never after:
+        # is_local_rpm_arg answers true for ANY argument containing a slash, so
+        # `apex install ./Thing.AppImage` or `./x.deb` would otherwise be
+        # refused as "not an RPM package". AppImage goes first of the two
+        # because is_flatpak_id also matches `org.foo.Bar.AppImage`.
+        if is_appimage_arg "$p"; then
+            appimages+=("$p")
+        elif is_local_deb_arg "$p"; then
+            debs+=("$p")
+        elif is_local_rpm_arg "$p"; then
             files+=("$p")
         elif is_flatpak_id "$p"; then
             flatpaks+=("$p")
         else
             names+=("$p")
         fi
+    done
+
+    # ── §9: which source serves the BARE names ──────────────────────────────
+    # A path and an application id have already decided themselves; `--source`
+    # would either agree with them or contradict them, and a contradiction is
+    # refused rather than silently resolved one way. Everything below therefore
+    # concerns `names` only.
+    if [ -n "$SOURCE" ]; then
+        if [ "${#files[@]}" -gt 0 ] && [ "$SOURCE" != rpm ]; then
+            die "--source ${SOURCE} contradicts the local .rpm file you named; a file is always installed as an RPM"
+        fi
+        if [ "${#debs[@]}" -gt 0 ] && [ "$SOURCE" != rpm ]; then
+            die "--source ${SOURCE} contradicts the local .deb file you named; a local package file always goes into the system extension"
+        fi
+        if [ "${#flatpaks[@]}" -gt 0 ] && [ "$SOURCE" != flatpak ]; then
+            die "--source ${SOURCE} contradicts the Flatpak id you named; an application id is always installed as a Flatpak"
+        fi
+        # There is deliberately no `--source appimage`, and `apex resolve` has
+        # no AppImage route either. --source ranks the ways a BARE NAME could be
+        # satisfied, and there is no AppImage index to rank: an AppImage is a
+        # file the user already downloaded. Naming one and a source at the same
+        # time is therefore always a contradiction, never a preference.
+        if [ "${#appimages[@]}" -gt 0 ]; then
+            die "--source ${SOURCE} contradicts the AppImage you named; an AppImage is always installed from the file, and there is no source to choose"
+        fi
+    fi
+
+    if [ "${#names[@]}" -gt 0 ]; then
+        # Declared out here, not inside the arms. `local` in a case arm only
+        # takes effect if that arm runs, so `id` assigned in the "" arm below
+        # would otherwise leak into the global scope of a script running as
+        # root.
+        local n id curated forced route
+        case "$SOURCE" in
+            capsule)
+                # Returns; a capsule install touches neither the extension nor
+                # Flatpak, and needs no root.
+                install_into_capsule "${names[@]}"
+                return $?
+                ;;
+            flatpak)
+                local -a resolved=()
+                for n in "${names[@]}"; do
+                    id="$(first_flatpak_id "$n")" \
+                        || die "no Flatpak application matches '${n}' (apex search ${n})"
+                    msg "'${n}' resolves to the Flatpak ${id}"
+                    resolved+=("$id")
+                done
+                flatpaks+=("${resolved[@]}")
+                names=()
+                ;;
+            rpm) ;;   # today's behaviour, explicitly requested
+            "")
+                # No source named: the ranking applies, and the ONLY thing that
+                # can move a bare name off the repository route is the curated
+                # table — which then has to say why, on the spot.
+                local -a kept=()
+                for n in "${names[@]}"; do
+                    if curated="$(curated_source "$n")"; then
+                        forced="${curated%%|*}"
+                        if [ "$forced" = flatpak ] && id="$(first_flatpak_id "$n")"; then
+                            warn "installing ${n} as a Flatpak instead of the RPM: ${curated#*|}"
+                            msg "to override: sudo apex install --source rpm ${n}"
+                            flatpaks+=("$id")
+                            continue
+                        fi
+                    fi
+                    # No curated opinion. Ask the same question resolve
+                    # asks: is there an rpm at all? A flatpak-only name in the
+                    # dnf set fails the whole transaction.
+                    route="$(bare_name_route "$n")"
+                    if [ "${route%% *}" = flatpak ]; then
+                        id="${route#* }"
+                        msg "'${n}' has no RPM in any enabled repository; installing the Flatpak ${id}"
+                        msg "to see why: apex resolve ${n}"
+                        flatpaks+=("$id")
+                        continue
+                    fi
+                    kept+=("$n")
+                done
+                names=("${kept[@]:-}")
+                # An all-empty array from the loop above must not leave a stray
+                # empty string that dnf would then try to resolve.
+                [ -n "${names[0]:-}" ] || names=()
+                ;;
+        esac
+    fi
+
+    # Validated here, beside the .rpm files and BEFORE the root gate, so a
+    # mistyped path or a type-1 AppImage is answered without a sudo round trip.
+    local -a aipath=()
+    for p in "${appimages[@]:-}"; do
+        [ -n "$p" ] || continue
+        inspect_appimage "$p"
+        aipath+=("$AI_PATH")
+        msg "AppImage: ${AI_PATH} (type 2, squashfs payload at offset ${AI_OFFSET})"
     done
 
     local -a lpath=() lname=()
@@ -1106,14 +3578,37 @@ cmd_install() {
         msg "local file: ${LR_NAME}-${LR_EVR}.${LR_ARCH} (${LR_PATH})"
     done
 
+    local -a dpath=() dname=() ddeps=()
+    for p in "${debs[@]:-}"; do
+        [ -n "$p" ] || continue
+        inspect_local_deb "$p"
+        dpath+=("$LD_PATH")
+        dname+=("$LD_NAME")
+        ddeps+=("$LD_DEPENDS")
+        msg "local file: ${LD_NAME}-${LD_VERSION}.${LD_ARCH} (.deb, ${LD_PATH})"
+    done
+
     need_root install
 
     if [ "${#flatpaks[@]}" -gt 0 ]; then
         flatpak_install "${flatpaks[@]}"
+        # §9 asks for provenance in the UI. One line, stating who vouched for
+        # what was just installed and what it can reach — the question a user
+        # cannot answer from the install log otherwise.
+        msg "provenance: $(provenance flatpak)"
     fi
-    # A Flatpak-only request must not rebuild the extension: that would cost
-    # minutes and re-merge /usr to change nothing.
-    [ "${#names[@]}" -gt 0 ] || [ "${#lpath[@]}" -gt 0 ] || return 0
+    # An AppImage touches neither the extension nor the requested list: it is
+    # self-contained, /var is writable, and nothing about it needs rebuilding.
+    # It is therefore installed here and is done.
+    if [ "${#aipath[@]}" -gt 0 ]; then
+        take_lock
+        appimage_install_all "${aipath[@]}"
+    fi
+
+    # A Flatpak-only or AppImage-only request must not rebuild the extension:
+    # that would cost minutes and re-merge /usr to change nothing. A local .deb
+    # DOES rebuild it — dpath stays in this guard for that reason.
+    [ "${#names[@]}" -gt 0 ] || [ "${#lpath[@]}" -gt 0 ] || [ "${#dpath[@]}" -gt 0 ] || return 0
 
     take_lock
 
@@ -1137,10 +3632,22 @@ cmd_install() {
             unsigned+=(1)
         fi
     done
+    # A .deb has nothing to check. Debian signs the apt index, not the file, so
+    # the answer is the same for every one of them and the opt-in is the same
+    # per-file, byte-exact marker the RPM path uses.
+    for i in "${!dpath[@]}"; do
+        [ "${ALLOW_UNSIGNED:-0}" = 1 ] \
+            || deb_trust_refusal "${dpath[$i]}" "${dname[$i]}" "${ddeps[$i]}"
+        warn "accepting ${dpath[$i]} unverified because you passed --allow-unsigned: a .deb carries no signature APEX can check"
+    done
     for i in "${!lpath[@]}"; do
         f="${lpath[$i]}"; n="${lname[$i]}"
         cache_local_rpm "$f" "$n" "${unsigned[$i]}"
         want+=("$(local_id "$n")")
+    done
+    for i in "${!dpath[@]}"; do
+        cache_local_deb "${dpath[$i]}" "${dname[$i]}"
+        want+=("$(deb_id "${dname[$i]}")")
     done
 
     if [ "${#names[@]}" -gt 0 ]; then
@@ -1157,7 +3664,7 @@ cmd_install() {
     for e in "${existing[@]:-}"; do
         [ -n "$e" ] || continue
         superseded=0
-        for t in "${lname[@]:-}" "${names[@]:-}"; do
+        for t in "${lname[@]:-}" "${dname[@]:-}" "${names[@]:-}"; do
             [ -n "$t" ] || continue
             if requested_matches "$e" "$t"; then
                 superseded=1
@@ -1167,6 +3674,7 @@ cmd_install() {
             want+=("$e")
         fi
     done
+    msg "provenance: $(provenance rpm)"
     rebuild_extension "${want[@]}"
 }
 
@@ -1178,8 +3686,44 @@ cmd_remove() {
     # `apex remove ./chrome.rpm` is accepted too and means the same thing — the
     # name is read back out of the file — so that re-running the install line
     # with `remove` does what it looks like it does.
-    local -a rpms=() flatpaks=() q n
+    #
+    # An AppImage is removed by the command name it installed, or by the path
+    # to the very file it was installed from — matched by checksum, so the same
+    # download in a different directory still resolves. Asked first: these
+    # names are in no requested list, so the rpm path below would answer "not
+    # installed by apex" for something the machine plainly has.
+    local -a appimages=() rest=()
+    local a n
+    for a in "$@"; do
+        if n="$(appimage_lookup "$APPIMAGE_REG" "$a")"; then
+            appimages+=("$n")
+        else
+            rest+=("$a")
+        fi
+    done
+    if [ "${#appimages[@]}" -gt 0 ]; then
+        take_lock
+        for a in "${appimages[@]}"; do
+            appimage_uninstall "$a" "$APPIMAGE_REG" "$APPIMAGE_PREFIX" "$APPIMAGE_APPS"
+            msg "removed the AppImage '${a}'"
+        done
+        appimage_refresh_caches "$APPIMAGE_PREFIX"
+    fi
+    if [ "${#rest[@]}" -eq 0 ]; then
+        return 0
+    fi
+    set -- "${rest[@]}"
+
+    local -a rpms=() flatpaks=()
+    local q
     for q in "$@"; do
+        if is_local_deb_arg "$q" && [ -f "$q" ] && deb_magic_ok "$q"; then
+            n="$(deb_name_of "$q")" || n=""
+            if [ -n "$n" ] && valid_deb_name "$n"; then
+                rpms+=("$n")
+                continue
+            fi
+        fi
         if is_local_rpm_arg "$q" && [ -f "$q" ] && rpm_magic_ok "$q"; then
             n="$(rpm -qp --nosignature --qf '%{NAME}' -- "$q" 2>/dev/null)" || n=""
             if [ -n "$n" ] && valid_pkg_name "$n"; then
@@ -1222,6 +3766,18 @@ cmd_remove() {
 cmd_upgrade() {
     need_root upgrade
     take_lock
+    # `apex update` funnels here. An AppImage is PINNED: there is no repository
+    # to ask for a newer one, it is not allowed to fetch its own, and APEX does
+    # not write an updater for a format that ships one file per vendor. Saying
+    # so on every run is the point — the alternative is a user who believes
+    # `apex update` covers everything on the machine and finds out otherwise
+    # from a security advisory.
+    local pinned
+    pinned="$(appimage_installed | tr '\n' ' ')"
+    if [ -n "${pinned// /}" ]; then
+        msg "AppImages are pinned and not updated by this command: ${pinned% }"
+        msg "to move one, run: sudo apex install --allow-unsigned /path/to/the/newer.AppImage"
+    fi
     local -a want=()
     mapfile -t want < <(load_requested)
     if [ "${#want[@]}" -eq 0 ]; then
@@ -1276,7 +3832,8 @@ cmd_rebuild() {
 }
 
 cmd_list() {
-    if [ -f "$STATE" ]; then
+    local kind; kind="$(state_kind)"
+    if [ "$kind" = ok ]; then
         echo "packages (system extension):"
         # Provenance is shown, not hidden: a package that came from a file the
         # user vouched for personally must not read like one Fedora signed.
@@ -1286,13 +3843,39 @@ cmd_list() {
             | if startswith("local:") then
                   ltrimstr("local:") as $n
                   | "  \($n)  [local file" + (if $u[$n] then ", signature not verified]" else "]" end)
+              elif startswith("deb:") then
+                  ltrimstr("deb:") as $n
+                  | "  \($n)  [.deb file, signature not verified, Debian dependencies unresolved]"
               else "  \(.)"
               end' "$STATE"
         printf '  (+%s pulled in as dependencies)\n' \
             "$(( $(jq -r '.resolved | length' "$STATE") - $(jq -r '.requested | length' "$STATE") ))"
+    elif [ "$kind" = unreadable ]; then
+        printf 'packages (system extension): '
+        state_unreadable_notice list
     else
         echo "packages (system extension): none"
     fi
+    local ai
+    ai="$(appimage_installed)"
+    if [ -n "$ai" ]; then
+        echo
+        echo "appimages (pinned — 'apex update' does not change these):"
+        local n rec
+        while IFS= read -r n; do
+            [ -n "$n" ] || continue
+            rec="$(appimage_record "$n")"
+            if [ -r "$rec" ]; then
+                printf '  %s  [AppImage %s, signature not verified, installed %s]\n' \
+                    "$n" \
+                    "$(jq -r '.desktop_id // "?"' "$rec" 2>/dev/null)" \
+                    "$(jq -r '.installed // "?"' "$rec" 2>/dev/null)"
+            else
+                printf '  %s  [AppImage, signature not verified]\n' "$n"
+            fi
+        done <<<"$ai"
+    fi
+
     if have_flatpak; then
         local apps
         apps="$(flatpak list --app --columns=application 2>/dev/null || true)"
@@ -1304,15 +3887,90 @@ cmd_list() {
     fi
 }
 
+# Whether `$STATE` can be read, and if not, whether we are entitled to say so.
+#
+# Prints `ok`, `absent` or `unreadable`.
+#
+# `[ -f "$STATE" ]` answers false for a missing file, a directory we may not
+# search, a symlink cycle and a non-directory parent alike. `$PKG_ROOT` is 0700
+# root:root while `list`, `info`, `status` and `verify` all run unprivileged, so
+# every one of them certified "no packages installed" on machines that had them.
+# In `verify` that also returned 0, which reads as "checked, and fine".
+#
+# So: read it. Absence is only a safe conclusion when the read failed AND every
+# directory on the way to the file was one we could actually look inside.
+# Takes the path as an argument, defaulting to $STATE, so the suite can drive
+# it over a fixture tree. $PKG_ROOT is a hardcoded readonly and giving it an
+# environment override would put a redirectable path into a script that runs as
+# root, which is a worse trade than one parameter.
+# shellcheck disable=SC2120  # the caller that passes $1 is tests/test-apex-pkg.sh,
+# which sources this file and calls `state_kind "$SK/..."` eight times over a
+# fixture tree. shellcheck only sees the callers in THIS file, all of which take
+# the $STATE default, so it reads the parameter as dead. It is not: dropping it
+# would take the suite's only way to drive this function over anything but the
+# real /var/lib/apex. Flagged by shellcheck 0.9.0, which is what ubuntu-24.04
+# runners ship, and NOT by 0.11.0 — this file was clean on the machine it was
+# written on and red in CI.
+state_kind() {
+    # Not named STATE: that is a readonly global, and `local STATE=` is an error
+    # in bash rather than a shadow. The suite found this the first time it ran.
+    local target="${1:-$STATE}"
+    if cat -- "$target" >/dev/null 2>&1; then
+        printf 'ok\n'
+        return
+    fi
+    # A symlink whose target is missing or loops still exists as a name.
+    if [ -L "$target" ]; then
+        printf 'unreadable\n'
+        return
+    fi
+    # Walk up to the first ancestor that exists. If it is not a searchable,
+    # readable directory then the read failed because we could not look, not
+    # because there was nothing there.
+    local d="$target" prev=
+    while :; do
+        d="$(dirname -- "$d")"
+        [ "$d" = "$prev" ] && break
+        prev="$d"
+        if [ -e "$d" ]; then
+            if [ -d "$d" ] && [ -r "$d" ] && [ -x "$d" ]; then
+                break
+            fi
+            printf 'unreadable\n'
+            return
+        fi
+        [ "$d" = "/" ] && break
+    done
+    if [ -e "$target" ]; then
+        printf 'unreadable\n'
+    else
+        printf 'absent\n'
+    fi
+}
+
+# What every caller prints when it could not look. Kept in one place so the
+# four commands cannot drift into disagreeing about the same machine.
+state_unreadable_notice() {
+    echo "cannot read ${STATE}"
+    echo "  reading it needs root; try: sudo apex pkg ${1}"
+}
+
 cmd_info() {
-    [ -f "$STATE" ] || { echo "no packages installed"; return 0; }
+    case "$(state_kind)" in
+        absent) echo "no packages installed"; return 0 ;;
+        unreadable) state_unreadable_notice info; return 1 ;;
+    esac
     jq . "$STATE"
 }
 
 cmd_status() {
     local payload; payload="$(current_payload)"
     printf 'extension       : %s\n' "${payload:-(none)}"
-    if [ -f "$STATE" ]; then
+    local kind; kind="$(state_kind)"
+    if [ "$kind" = unreadable ]; then
+        printf 'packages        : cannot read %s (needs root)\n' "$STATE"
+    fi
+    if [ "$kind" = ok ]; then
         printf 'built for       : %s %s\n' "$(jq -r .os_id "$STATE")" "$(jq -r .os_version_id "$STATE")"
         printf 'running         : %s %s\n' "$(os_id)" "$(os_version)"
         printf 'packages        : %s requested, %s total\n' \
@@ -1323,8 +3981,67 @@ cmd_status() {
     systemd-sysext status 2>/dev/null || true
 }
 
+# `verify` for the AppImage registry: are the accepted bytes still the accepted
+# bytes, is everything the manifest claims still there, and has anything come
+# to shadow — or be shadowed by — what was installed since? The last question
+# is the one only time can answer: an AppImage refused at install time because
+# /usr/bin already had that name is one thing, but a LATER `apex install` of the
+# rpm puts the same name on PATH behind /usr/local/bin, and nothing would say so.
+#
+# Prints its own findings and returns non-zero if any of them is a problem.
+#
+# Takes its registry, prefix and system root as parameters — like state_kind,
+# and for the same reason: it is the only way the suite can drive the decision
+# over a fixture tree instead of over /var/lib/apex. cmd_verify below is the
+# caller that takes all three defaults.
+# shellcheck disable=SC2120  # the callers that pass arguments are in
+# tests/test-apex-appimage.sh, which sources this file; shellcheck only sees
+# the one in-file caller and reads the parameters as dead. They are not.
+appimage_verify() {
+    local reg="${1:-$APPIMAGE_REG}" prefix="${2:-$APPIMAGE_PREFIX}" sr="${3:-/}"
+    local n rc=0 rec want have p
+    sr="${sr%/}"
+    while IFS= read -r n; do
+        [ -n "$n" ] || continue
+        rec="${reg}/${n}.json"
+        [ -r "$rec" ] || { warn "AppImage ${n}: its record ${rec} cannot be read"; rc=1; continue; }
+        want="$(jq -r '.image_sha256 // empty' "$rec" 2>/dev/null)"
+        have="$(sha "${reg}/${n}.AppImage" 2>/dev/null)"
+        if [ -z "$have" ]; then
+            warn "AppImage ${n}: the accepted file ${reg}/${n}.AppImage is gone"
+            rc=1
+        elif [ "$want" != "$have" ]; then
+            warn "AppImage ${n}: the accepted file no longer has the bytes that were accepted"
+            rc=1
+        fi
+        if [ -r "${reg}/${n}.files" ]; then
+            while IFS= read -r p; do
+                [ -n "$p" ] || continue
+                [ -e "$p" ] || { warn "AppImage ${n}: ${p} is missing"; rc=1; }
+            done < "${reg}/${n}.files"
+        else
+            warn "AppImage ${n}: its file manifest ${reg}/${n}.files cannot be read"
+            rc=1
+        fi
+        if [ -e "${sr}/usr/bin/${n}" ] || [ -L "${sr}/usr/bin/${n}" ]; then
+            warn "AppImage ${n}: ${prefix}/bin/${n} now SHADOWS ${sr}/usr/bin/${n}, which arrived after it was installed. Remove one of them: sudo apex remove ${n}"
+            rc=1
+        fi
+        warn "AppImage ${n}: its signature was never verified (no AppImage is), and it is pinned to the version installed"
+    done < <(appimage_installed "$reg")
+    return "$rc"
+}
+
 cmd_verify() {
-    [ -f "$STATE" ] || { echo "no packages installed"; return 0; }
+    # A refused read must not exit 0 here. `verify` answers "is this what APEX
+    # built", and exiting 0 without looking answers "yes" to a question nobody
+    # checked.
+    local ai_rc=0
+    appimage_verify || ai_rc=$?
+    case "$(state_kind)" in
+        absent) echo "no packages installed"; return "$ai_rc" ;;
+        unreadable) state_unreadable_notice verify; return 1 ;;
+    esac
     local payload want have
     payload="$(current_payload)"
     [ -n "$payload" ] || die "the extension recorded in state.json is missing"
@@ -1343,6 +4060,7 @@ cmd_verify() {
         printf '%s\n' "$unverified" | sed 's/^/  /' >&2
     fi
     msg "extension intact"
+    return "$ai_rc"
 }
 
 cmd_rollback() {
@@ -1389,9 +4107,411 @@ cmd_adopt() {
     msg "adopted. Reboot to drop the layered deployment, after which 'apex update' works again."
 }
 
+# ─────────────────────────────────────────────────────────────────────────────
+# ── the universal resolver (§9) ──────────────────────────────────────────────
+#
+# WHAT PROBLEM THIS SOLVES
+# A user who wants Discord should type `apex install discord`. They should not
+# first have to know that APEX is image-based, that an RPM goes into a system
+# extension while a Flatpak does not, that a vendor RPM which self-updates is a
+# trap on a read-only /usr, or that some software only exists as a package for
+# a distribution this is not. §9: "a normal user does not have to understand
+# RPM vs Flatpak vs AppImage vs containerized distro packages unless they want
+# to."
+#
+# WHAT IT DELIBERATELY DOES NOT DO
+# It does not change what `apex install <name>` already does. That command
+# ships, runs from `apex update` and from a boot-time unit, and is covered by
+# the assertions above; a resolver that silently re-routed a name which
+# installs an RPM today would be a behaviour change on a non-interactive
+# command, which is exactly the shape this repository refuses. So the ranking
+# below puts an exact-name repository package first and everything else after
+# it, and the resolver's job is to SAY what it chose, name the alternative, and
+# take `--source` when the user disagrees.
+#
+# The one exception is the curated table, and it is deliberately tiny: a
+# handful of packages whose RPM exists and is a known trap on an atomic host.
+# Every entry carries its reason in the file, so the table is auditable rather
+# than clever.
+#
+# WHY THE ORDER IS WHAT IT IS
+#   1. an exact-name repository package — it puts the command on $PATH where a
+#      script expects it, its signature is checked against a keyring APEX
+#      already trusts, it is rebuilt automatically after an OS upgrade, and it
+#      rolls back with the rest of the extension;
+#   2. a Flatpak — sandboxed and never touching /usr, which is better than
+#      nothing but cannot provide a command-line tool a script can call;
+#   3. a capsule — anything a distribution APEX is not still packages. The
+#      software works, and it works inside the capsule, not on the host.
+# ─────────────────────────────────────────────────────────────────────────────
+
+# Where the capsule engine lives. A CONSTANT, not an environment variable:
+# `apex install` runs as root, and letting a caller-controlled variable choose
+# a program a root process executes is a privilege-escalation hole for the sake
+# of test convenience. The capsule route refuses root anyway (see below), so
+# nothing here ever execs it with privileges.
+readonly ENV_ENGINE=/usr/libexec/apex-env
+
+# Packages whose repository build is a trap on an image-based system.
+#
+# The bar for an entry is high: the RPM must exist, must install, and must then
+# behave badly in a way the user cannot fix — not merely "the Flatpak is nicer".
+# Format: `name|source|reason`. The reason is printed verbatim, because a
+# re-route the user did not ask for has to justify itself on the spot.
+#
+#   discord  The RPM Fusion package is the vendor's own tarball repackaged, and
+#            Discord refuses to start once it considers itself out of date. On
+#            a normal distribution the next `dnf update` fixes that; here the
+#            update has to wait for RPM Fusion to rebuild AND for the extension
+#            to be rebuilt, so the client spends days telling the user to
+#            update and offering them no way to do it. The Flathub build
+#            updates itself on its own schedule.
+curated_source() {
+    case "$1" in
+        discord)
+            printf 'flatpak|the RPM is the vendor tarball repackaged and refuses to start once it considers itself out of date, which on an image-based system it regularly does'
+            ;;
+        *) return 1 ;;
+    esac
+}
+
+# Does a Flathub result actually answer what was asked?
+#
+# `flatpak search` matches descriptions too, so searching for "code" returns
+# fifty applications that merely mention it. A candidate counts only when the
+# application id's last segment or the application's name equals the term,
+# case-insensitively — that is the difference between "there is a Flatpak for
+# this" and "Flathub contains the word".
+flatpak_match() {
+    local term appid name last
+    term="$(printf '%s' "$1" | tr '[:upper:]' '[:lower:]')"
+    appid="$(printf '%s' "$2" | tr '[:upper:]' '[:lower:]')"
+    name="$(printf '%s' "$3" | tr '[:upper:]' '[:lower:]')"
+    [ -n "$term" ] || return 1
+    last="${appid##*.}"
+    [ "$last" = "$term" ] && return 0
+    [ "$name" = "$term" ] && return 0
+    [ "$appid" = "$term" ] && return 0
+    return 1
+}
+
+# The order the sources are offered in, given which ones have a candidate.
+# Pure, and separated from the probes for exactly that reason: the ranking is
+# the policy, and a policy that can only be exercised with a network and a
+# populated dnf cache is a policy nobody checks.
+# Where a BARE name goes when no --source was given. `apex resolve` and
+# `apex install` must not disagree about this, and they have before: the suite
+# records a round where resolve told a user to install the Chromium flatpak
+# while install fetched the Fedora rpm. This is the same disagreement in the
+# other direction, found 2026-09-22 by `apex install obs-studio discord code
+# libreoffice blender wine chromium` on katana.
+#
+# `code` has NO rpm anywhere — only a flatpak — and the old routing kept every
+# non-curated name for dnf. dnf then failed the WHOLE transaction with
+# `No package "code" available`, so obs-studio, libreoffice, blender, wine and
+# chromium did not install either. One unavailable name took five good ones
+# with it, and `apex resolve code` had already said "APEX would use: flatpak".
+#
+# Prints `flatpak <appid>` or `rpm`. The rpm probe is the same one resolve
+# uses, so the two answers are the same answer by construction rather than by
+# two functions agreeing today.
+#
+# The caveat, stated because it is a real one: probe_rpm matches a package NAME
+# exactly, so a name that dnf could only satisfy through a `Provides:` reads as
+# having no rpm. Such a name is rerouted only when a Flatpak actually exists
+# for it, and resolve would have said flatpak too — so the tools still agree,
+# which is the property being defended here.
+bare_name_route() {
+    local n="$1" id
+    if [ -n "$(probe_rpm "$n")" ]; then printf 'rpm\n'; return 0; fi
+    if id="$(first_flatpak_id "$n")" && [ -n "$id" ]; then
+        printf 'flatpak %s\n' "$id"; return 0
+    fi
+    # No rpm and no flatpak: keep it on the rpm route so dnf produces the error
+    # naming it, rather than this function inventing one.
+    printf 'rpm\n'
+}
+
+rank_sources() {
+    local have_rpm="$1" have_flatpak="$2" have_capsule="$3"
+    [ "$have_rpm" = 1 ]     && printf 'rpm\n'
+    [ "$have_flatpak" = 1 ] && printf 'flatpak\n'
+    [ "$have_capsule" = 1 ] && printf 'capsule\n'
+    return 0
+}
+
+# How software from each source is vouched for. §9 asks for provenance in the
+# UI, and "where did this come from" is answered by who signed it, not by which
+# command installed it.
+provenance() {
+    case "$1" in
+        rpm)     printf 'signature checked against the Fedora/RPM Fusion/COPR keys APEX trusts; installed into the system extension, rolls back with it' ;;
+        flatpak) printf 'signed by its Flatpak remote and sandboxed; never touches /usr and updates independently of the OS' ;;
+        capsule) printf "signed by the capsule distribution's own keys; installed inside the container, invisible to the host" ;;
+        *) return 1 ;;
+    esac
+}
+
+valid_source() { case "$1" in rpm|flatpak|capsule) return 0 ;; esac; return 1; }
+
+# ── source probes ───────────────────────────────────────────────────────────
+# Each prints one line per candidate and nothing on no match. Kept separate
+# from the ranking so a fake `dnf5`/`flatpak` on $PATH exercises the whole
+# resolver with no network.
+
+# `name|evr|repo|summary` for an exact-name repository package.
+#
+# repoquery, not search: `dnf5 search htop` matches summaries and would report
+# a candidate for every package that mentions the word. A bare name is an exact
+# name match to repoquery, which is the question being asked.
+#
+# NO `--` BEFORE THE NAME, and that is not a style choice. `dnf5 repoquery`
+# rejects `--` outright:
+#
+#   $ dnf5 repoquery --quiet --queryformat '%{name}\n' -- chromium
+#   Unknown argument "--" for command "repoquery".
+#
+# It writes that to stderr, which this function discards, and prints nothing to
+# stdout — so `probe_rpm` returned NOTHING FOR EVERY PACKAGE IN THE WORLD, and
+# `apex resolve <anything>` silently lost its entire rpm leg. Measured on katana
+# 2026-09-19 (evidence §11.1): `apex resolve chromium` offered only the Flathub
+# build and printed "APEX would use: flatpak", while `apex install chromium`
+# installed chromium-152.0.7977.82-1.fc43.x86_64 from Fedora. A predictor that
+# disagrees with the thing it predicts is worse than no predictor.
+#
+# The suite faked dnf5 and the fake ignored its arguments, so 50+ assertions
+# passed over this. tests/test-apex-resolve.sh's fake now refuses `--` with the
+# real error text, and tests/test-apex-multilib-extract.sh calls probe_rpm
+# against a REAL dnf5 inside the container.
+probe_rpm() {
+    command -v dnf5 >/dev/null 2>&1 || return 0
+    dnf5 repoquery --quiet --latest-limit 1 \
+         --queryformat '%{name}|%{evr}|%{repoid}|%{summary}\n' "$1" 2>/dev/null \
+        | awk -F'|' -v n="$1" '$1 == n' \
+        | awk -F'|' '!seen[$1"|"$2]++' \
+        | head -3
+}
+
+# `appid|name|remote` for Flatpak applications that really answer the term.
+probe_flatpak() {
+    have_flatpak || return 0
+    local appid name remote
+    while IFS=$'\t' read -r appid name remote _; do
+        [ -n "$appid" ] || continue
+        if flatpak_match "$1" "$appid" "$name"; then
+            printf '%s|%s|%s\n' "$appid" "$name" "${remote:-flathub}"
+        fi
+    done < <(flatpak search --columns=application,name,remotes -- "$1" 2>/dev/null) \
+        | head -3
+    return 0
+}
+
+# The capsule that would receive the package, or nothing.
+#
+# Runs the capsule engine as the INVOKING user, never as root: capsules are
+# per-user, and root's list is empty on every machine. Under sudo that means
+# $SUDO_USER; with no sudo it is simply this user.
+probe_capsule() {
+    # The one knob here, and it only ever turns the probe OFF — it cannot name
+    # a program, a path or a source, so nothing it can be set to changes what a
+    # root process executes. It exists because the suite has to get the same
+    # answer on a machine that has capsules and one that does not; without it,
+    # "nothing provides this name" would depend on whether the developer
+    # running the tests happens to have made a capsule.
+    [ "${APEX_PKG_NO_CAPSULE:-0}" = 1 ] && return 0
+    [ -x "$ENV_ENGINE" ] || return 0
+    local out
+    if [ "$(id -u)" = 0 ]; then
+        local u="${SUDO_USER:-}"
+        [ -n "$u" ] && [ "$u" != root ] || return 0
+        out="$(runuser -u "$u" -- "$ENV_ENGINE" list --json 2>/dev/null)" || return 0
+    else
+        out="$("$ENV_ENGINE" list --json 2>/dev/null)" || return 0
+    fi
+    printf '%s' "$out" | jq -r '.[0] | select(.) | "\(.name)|\(.image)|\(.package_manager)"' 2>/dev/null
+    return 0
+}
+
+# The application id a bare name resolves to on Flathub, or nothing.
+# Used by `--source flatpak` and by the curated re-route, both of which have to
+# turn a word the user typed into an id they have never seen.
+first_flatpak_id() {
+    local hit
+    hit="$(probe_flatpak "$1" | head -1)"
+    [ -n "$hit" ] || return 1
+    printf '%s' "${hit%%|*}"
+}
+
+# `apex install --source capsule <pkg>...` — §9's third source.
+#
+# Refuses root, and that refusal is the point rather than an inconvenience:
+# capsules are per-user rootless containers, so root has none, and `sudo apex
+# install --source capsule` would report an empty capsule list on every machine
+# in the world. Told with the command that works, because a user who reached
+# here typed `sudo` for a reason.
+install_into_capsule() {
+    local box="$ENV_NAME"
+    if [ "$(id -u)" = 0 ]; then
+        local u="${SUDO_USER:-}"
+        printf 'apex-pkg: error: %s\n' \
+            "a capsule belongs to a user, and root has none" \
+            "" \
+            "Run it without sudo:" \
+            "  apex install --source capsule $*" >&2
+        [ -n "$u" ] && [ "$u" != root ] \
+            && printf 'apex-pkg: error: %s\n' "  (as ${u}, the account that ran sudo)" >&2
+        exit 1
+    fi
+    [ -x "$ENV_ENGINE" ] \
+        || die "no capsule engine on this system — it predates 'apex env'; run: sudo apex update"
+    if [ -z "$box" ]; then
+        local hit
+        hit="$(probe_capsule)"
+        box="${hit%%|*}"
+        [ -n "$box" ] \
+            || die "no capsule to install into. Make one first:  apex env create fedora"
+        msg "using capsule '${box}' (name another with --env)"
+    fi
+    "$ENV_ENGINE" install "$box" "$@"
+}
+
+# ── resolve ─────────────────────────────────────────────────────────────────
+# Read-only and unprivileged on purpose: "what would this install, and from
+# where" is a question a user should be able to ask without a password.
+cmd_resolve() {
+    [ "$#" -ge 1 ] || die "usage: apex resolve <name>"
+    local name="$1"
+
+    # The two syntactic forms decide themselves and there is nothing to rank.
+    if is_local_rpm_arg "$name"; then
+        printf 'apex: %s\n' \
+            "'${name}' is a local RPM file, so there is nothing to choose." \
+            "  sudo apex install ${name}" \
+            "  provenance: $(provenance rpm)"
+        return 0
+    fi
+    if is_flatpak_id "$name"; then
+        printf 'apex: %s\n' \
+            "'${name}' is a Flatpak application id, so there is nothing to choose." \
+            "  sudo apex install ${name}" \
+            "  provenance: $(provenance flatpak)"
+        return 0
+    fi
+
+    if [[ "$name" =~ $REFUSE_RE ]]; then
+        printf 'apex: %s\n' \
+            "'${name}' is a kernel or core-system package." \
+            "No source can provide it: overlaying a second copy of the running" \
+            "userspace ABI onto /usr is unrecoverable without a rollback, and a" \
+            "kernel needs an initramfs and a real deployment." \
+            "If APEX should ship it, that is an image change, not an install." >&2
+        return 1
+    fi
+
+    local -a rpm_hits=() flatpak_hits=() capsule_hits=()
+    mapfile -t rpm_hits < <(probe_rpm "$name")
+    mapfile -t flatpak_hits < <(probe_flatpak "$name")
+    mapfile -t capsule_hits < <(probe_capsule)
+
+    local have_rpm=0 have_flatpak=0 have_capsule=0
+    [ -n "${rpm_hits[0]:-}" ] && have_rpm=1
+    [ -n "${flatpak_hits[0]:-}" ] && have_flatpak=1
+    [ -n "${capsule_hits[0]:-}" ] && have_capsule=1
+
+    if [ "$have_rpm$have_flatpak$have_capsule" = 000 ]; then
+        printf 'apex: %s\n' \
+            "nothing called '${name}' in the repositories or on Flathub." \
+            "" \
+            "  apex search ${name}          look for a near match" \
+            "  apex repo enable-copr O/P    add a COPR that has it" \
+            "  apex env create fedora       then: apex env install fedora ${name}" >&2
+        return 1
+    fi
+
+    local -a order=()
+    mapfile -t order < <(rank_sources "$have_rpm" "$have_flatpak" "$have_capsule")
+    local chosen="${order[0]}" reason="ranked first for this system"
+
+    local curated
+    if curated="$(curated_source "$name")"; then
+        local forced="${curated%%|*}"
+        case " ${order[*]} " in
+            *" $forced "*)
+                chosen="$forced"
+                reason="APEX prefers this source for ${name}: ${curated#*|}"
+                ;;
+        esac
+    fi
+
+    echo "candidates for '${name}':"
+    local h
+    for h in "${rpm_hits[@]:-}"; do
+        [ -n "$h" ] || continue
+        printf '  %-8s %s-%s  (repo %s)  %s\n' rpm \
+            "$(cut -d'|' -f1 <<<"$h")" "$(cut -d'|' -f2 <<<"$h")" \
+            "$(cut -d'|' -f3 <<<"$h")" "$(cut -d'|' -f4- <<<"$h")"
+    done
+    for h in "${flatpak_hits[@]:-}"; do
+        [ -n "$h" ] || continue
+        printf '  %-8s %s  (%s on %s)\n' flatpak \
+            "$(cut -d'|' -f1 <<<"$h")" "$(cut -d'|' -f2 <<<"$h")" \
+            "$(cut -d'|' -f3 <<<"$h")"
+    done
+    for h in "${capsule_hits[@]:-}"; do
+        [ -n "$h" ] || continue
+        printf '  %-8s capsule %s  (%s, %s)\n' capsule \
+            "$(cut -d'|' -f1 <<<"$h")" "$(cut -d'|' -f2 <<<"$h")" \
+            "$(cut -d'|' -f3 <<<"$h")"
+    done
+
+    echo
+    echo "APEX would use: ${chosen} — ${reason}"
+    echo "provenance:     $(provenance "$chosen")"
+    echo "install:        $(install_command "$name" "$chosen" "${flatpak_hits[0]:-}" "${capsule_hits[0]:-}")"
+
+    local alt
+    for alt in "${order[@]}"; do
+        [ "$alt" = "$chosen" ] && continue
+        echo "or:             $(install_command "$name" "$alt" "${flatpak_hits[0]:-}" "${capsule_hits[0]:-}")"
+    done
+    return 0
+}
+
+# The exact command that installs `name` from `source`. Printed rather than
+# described, because "you could use a Flatpak instead" leaves the user to guess
+# an application id they have never seen.
+install_command() {
+    local name="$1" source="$2" flatpak_hit="$3" capsule_hit="$4"
+    case "$source" in
+        rpm)     printf 'sudo apex install --source rpm %s' "$name" ;;
+        flatpak)
+            local id="${flatpak_hit%%|*}"
+            printf 'sudo apex install %s' "${id:-$name}"
+            ;;
+        capsule)
+            local box="${capsule_hit%%|*}"
+            printf 'apex env install %s %s' "${box:-<capsule>}" "$name"
+            ;;
+    esac
+}
+
 cmd_search() {
     [ "$#" -gt 0 ] || die "usage: apex search <term>..."
+    # Repository packages first: they are the source `apex install` uses for a
+    # bare name, so putting anything above them would misrepresent what typing
+    # the name does.
+    echo "── repository packages ─────────────────────────────────────────────"
     dnf5 search "$@"
+    # §9's "search multiple supported package sources". Flatpak's own search
+    # reads the local AppStream cache, so this costs nothing and works offline.
+    if have_flatpak; then
+        echo
+        echo "── Flatpak applications ────────────────────────────────────────────"
+        flatpak search --columns=application,name,description "$@" 2>/dev/null \
+            || echo "(no Flatpak remote is configured)"
+    fi
+    echo
+    echo "apex resolve <name>  shows which source APEX would use, and why"
 }
 
 valid_copr_project() {
@@ -1458,14 +4578,32 @@ usage() {
     cat <<'EOF'
 usage: apex-pkg <command> [args]
 
-  install <pkg|file.rpm>...
+  install <pkg|file.rpm|file.deb|App.AppImage>...
                        add packages. A reverse-DNS id (org.gimp.GIMP) is a
-                       Flatpak; a path or a name ending in .rpm is a local RPM
+                       Flatpak; a path ending in .AppImage is an AppImage,
+                       unpacked once into /usr/local and PINNED — `apex update`
+                       never moves it, and it cannot move itself; a path or a
+                       name ending in .rpm is a local RPM
                        file, which is copied into /var/lib/apex/pkg/local so
                        later rebuilds no longer need the original file. Its
                        dependencies still come from the repositories.
+                       A path or a name ending in .deb is a local Debian
+                       package, cached the same way under
+                       /var/lib/apex/pkg/deb. Its payload is unpacked; its
+                       maintainer scripts are NEVER run and its Debian
+                       dependencies are NEVER resolved, both of which are
+                       reported. APEX does not fetch from apt repositories —
+                       a .deb is installed from a file you already have.
                        --allow-unsigned accepts one local file that no trusted
-                       key covers; the decision is recorded per file.
+                       key covers; the decision is recorded per file. Every
+                       .deb needs it: Debian signs the apt index, not the
+                       package.
+                       --source rpm|flatpak|capsule picks the source for a bare
+                       name instead of letting APEX rank them; --env NAME says
+                       which capsule --source capsule installs into.
+  resolve <name>       which source APEX would use for that name, why, what
+                       vouches for it, and the exact command for each
+                       alternative. Read-only; needs no root.
   remove  <pkg>...     remove packages or Flatpak apps (a local file is removed
                        by its package name)
   upgrade              refresh all extension packages from the repositories
@@ -1490,6 +4628,11 @@ main() {
     # default and the opt-in is never remembered as a global setting. What IS
     # remembered is the per-file decision, in LOCAL_DIR.
     ALLOW_UNSIGNED=0
+    # §9's escape hatch. Empty means "let APEX decide", which is the only
+    # setting that ever changes behaviour based on the curated table below;
+    # naming a source explicitly always wins and is never overridden.
+    SOURCE=""
+    ENV_NAME=""
     local -a rest=()
     while [ "$#" -gt 0 ]; do
         case "$1" in
@@ -1497,10 +4640,18 @@ main() {
             --allow-unsigned) ALLOW_UNSIGNED=1 ;;
             --enable-repo=*) ENABLE_REPOS="${ENABLE_REPOS} ${1#*=}" ;;
             --enable-repo) shift || true; ENABLE_REPOS="${ENABLE_REPOS} ${1:-}" ;;
+            --source=*) SOURCE="${1#*=}" ;;
+            --source) shift || true; SOURCE="${1:-}" ;;
+            --env=*) ENV_NAME="${1#*=}" ;;
+            --env) shift || true; ENV_NAME="${1:-}" ;;
             *) rest+=("$1") ;;
         esac
         shift || true
     done
+    if [ -n "$SOURCE" ]; then
+        valid_source "$SOURCE" \
+            || die "unknown source '${SOURCE}' (rpm, flatpak, capsule)"
+    fi
     if [ "${#rest[@]}" -gt 0 ]; then
         set -- "${rest[@]}"
     else
@@ -1520,6 +4671,7 @@ main() {
         status)   cmd_status ;;
         verify)   cmd_verify ;;
         search)   cmd_search "$@" ;;
+        resolve)  cmd_resolve "$@" ;;
         repo-list) cmd_repo_list ;;
         repo-enable-copr) cmd_repo_enable_copr "$@" ;;
         repo-disable-copr) cmd_repo_disable_copr "$@" ;;

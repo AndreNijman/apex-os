@@ -1,0 +1,7 @@
+<?xml version="1.0" encoding="utf-8"?>
+<resources>
+    <!-- The launcher icon's background. The same deep teal the APEX greeter
+         uses (files/desktop/apex-greet/shell.qml), so the icon on a phone and
+         the login screen on a laptop are recognisably the same product. -->
+    <color name="apex_ink">#1A282A</color>
+</resources>

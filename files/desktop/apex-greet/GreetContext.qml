@@ -36,6 +36,25 @@ Item {
     property int    sessionIndex: 0
     property string _wantSession: ""    // desired id from last-session
 
+    // ── Recovery preselection (roadmap P2-018) ────────────────────
+    // The ONLY session id this greeter will ever select on its own initiative.
+    // /usr/libexec/apex-session-watchdog carries the same constant and
+    // tests/test-apex-session-watchdog.sh fails if the two drift apart. Named
+    // rather than discovered for the reason `defaultSession` is named: a
+    // greeter that acted on whatever a helper printed would be one typo away
+    // from selecting something nobody can log in to.
+    readonly property string recoverySession: "apex-safe-graphics"
+    property string _recoverWanted: ""   // set only by the watchdog's `check`
+    // Why recovery was preselected, shown on the greeter's status line. Set
+    // ONLY when the id actually matched an enumerated session — a notice for a
+    // session that is not in the picker is a dead end with an explanation.
+    property string recoveryNotice: ""
+    // The user has worked the session picker. From that moment their choice is
+    // final: `_selectWanted()` stops selecting anything, so neither a late line
+    // from the enumeration nor the watchdog can move the picker out from under
+    // them. This is what makes the recovery preselection a suggestion.
+    property bool   _userPicked:  false
+
     readonly property var currentSession:
         (sessions.length > 0 && sessionIndex >= 0 && sessionIndex < sessions.length)
             ? sessions[sessionIndex] : null
@@ -47,6 +66,14 @@ Item {
     function cycleSession(dir) {
         var n = ctx.sessions.length
         if (n === 0) return
+        // Touching the picker settles the question. Before this flag existed
+        // every `_addSession` line re-ran `_selectWanted()`, so a choice made
+        // while the enumeration was still arriving could be silently undone;
+        // with the watchdog able to preselect as well, a user who cycles away
+        // from recovery must not be put back into it.
+        ctx._userPicked     = true
+        ctx._recoverWanted  = ""
+        ctx.recoveryNotice  = ""
         ctx.sessionIndex = ((ctx.sessionIndex + dir) % n + n) % n
     }
 
@@ -73,17 +100,52 @@ Item {
     // hyprland-uwsm.desktop sorted before hyprland.desktop, became the default,
     // and bounce-looped at login on real hardware (see Containerfile.base).
     //
-    // The Gaming edition now also ships apex-gaming.desktop, which sorts before
+    // Every image now ships apex-gaming.desktop, which sorts before
     // BOTH of them. So the default is named, not positional, and adding a
     // session can no longer change it by accident.
     readonly property string defaultSession: "hyprland"
 
     function _selectWanted() {
-        // A remembered session always wins.
+        // The user's own choice outranks every rule below it.
+        if (ctx._userPicked) return
+
+        // Recovery outranks the remembered session, because the remembered
+        // session is the one that has just failed to start three times running.
+        // The id is checked against `recoverySession` at the point it is read
+        // (see the watchdog Process below), so this loop can only ever land on
+        // APEX Safe Graphics — and only if it is actually in the picker.
+        if (ctx._recoverWanted) {
+            for (var r = 0; r < ctx.sessions.length; r++)
+                if (ctx.sessions[r].id === ctx._recoverWanted) {
+                    ctx.sessionIndex   = r
+                    ctx.recoveryNotice = "Your desktop did not start — "
+                                       + ctx.sessions[r].name + " selected"
+                    return
+                }
+            // Not installed: say nothing and fall through. A notice about a
+            // session the user cannot choose is worse than no notice.
+        }
+
+        // A remembered session wins — WHILE IT IS STILL INSTALLED.
+        //
+        // The `return` that used to sit where the comment below is turned this
+        // into the same lockout the block above describes. `last-session` is
+        // written on every login, so after one trip through Gaming Mode it
+        // reads `apex-gaming` — and the TryExec gate removes that entry the
+        // moment gamescope is absent, which is every boot where the sysext has
+        // not merged yet. The remembered id then matched nothing, this function
+        // returned having selected nothing, and sessionIndex stayed at its
+        // default 0: the FIRST SORTED ENTRY, which is exactly the positional
+        // default that `defaultSession` exists to abolish.
+        //
+        // So a user who once tried Gaming Mode was silently moved to whatever
+        // sorts first — apex-labwc on a built image — and the named default
+        // they would otherwise have landed on was never consulted, because the
+        // protection below was only ever wired to the empty-memory path.
         if (ctx._wantSession !== "") {
             for (var i = 0; i < ctx.sessions.length; i++)
                 if (ctx.sessions[i].id === ctx._wantSession) { ctx.sessionIndex = i; return }
-            return
+            // Remembered but no longer installed: fall through to the default.
         }
         // Otherwise fall back to the named default rather than glob position.
         for (var j = 0; j < ctx.sessions.length; j++)
@@ -159,15 +221,37 @@ Item {
         var cmd  = ctx.sessionCommand.trim()
         var argv = cmd.length > 0 ? ["sh", "-lc", cmd]
                                   : ["sh", "-lc", "exec ${SHELL:-/bin/sh} -l"]
+        var sid  = ctx.currentSession ? ctx.currentSession.id : ""
         ctx._pendingArgv = argv
         persistProc.environment = {
             "AG_USER": ctx.username,
-            "AG_SESS": ctx.currentSession ? ctx.currentSession.id : ""
+            "AG_SESS": sid,
+            // RECOVERY IS NEVER REMEMBERED. last-session is written on every
+            // login, so before this flag one trip through APEX Safe Graphics
+            // made the recovery desktop the preselected default for ever —
+            // a user who went there once to fix their machine came back to a
+            // fixed machine and a picker still pointing at the rescue session.
+            // Skipping the write leaves the PREVIOUS memory intact rather than
+            // clearing it, so they land back on the desktop they were using.
+            // Gaming Mode's equivalent problem is solved elsewhere and
+            // differently (apex-session-select writes the file deliberately).
+            "AG_REMEMBER": (sid !== "" && sid !== ctx.recoverySession) ? "1" : "0"
         }
+        // The watchdog `record` goes LAST and is wrapped twice. It is on the
+        // only path to Greetd.launch() — the launch is deferred to
+        // persistProc.onExited — so a helper that hung here would be a machine
+        // nobody can log in to. `timeout` caps it; `|| true` covers a `timeout`
+        // that is not there to cap it with; and last-user/last-session are
+        // already on disk before it is called, so even the capped case loses
+        // nothing but the bounce count.
         persistProc.command = ["sh", "-c",
             "d=/var/lib/apex-greet; mkdir -p \"$d\" 2>/dev/null;" +
             " printf '%s' \"$AG_USER\" > \"$d/last-user\" 2>/dev/null || true;" +
-            " printf '%s' \"$AG_SESS\" > \"$d/last-session\" 2>/dev/null || true"]
+            " [ \"${AG_REMEMBER:-1}\" = 1 ] &&" +
+            "   printf '%s' \"$AG_SESS\" > \"$d/last-session\" 2>/dev/null;" +
+            " timeout 5 /usr/libexec/apex-session-watchdog record \"$AG_SESS\"" +
+            "   >/dev/null 2>&1 || true;" +
+            " true"]
         persistProc.running = true
     }
 
@@ -226,8 +310,12 @@ Item {
         stdout: SplitParser {
             onRead: function(line) {
                 var v = line.trim().toLowerCase()
-                if (v === "gaming" || v === "daily") ctx.edition = v
-                else if (v !== "")                   ctx.edition = "mono"
+                // `apex` is the single published image (VARIANT_ID=apex).
+                // `daily` and `gaming` are kept so a machine that has not yet
+                // updated past the three-edition split still gets its accent
+                // instead of falling through to mono.
+                if (v === "apex" || v === "gaming" || v === "daily") ctx.edition = v
+                else if (v !== "")                                   ctx.edition = "mono"
             }
         }
     }
@@ -308,13 +396,165 @@ Item {
         }
     }
 
+    // ── Bounce watchdog (roadmap P2-018) ──────────────────────────
+    //
+    // "A graphics/compositor/shell failure CAN ENTER a conservative recovery
+    // desktop" is the criterion, and the verb was the part that did not exist:
+    // APEX Safe Graphics shipped as a session a PERSON picks. A machine whose
+    // driver stopped working after an update bounces — greetd starts the
+    // session, it dies in a second, the login screen comes back — and nothing
+    // in the system counted, because greetd is a stock unit with no Restart=,
+    // no StartLimitBurst and no OnFailure=, and apex-boot-health's units are
+    // inert on a GRUB machine, which every APEX machine is.
+    //
+    // /usr/libexec/apex-session-watchdog counts. The greeter's whole part in it
+    // is this: `record` on the way out (above) and `check` on the way in.
+    //
+    // FAIL OPEN, three ways over:
+    //   * `timeout` caps it and a missing helper is a silent no-op — either way
+    //     the parser reads the bare `echo` and nothing is selected;
+    //   * the id is compared against `recoverySession` before it is used, so
+    //     garbage, a second line or an injected id selects NOTHING. The helper
+    //     cannot name a session; it can only vote for the one named here;
+    //   * it preselects. The user cycles away and that sticks (`_userPicked`).
+    Process {
+        running: true
+        command: ["sh", "-c",
+            "timeout 5 /usr/libexec/apex-session-watchdog check 2>/dev/null; echo"]
+        stdout: SplitParser {
+            onRead: function(line) {
+                var s = line.trim()
+                if (s !== "" && s === ctx.recoverySession) {
+                    ctx._recoverWanted = s
+                    ctx._selectWanted()
+                }
+            }
+        }
+    }
+
+    // ── Keyboard layout ───────────────────────────────────────────
+    //
+    // Three files in this repository already carry the same note — the keymap
+    // generator, sway-greet.conf and labwc-greet/environment: on a QWERTZ or
+    // AZERTY machine a password typed on a US map does not match, and a user
+    // who has just installed APEX cannot get in. All three fixed which layout
+    // the greeter STARTS on. None of them tells the user what that layout is,
+    // and none lets them change it, so a wrong one still presents as an
+    // ordinary "wrong password" with no way to diagnose it from the login
+    // screen. This is the readout and the switch.
+    //
+    // Read from sway, not from the environment. XKB_DEFAULT_LAYOUT is what the
+    // host was ASKED for; sway's input report is what it actually resolved, and
+    // that is what the keystrokes will follow.
+    //
+    // sway is the greeter's host (greetd-config.toml). Under the documented
+    // labwc fallback there is no such IPC, swaymsg fails, and the fallback
+    // Process below leaves an indicator with no switch — the honest state
+    // there, rather than a control that does nothing.
+    property var    layouts:    []
+    property string layoutName: "us"
+
+    readonly property bool canSwitchLayout: ctx.layouts.length > 1
+
+    function cycleLayout(dir) {
+        if (!ctx.canSwitchLayout) return
+        layoutSwitchProc.command = ["sh", "-c",
+            "swaymsg input type:keyboard xkb_switch_layout " +
+            (dir < 0 ? "prev" : "next") + " >/dev/null 2>&1 || true"]
+        layoutSwitchProc.running = true
+    }
+
+    // Parses the one `active<TAB>name,name,…` line LAYOUT_SCRIPT emits.
+    // Separated from the Process so tests can drive it directly, the way
+    // _addSession is driven by the session-list suite.
+    function _setLayouts(line) {
+        var parts = String(line).split("\t")
+        if (parts.length < 2) return
+        var active = parts[0].trim()
+        var all    = parts[1].split(",")
+        var clean  = []
+        for (var i = 0; i < all.length; i++) {
+            var v = all[i].trim()
+            if (v !== "" && clean.indexOf(v) < 0) clean.push(v)
+        }
+        if (clean.length === 0) return
+        ctx.layouts    = clean
+        ctx.layoutName = (active !== "") ? active : clean[0]
+    }
+
+    // The extraction is deliberately grep/sed only — no jq, no python. The
+    // greeter runs as the `greetd` system user before any session exists, and
+    // an absent interpreter would leave the indicator silently stuck on its
+    // default, which is the exact failure this feature exists to end.
+    //
+    // Newlines are squashed first so the array survives as one token: sway
+    // renders xkb_layout_names as ["English (US)", "French"], and anything that
+    // splits on commas keeps only the first entry — which reads as a
+    // single-layout machine and hides the switch on precisely the machines that
+    // need it.
+    readonly property string layoutScript:
+        "j=$(swaymsg -t get_inputs -r 2>/dev/null | tr -d '\\n');" +
+        " [ -n \"$j\" ] || exit 0;" +
+        " a=$(printf '%s' \"$j\" | grep -o '\"xkb_active_layout_name\"[[:space:]]*:[[:space:]]*\"[^\"]*\"'" +
+        "      | head -n1 | sed 's/.*:[[:space:]]*\"//; s/\"$//');" +
+        " n=$(printf '%s' \"$j\" | grep -o '\"xkb_layout_names\"[[:space:]]*:[[:space:]]*\\[[^]]*\\]'" +
+        "      | head -n1 | sed 's/.*\\[//; s/\\]//; s/\"//g; s/[[:space:]]*,[[:space:]]*/,/g;" +
+        "                    s/^[[:space:]]*//; s/[[:space:]]*$//');" +
+        " [ -n \"$n\" ] || exit 0;" +
+        " printf '%s\\t%s\\n' \"$a\" \"$n\""
+
+    Process {
+        id: layoutSwitchProc
+        running: false
+        // Re-read rather than assume the switch landed: sway refuses
+        // xkb_switch_layout on a keyboard with one configured layout, and an
+        // indicator that advanced its own index would then be lying.
+        onExited: function(exitCode, exitStatus) { layoutReadProc.running = true }
+    }
+
+    Process {
+        id: layoutReadProc
+        running: true
+        command: ["sh", "-c", ctx.layoutScript]
+        stdout: SplitParser {
+            onRead: function(line) { ctx._setLayouts(line) }
+        }
+    }
+
+    // Fallback for the labwc host, and for any sway that answers nothing: the
+    // layout the session was ASKED to come up on. Better a readout that is
+    // right by default than a hardcoded "us" that lies on an AZERTY machine.
+    // It defers to sway whenever sway has answered.
+    Process {
+        running: true
+        command: ["sh", "-c", "printf '%s\\n' \"${XKB_DEFAULT_LAYOUT:-}\""]
+        stdout: SplitParser {
+            onRead: function(line) {
+                var v = line.trim()
+                if (v === "" || ctx.layouts.length > 0) return
+                ctx.layouts    = v.split(",")
+                ctx.layoutName = ctx.layouts[0]
+            }
+        }
+    }
+
     // ── Session list from /usr/share/wayland-sessions/*.desktop ───
+    //
+    // TryExec is honoured, per the desktop-entry spec: an entry whose TryExec
+    // binary is not on PATH is skipped entirely. APEX ships one image for every
+    // laptop and the gaming userspace installs on demand, so apex-gaming.desktop
+    // is present on every machine but must only be OFFERED where gamescope has
+    // actually been installed. Without this filter the greeter would list a
+    // session that exits straight back to the greeter on most machines.
     Process {
         running: true
         command: ["sh", "-c",
             "for f in /usr/share/wayland-sessions/*.desktop; do" +
             " [ -r \"$f\" ] || continue;" +
             " id=$(basename \"$f\" .desktop);" +
+            " tryexec=$(sed -n 's/^TryExec=//p' \"$f\" | head -n1);" +
+            " if [ -n \"$tryexec\" ] && ! command -v \"$tryexec\" >/dev/null 2>&1;" +
+            " then continue; fi;" +
             " name=$(sed -n 's/^Name=//p' \"$f\" | head -n1);" +
             " exec=$(sed -n 's/^Exec=//p' \"$f\" | head -n1);" +
             " [ -n \"$exec\" ] || continue;" +

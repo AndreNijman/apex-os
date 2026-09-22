@@ -51,7 +51,16 @@ LOG=/var/log/apex-installer-launch.log
 # whole session — while the GUI's own install-failure page tells the user to
 # "switch to a shell with Ctrl+Alt+F2" to read the log. That advice has to be
 # true, and an escape hatch off a wedged GUI is worth having regardless.
-GUI_CMD=(cage -s -- /usr/bin/apex-installer-gui)
+# Not cage directly. apex-installer-session owns the cage loop, because the
+# keyboard page has to be able to RESTART the compositor: a wlroots compositor
+# compiles its keymap once, at startup, from XKB_DEFAULT_LAYOUT, so a layout
+# chosen afterwards cannot reach the keys under the user's hands any other way
+# (measured — libxkbcommon links only libc and reads no config file or dbus
+# call, so `localectl` cannot do it). That loop is deliberately NOT here: this
+# script's retry exists to absorb a failed compositor start, and entangling it
+# with a deliberate restart would make two opposite situations look alike.
+# The retry below still wraps the whole session, unchanged.
+GUI_CMD=(/usr/bin/apex-installer-session)
 log() { printf '%s %s\n' "$(date '+%F %T')" "$*" >>"$LOG" 2>/dev/null || true; }
 
 log "──── apex-installer-launch starting (pid $$) ────"
@@ -283,7 +292,8 @@ write_report() {
     printf ' APEX-OS INSTALLER BUG — the graphical installer could not start\n'
     printf '===============================================================================\n'
     printf ' This is a defect in the installer image, NOT something you did wrong.\n'
-    printf ' cage (the display compositor) exited with code %s on both attempts.\n' "$rc"
+    printf ' The installer session (cage + the GUI) exited with code %s on both\n' "$rc"
+    printf ' attempts. Code 70 there means the session refused a keyboard restart.\n'
     printf ' DRM nodes: %s\n /run/seatd.sock: %s   pinned GPU: %s\n' \
         "$card" "$seat" "${WLR_DRM_DEVICES:-<auto>}"
     printf ' ---- last lines of %s ----\n' "$LOG"

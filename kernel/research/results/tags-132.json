@@ -1,0 +1,13 @@
+{
+  "btf_dump": "/work/out/dump-132.txt",
+  "total_funcs": 71786,
+  "decl_tag_values": {
+    "bpf_kfunc": 308,
+    "bpf_fastcall": 2
+  },
+  "scx_bpf_examined": 68,
+  "scx_bpf_tagged": 68,
+  "scx_bpf_untagged": 0,
+  "untagged_names": [],
+  "impl_twins_skipped": 0
+}

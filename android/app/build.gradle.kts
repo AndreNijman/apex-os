@@ -1,0 +1,348 @@
+plugins {
+    // `org.jetbrains.kotlin.android` is deliberately absent: AGP 9 builds
+    // Kotlin itself and refuses the standalone plugin outright. `:core` still
+    // applies `kotlin.jvm`, because it is not an Android module and AGP is not
+    // in it at all.
+    alias(libs.plugins.android.application)
+    alias(libs.plugins.kotlin.compose)
+}
+
+// The human-facing version. The build metadata after it — the commit count and
+// the short SHA — is appended by `android/tools/release-version.sh`; this is
+// the only half a person chooses, and it is bumped by editing this line.
+val APEX_MARKETING_VERSION = "0.1.0"
+
+// Read an integer from the environment, or fail. NOT "or fall back": a
+// malformed `APEX_VERSION_CODE` silently becoming the default is how a release
+// ships with versionCode 1 and makes every later release uninstallable over
+// it. An absent variable is a local build and takes the default; a variable
+// that is PRESENT and unusable is a broken pipeline and stops it.
+fun intFromEnv(name: String, default: Int): Int {
+    val raw = System.getenv(name) ?: return default
+    if (raw.isBlank()) return default
+    val n = raw.toIntOrNull()
+        ?: throw GradleException("$name is set to '$raw', which is not an integer")
+    if (n < 1) {
+        throw GradleException("$name is $n; an Android versionCode must be a positive integer")
+    }
+    return n
+}
+
+android {
+    namespace = "com.apexos.remote"
+    // 36, which is what AGP 9 wants and what is actually installed. An
+    // earlier attempt at 35 failed with "Build properties not found": the
+    // command-line tools' unzip of `platforms;android-35` crashed with a
+    // `DirectoryNotEmptyException` and left a directory holding nothing but
+    // `package.xml`, which every tool then read as "installed".
+    compileSdk = 36
+
+    defaultConfig {
+        applicationId = "com.apexos.remote"
+        // 28, and the number is a security decision rather than a reach
+        // decision. It is the first release with `BiometricPrompt` in the
+        // platform and with a keystore that can hold an AES key marked
+        // `setUserAuthenticationRequired`, which is what P1-053's app lock and
+        // its "no private keys in insecure app storage" both rest on. Going
+        // lower would mean shipping a build where the device key is protected
+        // by nothing, on exactly the phones least able to defend it.
+        minSdk = 28
+        targetSdk = 36
+        // ── Version (android-release) ───────────────────────────────────────
+        //
+        // `versionCode` is the number Android compares to decide whether an
+        // APK is an upgrade, and it is the one value in this file that can
+        // permanently break an installed app. Android refuses to install a
+        // code lower than the installed one, so a release whose code went
+        // BACKWARDS cannot be installed over its predecessor — the user has to
+        // uninstall, and uninstalling this app destroys the paired device key.
+        // There is no server-side fix for a published regression.
+        //
+        // So it is not a literal any more. It comes from the environment, and
+        // `android/tools/release-version.sh` derives it from `git rev-list
+        // --count` on main and REFUSES to release a code that is not strictly
+        // greater than every code already published. Two independent ratchets,
+        // because one of them is a script and scripts get edited: the commit
+        // count only grows while main is never force-pushed, and the release
+        // tag `android-v<code>` cannot be created twice.
+        //
+        // The fallback is 1 rather than a computed value on purpose. A local
+        // build is a DEV build, it should be obvious in `adb shell dumpsys`
+        // that it is one, and a developer without git history should still be
+        // able to build. 1 is also the lowest possible code, so a release
+        // always installs over a local build and never the reverse.
+        versionCode = intFromEnv("APEX_VERSION_CODE", default = 1)
+        versionName = System.getenv("APEX_VERSION_NAME")?.takeIf { it.isNotBlank() }
+            ?: "$APEX_MARKETING_VERSION-dev"
+
+        // P1-060's first two criteria are claims about what ANDROID does with
+        // this code — a screen reader reading a label, a rotation surviving, a
+        // Noise handshake crossing real Wi-Fi — and no JVM test can make one.
+        // Every Compose path in this app had been compiled and never run until
+        // the suite this runner starts was first executed on a Pixel 7a.
+        testInstrumentationRunner = "androidx.test.runner.AndroidJUnitRunner"
+    }
+
+    // ── Release signing (P1-060) ────────────────────────────────────────────
+    //
+    // Every value comes from the environment and NOTHING is committed. Not a
+    // `keystore.properties`, not a debug-shaped fallback keystore, not a
+    // default password. A signing key in a repository is a signing key for
+    // everyone who can clone it, and for an app that unseals a device key and
+    // shows which machine is about to run something as root, a forged build is
+    // the whole game.
+    //
+    // The config is created only when the environment carries all four values.
+    // That is the important half: with them absent the release build is
+    // UNSIGNED and says so, rather than falling back to the debug key — which
+    // every Android project ships by default and which would produce an
+    // installable artefact signed by a key whose password is the string
+    // "android". `verifyReleaseSigning` below is what refuses to call that
+    // outcome success.
+    val signingEnv = listOf(
+        "APEX_KEYSTORE",
+        "APEX_KEYSTORE_PASSWORD",
+        "APEX_KEY_ALIAS",
+        "APEX_KEY_PASSWORD",
+    ).associateWith { System.getenv(it) }
+    val signingReady = signingEnv.values.all { !it.isNullOrBlank() } &&
+        file(signingEnv["APEX_KEYSTORE"]!!).isFile
+
+    signingConfigs {
+        if (signingReady) {
+            create("release") {
+                storeFile = file(signingEnv["APEX_KEYSTORE"]!!)
+                storePassword = signingEnv["APEX_KEYSTORE_PASSWORD"]
+                keyAlias = signingEnv["APEX_KEY_ALIAS"]
+                keyPassword = signingEnv["APEX_KEY_PASSWORD"]
+                // v1 off, v2 and v3 on. minSdk is 28, so every phone this app
+                // supports verifies v2; v1 is the JAR-signature scheme whose
+                // Janus and Master Key families of bugs are the reason v2
+                // exists, and leaving it on means shipping that attack surface
+                // to nobody's benefit.
+                enableV1Signing = false
+                enableV2Signing = true
+                enableV3Signing = true
+            }
+        }
+    }
+
+    buildTypes {
+        release {
+            // Off for now, and deliberately: nothing is published yet, and a
+            // shrinker configured before there is anything to shrink produces
+            // keep-rules nobody can justify. It goes on with the first release
+            // build, together with the rules `kotlinx.serialization` needs.
+            //
+            // Turning it on unverified would be worse than leaving it off. R8
+            // strips the generated serializers unless it is told not to, and
+            // the failure is at RUNTIME on a device — which is exactly the
+            // thing no test in this repository can reach.
+            isMinifyEnabled = false
+            signingConfig = signingConfigs.findByName("release")
+        }
+    }
+
+    compileOptions {
+        sourceCompatibility = JavaVersion.VERSION_17
+        targetCompatibility = JavaVersion.VERSION_17
+    }
+
+    buildFeatures {
+        compose = true
+        // AGP 9 defaults this OFF, and the updater needs it: it compares
+        // `BuildConfig.VERSION_CODE` against the code in the release metadata
+        // to decide whether a newer build exists. Without this the class is
+        // not generated and `:app` does not compile — a loud failure, which is
+        // the good case. The quiet one would have been reading the version out
+        // of `PackageManager` instead and getting a value that is right until
+        // the day somebody sideloads over the top.
+        buildConfig = true
+    }
+
+    packaging {
+        resources {
+            // BouncyCastle ships signature files that two copies of the jar
+            // would collide on.
+            excludes += "/META-INF/{AL2.0,LGPL2.1}"
+        }
+    }
+}
+
+kotlin {
+    compilerOptions {
+        jvmTarget.set(org.jetbrains.kotlin.gradle.dsl.JvmTarget.JVM_17)
+    }
+}
+
+dependencies {
+    // The protocol, which knows nothing about Android and is tested without it.
+    implementation(project(":core"))
+
+    implementation(libs.androidx.core.ktx)
+    implementation(libs.androidx.lifecycle.runtime.ktx)
+    implementation(libs.androidx.lifecycle.viewmodel.compose)
+    implementation(libs.androidx.lifecycle.runtime.compose)
+    implementation(libs.androidx.activity.compose)
+    implementation(platform(libs.androidx.compose.bom))
+    implementation(libs.androidx.compose.ui)
+    implementation(libs.androidx.compose.ui.graphics)
+    implementation(libs.androidx.compose.ui.tooling.preview)
+    implementation(libs.androidx.compose.material3)
+    implementation(libs.androidx.compose.material.icons.core)
+    implementation(libs.androidx.navigation.compose)
+    implementation(libs.androidx.biometric)
+    // Not imported anywhere. It is here to raise the floor: see the note on
+    // `fragment` in libs.versions.toml — biometric 1.1.0 pulls a FragmentActivity
+    // that mishandles every activity result this app takes.
+    implementation(libs.androidx.fragment)
+    implementation(libs.androidx.camera.camera2)
+    implementation(libs.androidx.camera.lifecycle)
+    implementation(libs.androidx.camera.view)
+    implementation(libs.zxing.core)
+    implementation(libs.kotlinx.coroutines.core)
+
+    testImplementation(libs.junit.jupiter)
+    testRuntimeOnly(libs.junit.platform.launcher)
+
+    // ── On-device (instrumented) tests ──────────────────────────────────────
+    //
+    // JUnit **4**, and not because the unit tests' JUnit 5 was a mistake.
+    // `AndroidJUnitRunner` is a JUnit 4 runner; the Jupiter engine does not run
+    // under it, and an `androidTest` source set written for Jupiter compiles
+    // and then discovers zero tests — which reports success. The two source
+    // sets therefore use different frameworks on purpose.
+    androidTestImplementation(libs.androidx.test.runner)
+    // Not imported anywhere. It is here to raise the floor, exactly as
+    // `fragment` is above: Compose's test rule reaches `Espresso.onIdle()` on
+    // every `waitForIdle`, the transitive resolution is 3.5.0, and 3.5.0 is
+    // broken on every Android from 14 up. See the note in libs.versions.toml.
+    androidTestImplementation(libs.androidx.test.espresso.core)
+    androidTestImplementation(libs.androidx.test.rules)
+    androidTestImplementation(libs.androidx.test.ext.junit)
+    androidTestImplementation(libs.androidx.test.uiautomator)
+    androidTestImplementation(platform(libs.androidx.compose.bom))
+    androidTestImplementation(libs.androidx.compose.ui.test.junit4)
+    // `enableAccessibilityChecks()`: the Accessibility Test Framework, run
+    // against the real semantics tree on a real phone. This is the assertion
+    // that AccessibilityStaticsTest deliberately could not make — a source scan
+    // can see that a label exists, not that Android exposes it.
+    androidTestImplementation(libs.androidx.compose.ui.test.junit4.accessibility)
+    // NOT `ui-test-manifest`. It exists to give `createComposeRule()` an empty
+    // `ComponentActivity` to compose into, and nothing here calls that any
+    // more: a stock host is destroyed a frame after launch behind a secure
+    // keyguard, so every Compose test in this module uses
+    // `createAndroidComposeRule<ComposeHostActivity>()` and the activity is
+    // declared in `src/debug` with `showWhenLocked`. Keeping the artefact would
+    // put a second, unusable host activity in the debug manifest beside the one
+    // that works.
+}
+
+tasks.withType<Test>().configureEach {
+    useJUnitPlatform()
+    // What `:core` already does, and for a reason this module has now paid
+    // for. CI run 35584033343 failed here and all the log said was
+    // `AssertionFailedError at RelayDiallerTest.kt:143` — a line number and no
+    // value. Whether that was 19 (a race) or 0 (a real leak) is the entire
+    // diagnosis, and it took re-running the test on a laptop to learn which.
+    // A gate that cannot say what it saw is most of the way to a gate nobody
+    // reads.
+    testLogging {
+        events("failed")
+        exceptionFormat = org.gradle.api.tasks.testing.logging.TestExceptionFormat.FULL
+    }
+}
+
+// ── Is the release artefact actually signed? ─────────────────────────────────
+//
+// A task rather than a comment, because "we sign it in CI" is a claim and this
+// is a check. It reads the APK's own signature blocks with `apksigner verify`
+// and refuses to report success for an unsigned build.
+//
+// It is deliberately NOT wired into `assembleRelease`. A developer building a
+// release APK locally to look at it has no keystore and should not need one;
+// what must never happen is a PIPELINE reporting a green release having
+// produced something nobody can install. So CI runs this task by name, and a
+// missing signature fails there.
+tasks.register("verifyReleaseSigning") {
+    group = "verification"
+    description = "Fail unless the release APK carries a v2/v3 signature."
+    dependsOn("assembleRelease", "bundleRelease")
+    doLast {
+        val dir = layout.buildDirectory.dir("outputs/apk/release").get().asFile
+        val apks = (dir.listFiles()?.filter { it.name.endsWith(".apk") } ?: emptyList())
+        if (apks.isEmpty()) {
+            throw GradleException(
+                "no release APK was produced under $dir, so there is nothing to check. This " +
+                    "task is about a signature; a missing artefact is a different failure and " +
+                    "is reported as one.",
+            )
+        }
+        val sdk = System.getenv("ANDROID_HOME") ?: System.getenv("ANDROID_SDK_ROOT")
+            ?: throw GradleException("ANDROID_HOME is unset, so apksigner cannot be found")
+        val signer = File(sdk, "build-tools").listFiles()
+            ?.sortedBy { it.name }
+            ?.mapNotNull { File(it, "apksigner").takeIf(File::canExecute) }
+            ?.lastOrNull()
+            ?: throw GradleException(
+                "apksigner was not found under $sdk/build-tools. A run that could not look " +
+                    "must fail rather than report that it found no problem.",
+            )
+        for (apk in apks) {
+            val result = providers.exec {
+                commandLine(signer.absolutePath, "verify", "--print-certs", apk.absolutePath)
+                isIgnoreExitValue = true
+            }
+            val code = result.result.get().exitValue
+            val text = result.standardOutput.asText.get() + result.standardError.asText.get()
+            if (code != 0) {
+                throw GradleException(
+                    "${apk.name} is not signed, so it cannot be installed and must not be " +
+                        "reported as a release build.\n" +
+                        "Set APEX_KEYSTORE, APEX_KEYSTORE_PASSWORD, APEX_KEY_ALIAS and " +
+                        "APEX_KEY_PASSWORD.\n" + text,
+                )
+            }
+            logger.lifecycle("signed: ${apk.name}")
+            text.lines().filter { it.startsWith("Signer") }.forEach { logger.lifecycle("  $it") }
+        }
+
+        // The AAB is the artefact a store actually takes, and it is signed by a
+        // different scheme: a bundle is a jar, so apksigner does not read it
+        // and jarsigner does. Checking only the APK would leave the thing that
+        // ships unchecked.
+        val bundleDir = layout.buildDirectory.dir("outputs/bundle/release").get().asFile
+        val bundles = bundleDir.listFiles()?.filter { it.name.endsWith(".aab") } ?: emptyList()
+        if (bundles.isEmpty()) {
+            throw GradleException("no release bundle was produced under $bundleDir")
+        }
+        val jarsigner = File(System.getProperty("java.home"), "bin/jarsigner")
+        if (!jarsigner.canExecute()) {
+            throw GradleException(
+                "jarsigner was not found at $jarsigner, so the bundle's signature could not " +
+                    "be read. A run that could not look must fail rather than report that it " +
+                    "found no problem.",
+            )
+        }
+        for (aab in bundles) {
+            val r = providers.exec {
+                commandLine(jarsigner.absolutePath, "-verify", aab.absolutePath)
+                isIgnoreExitValue = true
+            }
+            val outText = r.standardOutput.asText.get() + r.standardError.asText.get()
+            // MEASURED, not assumed: jarsigner -verify on the unsigned bundle
+            // this project produces without a keystore prints "no manifest."
+            // and EXITS 0. Reading the exit code alone would therefore pass
+            // every unsigned bundle, which is the exact outcome this task
+            // exists to prevent. A signed one prints "jar verified.", so that
+            // string is the condition and the exit code is only a second
+            // opinion.
+            if (r.result.get().exitValue != 0 || !outText.contains("jar verified")) {
+                throw GradleException(
+                    "${aab.name} is not signed, so a store would reject it.\n$outText",
+                )
+            }
+            logger.lifecycle("signed: ${aab.name}")
+        }
+    }
+}

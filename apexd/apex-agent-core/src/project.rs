@@ -62,6 +62,14 @@ pub struct Project {
     pub languages: Vec<String>,
     /// Unix seconds this project was last used by the runtime.
     pub last_opened: u64,
+    /// The APEX capsule (§8) this project's work belongs in, if the user has
+    /// bound one. `apex env` owns the capsule; this is only the name.
+    ///
+    /// `#[serde(default)]` because every project record written before capsules
+    /// existed has no such key, and a missing field must read as "no binding",
+    /// not as a parse failure that makes the project vanish from the listing.
+    #[serde(default)]
+    pub capsule: Option<String>,
 }
 
 impl Project {
@@ -99,13 +107,25 @@ pub fn detect(dir: &Path) -> Option<Project> {
         .file_name()
         .map(|n| n.to_string_lossy().into_owned())
         .unwrap_or_else(|| root.to_string_lossy().into_owned());
+    let slug = git::path_slug(&root.to_string_lossy());
     Some(Project {
-        slug: git::slugify(&root.to_string_lossy()),
+        // Detection reads the filesystem; the capsule binding is a decision the
+        // user made and only the record holds it. Reading it back here is what
+        // makes `apex project info` and the resolver see the binding without
+        // every caller having to remember to merge.
+        capsule: load(&slug).and_then(|p| p.capsule),
+        slug,
         languages: detect_languages(&root),
         root: root.to_string_lossy().into_owned(),
         name,
         last_opened: now_secs(),
     })
+}
+
+/// The stored record for `slug`, if there is one.
+pub fn load(slug: &str) -> Option<Project> {
+    let text = std::fs::read_to_string(record_path(slug)?).ok()?;
+    serde_json::from_str(&text).ok()
 }
 
 /// Toolchains implied by marker files at the repository root.
@@ -142,17 +162,55 @@ pub fn languages_from_names(names: &[String]) -> Vec<String> {
     out
 }
 
-fn record_path(slug: &str) -> PathBuf {
-    paths::projects_dir().join(format!("{slug}.json"))
+/// Whether `slug` may name a record file in the project store.
+///
+/// A real slug comes from [`git::path_slug`], which turns every `/` and every
+/// other non-alphanumeric into `-`, so it is `[a-z0-9._-]` and nothing else.
+/// This exists because [`record_path`] JOINS the slug onto the store
+/// directory, and two of its callers take the slug from outside this process:
+/// `apex agent worktrees --project <slug>` reaches [`load`] through the
+/// daemon's control socket (§P1-036), which every confined session can speak,
+/// and [`forget`] DELETES the file the slug names. A `..` or a `/` walks out
+/// of the store, so neither is a place to trust a caller's spelling.
+///
+/// A dot is allowed — a repository directory may be called `apex.rs` — but a
+/// leading one is not, which rules out `.`, `..` and a dotfile in one rule.
+pub fn is_record_slug(slug: &str) -> bool {
+    !slug.is_empty()
+        && slug.len() <= 128
+        && !slug.starts_with('.')
+        && slug
+            .chars()
+            .all(|c| c.is_ascii_alphanumeric() || matches!(c, '-' | '_' | '.'))
+}
+
+/// Where `slug`'s record lives, or `None` when `slug` is not a slug.
+fn record_path(slug: &str) -> Option<PathBuf> {
+    if !is_record_slug(slug) {
+        return None;
+    }
+    Some(paths::projects_dir().join(format!("{slug}.json")))
 }
 
 /// Record that a project was used, so `apex project list` can order by recency.
+///
+/// The record is REPLACED, not merged, with one exception: a capsule binding
+/// already on disk survives a `remember` that does not carry one. This is not
+/// defensive coding, it is the difference between the feature working and not
+/// working — `remember` runs on every `apex agent run` and every layout save,
+/// with a freshly detected project whose only source is the filesystem, and
+/// the filesystem does not know which capsule the user chose. Without this,
+/// binding a capsule and then starting an agent would silently unbind it.
 pub fn remember(project: &Project) -> Result<()> {
     let dir = paths::projects_dir();
     paths::ensure_private_dir(&dir)?;
     let mut p = project.clone();
     p.last_opened = now_secs();
-    let path = record_path(&p.slug);
+    if p.capsule.is_none() {
+        p.capsule = load(&p.slug).and_then(|old| old.capsule);
+    }
+    let path = record_path(&p.slug)
+        .with_context(|| format!("{:?} is not a usable project slug", p.slug))?;
     let tmp = path.with_extension("json.tmp");
     std::fs::write(&tmp, serde_json::to_string_pretty(&p)?)
         .with_context(|| format!("writing {}", tmp.display()))?;
@@ -191,9 +249,94 @@ pub fn list() -> Vec<Project> {
     out
 }
 
+// ── project ↔ capsule binding (§8) ──────────────────────────────────────────
+
+/// Is `name` a capsule name `apex env` would accept?
+///
+/// Duplicated from the engine on purpose, and kept narrow for the same reason
+/// the engine keeps it narrow: the name becomes a container name and a file
+/// path, so a binding must never store something that later expands into a
+/// path somewhere else. Rejecting it here means the user finds out when they
+/// bind, not when a command inside the capsule fails.
+pub fn valid_capsule_name(name: &str) -> bool {
+    !name.is_empty()
+        && name.len() <= 40
+        && !name.contains("..")
+        && name
+            .chars()
+            .all(|c| c.is_ascii_lowercase() || c.is_ascii_digit() || matches!(c, '.' | '_' | '-'))
+        && name
+            .chars()
+            .next()
+            .is_some_and(|c| c.is_ascii_lowercase() || c.is_ascii_digit())
+}
+
+/// Bind `project` to a capsule, or clear the binding with `None`.
+///
+/// Writes through `remember`, so a project that has never been recorded gets a
+/// record here rather than silently accepting a binding that nothing stores.
+pub fn bind_capsule(project: &Project, capsule: Option<&str>) -> Result<()> {
+    if let Some(name) = capsule {
+        if !valid_capsule_name(name) {
+            anyhow::bail!(
+                "'{name}' is not a usable capsule name \
+                 (lowercase letters, digits, . _ - ; at most 40 characters)"
+            );
+        }
+    }
+    let mut p = project.clone();
+    p.capsule = capsule.map(|c| c.to_string());
+    // remember() preserves an existing binding when the incoming one is None,
+    // which is exactly wrong for a deliberate clear, so the clear is written
+    // directly instead of going back through it.
+    let dir = paths::projects_dir();
+    paths::ensure_private_dir(&dir)?;
+    p.last_opened = now_secs();
+    let path = record_path(&p.slug)
+        .with_context(|| format!("{:?} is not a usable project slug", p.slug))?;
+    let tmp = path.with_extension("json.tmp");
+    std::fs::write(&tmp, serde_json::to_string_pretty(&p)?)
+        .with_context(|| format!("writing {}", tmp.display()))?;
+    std::fs::rename(&tmp, &path)?;
+    Ok(())
+}
+
+/// The capsule image alias that suits this project's toolchains, if any.
+///
+/// A suggestion, printed and never acted on: creating a container because a
+/// `package.json` exists would be a surprise measured in gigabytes.
+///
+/// The table is about what the APEX image ACTUALLY SHIPS, not about what looks
+/// tidy. `python3` and `git` are on the host, so a Python project is suggested
+/// a capsule for the pip-and-venv litter rather than for a missing
+/// interpreter. Node, Go, Rust, Java, Ruby, PHP and the rest have no host
+/// toolchain at all — on a read-only /usr that is a capsule, not a
+/// `dnf install`.
+///
+/// Deliberately silent for `nix` (it manages its own store), `container` and
+/// `qml` (podman and quickshell are in the image), and for a project with no
+/// detected toolchain.
+pub fn suggested_capsule(languages: &[String]) -> Option<&'static str> {
+    if languages.iter().any(|l| l == "python") {
+        return Some("python");
+    }
+    const NEEDS_A_TOOLCHAIN: &[&str] = &[
+        "node", "go", "rust", "java", "kotlin", "ruby", "php", "elixir", "dart", "swift", "cmake",
+        "meson",
+    ];
+    if languages
+        .iter()
+        .any(|l| NEEDS_A_TOOLCHAIN.contains(&l.as_str()))
+    {
+        return Some("fedora");
+    }
+    None
+}
+
 /// Forget a remembered project. The checkout itself is never touched.
 pub fn forget(slug: &str) -> Result<()> {
-    let path = record_path(slug);
+    let path = record_path(slug)
+        .with_context(|| format!("{slug:?} is not a project slug"))?;
     if path.exists() {
         std::fs::remove_file(&path)?;
     }
@@ -266,7 +409,12 @@ pub fn remove_worktree(project: &Project, name: &str, delete_branch: bool) -> Re
 /// Written to `.git/info/exclude` rather than `.gitignore`: the worktree
 /// directory is this machine's runtime state, not something to commit into the
 /// user's repository and push to their colleagues.
-fn ensure_ignored(project: &Project) -> Result<()> {
+///
+/// Public because `.apex/` stopped being only the worktree directory: §16's
+/// handoff packet lives there too, and it has to, because a sandboxed session
+/// can read the project and cannot read `$HOME`. One helper, so a second
+/// writer into `.apex/` cannot forget the exclude.
+pub fn ensure_ignored(project: &Project) -> Result<()> {
     let root = Path::new(&project.root);
     let Some(common) = git::common_dir(root) else {
         return Ok(());
@@ -303,7 +451,78 @@ mod tests {
             slug: "home-tester-projects-demo".into(),
             languages: vec![],
             last_opened: 0,
+            capsule: None,
         }
+    }
+
+    #[test]
+    fn a_record_written_before_capsules_existed_still_parses() {
+        // Every project record on every installed machine looks like this. If
+        // the new field were required, they would all fail to deserialise and
+        // `apex project list` would report no projects at all.
+        let old = r#"{"root":"/p/demo","name":"demo","slug":"p-demo",
+                      "languages":["rust"],"last_opened":17}"#;
+        let p: Project = serde_json::from_str(old).expect("old records parse");
+        assert_eq!(p.capsule, None);
+        assert_eq!(p.name, "demo");
+    }
+
+    #[test]
+    fn capsule_names_are_validated_before_they_are_stored() {
+        assert!(valid_capsule_name("fedora"));
+        assert!(valid_capsule_name("ml-2024"));
+        assert!(valid_capsule_name("py_3.13"));
+        // The name becomes a container name and a file path in the engine.
+        assert!(!valid_capsule_name("../../etc/passwd"));
+        assert!(!valid_capsule_name("a..b"));
+        assert!(!valid_capsule_name("a/b"));
+        assert!(!valid_capsule_name("-rf"));
+        assert!(!valid_capsule_name("Fedora"));
+        assert!(!valid_capsule_name(""));
+        assert!(!valid_capsule_name("a b"));
+        assert!(!valid_capsule_name(&"a".repeat(41)));
+        assert!(valid_capsule_name(&"a".repeat(40)));
+    }
+
+    #[test]
+    fn binding_refuses_a_name_the_engine_would_not_accept() {
+        let p = project();
+        assert!(bind_capsule(&p, Some("../escape")).is_err());
+    }
+
+    #[test]
+    fn a_python_project_is_suggested_a_python_capsule() {
+        assert_eq!(
+            suggested_capsule(&["python".to_string()]),
+            Some("python")
+        );
+    }
+
+    #[test]
+    fn a_toolchain_the_image_does_not_ship_is_suggested_a_capsule() {
+        for lang in ["node", "go", "rust", "java", "ruby"] {
+            assert_eq!(
+                suggested_capsule(&[lang.to_string()]),
+                Some("fedora"),
+                "{lang} got no suggestion"
+            );
+        }
+    }
+
+    #[test]
+    fn nothing_is_suggested_where_the_host_already_serves() {
+        // podman and quickshell are in the image; nix manages its own store.
+        for lang in ["container", "qml", "nix"] {
+            assert_eq!(suggested_capsule(&[lang.to_string()]), None, "{lang}");
+        }
+        assert_eq!(suggested_capsule(&[]), None);
+    }
+
+    #[test]
+    fn python_wins_over_a_second_toolchain() {
+        // A Python project with a Makefile is a Python project.
+        let langs = vec!["make".to_string(), "python".to_string()];
+        assert_eq!(suggested_capsule(&langs), Some("python"));
     }
 
     #[test]
@@ -385,5 +604,65 @@ mod tests {
         let p = project();
         assert!(p.worktree_root().starts_with(&p.root));
         assert!(p.worktree_root().ends_with("worktrees"));
+    }
+
+    #[test]
+    fn a_real_slug_is_accepted() {
+        // What `git::path_slug` actually produces, for the paths on this
+        // machine. A guard that rejected one of these would break `apex
+        // project add` rather than protect anything.
+        for slug in [
+            "var-home-andre-projects-apex",
+            "var-tmp-apex-work-wt-p1-035",
+            "home-a-apex.rs",
+            "x",
+            "a_b-c.d",
+        ] {
+            assert!(is_record_slug(slug), "{slug}");
+        }
+        assert!(is_record_slug(&git::path_slug("/var/home/a/apex")));
+    }
+
+    #[test]
+    fn a_path_shaped_slug_cannot_name_a_record() {
+        // `record_path` JOINS the slug onto the store directory, `load` is
+        // reachable through the daemon's control socket, which every confined
+        // session can speak, and `forget` DELETES what it names. Each of
+        // these walks out of the store.
+        for slug in [
+            "../../../var/tmp/mine",
+            "..",
+            ".",
+            "/etc/passwd",
+            "a/b",
+            "sub/../../escape",
+            ".hidden",
+            "",
+        ] {
+            assert!(!is_record_slug(slug), "{slug:?} must not name a record");
+            assert!(record_path(slug).is_none(), "{slug:?}");
+        }
+        // And nothing exotic gets through either: a NUL or a newline in a
+        // filename is a different class of problem to hand to the filesystem.
+        assert!(!is_record_slug("a\0b"));
+        assert!(!is_record_slug("a\nb"));
+        assert!(!is_record_slug(&"a".repeat(129)), "bounded");
+    }
+
+    #[test]
+    fn loading_a_path_shaped_slug_reads_nothing() {
+        // The refusal has to be in `load`, not only in the daemon: this is the
+        // function every other caller of the store goes through.
+        assert!(load("../../../etc/hostname").is_none());
+        assert!(load("..").is_none());
+    }
+
+    #[test]
+    fn forgetting_a_path_shaped_slug_is_an_error_not_a_deletion() {
+        let err = forget("../../../tmp/anything").expect_err("must refuse");
+        assert!(
+            format!("{err:#}").contains("not a project slug"),
+            "{err:#}"
+        );
     }
 }

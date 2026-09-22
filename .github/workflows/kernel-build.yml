@@ -1,0 +1,398 @@
+# ─────────────────────────────────────────────────────────────────────────────
+#  kernel-build.yml — compile APEX's own kernel on katana.
+#
+#  WHY THIS IS THE ONE JOB THAT LEAVES THE HOSTED RUNNERS
+#
+#  `Containerfile.kernel` needs a ~100 GB build tree (measured 2026-09-20) and
+#  ~45 minutes of 12-way compile. A GitHub-hosted `ubuntu-24.04` runner has
+#  14 GB of disk. That is not a tuning problem, it is an impossibility, and it
+#  is the reason katana exists as a self-hosted runner at all. Everything else
+#  in this repository STAYS on `ubuntu-24.04` on purpose — the hosted runner is
+#  a second environment that keeps finding defects a developer machine cannot
+#  (see `ROADMAP/evidence/`), and that is worth more than the minutes it costs.
+#
+#  Katana: 20 cores, 62 GiB RAM, 500 GB on /var/lab. The runner is ephemeral and
+#  unprivileged; see `ROADMAP/evidence/katana-runner-20260920.md`.
+# ─────────────────────────────────────────────────────────────────────────────
+name: kernel build (katana)
+
+on:
+  workflow_dispatch:
+    inputs:
+      run_contract_check:
+        description: 'Also run tests/check-kernel-contract.sh against the produced RPMs'
+        type: boolean
+        default: true
+      publish:
+        description: 'Push the built kernel image to GHCR (this is what Containerfile.core consumes)'
+        type: boolean
+        default: true
+  push:
+    # BRANCHES AS WELL AS PATHS, on the same reasoning build-image.yml gives for
+    # dispatching the integration branch: this is a 45-minute occupation of a
+    # machine Andre is also using. Without a branch filter, every task branch
+    # that touches kernel/** starts one, and several of them queue behind each
+    # other on a runner that takes one job at a time. A unit working on the
+    # kernel runs it with `gh workflow run kernel-build.yml --ref <branch>`.
+    branches:
+      - main
+      - 'roadmap/**'
+    paths:
+      - 'kernel/**'
+      - 'Containerfile.kernel'
+      - '.github/workflows/kernel-build.yml'
+
+permissions:
+  contents: read
+
+# Two pushes must not queue two 100 GB builds.
+concurrency:
+  group: kernel-build-${{ github.ref }}
+  cancel-in-progress: true
+
+jobs:
+  kernel:
+    # Fork pull requests never reach Andre's hardware. See the long note in
+    # katana-probe.yml: this `if:` is the belt, and the repository's
+    # "require approval for all external contributors" setting is the control.
+    # NEVER give this job a `pull_request_target` trigger.
+    if: >-
+      github.event_name != 'pull_request' ||
+      github.event.pull_request.head.repo.full_name == github.repository
+    runs-on: [self-hosted, katana]
+    timeout-minutes: 300
+    # ═══ WHY THIS JOB IS ALLOWED TO PUSH, ON A SELF-HOSTED RUNNER ═══
+    #
+    # `permissions:` on a job REPLACES the workflow-level block, it does not
+    # merge with it — so `contents: read` is repeated here on purpose. Drop it
+    # and `actions/checkout` fails in a way that reads as unrelated.
+    #
+    # The decision this encodes, stated rather than left implicit. A GITHUB_TOKEN
+    # already exists on katana for the length of every run of this workflow:
+    # `actions/checkout` needs one. What changes is its scope, from
+    # `contents: read` to `contents: read + packages: write`, for the length of
+    # one job, on a workflow no pull request can trigger (there is no
+    # `pull_request` trigger, and the `if:` above is the belt for that).
+    #
+    # NOTHING ABOUT THE RUNNER IS LOOSENED. The runner user stays unprivileged
+    # and ephemeral, podman here stays rootless, no credential is written
+    # anywhere that survives the job (see the authfile handling below), and no
+    # setting on the machine changes.
+    #
+    # The alternative considered and rejected: katana saves an OCI archive,
+    # uploads it as an artifact, and a hosted `ubuntu-24.04` runner pushes it.
+    # That moves where the short-lived token sits without making the kernel one
+    # bit more trustworthy — the bytes still come from katana either way — and
+    # it pays a multi-GB round trip through GitHub's artifact store to do it.
+    # If that trade is ever wanted anyway, the push step below is the only thing
+    # that moves.
+    permissions:
+      contents: read
+      packages: write
+    env:
+      KERNEL_IMG: localhost/apex-kernel:ci
+      # Same repository as every other tier, distinguished by tag — see the long
+      # note in build-image.yml. That is also why the kernel needs no new GHCR
+      # package and no new permission grant: `apex-os` already exists and is
+      # already linked to this repository.
+      IMAGE: ghcr.io/andrenijman/apex-os
+      # Where podman/skopeo credentials go: "$RUNNER_TEMP/ghcr-auth.json",
+      # spelled out in each step that needs it because the `runner` context is
+      # not available in a job-level `env:` block (only `github`, `needs`,
+      # `inputs`, `vars`, `secrets` are) and `${{ runner.temp }}` here would
+      # expand to the empty string.
+      #
+      # RUNNER_TEMP is inside _work, which the ephemeral registration wipes
+      # between runs — unlike the runner's HOME, where a plain `podman login`
+      # would leave a GHCR token lying on Andre's machine after the job ended.
+      # It is removed explicitly as well.
+    steps:
+      - uses: actions/checkout@v5
+
+      - name: the build needs room — say so before spending 45 minutes
+        id: preflight
+        run: |
+          set -euo pipefail
+          avail_gb=$(df -BG --output=avail /var/lab | tail -1 | tr -dc '0-9')
+          echo "free on /var/lab: ${avail_gb} GiB"
+          echo "cpus=$(nproc) mem=$(free -g | awk '/^Mem:/{print $2}')GiB"
+          if [ "$avail_gb" -lt 150 ]; then
+            echo "FATAL: the kernel build tree is ~100 GB and only ${avail_gb} GiB is free."
+            echo "       Prune the runner's container storage:"
+            echo "         sudo -u ghrunner XDG_RUNTIME_DIR=/run/apex-runner HOME=/var/lab/runner podman system prune -af"
+            exit 1
+          fi
+
+          # ── Decide about publishing HERE, 40 minutes before it happens ─────
+          # Two reasons this is not left to an `if:` on the push step. A skipped
+          # step is a silent success, which is the defect family this repository
+          # keeps finding; and every dependency the push needs must be asserted
+          # before the compile, not after it, or a missing binary costs 40
+          # minutes to discover.
+          publish=false
+          reason=""
+          case "${{ github.event_name }}" in
+            workflow_dispatch)
+              if [ "${{ inputs.publish }}" = "true" ]; then publish=true
+              else reason="workflow_dispatch with publish=false"; fi ;;
+            push) publish=true ;;
+            *)    reason="event ${{ github.event_name }} never publishes" ;;
+          esac
+
+          # The FLOATING `:kernel` name is a release, on exactly the reasoning
+          # build-image.yml's PUBLISH guard gives: it is a name a human or
+          # another workflow reads as "the current kernel". A task branch gets
+          # the immutable per-build tag only — enough to pin a digest into
+          # Containerfile.core and prove it, without moving a name.
+          floating=false
+          case "${{ github.ref }}" in
+            refs/heads/main|refs/heads/roadmap/*) floating=true ;;
+          esac
+
+          echo "publish=$publish"  >> "$GITHUB_OUTPUT"
+          echo "floating=$floating" >> "$GITHUB_OUTPUT"
+          if [ "$publish" = true ]; then
+            echo "publish: YES (floating :kernel tag moved: $floating)"
+            # skopeo does the registry-to-registry retag. It is on katana today
+            # (/usr/bin/skopeo); assert it rather than discover it at minute 40,
+            # and FATAL rather than degrade — a publish that quietly did not
+            # happen is worse than a run that stops.
+            command -v skopeo >/dev/null || {
+              echo "FATAL: skopeo is not on this runner, and the publish step needs it"
+              echo "       to retag in-registry. Install it (sudo dnf install skopeo)"
+              echo "       or re-run this workflow with publish=false."
+              exit 1
+            }
+            skopeo --version
+          else
+            echo "publish: NO ($reason)"
+          fi
+
+      - name: compile
+        run: |
+          set -euo pipefail
+          # Same invocation as build-local.sh's build_kernel(), minus the sudo:
+          # this runner is unprivileged and podman here is rootless.
+          #
+          # KERNEL_BUILD_JOBS: the Containerfile's default is 12, measured on a
+          # 29 GiB machine. Katana has 20 cores and 62 GiB and Andre asked for
+          # the whole box, so this hands it all of them. There is deliberately
+          # no CPUQuota or MemoryMax on the runner unit; what protects his
+          # session is OOMScoreAdjust=300, which makes the build die first.
+          podman build --isolation=chroot \
+            --build-arg "KERNEL_BUILD_JOBS=$(nproc)" \
+            -f Containerfile.kernel -t "$KERNEL_IMG" .
+
+      - name: read the verdict back out of the image it produced
+        id: verdict
+        run: |
+          set -euo pipefail
+          # `podman build` exiting 0 is NOT evidence the BTF gate ran. Read the
+          # manifest the build wrote. The image is FROM scratch and has no
+          # shell, so this must be `podman create` + `podman cp`, never
+          # `podman run` — a `podman run --entrypoint /bin/sh` on it cannot
+          # start and comes back EMPTY, which fails as though the gate failed.
+          cid="$(podman create "$KERNEL_IMG" /x)"
+          tmp="$(mktemp -d)"
+          podman cp "$cid:/manifest/kernel-build.txt" "$tmp/kernel-build.txt"
+          podman rm "$cid" >/dev/null
+          echo "--- /manifest/kernel-build.txt ---"
+          cat "$tmp/kernel-build.txt"
+          got="$(sed -n 's/^btf_scx=//p' "$tmp/kernel-build.txt")"
+          if [ "$got" != "usable" ]; then
+            echo "FATAL: kernel image reports btf_scx='$got', expected 'usable'"
+            exit 1
+          fi
+          echo "kernel: BTF verdict usable"
+          # The kver names the per-build tag below, so a human reading the GHCR
+          # tag list can tell which kernel each published image is without
+          # pulling it. Read from the manifest, not from `uname` or a glob.
+          kver="$(sed -n 's/^kver=//p' "$tmp/kernel-build.txt")"
+          [ -n "$kver" ] || { echo "FATAL: the manifest carries no kver"; exit 1; }
+          echo "kver=$kver" >> "$GITHUB_OUTPUT"
+          {
+            echo "### kernel built on katana"
+            echo '```'
+            cat "$tmp/kernel-build.txt"
+            echo '```'
+          } >> "$GITHUB_STEP_SUMMARY"
+          rm -rf "$tmp"
+
+      - name: contract check against the real RPMs
+        if: github.event_name != 'workflow_dispatch' || inputs.run_contract_check
+        run: |
+          set -euo pipefail
+          rpmdir="$RUNNER_TEMP/kernel-rpms"
+          rm -rf "$rpmdir"; mkdir -p "$rpmdir"
+          cid="$(podman create "$KERNEL_IMG" /x)"
+          # $rpmdir already exists, so `podman cp` copies the SOURCE DIRECTORY
+          # into it: the rpms land at $rpmdir/rpms. Deriving that path with
+          # `find … | head -1` instead would put a `head` at the end of a
+          # pipeline under `set -o pipefail`, which is the 141-on-success trap
+          # this repository has been bitten by before. The path is knowable, so
+          # name it and assert it.
+          podman cp "$cid:/rpms" "$rpmdir"
+          podman rm "$cid" >/dev/null
+          rpms="$rpmdir/rpms"
+          if [ ! -d "$rpms" ]; then
+            echo "FATAL: expected $rpms to be a directory; podman cp put it somewhere else"
+            find "$rpmdir" -maxdepth 2 | head -20
+            exit 1
+          fi
+          n=$(find "$rpms" -name '*.rpm' | wc -l)
+          echo "extracted $n rpms into $rpms"
+          if [ "$n" -eq 0 ]; then echo "FATAL: no rpms came out of the image"; exit 1; fi
+          RPMS="$rpms" ./tests/check-kernel-contract.sh
+
+      # ═══ THE PUBLISH — this workflow's reason for existing ═══
+      #
+      # Until this step, `kernel-build.yml` was a proof and not the producer:
+      # it built `localhost/apex-kernel:ci`, asserted it, and threw it away,
+      # while `Containerfile.core` defaulted to `localhost/apex-kernel:local` —
+      # an image that exists only on a machine somebody hand-built a kernel on.
+      # CI is not such a machine, so `FROM ${APEX_KERNEL_IMAGE}` resolved to
+      # nothing and EVERY image build failed with "determining starting point
+      # for build: no FROM statement found" (run 35552604603 on roadmap/v2.2).
+      #
+      # Deliberately NOT an `if:` on the step. See the preflight step.
+      - name: publish the kernel image
+        id: publish
+        env:
+          GHCR_USER: ${{ github.actor }}
+          GHCR_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+          DO_PUBLISH: ${{ steps.preflight.outputs.publish }}
+          DO_FLOATING: ${{ steps.preflight.outputs.floating }}
+          KVER: ${{ steps.verdict.outputs.kver }}
+        run: |
+          set -euo pipefail
+          if [ "$DO_PUBLISH" != "true" ]; then
+            echo "not publishing (decided in preflight); the image stays local as $KERNEL_IMG"
+            exit 0
+          fi
+
+          # The immutable name. A tag may hold [A-Za-z0-9_][A-Za-z0-9._-]{0,127}
+          # and a kver is already within that, but sanitise rather than assume:
+          # a release string is upstream's to change.
+          safe_kver="$(printf '%s' "$KVER" | tr -c 'A-Za-z0-9._-' '-')"
+          sha7="$(printf '%s' "${{ github.sha }}" | cut -c1-7)"
+          uniq_tag="kernel-${safe_kver}-${sha7}"
+          echo "immutable tag: $uniq_tag"
+
+          authfile="$RUNNER_TEMP/ghcr-auth.json"
+          podman login "ghcr.io" \
+            --authfile "$authfile" \
+            -u "$GHCR_USER" --password-stdin <<<"$GHCR_TOKEN"
+
+          # ONE push, to the immutable tag, and the floating name is made by an
+          # in-registry copy afterwards. Two `podman push`es of the same local
+          # image can produce two DIFFERENT manifest digests — compression
+          # happens at push time and the digest only exists afterwards, which is
+          # the same property build-image.yml documents at length — so pushing
+          # twice would leave two digests for one kernel and no answer to "which
+          # one did core pin". A registry-to-registry copy knows the digest up
+          # front, moves no blobs, and is near-instant.
+          digestfile="$RUNNER_TEMP/kernel.digest"
+          rm -f "$digestfile"
+          podman push --authfile "$authfile" \
+            --digestfile "$digestfile" \
+            "$KERNEL_IMG" "docker://$IMAGE:$uniq_tag"
+
+          digest="$(cat "$digestfile")"
+          case "$digest" in
+            sha256:*) : ;;
+            *) echo "FATAL: podman push produced no usable digest (got '$digest')"; exit 1 ;;
+          esac
+          ref="$IMAGE@$digest"
+          echo "pushed $ref"
+
+          # `podman push` exiting 0 is not evidence the registry kept it. Read
+          # it back by DIGEST — the exact reference Containerfile.core will
+          # use — rather than by the tag we just wrote.
+          skopeo inspect --authfile "$authfile" \
+            --format '{{.Digest}} {{.Created}}' "docker://$ref"
+
+          if [ "$DO_FLOATING" = "true" ]; then
+            skopeo copy --all \
+              --src-authfile "$authfile" --dest-authfile "$authfile" \
+              "docker://$ref" "docker://$IMAGE:kernel"
+            echo "floating tag $IMAGE:kernel now points at $digest"
+          else
+            echo "floating tag NOT moved: ${{ github.ref }} is not main or roadmap/**"
+          fi
+
+          echo "digest=$digest" >> "$GITHUB_OUTPUT"
+          echo "ref=$ref"       >> "$GITHUB_OUTPUT"
+          {
+            echo "### kernel published"
+            echo ""
+            echo "| | |"
+            echo "|---|---|"
+            echo "| immutable tag | \`$IMAGE:$uniq_tag\` |"
+            echo "| digest | \`$digest\` |"
+            echo "| floating \`:kernel\` moved | $DO_FLOATING |"
+            echo ""
+            echo "\`Containerfile.core\` consumes this by DIGEST. To make this build"
+            echo "the one \`core\` installs, that line must read:"
+            echo ""
+            echo '```dockerfile'
+            echo "ARG APEX_KERNEL_IMAGE=$ref"
+            echo '```'
+          } >> "$GITHUB_STEP_SUMMARY"
+
+      # A step that decided not to run is indistinguishable from one that ran
+      # and did nothing, unless something asserts the difference. This is that.
+      - name: a run that meant to publish must have published
+        env:
+          DO_PUBLISH: ${{ steps.preflight.outputs.publish }}
+          DIGEST: ${{ steps.publish.outputs.digest }}
+        run: |
+          set -euo pipefail
+          if [ "$DO_PUBLISH" != "true" ]; then
+            echo "this run was not meant to publish — nothing to assert"
+            exit 0
+          fi
+          case "${DIGEST:-}" in
+            sha256:*) echo "published digest: $DIGEST" ;;
+            *) echo "FATAL: this run was meant to publish but produced no digest."
+               echo "       The publish step did not run, or ran and wrote nothing."
+               exit 1 ;;
+          esac
+
+      - name: take the credential back off the machine
+        if: always()
+        run: |
+          set -uo pipefail
+          # Belt: the file is under RUNNER_TEMP, which the ephemeral
+          # registration wipes. Braces: log out and delete it anyway, so a GHCR
+          # token is never sitting on Andre's box between runs even if the
+          # wipe is ever changed.
+          authfile="$RUNNER_TEMP/ghcr-auth.json"
+          podman logout --authfile "$authfile" ghcr.io || true
+          rm -f "$authfile"
+          test ! -e "$authfile" || { echo "FATAL: $authfile still exists"; exit 1; }
+          echo "no GHCR credential left on the runner"
+
+      - name: give the disk back
+        if: always()
+        run: |
+          set -uo pipefail
+          # The ephemeral registration wipes _work, but NOT the container
+          # graphroot — that is deliberate, so the builder base layers survive
+          # between runs. Drop the dangling build layers this run created.
+          podman image prune -f || true
+          df -h /var/lab | tail -1
+
+  # A skipped job counts as success. Make "the kernel job never ran" red.
+  assert-kernel-ran:
+    needs: kernel
+    if: always()
+    runs-on: ubuntu-24.04
+    steps:
+      - run: |
+          set -euo pipefail
+          result='${{ needs.kernel.result }}'
+          echo "kernel job result: $result"
+          if [ "$result" != "success" ]; then
+            echo "the kernel build did not run to success"
+            exit 1
+          fi

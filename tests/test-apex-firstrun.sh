@@ -23,8 +23,10 @@ trap 'rm -rf "$WORK"' EXIT
 
 pass=0
 fail=0
-ok()  { printf 'PASS  %s\n' "$1"; pass=$((pass + 1)); }
-bad() { printf 'FAIL  %s\n' "$1"; fail=$((fail + 1)); }
+skipped=0
+ok()   { printf 'PASS  %s\n' "$1"; pass=$((pass + 1)); }
+bad()  { printf 'FAIL  %s\n' "$1"; fail=$((fail + 1)); }
+skip() { printf 'SKIP  %s\n' "$1"; skipped=$((skipped + 1)); }
 section() { printf '\n── %s ──\n' "$1"; }
 
 extract() {
@@ -88,6 +90,12 @@ run_zshrc "$h"
 #  interesting property is again that re-running leaves their edits alone.
 # ─────────────────────────────────────────────────────────────────────────────
 extract '# ── 6b\. labwc config' "${WORK}/labwc-block.sh" 'apex-shell-autostart'
+
+# The Hyprland rule migration, extracted so the assertion below drives the real
+# sed rather than a copy of it that can drift.
+sed -n '/^# Hyprland 0\.54+ removed syntax/,/^done$/p' "$SRC" > "${WORK}/hypr-mig-block.sh"
+grep -q 'suppress_event maximize' "${WORK}/hypr-mig-block.sh" \
+    || { printf 'could not extract the Hyprland migration block\n' >&2; exit 1; }
 
 # The block hardcodes the INSTALLED template directory, which does not exist in a
 # checkout. Redirect that single path at the repo copies so the real logic runs
@@ -194,17 +202,37 @@ else
     printf 'SKIP  xmllint unavailable\n'
 fi
 
+# ── the developer's own session must be untouched ────────────────────────────
+# Counted before the labwc block below, compared after. A nested compositor
+# creates a new wayland-N socket in $XDG_RUNTIME_DIR, so this is a direct
+# measurement of the thing that went wrong rather than a proxy for it.
+_socks_before=$(find "${XDG_RUNTIME_DIR:-/run/user/$(id -u)}" -maxdepth 1 \
+                     -name 'wayland-*' -type s 2>/dev/null | wc -l)
+
 # labwc itself is the only authority on whether an action name and its arguments
 # are valid; xmllint cannot know that `Focus direction=...` is not a thing.
 if command -v labwc >/dev/null 2>&1; then
     d="${WORK}/labwc-parse"; mkdir -p "$d"
     cp "${TMPL}/rc.xml" "${TMPL}/menu.xml" "$d/"
     sed -e 's|@KB_LAYOUT@|us|g' -e 's|@KB_VARIANT@||g' "${TMPL}/environment" > "${d}/environment"
-    # Grep for CONFIG diagnostics specifically, not any error. labwc will also
-    # fail to open a backend here (no seat in CI, and X11 fallback complains in a
-    # Wayland session), which is expected and irrelevant: config parsing happens
-    # first and is the only thing under test.
+    # Grep for CONFIG diagnostics specifically, not any error: config parsing
+    # happens before the backend comes up and is the only thing under test.
+    #
+    # WLR_BACKENDS=headless, and WAYLAND_DISPLAY and DISPLAY removed, and that
+    # is not tidiness — it is a bug fix. The previous version unset only
+    # HYPRLAND_INSTANCE_SIGNATURE and reasoned that labwc "will fail to open a
+    # backend here (no seat in CI)". True in CI; false on a developer's
+    # machine, where there IS a seat and a live session, so labwc succeeded and
+    # opened a NESTED COMPOSITOR WINDOW on whatever workspace the developer was
+    # using — for six seconds, once per run of this file. It interrupted real
+    # work.
+    #
+    # "Safe because CI has no display" is the mirror image of "works on my
+    # machine", and it is the more dangerous of the two: the failure lands on a
+    # person rather than on a build.
     parse_out="$(timeout 6 env -u HYPRLAND_INSTANCE_SIGNATURE \
+                     -u WAYLAND_DISPLAY -u DISPLAY \
+                     WLR_BACKENDS=headless WLR_LIBINPUT_NO_DEVICES=1 \
                      labwc -C "$d" 2>&1 \
                  | grep -iE 'invalid argument for action|invalid action|unexpected element' \
                  || true)"
@@ -216,6 +244,17 @@ if command -v labwc >/dev/null 2>&1; then
     fi
 else
     printf 'SKIP  labwc unavailable; cannot validate action names\n'
+fi
+
+# The assertion that keeps the fix above from being undone. If a future change
+# lets labwc attach to the developer's session again, this fails here instead
+# of putting a window on someone's workspace mid-task.
+_socks_after=$(find "${XDG_RUNTIME_DIR:-/run/user/$(id -u)}" -maxdepth 1 \
+                    -name 'wayland-*' -type s 2>/dev/null | wc -l)
+if [ "$_socks_before" = "$_socks_after" ]; then
+    ok "no compositor was started on the session running the tests"
+else
+    bad "no compositor was started on the session running the tests"
 fi
 
 # ─────────────────────────────────────────────────────────────────────────────
@@ -240,6 +279,152 @@ fi
 #  So the check is against the NAMES labwc actually implements, taken from the
 #  package's own exhaustive reference rather than from memory.
 # ─────────────────────────────────────────────────────────────────────────────
+# ─────────────────────────────────────────────────────────────────────────────
+#  Hyprland window-rule migration
+#
+#  The migration and the shipped template must agree, because they configure the
+#  same compositor. They did not, twice, in opposite directions: the template was
+#  once "corrected" to Hyprland 0.51.1 syntax after checking the PUBLISHED core
+#  image, which was stale — Containerfile.core builds 0.56.2, where only the
+#  `match:` forms parse.
+#
+#  So this asserts the migration's OUTPUT equals what the template ships. That is
+#  the invariant; which syntax is currently right is the Containerfile's
+#  `Hyprland --verify-config` assertion to decide.
+# ─────────────────────────────────────────────────────────────────────────────
+section "Hyprland rule migration agrees with the template"
+
+HYPR_TMPL="${ROOT}/files/desktop/hypr/hyprland.lua"
+HYPR_MODULES="${ROOT}/files/desktop/hypr/apex"
+if [ ! -f "$HYPR_TMPL" ]; then
+    bad "the Hyprland template is present"
+else
+    mig="${WORK}/mig.conf"
+    # The pre-0.54 spellings an upgrading user would still have on disk.
+    {
+        printf 'windowrule = suppressevent maximize, class:.*\n'
+        printf 'windowrule = nofocus, class:^$, title:^$, xwayland:1, floating:1, fullscreen:0, pinned:0\n'
+    } > "$mig"
+
+    # Run the real block against it, not a copy of the sed.
+    # HYPR_LEGACY_CONF, not HYPR_CONF: since P0-025 the seeded config is
+    # hyprland.lua and HYPR_CONF names it, while this block is precisely the one
+    # that still has to reach a leftover hyprlang hyprland.conf — it runs before
+    # apex-hypr-migrate converts it.
+    HOME="${WORK}/mighome" bash -c '
+        set -euo pipefail
+        log() { :; }
+        KB_LAYOUT=us; KB_VARIANT=; APEX_ACCENT="#D9F99D"
+        render_hypr_tmpl() { cat "$1"; }
+        HYPR_LEGACY_CONF="$2"
+        mkdir -p "$(dirname "$2")"
+        source "$1"
+    ' -- "${WORK}/hypr-mig-block.sh" "$mig" >/dev/null 2>&1 || true
+
+    for want in 'suppress_event maximize, match:class' 'no_focus on'; do
+        grep -qF "$want" "$mig" \
+            && ok "migration produces: ${want}" || bad "migration produces: ${want}"
+    done
+    # And the shipped tree expresses the same two rules. It cannot ship the same
+    # SPELLING any more — the rules are hl.window_rule calls in apex/rules.lua
+    # since P0-025 — so the invariant is checked semantically: both rules are
+    # present, and the pre-0.54 spellings the sed above removes are absent from
+    # the tree the sed can no longer reach.
+    for want in 'suppress_event = "maximize"' 'no_focus = true'; do
+        grep -qF "$want" "${HYPR_MODULES}/rules.lua" \
+            && ok "the shipped rules module expresses: ${want}" \
+            || bad "the shipped rules module expresses: ${want}"
+    done
+    grep -qE 'suppressevent|nofocus,' "${HYPR_MODULES}/rules.lua" \
+        && bad "the shipped rules module carries no pre-0.54 spelling" \
+        || ok "the shipped rules module carries no pre-0.54 spelling"
+    # Nothing may still carry the pre-0.54 spelling after migrating.
+    grep -qE 'suppressevent|nofocus,' "$mig" \
+        && bad "no pre-0.54 spelling survives migration" \
+        || ok "no pre-0.54 spelling survives migration"
+fi
+
+# ─────────────────────────────────────────────────────────────────────────────
+#  Every generated module the template requires must be SAFE TO BE MISSING.
+#
+#  This section used to assert the opposite, because hyprlang needed it:
+#  Hyprland treats a `source =` with no matching file as a FATAL config error
+#  and refuses the ENTIRE config, so on boot #1 — before the shell and the
+#  settings generators have written anything — every sourced file had to be
+#  pre-created or the user got no keybinds and no window rules at all.
+#
+#  Lua removed the need and replaced it with a sharper failure. An uncaught
+#  `require` of a missing module does not just fail: it aborts the config AND
+#  skips every hl.* call below it. hyprland.lua's loader therefore asks
+#  package.searchpath first and treats absent as "not generated yet".
+#
+#  So the invariant is now the reverse one, and it is checked the only way that
+#  proves anything: build the seeded tree with the generated modules genuinely
+#  absent and hand it to the Hyprland in this image.
+# ─────────────────────────────────────────────────────────────────────────────
+section "a generated module that does not exist yet is survivable"
+
+if [ ! -f "$HYPR_TMPL" ]; then
+    bad "the Hyprland template is present"
+else
+    # The loader has to look before it leaps. Asserted separately from the parse
+    # below because a template that dropped the guard would still parse here —
+    # the modules are absent, so a bare require would abort, but a template that
+    # required nothing at all would pass a parse check while doing nothing.
+    grep -q 'package.searchpath' "$HYPR_TMPL" \
+        && ok "the loader checks package.searchpath before requiring" \
+        || bad "the loader checks package.searchpath before requiring"
+
+    # Every generated module is named, and none of them is shipped.
+    for gen in monitors input shell-keybinds user-overrides; do
+        if grep -q "^apex(\"${gen}\")" "$HYPR_TMPL"; then
+            ok "the template requires the generated module: ${gen}"
+        else
+            bad "the template requires the generated module: ${gen}"
+        fi
+        [ -e "${HYPR_MODULES}/${gen}.lua" ] \
+            && bad "${gen}.lua is generated, so the image must not ship one" \
+            || ok "${gen}.lua is generated, so the image must not ship one"
+    done
+
+    if ! command -v Hyprland >/dev/null 2>&1; then
+        skip "Hyprland is not installed; cannot parse the seeded tree"
+    else
+        CH="${WORK}/cfghome"
+        mkdir -p "${CH}/apex"
+        sed -e 's|@KB_LAYOUT@|us|g' -e 's|@KB_VARIANT@||g' "$HYPR_TMPL" > "${CH}/hyprland.lua"
+        for f in "${HYPR_MODULES}"/*.lua; do
+            sed -e 's|@KB_LAYOUT@|us|g' -e 's|@KB_VARIANT@||g' "$f" \
+                > "${CH}/apex/$(basename "$f")"
+        done
+        rt="$(mktemp -d)"; chmod 0700 "$rt"
+        out="$(XDG_RUNTIME_DIR="$rt" timeout 60 env -u WAYLAND_DISPLAY \
+                 -u HYPRLAND_INSTANCE_SIGNATURE Hyprland --i-am-really-stupid \
+                 --verify-config --config "${CH}/hyprland.lua" 2>&1 || true)"
+        rm -rf "$rt"
+        case "$out" in
+            *"config ok"*) ok "the seeded tree parses with every generated module absent" ;;
+            *) bad "the seeded tree parses with every generated module absent: ${out##*Config parsing result:}" ;;
+        esac
+
+        # ...and a module that is present but BROKEN must not take the rest with
+        # it. This is the half that pays for the loader's pcall: the defaults
+        # are already applied by the time a bad generated file is reached, so a
+        # settings page writing one wrong line costs that page, not the desktop.
+        printf 'this is not lua(((\n' > "${CH}/apex/monitors.lua"
+        rt="$(mktemp -d)"; chmod 0700 "$rt"
+        out="$(XDG_RUNTIME_DIR="$rt" timeout 60 env -u WAYLAND_DISPLAY \
+                 -u HYPRLAND_INSTANCE_SIGNATURE Hyprland --i-am-really-stupid \
+                 --verify-config --config "${CH}/hyprland.lua" 2>&1 || true)"
+        rm -rf "$rt"
+        case "$out" in
+            *"config ok"*) bad "a broken generated module is REPORTED, not swallowed" ;;
+            *monitors*)    ok "a broken generated module is reported by name" ;;
+            *)             bad "a broken generated module is reported by name: ${out##*Config parsing result:}" ;;
+        esac
+    fi
+fi
+
 section "labwc input settings"
 
 # labwc ships rc.xml.all as its complete annotated reference. Preferring it over
@@ -400,10 +585,136 @@ else
     if python3 "$CHECK" "$SHELL_TREE" "${TMPL}/rc.xml" >/dev/null 2>&1; then
         ok "every shell popup bind matches KeybindService"
     else
-        python3 "$CHECK" "$SHELL_TREE" "${TMPL}/rc.xml" 2>&1 | head -12
+        # `| head -12` here used to END THE SUITE. This file is `set -euo
+        # pipefail`; the checker prints 13 lines, head took 12 and closed the
+        # pipe, python died of SIGPIPE, pipefail surfaced 141 and errexit
+        # exited — before `bad` ran, before the summary, and before every
+        # section below this one. So a genuine mismatch reported as a crash
+        # with no verdict, and any assertion added after this point silently
+        # never ran. `awk` reads its input to the end, so there is no early
+        # close and no SIGPIPE; `|| true` is for the checker's own non-zero
+        # exit, which is the thing being reported rather than an error.
+        python3 "$CHECK" "$SHELL_TREE" "${TMPL}/rc.xml" 2>&1 | awk 'NR <= 12' || true
         bad "every shell popup bind matches KeybindService"
     fi
 fi
 
-printf '\napex-shell-firstrun: %d passed, %d failed\n' "$pass" "$fail"
+# ─────────────────────────────────────────────────────────────────────────────
+#  niri: the stock waybar spawn
+#
+#  MEASURED ON KATANA 2026-09-19 (evidence §5.4): the niri session ran waybar
+#  AND quickshell. niri's upstream default-config.kdl — which is what lands in
+#  ~/.config/niri/config.kdl whether niri writes it or this script copies it —
+#  carries `spawn-at-startup "waybar"` at line 271, and this script only ever
+#  APPENDED to that file, so every niri user got two bars.
+#
+#  The block edits a file that belongs to the user, so the properties that
+#  matter are the ones the labwc section above cares about too: it changes one
+#  line and only that line, it is idempotent, it leaves a config the user
+#  edited alone, and it never leaves niri with something niri refuses.
+# ─────────────────────────────────────────────────────────────────────────────
+section "niri: one bar, not two"
+
+sed -n '/^    NIRI_BIN=/,/^    fi$/p' "$SRC" > "${WORK}/niri-bar-block.sh"
+grep -q 'NIRI_STOCK_WAYBAR' "${WORK}/niri-bar-block.sh" \
+    || { printf 'could not extract the niri waybar block\n' >&2; exit 1; }
+
+NIRI_BIN_T="$(command -v niri 2>/dev/null || echo /usr/bin/niri)"
+run_niri_bar() {  # <config path>
+    NIRI_CONF="$1" bash -c '
+        set -uo pipefail
+        log() { :; }
+        source "$1"
+    ' -- "${WORK}/niri-bar-block.sh"
+}
+
+# The real upstream default, not a hand-typed excerpt: a two-line paraphrase
+# would pass a test that the actual file fails.
+UPSTREAM=""
+for cand in /usr/share/doc/niri/default-config.kdl /usr/share/niri/default-config.kdl; do
+    [ -f "$cand" ] && { UPSTREAM="$cand"; break; }
+done
+
+if [ ! -x "$NIRI_BIN_T" ]; then
+    skip "niri is not installed; the waybar block is not exercised"
+elif [ -z "$UPSTREAM" ]; then
+    skip "niri's default-config.kdl is not on this machine; nothing to transform"
+else
+    c="${WORK}/niri-stock.kdl"
+    cp "$UPSTREAM" "$c"
+    before_lines="$(wc -l < "$c")"
+    # Proves the fixture really is the broken shape. Without it every
+    # assertion below could be measuring a file that never had the line.
+    grep -qxF 'spawn-at-startup "waybar"' "$c" \
+        && ok "the upstream default really does start waybar" \
+        || bad "the upstream default really does start waybar"
+    line="$(grep -nxF 'spawn-at-startup "waybar"' "$c" | cut -d: -f1)"
+
+    run_niri_bar "$c"
+
+    if grep -qxF 'spawn-at-startup "waybar"' "$c"; then
+        bad "the stock waybar spawn is disabled"
+    else
+        ok "the stock waybar spawn is disabled"
+    fi
+    [ "$(wc -l < "$c")" = "$before_lines" ] \
+        && ok "the file has exactly as many lines as before" \
+        || bad "the file has exactly as many lines as before"
+    # The whole file, minus the one line, byte for byte. A substitution
+    # anywhere else could not survive this.
+    a="$(sed "${line}d" "$UPSTREAM" | sha256sum)"
+    b="$(sed "${line}d" "$c" | sha256sum)"
+    [ "$a" = "$b" ] \
+        && ok "not one other byte of the user's config changed" \
+        || bad "not one other byte of the user's config changed"
+    "$NIRI_BIN_T" validate --config "$c" >/dev/null 2>&1 \
+        && ok "niri still accepts the config" \
+        || bad "niri still accepts the config" \
+               "$("$NIRI_BIN_T" validate --config "$c" 2>&1 | head -5)"
+    [ -f "${c}.pre-apex-bar.bak" ] \
+        && ok "a backup of the original is kept beside it" \
+        || bad "a backup of the original is kept beside it"
+    [ -z "$(find "${WORK}" -maxdepth 1 -name 'niri-stock.kdl.apexnew.*')" ] \
+        && ok "no temporary file is left behind" \
+        || bad "no temporary file is left behind"
+
+    # Idempotence: a per-login unit runs this every single login.
+    sum_once="$(sha256sum < "$c")"
+    run_niri_bar "$c"
+    run_niri_bar "$c"
+    [ "$(sha256sum < "$c")" = "$sum_once" ] \
+        && ok "running it again changes nothing" \
+        || bad "running it again changes nothing"
+
+    # A user who edited that line meant it. Only upstream's exact spelling at
+    # column 0 is touched.
+    c2="${WORK}/niri-user.kdl"
+    sed 's|^spawn-at-startup "waybar"$|spawn-at-startup "waybar" // I want this|' \
+        "$UPSTREAM" > "$c2"
+    cp "$c2" "${WORK}/niri-user.orig"
+    run_niri_bar "$c2"
+    cmp -s "$c2" "${WORK}/niri-user.orig" \
+        && ok "a waybar line the user edited is left alone" \
+        || bad "a waybar line the user edited is left alone"
+
+    # A config that is already broken is not this block's to make worse.
+    c3="${WORK}/niri-broken.kdl"
+    { cat "$UPSTREAM"; printf 'this-is-not-a-niri-node {\n'; } > "$c3"
+    cp "$c3" "${WORK}/niri-broken.orig"
+    run_niri_bar "$c3"
+    cmp -s "$c3" "${WORK}/niri-broken.orig" \
+        && ok "a config niri already rejects is not edited" \
+        || bad "a config niri already rejects is not edited"
+
+    # And a config that never had the line is not invented into one.
+    c4="${WORK}/niri-nobar.kdl"
+    grep -vxF 'spawn-at-startup "waybar"' "$UPSTREAM" > "$c4"
+    cp "$c4" "${WORK}/niri-nobar.orig"
+    run_niri_bar "$c4"
+    cmp -s "$c4" "${WORK}/niri-nobar.orig" \
+        && ok "a config with no stock waybar spawn is untouched" \
+        || bad "a config with no stock waybar spawn is untouched"
+fi
+
+printf '\napex-shell-firstrun: %d passed, %d failed, %d skipped\n' "$pass" "$fail" "$skipped"
 [ "$fail" -eq 0 ]

@@ -1,0 +1,203 @@
+#!/usr/sbin/nft -f
+#
+# APEX default incoming firewall.
+#
+# Until this shipped there was none: firewalld is not installed, nftables was
+# present with an empty ruleset, and every port a program happened to bind was
+# reachable from the network. On the author's own laptop that was seventeen
+# listening ports, including a model server and a Steam remote-play socket.
+#
+# ── What it does ────────────────────────────────────────────────────────────
+# Drops inbound and permits outbound, plus the things a desktop stops working
+# without.
+#
+# ── Why each exception is here ──────────────────────────────────────────────
+# Every `accept` below is a decision, not a default. If you are reading this to
+# find out whether you can delete one, the answer is in its comment.
+#
+# ── What it deliberately does NOT do ────────────────────────────────────────
+# No egress filtering. That belongs to the agent network dimension (P0-008),
+# which is per-session and knows which agent is asking; a host-wide egress rule
+# would either be too coarse to matter or would break the user's own browser.
+# No port knocking, no rate limits beyond ICMP, no logging by default — a log
+# rule on a desktop fills the journal with broadcast noise within the hour.
+#
+# No forward chain either. There was one, dropping by default, with a comment
+# claiming container traffic was unaffected because podman "hooks at its own
+# priority in its own table". That is not how nftables works, and
+# tests/test-apex-firewall-live.sh measures it: every base chain registered at
+# a hook is evaluated, an `accept` in one does not end the others, and a drop
+# in any one of them is final. A drop here therefore overrode netavark,
+# libvirt and incus alike, and killed every rootful container's networking
+# without appearing in their rules. The intent behind it — that a workstation
+# should not route by accident — is already met by the kernel: ip_forward is 0
+# until something turns it on, and the thing that turns it on brings its own
+# policy for the traffic it created.
+
+# `nft -f` MERGES a table block into an existing table rather than replacing
+# it, so loading this file twice appended every rule a second time — measured,
+# 14 accepts became 28 — and a doubled `limit rate` is silently twice the rate
+# it says. The empty declaration exists so the delete is safe on a machine
+# where the table is not there yet.
+table inet apex
+delete table inet apex
+
+table inet apex {
+    # Exceptions APEX adds live here rather than in the chain below, so
+    # `apex firewall allow` never rewrites a shipped rule and a corrupted
+    # exception set cannot take the base policy with it.
+    set allowed_tcp {
+        type inet_service
+        flags interval
+        # Populated by apex-firewall from /etc/apex/firewall.d/*.conf
+    }
+    set allowed_udp {
+        type inet_service
+        flags interval
+    }
+
+    # The interfaces on which this machine is currently a hotspot, by name,
+    # empty until NetworkManager brings a `method=shared` link up.
+    #
+    # Sharing a connection is the one case where a desktop is the server on a
+    # link rather than a client: the phone that joined broadcasts a DHCP
+    # DISCOVER at us and then asks us to resolve names, and both of those are
+    # inbound on ports this policy shuts. The port-only exception catalogue
+    # cannot express it — `apex firewall allow dns` would open 53 on the café
+    # Wi-Fi too, which is a resolver anyone on that network can use.
+    #
+    # So the exception is scoped to the link instead of to the port, and it is
+    # link state rather than a decision: /etc/apex/firewall.d holds what the
+    # user chose and survives reboots, this set holds what is true right now
+    # and empties when the shared connection goes down. An empty set matches
+    # nothing, so a machine that is not sharing is filtered exactly as before.
+    set hotspot_ifaces {
+        type ifname
+        # Populated by apex-firewall hotspot add/remove, from NetworkManager's
+        # dispatcher.
+    }
+
+    chain input {
+        type filter hook input priority filter; policy drop;
+
+        # Replies to traffic this machine started. Without it every answer to
+        # your own request is dropped and the machine reads as offline.
+        #
+        # What it does NOT do is rescue a connection that was already open when
+        # the policy loaded. conntrack is not running on an APEX box until this
+        # ruleset loads, so it has no entry for that connection; the first
+        # packet it sees creates a `new` entry, and `new` is dropped. Measured,
+        # per kind:
+        #
+        #   outbound          survives — our next packet out creates the entry
+        #                     and the reply to it is ESTABLISHED
+        #   inbound, open     survives on the port's own rule, which is why
+        #     port            starting this unit over ssh is safe
+        #   inbound, closed   dies. Correct, and the reason the unit loads
+        #     port            BEFORE the network rather than after it: at boot
+        #                     there is nothing yet to strand.
+        #
+        # The ssh case also needs nf_conntrack_tcp_loose=1, the kernel default.
+        # At 0 the first packet of an adopted connection is INVALID and the
+        # next rule drops it before `tcp dport 22 accept` is ever reached.
+        ct state established,related accept
+        ct state invalid drop
+
+        # Loopback. A surprising amount of a desktop session talks to itself,
+        # and the seventeen listening ports on this machine are mostly here.
+        iif lo accept
+
+        # ICMP is not optional. Dropping it breaks path MTU discovery, which
+        # fails as a slow connection rather than a refused one, and on IPv6 it
+        # breaks neighbour discovery outright, which means no network at all.
+        # Rate-limited rather than open: an unlimited echo responder is a
+        # reflector.
+        #
+        # The error types below overlap with `related` above rather than
+        # duplicating it, and the overlap is deliberate: the live test breaks
+        # each half in turn and shows path MTU discovery still working on the
+        # other. Deleting either is safe; deleting both is not.
+        ip protocol icmp icmp type { echo-request } limit rate 10/second accept
+        ip protocol icmp icmp type { destination-unreachable, time-exceeded, parameter-problem } accept
+        ip6 nexthdr icmpv6 icmpv6 type { echo-request } limit rate 10/second accept
+        ip6 nexthdr icmpv6 icmpv6 type {
+            destination-unreachable, packet-too-big, time-exceeded, parameter-problem,
+            nd-router-advert, nd-neighbor-solicit, nd-neighbor-advert, nd-redirect,
+            mld-listener-query, mld-listener-report, mld-listener-done
+        } accept
+
+        # DHCPv6 and DHCP replies arrive before a connection exists, so
+        # conntrack cannot recognise them as related.
+        ip6 daddr fe80::/10 udp dport 546 accept
+        udp sport 67 udp dport 68 accept
+
+        # The other direction of DHCP, and DNS, on a link we are sharing.
+        #
+        # The rule above is a DHCP *reply* arriving for a client we are. A
+        # hotspot client sends the opposite: a broadcast DISCOVER from port 68
+        # to port 67, which is a new flow, so `established,related` cannot
+        # rescue it and dnsmasq never hears the request. Port 53 is the same
+        # story one step later — the client gets an address and then cannot
+        # resolve a name.
+        #
+        # Scoped to @hotspot_ifaces, which is empty unless this machine is
+        # sharing a connection right now. Nothing here opens a resolver or a
+        # DHCP server on the network this machine is a guest on.
+        iifname @hotspot_ifaces udp dport { 53, 67 } accept
+        iifname @hotspot_ifaces tcp dport 53 accept
+
+        # mDNS. Printers, Chromecasts and `apex host` discovery depend on
+        # answering this; a desktop that cannot be resolved by name on its own
+        # LAN is a support ticket. Measured on the L16 2026-09-21: with avahi
+        # running, one `avahi-browse` found a FUJIFILM ApeosPrint over _ipp,
+        # _ipps and _pdl-datastream.
+        #
+        # Scoped to the mDNS multicast groups rather than accepting the port
+        # from anywhere. RFC 6762 sends queries to 224.0.0.251 and ff02::fb, so
+        # discovery is unaffected, while a UNICAST packet to port 5353 from an
+        # arbitrary host is refused. That packet is not how a printer is found;
+        # it is how a stranger enumerates this machine, and how an mDNS
+        # reflection amplifier recruits it. Replies to queries THIS machine
+        # sent arrive on an ephemeral port and are already covered by the
+        # established/related rule at the top of this chain.
+        ip daddr 224.0.0.251 udp dport 5353 accept
+        ip6 daddr ff02::fb   udp dport 5353 accept
+
+        # LLMNR is NOT accepted, and that is a measurement rather than a
+        # preference.
+        #
+        # systemd-resolved ships `LLMNR=resolve` (the upstream default, in
+        # /usr/lib/systemd/resolved.conf; APEX pins nothing). `resolve` asks
+        # LLMNR questions and NEVER answers them -- answering needs `LLMNR=yes`.
+        # Measured on the L16 2026-09-21: resolved reports
+        # `Protocols: LLMNR=resolve` on every scope, so an inbound LLMNR query
+        # reaches a service that discards it. The old `udp/tcp dport 5355
+        # accept` pair therefore admitted packets to nothing, on every
+        # interface, for no function.
+        #
+        # What it did buy was exposure. LLMNR poisoning is the standard way a
+        # stranger on a cafe or hotel LAN answers a name lookup and becomes the
+        # host you meant; the port being open is what lets that machine also
+        # probe back. Windows finds Linux hosts over mDNS on anything since
+        # Windows 10 1803, so nothing on a normal LAN loses a name.
+        #
+        # If a future APEX ever sets `LLMNR=yes`, this needs a rule again --
+        # scoped to 224.0.0.252 and ff02::1:3, which is the link-local scope
+        # RFC 4795 defines. Until something answers, there is nothing to open.
+        # A user who wants it today has `apex firewall allow`.
+
+        # ssh, and the one exception that is genuinely load-bearing here: APEX
+        # remote agents, `apex host run` and `apex build --on` are all ssh, and
+        # a firewall that shipped without it would strand a user mid-session on
+        # the machine they were driving from.
+        tcp dport 22 accept
+
+        # Whatever the user allowed, by name, through `apex firewall allow`.
+        tcp dport @allowed_tcp accept
+        udp dport @allowed_udp accept
+    }
+
+    chain output {
+        type filter hook output priority filter; policy accept;
+    }
+}

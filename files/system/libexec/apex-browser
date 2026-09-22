@@ -1,0 +1,995 @@
+#!/usr/bin/env bash
+# ─────────────────────────────────────────────────────────────────────────────
+# apex-browser — P2-012's secure browser automation capsule.
+#
+# WHAT THIS IS
+# A browser that automates a site without going anywhere near the browser you
+# use yourself: its own profile, its own cookie jar, its own download
+# directory, no route onto the network except the destinations you named, and
+# nothing left behind when it finishes.
+#
+# WHAT IT IS NOT: A NEW SANDBOX
+# This file contains no confinement of its own and never invokes `bwrap`. It
+# asks `apex agent` for a confined, allowlisted session, because the
+# confinement and the egress proxy already exist, are already enforced by the
+# daemon, and must not have a second implementation:
+#
+#   * the masked home        apex-agent-core/src/sandbox.rs — $HOME, /run and
+#                            $XDG_RUNTIME_DIR are tmpfs, so ~/.mozilla is not
+#                            in the mount namespace to be read, and there is no
+#                            compositor socket to open a window on.
+#   * the network boundary   apex-agentd/src/egress.rs — --unshare-net plus a
+#                            CONNECT proxy the DAEMON serves, which asks
+#                            destination::Allowlist twice and connects to the
+#                            address it checked. A capsule that ignored the
+#                            proxy would get ENETUNREACH, not a connection.
+#   * the file egress rule   files/system/libexec/apex-vm, cmd_run — the copy
+#                            loop runs over the NOMINATIONS and never over the
+#                            directory's contents. Iterating the directory and
+#                            copying what matched would let the page decide
+#                            what leaves by choosing a filename.
+#   * the teardown fence     the same file's remove_vm_dir — four fences on a
+#                            recursive removal driven by a name.
+#
+# So what is new here is a profile, a download boundary and a lifetime. That
+# is deliberate: docs/browser-capsule.md is the argument, and it also carries
+# the list of what is NOT built.
+#
+# THE PROFILE IS PART OF THE SECURITY SURFACE
+# Firefox does not read $HTTP_PROXY. The session has those variables set — the
+# daemon sets them for every allowlisted session — and a browser ignores them,
+# so a capsule whose profile did not pin the proxy would be a browser with no
+# route at all, reporting a destination policy. The preferences this file
+# writes are therefore asserted by tests/test-apex-browser.sh, not treated as
+# configuration.
+#
+# HEADLESS IS STRUCTURAL
+# There is no --headed, no --display and no viewer verb, the same way `apex vm`
+# has no --graphics. But the guarantee is not the missing flag: the capsule's
+# /run is a tmpfs, so $WAYLAND_DISPLAY names a socket that does not exist. A
+# capsule cannot put a window on anybody's screen even if every flag were
+# reversed.
+# ─────────────────────────────────────────────────────────────────────────────
+set -uo pipefail
+
+msg()  { printf 'apex-browser: %s\n' "$*" >&2; }
+warn() { printf 'apex-browser: warning: %s\n' "$*" >&2; }
+die()  { printf 'apex-browser: error: %s\n' "$*" >&2; exit 1; }
+
+# A refusal that must never be a warning: continuing would mean removing
+# something this program cannot prove it owns, or widening a boundary the
+# caller asked for. apex-vm's refuse(), for the same reasons.
+refuse() {
+    printf 'apex-browser: REFUSED: %s\n' "$*" >&2
+    printf 'apex-browser: this is a safety check failing, not a transient error.\n' >&2
+    exit 2
+}
+
+# ── paths and the programs this composes ────────────────────────────────────
+#
+# Read once, here, and never re-derived. apex-disposable's note applies
+# unchanged: a helper that recomputed the root from $HOME would quietly operate
+# on the real one while the suite believed it was pointed at a throwaway.
+#
+# NOT /tmp. A capsule's downloads have to live long enough for the copy-out to
+# run, and a tmpfiles sweep between the browser exiting and the nomination loop
+# would take exactly the files the caller asked to keep.
+DATA_STATE="${XDG_STATE_HOME:-${HOME:-/nonexistent}/.local/state}"
+BROWSER_ROOT="${APEX_BROWSER_ROOT:-${DATA_STATE}/apex/browser}"
+
+# Overridable for the same reason apex-vm makes $VIRSH overridable: it is what
+# lets the suite assert the exact argv without a daemon and without a browser.
+APEX="${APEX_BROWSER_APEX:-apex}"
+BROWSER_BIN="${APEX_BROWSER_BIN:-/usr/bin/firefox}"
+
+# Where the in-namespace egress bridge listens. Fixed by
+# apex-agent-core::sandbox::BRIDGE_PORT, and fixed there because a session's
+# namespace is empty apart from loopback and the bridge, so nothing can collide
+# with it. Named here rather than typed into the profile twice.
+BRIDGE_HOST="127.0.0.1"
+BRIDGE_PORT="${APEX_BROWSER_BRIDGE_PORT:-3128}"
+
+CAPSULE_PREFIX="cap-"
+
+# ── names ───────────────────────────────────────────────────────────────────
+
+# A capsule name is the last component of a directory this program will later
+# remove recursively, so it is an allowlist and not a denylist.
+valid_capsule_name() {
+    [ -n "${1:-}" ] || return 1
+    [ "${#1}" -le 48 ] || return 1
+    [[ "$1" =~ ^[a-z0-9][a-z0-9-]{0,47}$ ]] || return 1
+    return 0
+}
+
+new_capsule_name() {
+    local suffix
+    suffix="$(LC_ALL=C tr -dc 'a-z0-9' < /dev/urandom 2>/dev/null | head -c 8)"
+    [ "${#suffix}" -eq 8 ] || die "cannot generate a capsule name (no usable /dev/urandom)"
+    printf '%s%s' "$CAPSULE_PREFIX" "$suffix"
+}
+
+capsule_dir() { printf '%s/%s' "$BROWSER_ROOT" "$1"; }
+
+# A download nomination. apex-vm's valid_egress_name, with the same rule and
+# for the same reason: a bare filename, no directory component, no `..`, no
+# wildcard. A wildcard would turn "the caller decides what leaves" into
+# "whatever matched", which is the property this verb exists to have.
+valid_download_name() {
+    [ -n "${1:-}" ] || return 1
+    [ "${#1}" -le 64 ] || return 1
+    case "$1" in
+        */*|*'*'*|*'?'*|*'['*|.|..|.*) return 1 ;;
+    esac
+    [[ "$1" =~ ^[A-Za-z0-9][A-Za-z0-9._-]{0,63}$ ]] || return 1
+    return 0
+}
+
+# --download-to's destination. Absolute, and refused if it resolves inside the
+# capsule root: teardown deletes that tree, so a destination in there would
+# report every file copied and then produce none. apex-vm's valid_egress_dest
+# and apex-disposable's valid_copy_out make the same check.
+valid_download_dest() {
+    local dest="$1" root d
+    case "$dest" in /*) ;; *) return 1 ;; esac
+    case "$dest" in *$'\n'*) return 1 ;; esac
+    root="$(realpath -m -- "$BROWSER_ROOT" 2>/dev/null)" || return 1
+    d="$(realpath -m -- "$dest" 2>/dev/null)" || return 1
+    case "$d" in
+        "$root"|"$root"/*) return 1 ;;
+    esac
+    return 0
+}
+
+# A destination the capsule may reach: host, or host:port. The daemon parses it
+# again on its own side — this check exists so a typo is refused at the call
+# site instead of becoming a session that can reach nothing.
+valid_destination() {
+    [ -n "${1:-}" ] || return 1
+    case "$1" in
+        *' '*|*$'\t'*|*$'\n'*|*/*) return 1 ;;
+    esac
+    [[ "$1" =~ ^[A-Za-z0-9_.*:-]{1,255}$ ]] || return 1
+    return 0
+}
+
+# ── teardown ────────────────────────────────────────────────────────────────
+#
+# The most dangerous line in the file, so it is fenced the four ways apex-vm's
+# remove_vm_dir is fenced, and a failure HARD-EXITS rather than warning.
+remove_capsule_dir() {
+    local name="$1" dir root_real real
+    # Fence 1: the name is an allowlist match, not a string.
+    valid_capsule_name "$name" || refuse "'$name' is not a valid capsule name"
+    dir="$(capsule_dir "$name")"
+    [ -e "$dir" ] || return 0
+    # Fence 2: never follow a symlink at the final component.
+    [ -L "$dir" ] && refuse "$dir is a symlink"
+    [ -d "$dir" ] || refuse "$dir is not a directory"
+    root_real="$(realpath -e -- "$BROWSER_ROOT" 2>/dev/null)" \
+        || refuse "$BROWSER_ROOT does not resolve"
+    # Fence 3: resolve, and compare against the resolved root.
+    real="$(realpath -e -- "$dir" 2>/dev/null)" || refuse "$dir does not resolve"
+    # Fence 4: the resolved path must be exactly one component under the root.
+    [ "$real" = "${root_real}/${name}" ] \
+        || refuse "$dir resolves to $real, which is not ${root_real}/${name}"
+    rm -rf -- "$real"
+}
+
+# Set before the trap is armed and read after cmd_run has returned. A global
+# and a top-level function for the reason apex-vm records as measured rather
+# than reasoned: the EXIT trap fires after the function has returned, so a
+# `local name` read in the trap is an unbound variable at exactly the moment of
+# teardown — and the capsule is then left behind while the command reports
+# success.
+CAPSULE_NAME=""
+CAPSULE_SESSION=""
+
+capsule_teardown() {
+    if [ -n "$CAPSULE_SESSION" ]; then
+        # Kill first, forget second. A session left in the daemon's registry is
+        # a capsule that "finished" and is still listed, and `apex agent rm`
+        # refuses a running one.
+        "$APEX" agent kill "$CAPSULE_SESSION" >/dev/null 2>&1
+        "$APEX" agent rm "$CAPSULE_SESSION" >/dev/null 2>&1
+    fi
+    [ -n "$CAPSULE_NAME" ] && remove_capsule_dir "$CAPSULE_NAME"
+    return 0
+}
+
+# ── the profile ─────────────────────────────────────────────────────────────
+#
+# Written fresh for every capsule. There is no flag naming an existing profile,
+# and the real one is not in the capsule's mount namespace to be named.
+#
+# Every preference here is load-bearing and the suite asserts it:
+#
+#   the proxy      Firefox does not read $HTTP_PROXY, so without these four the
+#                  capsule has no route at all. `no_proxies_on` is emptied and
+#                  `allow_hijacking_localhost` set because Firefox's default is
+#                  to bypass the proxy for loopback — and inside the namespace
+#                  loopback is where the bridge is, so the default would make
+#                  the one reachable address the one that is skipped.
+#   the downloads  pinned to the capsule's own directory, with the "where shall
+#                  I put it" dialogue off: a headless browser has nobody to ask,
+#                  and the answer decides whether the nomination loop can see
+#                  the file at all.
+#   the rest       a capsule must not phone home on its own account. Telemetry,
+#                  crash reports and the updater are destinations nobody
+#                  nominated, and leaving them on would mean a run's allowlist
+#                  did not describe what it talked to.
+write_profile() {
+    local prof="$1" downloads="$2"
+    mkdir -p "$prof" || die "cannot create the capsule profile at $prof"
+    chmod 0700 "$prof" 2>/dev/null
+    cat > "$prof/user.js" <<EOF
+// Written by apex-browser for one capsule. Not configuration: these are the
+// preferences docs/browser-capsule.md calls part of the security surface.
+user_pref("network.proxy.type", 1);
+user_pref("network.proxy.http", "${BRIDGE_HOST}");
+user_pref("network.proxy.http_port", ${BRIDGE_PORT});
+user_pref("network.proxy.ssl", "${BRIDGE_HOST}");
+user_pref("network.proxy.ssl_port", ${BRIDGE_PORT});
+user_pref("network.proxy.no_proxies_on", "");
+user_pref("network.proxy.allow_hijacking_localhost", true);
+user_pref("browser.download.folderList", 2);
+user_pref("browser.download.dir", "${downloads}");
+user_pref("browser.download.useDownloadDir", true);
+user_pref("browser.download.start_downloads_in_tmp_dir", false);
+user_pref("browser.download.always_ask_before_handling_new_types", false);
+user_pref("browser.shell.checkDefaultBrowser", false);
+user_pref("datareporting.healthreport.uploadEnabled", false);
+user_pref("datareporting.policy.dataSubmissionEnabled", false);
+user_pref("toolkit.telemetry.enabled", false);
+user_pref("toolkit.telemetry.unified", false);
+user_pref("app.update.auto", false);
+user_pref("app.update.enabled", false);
+user_pref("browser.tabs.crashReporting.sendReport", false);
+user_pref("extensions.update.enabled", false);
+user_pref("extensions.getAddons.cache.enabled", false);
+// Vendor services the browser talks to on its own account. Measured, not
+// tidied away: with only the telemetry preferences above, the lab's daemon
+// logged a capsule being denied firefox.settings.services.mozilla.com,
+// aus5.mozilla.org and location.services.mozilla.com, repeatedly, for the
+// rest of its run. The allowlist did its job — none of it went anywhere —
+// but a capsule whose allowlist does not describe what it talks to is one
+// whose allowlist is doing work the profile should have done.
+//
+// AND THESE DO NOT FULLY STOP IT, which is stated here rather than left to be
+// rediscovered: with every preference below applied, the lab's daemon still
+// logs occasional denials for the settings and update services. What they buy
+// is fewer, not none. THE ALLOWLIST IS THE BOUNDARY; this list is hygiene in
+// front of it, and a capsule reaches only what it was allowed either way.
+user_pref("services.settings.server", "");
+user_pref("browser.region.network.url", "");
+user_pref("browser.region.update.enabled", false);
+user_pref("geo.provider.network.url", "");
+user_pref("geo.enabled", false);
+user_pref("network.captive-portal-service.enabled", false);
+user_pref("network.connectivity-service.enabled", false);
+user_pref("browser.safebrowsing.malware.enabled", false);
+user_pref("browser.safebrowsing.phishing.enabled", false);
+user_pref("browser.safebrowsing.downloads.enabled", false);
+user_pref("browser.newtabpage.activity-stream.feeds.system.topstories", false);
+user_pref("browser.discovery.enabled", false);
+user_pref("browser.ping-centre.telemetry", false);
+user_pref("network.dns.disablePrefetch", true);
+user_pref("network.prefetch-next", false);
+EOF
+    [ -s "$prof/user.js" ] || die "cannot write the capsule profile preferences"
+}
+
+# ── doctor ──────────────────────────────────────────────────────────────────
+#
+# Each row observes the capability rather than guessing at it, and each names
+# the ONE thing that is missing. "Permission denied is not absence": a browser
+# that exists and cannot be executed is a different answer from no browser, and
+# a daemon that is installed but not running is a different answer from a
+# daemon that refuses.
+cmd_doctor() {
+    local ok=1
+    if [ -x "$BROWSER_BIN" ]; then
+        printf '  browser       %s\n' "$BROWSER_BIN"
+    elif [ -e "$BROWSER_BIN" ]; then
+        printf '  browser       PRESENT BUT NOT EXECUTABLE: %s\n' "$BROWSER_BIN"; ok=0
+    else
+        printf '  browser       MISSING: %s\n' "$BROWSER_BIN"; ok=0
+    fi
+    if command -v "$APEX" >/dev/null 2>&1; then
+        printf '  apex          %s\n' "$(command -v "$APEX")"
+    else
+        printf '  apex          MISSING: %s\n' "$APEX"; ok=0
+    fi
+    # The daemon, not the binary. A capsule needs a runtime that answers.
+    if "$APEX" agent status >/dev/null 2>&1; then
+        printf '  agent runtime answers\n'
+    else
+        printf '  agent runtime DOES NOT ANSWER — `systemctl --user enable --now apex-agentd`\n'
+        ok=0
+    fi
+    if [ "$ok" = 1 ]; then
+        printf 'Every part of a browser capsule is available.\n'
+        return 0
+    fi
+    printf 'A browser capsule cannot start until the rows above are fixed.\n'
+    return 1
+}
+
+# ── run ─────────────────────────────────────────────────────────────────────
+
+cmd_run() {
+    local name="" download_to="" console_to="" force=0 timeout=300 capability="" trust_ca=""
+    local present=0
+    local -a allow=() download=() browser_args=()
+    while [ $# -gt 0 ]; do
+        case "$1" in
+            --name)        shift; name="${1:-}" ;;
+            --allow)       shift; allow+=("${1:-}") ;;
+            --capability)  shift; capability="${1:-}" ;;
+            --trust-ca)    shift; trust_ca="${1:-}" ;;
+            --present)     present=1 ;;
+            --download)    shift; download+=("${1:-}") ;;
+            --download-to) shift; download_to="${1:-}" ;;
+            --console-to)  shift; console_to="${1:-}" ;;
+            --timeout)     shift; timeout="${1:-}" ;;
+            --force)       force=1 ;;
+            # Refused by name rather than reported as unknown. A caller who
+            # typed one of these has a model of this verb that is wrong, and
+            # "unknown option" would leave them looking for the right spelling.
+            --profile|--profile-dir)
+                refuse "--profile is not accepted by \`apex browser run\`.
+  A capsule writes a fresh profile every time and the one you use is not in its
+  mount namespace to be named. A profile that persisted between runs would be
+  long-lived credential storage, which is what --capability exists to replace." ;;
+            --headed|--display|--window|--gui)
+                refuse "'$1' is not accepted: a capsule is headless.
+  Not because the flag was left out — the capsule's /run is a tmpfs, so there
+  is no compositor socket for a window to appear on. Reversing every flag in
+  this file would not put one on your screen." ;;
+            --) shift; browser_args=("$@"); break ;;
+            -*) die "unknown option '$1' (apex browser run --help)" ;;
+            *)  browser_args=("$@"); break ;;
+        esac
+        shift
+    done
+
+    [ "${#browser_args[@]}" -gt 0 ] \
+        || die "give the capsule something to do: apex browser run --allow HOST -- URL"
+
+    # ── the browser's own arguments are checked, not just forwarded ─────────
+    #
+    # Found by a test rather than by reading. `apex browser run --profile X`
+    # does NOT reach this file as `--profile`: clap's trailing var-arg absorbs
+    # an unrecognised option into the browser's arguments instead of rejecting
+    # it, which is the same behaviour `apex vm run` records for `--network`.
+    # So a word this file refuses before the separator arrives after it, and a
+    # second --profile later on a Firefox command line WINS over the first —
+    # which would point the capsule's browser at a profile directory this file
+    # did not create and does not delete.
+    #
+    # The list is small and is about two things only: where the profile is, and
+    # whether anything can ask for a display. A capsule's namespace has no
+    # compositor, so -display is refused for saying something untrue rather
+    # than for being dangerous.
+    local ba
+    for ba in "${browser_args[@]}"; do
+        case "$ba" in
+            --profile|-profile|-P|--profile-manager|-ProfileManager|--ProfileManager|--profile=*|-profile=*|-P=*)
+                refuse "'$ba' cannot be passed to the capsule's browser.
+  The capsule writes its own profile and deletes it afterwards; a second
+  --profile on the command line would win over that one, and the capsule would
+  be using a directory it does not own and will not clean up.
+
+  The '=' spellings are here because Firefox accepts them. Measured, not
+  assumed: \`firefox --profile=DIR\` creates and uses a profile at DIR, so a
+  refusal that listed only the space-separated form could be walked around
+  with one character." ;;
+            --display|-display|--display=*|-display=*)
+                refuse "'$ba' cannot be passed to the capsule's browser.
+  A capsule is headless because its /run is a tmpfs and there is no compositor
+  socket in its namespace — naming a display would not produce a window, it
+  would produce a browser that fails to start and a confusing reason." ;;
+        esac
+    done
+    [[ "$timeout" =~ ^[0-9]+$ ]] || die "--timeout takes seconds as a number"
+    [ "$timeout" -gt 0 ] || die "--timeout must be more than zero seconds"
+
+    # A capsule that can reach nothing while reporting a destination policy is
+    # a mode that lies. AgentPolicy::validate_for refuses the same pair one
+    # layer down; refusing here names the flag the caller actually typed.
+    if [ "${#allow[@]}" -eq 0 ] && [ -z "$capability" ]; then
+        die "a capsule must name where it may go: --allow HOST[:PORT], or --capability NAME
+  Without one, the browser would have no route at all while this command
+  reported a destination policy. There is no implicit 'anywhere'."
+    fi
+
+    local d
+    for d in "${allow[@]}"; do
+        valid_destination "$d" \
+            || die "--allow takes a host or host:port (got '$d')"
+    done
+    for d in "${download[@]}"; do
+        valid_download_name "$d" \
+            || die "--download takes a plain filename, no directories and no wildcards (got '$d')"
+    done
+    if [ -n "$console_to" ]; then
+        case "$console_to" in */) die "--console-to names a file, not a directory" ;; esac
+        valid_download_dest "$(dirname -- "$console_to")" \
+            || die "--console-to needs an absolute path outside $BROWSER_ROOT
+  (teardown deletes that tree, so a log written into it would not survive)"
+    fi
+    # ── the CA, if one was named ────────────────────────────────────────────
+    #
+    # A capsule that trusts a private root is the intranet case, and the flag
+    # NAMES A FILE rather than defaulting to anything: handing a capsule a CA
+    # it did not have widens what it will believe, and a default would widen
+    # it without anybody typing anything.
+    #
+    # Checked here for the reason every other refusal in this file is checked
+    # here — the message is better before a capsule directory exists — and the
+    # daemon checks the file's CONTENTS again on the copy the capsule actually
+    # reads, which is the boundary. This is not that boundary.
+    if [ -n "$trust_ca" ]; then
+        case "$trust_ca" in
+            /*) ;;
+            *)  die "--trust-ca needs an absolute path (got '$trust_ca')
+  The path travels to the agent runtime, which resolves it against ITS working
+  directory and not yours, so a relative one names a different file or none." ;;
+        esac
+        [ -f "$trust_ca" ] || die "--trust-ca names '$trust_ca', which is not a readable file"
+        # Inside the capsule tree is refused for `--download-to`'s reason
+        # turned around: teardown deletes that tree, so a CA kept there would
+        # work once and then be gone, and the second run would fail with a
+        # message about a missing file rather than about the deletion.
+        valid_download_dest "$trust_ca" \
+            || die "--trust-ca must name a file outside $BROWSER_ROOT
+  (teardown deletes that tree, so the CA would survive exactly one capsule)"
+    fi
+
+    # ── --present, which is an addition to --capability and not a twin ─────
+    #
+    # It takes no argument on purpose. The credential is already named by
+    # --capability, and the destination is already that credential's pin —
+    # naming either of them a second time would be a second thing that can
+    # disagree with the first. What this asks for is that the runtime
+    # AUTHENTICATE that one destination, which is the difference between a
+    # capsule confined to a site and a capsule logged in to it.
+    if [ "$present" = 1 ] && [ -z "$capability" ]; then
+        die "--present authenticates the destination a credential is pinned to, so it needs
+  --capability NAME to say which credential. \`apex secret list\` shows what is stored."
+    fi
+    if [ "$present" = 1 ] && [ -n "$trust_ca" ]; then
+        die "--present and --trust-ca cannot both be given.
+  --present pins this capsule to one destination and the runtime terminates that
+  connection itself, so a certificate authority for the capsule's own connection
+  to that site would never be used. The runtime refuses the pair too."
+    fi
+
+    if [ -n "$download_to" ]; then
+        valid_download_dest "$download_to" \
+            || die "--download-to needs an absolute directory outside $BROWSER_ROOT
+  (a destination inside it is deleted by this command's own teardown, so every
+  file would be reported copied and none would survive)"
+        [ "${#download[@]}" -gt 0 ] \
+            || die "--download-to was given but nothing was nominated with --download, so nothing would leave"
+    fi
+
+    # ── the capability, if one was named ────────────────────────────────────
+    #
+    # What it does is bind the capsule's destination to a credential's PIN. The
+    # value is never read: `apex secret list` does not print one and this file
+    # never asks. What the caller does not get to choose is where the capsule
+    # can reach, which is the half of the capability model a browser can
+    # honestly use — see docs/browser-capsule.md for the half it cannot.
+    if [ -n "$capability" ]; then
+        local answer cap_rc pin_host pin_port pinned
+        answer="$(capability_pin "$capability")"; cap_rc=$?
+        case "$cap_rc" in
+            3) die "the secret service could not be asked, so this capsule's destination is unknown.
+  That is not the same as '$capability' being absent, and the difference decides
+  what fixes it: start the service (\`sudo systemctl start apex-secretd\`)
+  rather than storing a credential. What it said:
+  ${answer}" ;;
+            1) die "the secret service has no credential named '$capability'.
+  \`apex secret list\` shows what is stored; \`apex secret add $capability --host HOST\`
+  stores one. The capsule's destination comes from that host, not from --allow." ;;
+            4) die "the secret service answered, and this engine could not read the answer.
+  That is a version mismatch between \`apex secret list --json\` and this
+  program, not a missing credential and not a stopped service — so neither
+  \`apex secret add\` nor \`systemctl start apex-secretd\` is the fix." ;;
+        esac
+        pin_host="$(printf '%s\n' "$answer" | sed -n 1p)"
+        pin_port="$(printf '%s\n' "$answer" | sed -n 2p)"
+        [ -n "$pin_host" ] || die "the credential '$capability' has no pinned host, so it cannot decide where a capsule may go"
+        pinned="$(join_destination "$pin_host" "$pin_port")"
+        # A caller may REPEAT the pin and may not widen it. The host has to be
+        # the pinned one; a port, if the caller spells one out, has to be the
+        # pinned one too — `--allow host:443` against a credential pinned to
+        # `host:9443` is a different endpoint, not the same one said twice.
+        local d d_host d_port split
+        for d in "${allow[@]}"; do
+            split="$(split_destination "$d")"
+            d_host="$(printf '%s\n' "$split" | sed -n 1p)"
+            d_port="$(printf '%s\n' "$split" | sed -n 2p)"
+            [ "$d_host" = "$pin_host" ] || refuse "--allow names '$d' but the capability '$capability' is pinned to '$pinned'.
+  A capability decides where its authority is spent. Widening it at the call
+  site is the thing the pin exists to stop."
+            if [ -n "$d_port" ] && [ -n "$pin_port" ] && [ "$d_port" != "$pin_port" ]; then
+                refuse "--allow names port $d_port on '$d_host' but the capability '$capability' is pinned to '$pinned'.
+  A different port is a different endpoint. A capability decides where its
+  authority is spent, and the port is part of where."
+            fi
+        done
+        # The pin is the destination, whether or not --allow repeated it.
+        allow=("$pinned")
+        msg "capability '$capability' pins this capsule to $pinned"
+    fi
+
+    [ -n "$name" ] || name="$(new_capsule_name)"
+    valid_capsule_name "$name" || die "'$name' is not a valid capsule name"
+
+    command -v "$APEX" >/dev/null 2>&1 \
+        || die "the agent runtime's CLI is not on \$PATH, and a capsule is one of its sessions"
+    [ -x "$BROWSER_BIN" ] \
+        || die "no browser at $BROWSER_BIN; \`apex browser doctor\` says what is missing"
+
+    # Every named destination must already be one the daemon will honour. The
+    # daemon proves that again — it refuses a session allowlist it cannot
+    # narrow out of the runtime's — and this check is not that boundary and
+    # must not be read as one. It is here because the refusal is better BEFORE
+    # a capsule directory exists and a session is asked for: the message names
+    # the line to add, and nothing has to be torn down to show it.
+    # THREE ANSWERS AGAIN. `apex agent allow` with no argument lists what the
+    # runtime honours — but a runtime that cannot be asked returns nothing,
+    # and an empty list read as "nothing is allowed" would refuse every
+    # destination with "add it with apex agent allow", which is advice for a
+    # problem the caller does not have. The exit status separates them.
+    local allowed_now allow_rc
+    allowed_now="$("$APEX" agent allow 2>&1)"; allow_rc=$?
+    if [ "$allow_rc" != 0 ]; then
+        die "the agent runtime could not be asked what a capsule may reach.
+  That is not the same as nothing being allowed, and the difference decides
+  what fixes it: start the runtime (\`systemctl --user enable --now apex-agentd\`)
+  rather than adding a destination. What it said:
+  ${allowed_now}"
+    fi
+    for d in "${allow[@]}"; do
+        printf '%s\n' "$allowed_now" | grep -Fxq -- "$d" && continue
+        printf '%s\n' "$allowed_now" | grep -Fxq -- "${d%%:*}" && continue
+        die "'$d' is not on the runtime's allowlist, so this capsule could not reach it.
+  Add it once with:  apex agent allow $d
+  A capsule cannot widen the allowlist by asking. What it CAN do is narrow it:
+  this destination is sent to the daemon as the session's own allowlist, and
+  the daemon refuses any line the runtime's list does not already cover."
+    done
+
+    local dir; dir="$(capsule_dir "$name")"
+    [ -e "$dir" ] && die "a capsule called '$name' already exists at $dir"
+    mkdir -p "$dir" || die "cannot create $dir"
+    chmod 0700 "$dir" 2>/dev/null
+
+    # Armed before anything else exists, so a Ctrl-C between here and the first
+    # line of the browser still removes the capsule.
+    CAPSULE_NAME="$name"
+    trap 'capsule_teardown' EXIT INT TERM
+
+    # The capsule directory IS the download directory, and the profile is
+    # hidden inside it. Found by the live lab rather than by design: with the
+    # downloads in a subdirectory, `--screenshot shot.png` wrote shot.png to
+    # the session's working directory — the capsule root — and the nomination
+    # loop looked for it one level down and reported that the capsule "did not
+    # produce" a file it was staring at. A caller would have had to know the
+    # engine's internal layout to nominate anything the browser wrote
+    # relatively.
+    #
+    # One directory removes that. The profile goes to `.profile` rather than
+    # `profile`, and the leading dot is not decoration: valid_download_name
+    # refuses a name that starts with one, so the profile cannot be nominated
+    # by construction rather than by a check somebody has to remember.
+    local prof="$dir/.profile" downloads="$dir"
+    write_profile "$prof" "$downloads"
+
+    # ── the session ─────────────────────────────────────────────────────────
+    #
+    # --sandbox project, not strict: strict IS project with the network
+    # removed, and the CLI refuses `--sandbox strict --network allowlist`
+    # rather than pretending the two combine. Both mask $HOME, /run and
+    # $XDG_RUNTIME_DIR, which is what makes the profile, the cookies and the
+    # headlessness properties of the namespace rather than of this file.
+    #
+    # --cwd is the capsule: a confined session's working directory is the one
+    # host path bound writable, which is why the profile and the downloads live
+    # there and not in the masked home.
+    # ── {capsule} in the browser's own arguments ────────────────────────────
+    #
+    # Measured, and the measurement is the whole reason this exists: Firefox's
+    # `--screenshot` with a RELATIVE filename writes nothing at all. Not to the
+    # working directory, not anywhere the capsule can see — the run exits 0 and
+    # produces no file, which the nomination loop then reports as "the capsule
+    # did not produce" it. An absolute path works.
+    #
+    # But a caller cannot write an absolute path into a capsule whose name this
+    # engine generates, and teardown deletes the directory afterwards anyway.
+    # So the capsule's own path is substitutable: the literal token {capsule}
+    # in any browser argument becomes the capsule directory, which is also the
+    # download directory, which is where nominations are looked up.
+    #
+    #     apex browser run --allow e.example --download shot.png \
+    #         --download-to ~/out -- --screenshot {capsule}/shot.png https://e/
+    #
+    # A token rather than a rewrite of --screenshot specifically: this engine
+    # does not know which of a browser's flags take paths, and guessing would
+    # be a list to keep correct for every browser and every version.
+    local -a expanded=()
+    for ba in "${browser_args[@]}"; do
+        expanded+=("${ba//\{capsule\}/$dir}")
+    done
+    browser_args=("${expanded[@]}")
+
+    # ── the capsule's OWN allowlist, not the machine's (P2-012) ─────────────
+    #
+    # `--allow` on this command line reaches the daemon as the session's
+    # allowlist, and the egress proxy — the only route out of a `--network
+    # allowlist` session — enforces that list and not the runtime's. Before
+    # this, a capsule started to visit one host could reach every destination
+    # the machine had ever been told to permit; the check above was a check in
+    # this file, which is not a boundary.
+    #
+    # It matters most for `--capability`: `allow` was replaced by the
+    # credential's pin further up, so a capsule holding a capability is now
+    # confined to the destination that capability is for, by the proxy.
+    #
+    # Repeated rather than comma-joined, because a destination is `host:port`
+    # and `apex agent run --allow` takes one per occurrence.
+    local -a allow_argv=()
+    for d in "${allow[@]}"; do allow_argv+=(--allow "$d"); done
+
+    # ── the capsule's OWN trust anchors (P2-012, gap 5) ─────────────────────
+    #
+    # `--trust-ca` reaches the daemon, which copies the PEM where the session
+    # can read it, merges a Certificates.Install into a COPY of the machine's
+    # own /etc/firefox/policies/policies.json, and binds that copy over the
+    # real one inside the session's namespace. Nothing outside the capsule
+    # changes and no other browser on the machine sees the root.
+    #
+    # An empty array when no CA was named, so the argv is byte-identical to
+    # what it was before this flag existed for every capsule that does not use
+    # it.
+    local -a ca_argv=()
+    [ -n "$trust_ca" ] && ca_argv=(--trust-ca "$trust_ca")
+
+    # ── the credential the capsule spends and never holds (P2-012, route B) ─
+    #
+    # `--present NAME` reaches the daemon, which mints a certificate for the
+    # destination that credential is pinned to, installs its authority in this
+    # capsule's browser, and terminates that ONE connection — handing the
+    # plaintext to apex-secretd, which is the only process that holds the
+    # value. The capsule never has it, and neither does the agent runtime.
+    #
+    # Among the RUNTIME's flags and not after the `--`: firefox has no such
+    # flag, and a capsule that put it there would fail naming the wrong
+    # program.
+    local -a present_argv=()
+    [ "$present" = 1 ] && present_argv=(--present "$capability")
+
+    local -a session_argv=(
+        "$APEX" agent run
+        --agent generic
+        --sandbox project
+        --network allowlist
+        "${allow_argv[@]}"
+        "${ca_argv[@]}"
+        "${present_argv[@]}"
+        --cwd "$dir"
+        --detach
+        --
+        "$BROWSER_BIN"
+        --no-remote
+        --headless
+        --profile "$prof"
+    )
+    session_argv+=("${browser_args[@]}")
+
+    local started rc
+    started="$("${session_argv[@]}" 2>&1)"; rc=$?
+    if [ "$rc" != 0 ]; then
+        printf '%s\n' "$started" >&2
+        die "the runtime refused the capsule's session"
+    fi
+    CAPSULE_SESSION="$(printf '%s\n' "$started" | sed -n 's/^session \([0-9][0-9]*\).*/\1/p' | head -n1)"
+    [ -n "$CAPSULE_SESSION" ] \
+        || die "the runtime started a session but did not say which; not waiting on a capsule this command cannot stop"
+    msg "capsule '$name' is session $CAPSULE_SESSION"
+
+    # ── wait ────────────────────────────────────────────────────────────────
+    #
+    # A timeout is not a failure of the capsule, it is the end of the capsule:
+    # the teardown below runs either way, and a browser still running when the
+    # clock runs out is killed rather than left. What it does change is whether
+    # the nominations are believed to be finished, so it is reported.
+    # THE TERMINAL STATES ARE THE RUNTIME'S, NOT A GUESS AT THEM.
+    # protocol.rs::AgentState prints starting, working, waiting_for_user,
+    # permission_request, complete, failed, exited. The first version of this
+    # loop waited for `complete|failed|killed`: `killed` is not a state the
+    # runtime has, so that arm could never fire, and `exited` — which is how a
+    # session that ended without publishing a completion reads — was not in the
+    # list at all, so such a capsule would have been held here until the
+    # timeout and then reported as one.
+    #
+    # AND AN UNANSWERED QUESTION IS ITS OWN ANSWER. An empty read means the
+    # runtime did not answer, which is NOT "the session finished": treating it
+    # as finished would run the nomination loop over a directory the browser
+    # may still be writing into. It is retried a few times — a daemon restart
+    # is survivable — and then it is a distinct outcome with its own sentence.
+    local waited=0 state="" timed_out=0 unanswered=0 lost=0
+    while :; do
+        state="$("$APEX" agent status "$CAPSULE_SESSION" 2>/dev/null \
+                 | sed -n 's/^state[[:space:]]*\([a-z_]*\).*/\1/p' | head -n1)"
+        case "$state" in
+            complete|failed|exited) break ;;
+            "")
+                unanswered=$((unanswered + 1))
+                [ "$unanswered" -ge 5 ] && { lost=1; break; }
+                ;;
+            *) unanswered=0 ;;
+        esac
+        [ "$waited" -ge "$timeout" ] && { timed_out=1; break; }
+        sleep 1
+        waited=$((waited + 1))
+    done
+    if [ "$lost" = 1 ]; then
+        # Nothing is copied. The capsule is still torn down by the EXIT trap,
+        # so this leaves no browser running and no directory behind — what it
+        # refuses to do is guess that a session it can no longer see is one
+        # that finished.
+        die "the agent runtime stopped answering about session $CAPSULE_SESSION after ${waited}s.
+  That is not the same as the capsule having finished, so nothing was copied
+  out: a nomination loop run now would be reading a directory the browser may
+  still be writing into. The capsule was torn down."
+    fi
+    if [ "$timed_out" = 1 ]; then
+        warn "the capsule did not finish within ${timeout}s; stopping it.
+  Anything it had already written is still nominated normally, but a file it
+  was part-way through writing is a partial file."
+        "$APEX" agent kill "$CAPSULE_SESSION" >/dev/null 2>&1
+    fi
+
+    # ── the console ─────────────────────────────────────────────────────────
+    #
+    # Opt-in, and that is the argument rather than caution: the transcript is
+    # bytes the capsule chose to write, so it leaves only where the caller
+    # named a destination — the same rule every other file here follows. It is
+    # also the only diagnostic a capsule that rendered nothing can leave, and
+    # apex-vm records what its absence cost.
+    if [ -n "$console_to" ]; then
+        if [ -e "$console_to" ] && [ "$force" != 1 ]; then
+            warn "console: $console_to already exists; not overwriting it (--force to allow)"
+        elif mkdir -p "$(dirname -- "$console_to")" \
+             && "$APEX" agent logs "$CAPSULE_SESSION" > "$console_to" 2>/dev/null; then
+            msg "console: the capsule's output -> $console_to"
+        else
+            warn "console: could not write $console_to"
+        fi
+    fi
+
+    # ── downloads: exactly the nominated names, and nothing else ────────────
+    #
+    # THE LOOP RUNS OVER THE NOMINATIONS. It does not list $downloads and copy
+    # what it finds. That direction is the security property, and apex-vm's
+    # cmd_run carries the same comment because the same mistake is available
+    # there: iterating the directory would let the page decide what leaves by
+    # choosing a filename.
+    if [ -n "$download_to" ]; then
+        local copied=0 blocked=0 n
+        mkdir -p "$download_to" || die "cannot create $download_to"
+        for n in "${download[@]}"; do
+            # Re-checked here, not only at parse time. This is the value that
+            # becomes a path, and a nomination that reached this loop unchecked
+            # would be the one bug that matters.
+            valid_download_name "$n" || refuse "'$n' is not a plain filename"
+            if [ ! -f "$downloads/$n" ]; then
+                warn "download: the capsule did not produce '$n'"
+                continue
+            fi
+            if [ -e "$download_to/$n" ] && [ "$force" != 1 ]; then
+                blocked=$((blocked + 1))
+                warn "download: $download_to/$n already exists; not overwriting it (--force to allow)"
+                continue
+            fi
+            if cp -- "$downloads/$n" "$download_to/$n"; then
+                copied=$((copied + 1))
+                msg "download: $n -> $download_to/$n"
+            else
+                warn "download: could not copy '$n'"
+            fi
+        done
+        msg "downloads: ${copied} of ${#download[@]} nominated files left the capsule; everything else stayed in it"
+        [ "$blocked" -gt 0 ] && warn "downloads: ${blocked} were blocked by an existing file on the host"
+    else
+        msg "nothing left the capsule: --download-to was not given"
+    fi
+
+    # Teardown is the EXIT trap's, so it runs on this path and on every other.
+    [ "$timed_out" = 1 ] && return 1
+    return 0
+}
+
+# The destination a stored credential is pinned to, as two lines: the host,
+# then the port or an empty line. `apex secret list` never prints a value —
+# asking for the pin is not asking for the secret.
+#
+# FOUR ANSWERS, NOT TWO. "the secret service did not answer", "it answered and
+# has no credential of that name", "it answered with something this engine
+# cannot read" and "here is the pin" are different facts, and the first written
+# as the second is this repository's most-repeated defect: a question that
+# could not be asked, reported as the answer. A capsule refused because secretd
+# is stopped must say so, because the fix is `systemctl start apex-secretd` and
+# not `apex secret add`.
+#
+# ── WHY THIS READS --json AND NOT THE TABLE ─────────────────────────────────
+#
+# It read the table once, and against a REAL apex-secretd `--capability` could
+# not work at all. Two reasons, both measured rather than reasoned about:
+#
+#   * the table's ENDPOINT column is `scheme://host`, not `host`. The pin came
+#     out as `https://intranet.example`, which is not a destination — so every
+#     capsule naming a capability was refused, either because `--allow
+#     intranet.example` "did not match the pin" or because the runtime
+#     allowlist was told to add a line with a scheme in it. Fail-closed, and
+#     completely unusable.
+#   * the table has no port column at all. A credential stored with
+#     `--port 9443` printed `http://127.0.0.1`, so the pin could not have
+#     carried the port even after the scheme was stripped off it.
+#
+# The suite did not catch either, because its stub printed a bare host in the
+# second column — a stub that agreed with the engine rather than with the CLI.
+# The stub now prints what `apex secret list` prints, and the JSON is what this
+# parses, because the JSON is the interface with the fields in it.
+#
+# stdout and stderr are kept APART. `apex secret list` writes a banner to
+# stderr when the store is not root-owned, and folding that into the parse put
+# a line whose first field is `apex` in front of the credentials — which a
+# credential named `apex` would then have been matched against.
+#
+#   0  printed the pinned host on line 1 and its port, or nothing, on line 2
+#   1  the service answered; there is no credential of that name
+#   3  the service could not be asked
+#   4  the service answered with something this engine cannot read
+capability_pin() {
+    local want="$1" tmp out rc
+    tmp="$(mktemp -d "${TMPDIR:-/tmp}/apex-browser-cap.XXXXXX")" || return 3
+    "$APEX" secret list --json >"$tmp/out" 2>"$tmp/err"; rc=$?
+    if [ "$rc" != 0 ]; then
+        cat "$tmp/err" "$tmp/out"
+        rm -rf "$tmp"
+        return 3
+    fi
+    # The file is an ARGUMENT, not stdin. `python3 -` reads its program from
+    # stdin, so a `<"$tmp/out"` beside the heredoc is one redirection too many:
+    # the heredoc wins, the program runs, and `json.load(sys.stdin)` reads a
+    # stream somebody else already drained. That spelling answered "the service
+    # answered with something this engine cannot read" for every credential
+    # that existed — a silent nothing with a confident message on it.
+    out="$(python3 - "$want" "$tmp/out" <<'PY'
+import json, sys
+want = sys.argv[1]
+try:
+    with open(sys.argv[2]) as fh:
+        services = json.load(fh)
+    if not isinstance(services, list):
+        raise ValueError("not a list")
+except Exception:
+    sys.exit(4)
+for s in services:
+    if not isinstance(s, dict):
+        sys.exit(4)
+    if s.get("service") == want:
+        host = s.get("host") or ""
+        port = s.get("port")
+        print(host)
+        print("" if port in (None, "") else port)
+        sys.exit(0)
+sys.exit(1)
+PY
+)"; rc=$?
+    rm -rf "$tmp"
+    [ "$rc" = 0 ] || return "$rc"
+    printf '%s' "$out"
+}
+
+# Split a destination into a host and a port, as two lines, so that neither an
+# IPv6 literal nor a missing port is handled by cutting a string at the first
+# or the last colon. `[::1]:9443`, `::1`, `h:443` and `h` are all destinations
+# a caller can type, and `${d%%:*}` gets three of the four wrong.
+split_destination() {
+    case "$1" in
+        \[*\]:*) printf '%s\n%s\n' "${1%%\]:*}" "${1##*\]:}" | sed '1s/^\[//' ;;
+        \[*\])   printf '%s\n\n' "$1" | sed '1s/^\[//; 1s/\]$//' ;;
+        *:*:*)   printf '%s\n\n' "$1" ;;
+        *:*)     printf '%s\n%s\n' "${1%%:*}" "${1##*:}" ;;
+        *)       printf '%s\n\n' "$1" ;;
+    esac
+}
+
+# The destination a pin names, spelled the way a caller would type it.
+join_destination() {
+    local host="$1" port="$2"
+    [ -n "$port" ] || { printf '%s' "$host"; return; }
+    case "$host" in
+        *:*) printf '[%s]:%s' "$host" "$port" ;;
+        *)   printf '%s:%s' "$host" "$port" ;;
+    esac
+}
+
+# ── usage ───────────────────────────────────────────────────────────────────
+#
+# STDOUT. `apex vm --help` wrote to stderr once, which made `--help | grep`
+# read an empty stream and a test assert against nothing. A pure help path
+# prints to stdout.
+usage() {
+    cat <<'EOF'
+apex browser — run a browser that automates a site without touching yours.
+
+  apex browser run [OPTIONS] -- BROWSER-ARGUMENTS...
+  apex browser doctor
+
+A capsule has its own profile, its own cookie jar and its own download
+directory, reaches only the destinations you name, and is deleted when it
+finishes. It is headless: there is no flag that opens a window, and no
+compositor socket in its namespace for one to appear on.
+
+Options for `run`:
+  --allow HOST[:PORT]   a destination this capsule may reach, and the ONLY one
+                        it may reach. Repeatable, and required unless
+                        --capability names one. Must already be on the
+                        runtime's allowlist (`apex agent allow`): this narrows
+                        that list for one capsule and can never widen it.
+  --capability NAME     take the destination from a stored credential's pinned
+                        host instead. The capsule is never given the value.
+  --present             and authenticate that destination with it. Needs
+                        --capability, and a grant: `apex secret grant NAME
+                        browser.present --everywhere`. The runtime terminates
+                        that one connection and apex-secretd — the only process
+                        that holds credentials — adds the header. The capsule
+                        never holds the value and neither does the runtime.
+                        Cannot be combined with --trust-ca.
+  --trust-ca FILE       a PEM of certificate authorities this capsule's
+                        browser trusts, for this capsule only — the intranet
+                        case. The machine's trust store is not changed and no
+                        other browser sees the root. There is no default: the
+                        flag names the file or the capsule trusts what the
+                        machine trusts.
+  --download NAME       a plain filename the capsule produced that may leave
+                        it — a download, or anything the browser wrote next to
+                        it. Repeatable. A name starting with a dot is refused,
+                        which is also what keeps the profile unnominatable.
+  --download-to DIR     where nominated downloads land. Without it, nothing
+                        leaves the capsule however much is nominated.
+  --console-to FILE     save what the capsule printed before it is deleted.
+  --force               allow a nominated file to replace one at the
+                        destination.
+  --name NAME           name the capsule instead of generating one.
+  --timeout SECONDS     how long to let it run (default 300).
+
+Everything after `--` goes to the browser, with one substitution: the literal
+token {capsule} becomes the capsule's own directory, which is also where
+nominated files are looked for. Firefox's --screenshot writes nothing at all
+when given a relative filename, and a capsule's path cannot be typed in
+advance because this command generates it.
+
+  apex browser run --allow example.com:443 \
+      --download shot.png --download-to ~/results \
+      -- --screenshot {capsule}/shot.png https://example.com/
+
+docs/browser-capsule.md records what each property rests on and what is not
+built.
+EOF
+}
+
+# ── dispatch ────────────────────────────────────────────────────────────────
+case "${1:-}" in
+    run)              shift; cmd_run "$@" ;;
+    doctor)           shift; cmd_doctor "$@" ;;
+    help|--help|-h|"") usage ;;
+    *)                die "unknown command '$1' (apex browser --help)" ;;
+esac

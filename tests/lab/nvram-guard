@@ -1,0 +1,257 @@
+#!/usr/bin/env bash
+# ─────────────────────────────────────────────────────────────────────────────
+#  nvram-guard — run a command with the host's UEFI boot variables measured
+#  before and after, and fail loudly if they moved.
+#
+#  ═══ WHY THIS EXISTS ═══
+#
+#  2026-09-20, 09:02:17 AWST. A container `gallant_ride`
+#  (`localhost/apex-os:daily`, `--privileged --pid=host`) running
+#  `installer/apex-install` reached its bootloader step. bootupd did exactly
+#  what it is designed to do, to the wrong machine:
+#
+#      efibootmgr -b 0000 -B
+#      efibootmgr --create --disk /dev/loop1 --part 1 \
+#                 --loader '\EFI\fedora\shimx64.efi' --label 'APEX-OS'
+#
+#  The replacement entry named PARTUUID ee26313c-…, which is the ESP *inside
+#  the disk image file being built* and exists on no physical disk. Nothing on
+#  disk was damaged; the laptop simply had no bootable entry, and that was not
+#  discovered until the next power-on. Repaired from a live USB.
+#  See BOOT-BREAKAGE-2026-09-20.md.
+#
+#  Two details of that account are worth correcting here, because a guard aimed
+#  at the wrong shape guards nothing. It was NOT `bootc install to-disk
+#  --via-loopback`: the engine had already attached the image file itself, and
+#  bootc was handed the LOOP DEVICE `/dev/loop1` on a `to-filesystem` install.
+#  That run's log is /var/lab-scratch/apex-luks-live.oRDxu4/engine-stdout.txt —
+#  `Bootloader: grub`, `Installing bootloader via bootupd`, then the efibootmgr
+#  pair above. Nothing in either incident contained the string
+#  `--via-loopback`, so no scan for that literal would have seen either one.
+#  And neither run carried `--generic-image`: `set_nvram_args_for` did not
+#  exist in `apex-install` until 68855e92, that same evening.
+#
+#  ═══ THIS FILE IS DETECTION. IT IS ALSO THE ONLY THING THAT HAS EVER WORKED ═══
+#
+#  Be exact about this, because the first version of this comment was not.
+#  This file CANNOT PREVENT the write. It turns "found at the next power-on,
+#  hours later" into "found when the command returns" — the difference between
+#  a live USB and a five-minute restore from the before-snapshot.
+#
+#  Prevention lives in ONE place: `bootc install --generic-image`, which skips
+#  the firmware step. `tests/lab/bootc-install-lab` puts it in the argv and
+#  refuses to launch without it, and `installer/apex-install` passes it for a
+#  loop-backed target.
+#
+#  What this file is NOT paired with is an efivars tmpfs. That mask was called
+#  the primary guard here for about twelve hours and it prevents nothing:
+#  `bootc` takes `--pid=host` and nsenters into the HOST's mount namespace for
+#  the bootloader step (`strings /usr/bin/bootc`: `nsenter`, `/proc/1/ns/mnt`,
+#  `/proc/1/root`), and an unmasked privileged container shows ZERO entries
+#  under /sys/firmware/efi/efivars anyway — the host's efivarfs was never in
+#  the container's view to be masked. On 2026-09-20 an install launched at
+#  21:53:26 ran with the mask applied AND ITS PROMISE PRINTED — "this machine's
+#  UEFI boot entries are masked off and will not be touched" — and moved
+#  Boot0000 off the real ESP four log lines later. THIS FILE is what caught it,
+#  and the exact bytes were restored from the before-snapshot below. That is the second of the two times it has caught
+#  this defect; the mask has caught it zero times.
+#
+#  ═══ THREE VERDICTS, NEVER A BOOLEAN ═══
+#
+#  Same vocabulary as tests/chaos/lib.sh and apexd/apex/src/verify.rs, for the
+#  same reason: a measurement that could not be TAKEN is not a pass.
+#
+#      verified            both snapshots were taken, both are real, and they
+#                          are identical. The command changed no boot entry.
+#      nvram-changed       they differ. The diff is printed and the exit code
+#                          is 3, whatever the wrapped command returned.
+#      could-not-snapshot  UEFI is present but the snapshot is empty or has no
+#                          BootOrder line. The command is NOT RUN. An empty
+#                          snapshot compared against another empty snapshot is
+#                          "permission denied reported as absence", with a
+#                          boot path on the other end of it.
+#      could-not-run       no UEFI firmware on this host at all. There is no
+#                          NVRAM to damage; the command runs and the guard says
+#                          plainly that it measured nothing. It never prints
+#                          "unchanged" for a thing it never read.
+#
+#  ═══ TWO SOURCES, BECAUSE ONE TOOL'S FORMATTING IS NOT THE TRUTH ═══
+#
+#  Each snapshot records BOTH `efibootmgr -v` and a sha256 of every `Boot*`
+#  variable in efivarfs (Boot0000…, BootOrder, BootCurrent, BootNext). The
+#  second is what actually lives in NVRAM; the first is a rendering of it. A
+#  change that one misses, the other catches, and a tool that stops working
+#  shows up as a could-not-snapshot rather than as a quiet pass.
+#
+#  ═══ THIS FILE NEVER WRITES NVRAM ═══
+#
+#  `efibootmgr` is invoked with exactly one argument, `-v`. Nothing here opens
+#  an efivarfs file for writing. tests/test-bootc-install-guard.sh asserts both
+#  by recording every argv the guard hands to efibootmgr.
+#
+#  Usage:
+#      nvram-guard [--out DIR] [--label NAME] -- COMMAND [ARG...]
+#      nvram-guard --snapshot DIR          # take one snapshot, print verdict
+#
+#  Exit codes: the command's own, except
+#      2  usage error
+#      3  nvram-changed
+#      4  could-not-snapshot (the command did not run, or the after-snapshot
+#         could not be taken — either way the guard is not claiming a pass)
+# ─────────────────────────────────────────────────────────────────────────────
+set -euo pipefail
+
+# The one test seam. Same shape as APEX_BOOT_EFIVARS in apex-boot-health: the
+# suite points it at a fixture tree so both arms of the diff can be driven
+# without a real firmware anywhere near the run.
+EFI_ROOT="${APEX_NVRAM_EFI_ROOT:-/sys/firmware/efi}"
+
+OUT=""
+LABEL="nvram-guard"
+SNAPSHOT_ONLY=""
+CMD=()
+
+while [ $# -gt 0 ]; do
+    case "$1" in
+        --out)      OUT="${2:?--out needs a directory}"; shift 2 ;;
+        --label)    LABEL="${2:?--label needs a name}"; shift 2 ;;
+        --snapshot) SNAPSHOT_ONLY="${2:?--snapshot needs a directory}"; shift 2 ;;
+        --)         shift; CMD=("$@"); break ;;
+        -h|--help)  sed -n '2,100p' "$0"; exit 0 ;;
+        *)          printf 'nvram-guard: unknown argument %s\n' "$1" >&2; exit 2 ;;
+    esac
+done
+
+say()  { printf 'nvram-guard[%s]: %s\n' "$LABEL" "$*" >&2; }
+loud() { printf '\n!!! nvram-guard[%s]: %s\n' "$LABEL" "$*" >&2; }
+
+# ── one snapshot ────────────────────────────────────────────────────────────
+take_snapshot() {
+    local d="$1"
+    mkdir -p "$d"
+
+    # -v and nothing else. Ever. See the header.
+    if command -v efibootmgr >/dev/null 2>&1; then
+        efibootmgr -v > "$d/efibootmgr.txt" 2> "$d/efibootmgr.err" || true
+    else
+        : > "$d/efibootmgr.txt"
+        printf 'efibootmgr is not installed\n' > "$d/efibootmgr.err"
+    fi
+
+    # The independent source. A read that fails is RECORDED as unreadable
+    # rather than dropped, so a variable that becomes unreadable between the
+    # two snapshots shows up as a difference instead of vanishing from both
+    # sides of the comparison.
+    local f name h
+    {
+        for f in "$EFI_ROOT"/efivars/Boot*; do
+            [ -f "$f" ] || continue
+            name="${f##*/}"
+            if h="$(sha256sum < "$f" 2>/dev/null)"; then
+                printf '%s  %s\n' "${h%% *}" "$name"
+            else
+                printf 'UNREADABLE                                                        %s\n' "$name"
+            fi
+        done
+    } | sort -k2 > "$d/efivars.sha256"
+}
+
+# A snapshot is real when the rendering has a BootOrder line AND efivarfs gave
+# up at least one Boot* variable. Either half empty means the measurement did
+# not happen, and a measurement that did not happen is not a pass.
+snapshot_is_real() {
+    local d="$1"
+    [ -s "$d/efibootmgr.txt" ]              || return 1
+    grep -q '^BootOrder:' "$d/efibootmgr.txt" || return 1
+    [ -s "$d/efivars.sha256" ]              || return 1
+    return 0
+}
+
+snapshot_why_not() {
+    local d="$1"
+    [ -s "$d/efibootmgr.txt" ]  || { printf 'efibootmgr -v produced nothing (%s)' \
+                                        "$(tr -d '\n' < "$d/efibootmgr.err" 2>/dev/null)"; return; }
+    grep -q '^BootOrder:' "$d/efibootmgr.txt" \
+        || { printf 'efibootmgr -v output has no BootOrder: line'; return; }
+    printf 'no Boot* variables were readable under %s/efivars' "$EFI_ROOT"
+}
+
+# ── --snapshot: take one and say whether it is real ─────────────────────────
+if [ -n "$SNAPSHOT_ONLY" ]; then
+    if [ ! -d "$EFI_ROOT" ]; then
+        say "verdict: could-not-run — no UEFI firmware on this host ($EFI_ROOT absent)"
+        exit 0
+    fi
+    take_snapshot "$SNAPSHOT_ONLY"
+    if snapshot_is_real "$SNAPSHOT_ONLY"; then
+        say "verdict: snapshot taken — $(grep -c . "$SNAPSHOT_ONLY/efivars.sha256") Boot* variables, $SNAPSHOT_ONLY"
+        exit 0
+    fi
+    loud "verdict: could-not-snapshot — $(snapshot_why_not "$SNAPSHOT_ONLY")"
+    exit 4
+fi
+
+[ "${#CMD[@]}" -gt 0 ] || { printf 'nvram-guard: nothing to run. Usage: nvram-guard [--out DIR] -- COMMAND...\n' >&2; exit 2; }
+
+# ── where the pair is kept ──────────────────────────────────────────────────
+KEEP=1
+if [ -z "$OUT" ]; then
+    OUT="$(mktemp -d)"
+    KEEP=0
+fi
+mkdir -p "$OUT"
+BEFORE="$OUT/before"
+AFTER="$OUT/after"
+cleanup() { [ "$KEEP" = 1 ] || rm -rf "$OUT"; }
+trap cleanup EXIT
+
+# ── no firmware: run it, and say that nothing was measured ──────────────────
+if [ ! -d "$EFI_ROOT" ]; then
+    say "verdict: could-not-run — no UEFI firmware on this host ($EFI_ROOT absent)."
+    say "         The command runs unguarded. No boot variables were read, so"
+    say "         nothing below is a claim that they are unchanged."
+    rc=0
+    "${CMD[@]}" || rc=$?
+    exit "$rc"
+fi
+
+# ── before ──────────────────────────────────────────────────────────────────
+take_snapshot "$BEFORE"
+if ! snapshot_is_real "$BEFORE"; then
+    loud "verdict: could-not-snapshot — $(snapshot_why_not "$BEFORE")"
+    loud "The command was NOT run. A guard that cannot read NVRAM cannot tell you"
+    loud "afterwards whether NVRAM moved, and this is the exact run where that"
+    loud "matters: see BOOT-BREAKAGE-2026-09-20.md."
+    exit 4
+fi
+say "before: $(grep -c . "$BEFORE/efivars.sha256") Boot* variables, $(grep -c '^Boot[0-9A-Fa-f]' "$BEFORE/efibootmgr.txt") entries"
+
+# ── the command ─────────────────────────────────────────────────────────────
+rc=0
+"${CMD[@]}" || rc=$?
+
+# ── after ───────────────────────────────────────────────────────────────────
+take_snapshot "$AFTER"
+if ! snapshot_is_real "$AFTER"; then
+    loud "verdict: could-not-snapshot — the AFTER snapshot is not real: $(snapshot_why_not "$AFTER")"
+    loud "The command exited $rc. Whether it touched NVRAM is UNKNOWN; check"
+    loud "'efibootmgr -v' by hand before rebooting this machine."
+    KEEP=1
+    exit 4
+fi
+
+if cmp -s "$BEFORE/efibootmgr.txt" "$AFTER/efibootmgr.txt" \
+   && cmp -s "$BEFORE/efivars.sha256" "$AFTER/efivars.sha256"; then
+    say "verdict: verified — boot variables identical before and after (command exited $rc)"
+    exit "$rc"
+fi
+
+KEEP=1
+loud "verdict: nvram-changed — this command MOVED THE HOST'S BOOT ENTRIES."
+loud "Do not reboot this machine until 'efibootmgr -v' names a loader on a real disk."
+printf '\n--- efibootmgr -v ---\n' >&2
+diff -u "$BEFORE/efibootmgr.txt" "$AFTER/efibootmgr.txt" >&2 || true
+printf '\n--- efivarfs Boot* digests ---\n' >&2
+diff -u "$BEFORE/efivars.sha256" "$AFTER/efivars.sha256" >&2 || true
+printf '\nsnapshots kept at %s\n' "$OUT" >&2
+exit 3
