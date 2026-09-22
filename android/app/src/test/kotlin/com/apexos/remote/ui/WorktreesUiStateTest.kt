@@ -1,7 +1,10 @@
 package com.apexos.remote.ui
 
 import com.apexos.remote.core.agent.Project
+import com.apexos.remote.core.agent.ProjectRecord
 import com.apexos.remote.core.agent.WorktreeStatus
+import com.apexos.remote.ui.agent.workspaceLine
+import org.junit.jupiter.api.Assertions.assertNull
 import org.junit.jupiter.api.Assertions.assertEquals
 import org.junit.jupiter.api.Assertions.assertFalse
 import org.junit.jupiter.api.Assertions.assertTrue
@@ -80,5 +83,56 @@ class WorktreesUiStateTest {
         )
         assertEquals(2, state.rows.size)
         assertTrue(state.rows.any { it.name == "orphan" })
+    }
+
+    // ---- the workspace, joined from the project records (P1-056) ----------
+
+    @Test
+    fun `a project finds its record by slug and never by name`() {
+        // Two checkouts of one repository share a name and are different
+        // projects. On this developer's machine that is the normal case:
+        // `/var/tmp/apex-work` holds over a hundred worktrees of `apex-os`. A
+        // join on the name would show one project's workspace on another's
+        // heading.
+        val state = WorktreesUiState(
+            projects = Project.group(
+                listOf(
+                    row("apex", agent = false, slug = "apex-aaaa"),
+                    row("apex", agent = false, slug = "apex-bbbb"),
+                ),
+            ),
+            records = listOf(
+                ProjectRecord(name = "apex", slug = "apex-aaaa", capsule = "rust"),
+                ProjectRecord(name = "apex", slug = "apex-bbbb", capsule = "node"),
+            ),
+        )
+        assertEquals(2, state.projects.size)
+        assertEquals("rust", state.recordFor(state.projects[0])!!.capsule)
+        assertEquals("node", state.recordFor(state.projects[1])!!.capsule)
+    }
+
+    @Test
+    fun `a group with no slug matches no record rather than the first one`() {
+        // A listing from a daemon older than `WorktreeStatus.slug`. There is
+        // no evidence about which record the group is, so the honest answer is
+        // none — and the heading then omits the line instead of attributing
+        // somebody else's workspace to it.
+        val state = WorktreesUiState(
+            projects = Project.group(listOf(row("apex", agent = false))),
+            records = listOf(ProjectRecord(name = "apex", slug = "apex-aaaa", capsule = "rust")),
+        )
+        assertNull(state.recordFor(state.projects[0]))
+    }
+
+    @Test
+    fun `the workspace line says bound or unbound, and says nothing when unasked`() {
+        assertEquals(
+            "workspace rust · rust, kotlin",
+            workspaceLine(ProjectRecord(capsule = "rust", languages = listOf("rust", "kotlin"))),
+        )
+        assertEquals("no workspace bound", workspaceLine(ProjectRecord()))
+        // The case that must stay silent: no record at all. "This project has
+        // no workspace" and "this app could not ask" are different facts.
+        assertNull(workspaceLine(null))
     }
 }
