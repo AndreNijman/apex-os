@@ -87,6 +87,63 @@ pub enum UserCmd {
         #[command(subcommand)]
         cmd: GuestCmd,
     },
+    /// Switch to another account without logging out (P2-016 criterion 1).
+    ///
+    /// Needs no root. Switching to somebody who is already logged in
+    /// activates their session and is instant; switching to somebody who is
+    /// not opens a login screen on a spare VT, which is a second greetd
+    /// instance and is the only part that needs privilege — one argument-free
+    /// NOPASSWD rule, granted to every local account rather than to `wheel`,
+    /// because a standard account being able to switch users is the criterion.
+    ///
+    /// The session being left is locked first and the lock is WAITED for.
+    Switch {
+        #[command(subcommand)]
+        cmd: SwitchCmd,
+    },
+}
+
+#[derive(Subcommand)]
+pub enum SwitchCmd {
+    /// Who can be switched to, and what the switch would do for each.
+    ///
+    /// The KIND column is the operation rather than logind's session class:
+    /// `session` is an activate and is instant, `greeter` is a login screen
+    /// already open on a spare VT, `account` is one that has to be started.
+    List {
+        #[arg(long)]
+        json: bool,
+    },
+    /// Switch to a named account.
+    To {
+        #[arg(value_name = "NAME")]
+        name: String,
+        /// Do not lock this session first.
+        ///
+        /// The default waits for logind's `LockedHint` to turn true and
+        /// refuses the switch if it never does, because `loginctl
+        /// lock-session` is a request and the locker is what answers it. This
+        /// flag is for a machine whose session has no locker; it leaves a
+        /// desktop anyone who switches back can reach, and says so.
+        #[arg(long)]
+        no_lock: bool,
+        /// Print what would be run and change nothing.
+        #[arg(long)]
+        plan: bool,
+    },
+    /// Go to a login screen without naming anybody — the "Switch User" button.
+    ///
+    /// A login screen already open on a spare VT is activated rather than
+    /// doubled: greetd loops its default session, so after somebody logs out
+    /// on the switch VT there is a greeter sitting there to go back to.
+    Greeter {
+        /// Do not lock this session first. See `to --no-lock`.
+        #[arg(long)]
+        no_lock: bool,
+        /// Print what would be run and change nothing.
+        #[arg(long)]
+        plan: bool,
+    },
 }
 
 #[derive(Subcommand)]
@@ -173,6 +230,44 @@ pub fn argv(cmd: UserCmd) -> Vec<String> {
             GuestCmd::Enable { name, plan } => guest_argv("enable", name, plan),
             GuestCmd::Disable { name, plan } => guest_argv("disable", name, plan),
         },
+        UserCmd::Switch { cmd } => {
+            let mut v = vec!["switch".to_string()];
+            match cmd {
+                SwitchCmd::List { json } => {
+                    v.push("list".to_string());
+                    if json {
+                        v.push("--json".to_string());
+                    }
+                }
+                SwitchCmd::To {
+                    name,
+                    no_lock,
+                    plan,
+                } => {
+                    v.push("to".to_string());
+                    v.push(name);
+                    switch_flags(&mut v, no_lock, plan);
+                }
+                SwitchCmd::Greeter { no_lock, plan } => {
+                    v.push("greeter".to_string());
+                    switch_flags(&mut v, no_lock, plan);
+                }
+            }
+            v
+        }
+    }
+}
+
+/// `--no-lock` is the one worth building in a named function: it is the
+/// difference between a switch that leaves a locked desktop behind and one
+/// that leaves an unlocked one, and it is a flag nobody looks at again once
+/// the command works.
+fn switch_flags(v: &mut Vec<String>, no_lock: bool, plan: bool) {
+    if no_lock {
+        v.push("--no-lock".to_string());
+    }
+    if plan {
+        v.push("--plan".to_string());
     }
 }
 
@@ -271,6 +366,52 @@ mod tests {
         // And a verb the engine does not have is refused by clap, here, rather
         // than reaching a privileged program as an unknown word.
         assert!(Harness::try_parse_from(["user", "guest", "wipe", "apex-guest"]).is_err());
+    }
+
+    #[test]
+    fn a_switch_locks_unless_somebody_asked_it_not_to() {
+        // The `--admin` of this subcommand. `--no-lock` leaking into the
+        // plain form is not a compile error and not a visible failure: every
+        // switch still works, the seat still moves, and the desktop left
+        // behind is reachable by whoever switches back — which is the whole
+        // thing the locking is for.
+        let a = build(&["switch", "to", "bob"]);
+        assert_eq!(a, vec!["switch", "to", "bob"]);
+        assert!(!a.iter().any(|x| x == "--no-lock"));
+    }
+
+    #[test]
+    fn no_lock_reaches_the_engine_when_it_is_asked_for() {
+        // The counterpart, for the reason `admin_is_the_only_way_to_reach_wheel`
+        // exists: without it the assertion above passes with the flag deleted
+        // from the builder, and the override silently does nothing.
+        assert_eq!(
+            build(&["switch", "to", "bob", "--no-lock"]),
+            vec!["switch", "to", "bob", "--no-lock"]
+        );
+        assert_eq!(
+            build(&["switch", "greeter", "--no-lock"]),
+            vec!["switch", "greeter", "--no-lock"]
+        );
+    }
+
+    #[test]
+    fn the_switch_verbs_are_a_closed_set() {
+        assert_eq!(build(&["switch", "list"]), vec!["switch", "list"]);
+        assert_eq!(
+            build(&["switch", "list", "--json"]),
+            vec!["switch", "list", "--json"]
+        );
+        assert_eq!(build(&["switch", "greeter"]), vec!["switch", "greeter"]);
+        assert_eq!(
+            build(&["switch", "to", "bob", "--plan"]),
+            vec!["switch", "to", "bob", "--plan"]
+        );
+        // `switch` with no verb, and a verb the engine does not have, are both
+        // refused here rather than reaching the engine as an unknown word.
+        assert!(Harness::try_parse_from(["user", "switch"]).is_err());
+        assert!(Harness::try_parse_from(["user", "switch", "activate", "bob"]).is_err());
+        assert!(Harness::try_parse_from(["user", "switch", "to"]).is_err());
     }
 
     #[test]
