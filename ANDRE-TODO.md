@@ -332,7 +332,7 @@ OS holds, APEX cannot reset it.
 
 ## Separately, and not on this list
 
-- Back up `/var/home/andre/apex-android-signing` — all four files, two places,
-  neither of them GitHub. If that directory is lost, **every install of the
-  Android app in the world becomes permanently unupgradeable.**
+- ~~Back up `/var/home/andre/apex-android-signing`~~ — **DONE 2026-09-22, Andre
+  confirmed.** If that directory is ever lost, every install of the Android app
+  in the world becomes permanently unupgradeable, so keep the copies current.
 - Plug the Pixel 10a in when convenient so the signed release APK can go on.
