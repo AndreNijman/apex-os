@@ -109,9 +109,22 @@ NVGUARD="../tests/lab/nvram-guard"
 NETINSTALL_REF="${APEX_LIVE_PATHS_REF:-ghcr.io/andrenijman/apex-os:daily}"
 
 # TEST-ONLY kargs appended to the installed bootloader entry so the guest can
-# be read at all. Identical to the string installer/test-installer-luks-boot.sh
-# feeds the engine through APEX_LUKS_EXTRA_KARGS.
-BOOT_KARGS="console=ttyS0,115200 console=tty1 systemd.log_target=kmsg systemd.show_status=1 loglevel=7 rd.plymouth=0 plymouth.enable=0 rd.timeout=120"
+# be read at all.
+#
+# THE ORDER OF THE TWO console= ARGUMENTS IS LOAD-BEARING, and it is the
+# opposite of installer/test-installer-luks-boot.sh's. Measured 2026-09-22 on a
+# partition-mode install that booted perfectly and was reported as a failure:
+# the LAST console= on the kernel command line becomes /dev/console, and
+# systemd-getty-generator puts the serial getty there. With
+# "console=ttyS0 console=tty1" — the luks-boot spelling — /dev/console is tty1,
+# NO serial getty is ever generated, and "login:" cannot appear on the serial
+# line no matter how well the machine booted. That suite only ever looks for
+# "Switching root", so it never had to care; this one reads a login prompt, so
+# it does.
+#
+# ttyS0 last => /dev/console is the serial line => serial-getty@ttyS0 => a real
+# "login:". Kernel messages still reach both consoles either way.
+BOOT_KARGS="console=tty1 console=ttyS0,115200 systemd.log_target=kmsg systemd.show_status=1 loglevel=7 rd.plymouth=0 plymouth.enable=0 rd.timeout=120"
 
 # 24 GiB is comfortably over the engine's 16 GB whole-disk floor and leaves
 # ~21 GiB for APEX beside a 512 MiB ESP and a 2 GiB data partition.
@@ -122,6 +135,38 @@ PART_DISK_SIZE=24G
 DISK_DISK_SIZE=40G
 
 WANT_PATHS="both"
+# ── WHY THE DEFAULT FIXTURE CARRIES A BIOS BOOT PARTITION ────────────────────
+# Measured on 2026-09-22, not reasoned: a Windows-EXACT fixture (ESP + data +
+# free space, no bios_grub — which is what a GPT disk prepared by Windows Setup
+# actually looks like) makes the install FAIL here, and the reason is the lab,
+# not the installer.
+#
+#   /usr/sbin/grub2-install: error: filesystem `btrfs' doesn't support blocklists.
+#   error: boot data installation failed: installing component BIOS to device
+#          /dev/loop1: installing GRUB on /dev/loop1
+#
+# The chain, read out of the tools rather than guessed:
+#   * every loopback install in this lab MUST pass bootc `--generic-image` — it
+#     is the one layer that prevents the 2026-09-20 host-NVRAM incident, and
+#     apex-install adds it from set_nvram_args_for for a loop-backed target;
+#   * bootc's own help for that flag: "All bootloader types will be installed";
+#   * so bootc does NOT hand bootupd `--auto`, and bootupd installs the BIOS
+#     component as well as the ESP one;
+#   * `grub2-install --target i386-pc` on a GPT disk with no bios_grub partition
+#     has nowhere to embed core.img and falls back to blocklists, which btrfs
+#     refuses. Hard failure, and the whole install fails with it.
+#
+# On real hardware the engine passes NO `--generic-image` (that branch is only
+# taken for a loop-backed disk), bootc hands bootupd `--auto`, and on a
+# UEFI-booted machine bootupd installs the ESP component ONLY — the BIOS step
+# never runs and this failure cannot occur. `--auto` is present exactly once in
+# the bootc binary; `--generic-image` is documented above.
+#
+# A 1 MiB bios_grub partition compensates for the lab-only flag and changes
+# nothing about what this path actually measures: whether the neighbouring OS's
+# partitions, its ESP files and the partition table survive, and whether the
+# result boots. `--fixture windows` reproduces the red above on demand.
+FIXTURE="windows+biosboot"
 DO_BOOT=1
 KEEP=0
 BOOT_TIMEOUT=600
@@ -129,6 +174,7 @@ BOOT_TIMEOUT=600
 while [ $# -gt 0 ]; do
   case "$1" in
     --path)         WANT_PATHS="${2:?--path needs partition|disk|both}"; shift 2 ;;
+    --fixture)      FIXTURE="${2:?--fixture needs windows|windows+biosboot}"; shift 2 ;;
     --no-boot)      DO_BOOT=0; shift ;;
     --keep)         KEEP=1; shift ;;
     --boot-timeout) BOOT_TIMEOUT="${2:?--boot-timeout needs seconds}"; shift 2 ;;
@@ -137,6 +183,10 @@ while [ $# -gt 0 ]; do
   esac
 done
 case "$WANT_PATHS" in partition|disk|both) : ;; *) echo "--path must be partition, disk or both" >&2; exit 2 ;; esac
+case "$FIXTURE" in
+  windows|windows+biosboot) : ;;
+  *) echo "--fixture must be windows or windows+biosboot" >&2; exit 2 ;;
+esac
 
 pass=0; fail=0
 ok()   { printf 'PASS  %-58s %s\n' "$1" "${2:-}"; pass=$((pass+1)); }
@@ -272,6 +322,35 @@ attach() {  # $1 = image file — sets LOOP, and proves it is a loop device
   [ -e "/sys/class/block/$(basename "$l")/loop/backing_file" ] \
     || die "refusing to continue: the kernel does not consider $l loop-backed."
   LOOP="$l"
+}
+
+# The partition table, with the LOOP DEVICE NAME normalised out of it.
+# `sfdisk -d` names the device on its `device:` line and at the head of every
+# partition line. This suite detaches the loop and re-attaches it between the
+# install check and the after-first-boot check, and `losetup -f` hands out
+# whatever is free THEN — on a box where other sessions attach loops too, an
+# unchanged table can come back spelled /dev/loop2 and read as a rewritten one.
+# What Windows' BCD depends on is start=, size= and uuid=, and those are what
+# stay in the comparison.
+# The first 440 bytes of sector 0 — the MBR BOOT CODE region, before the disk
+# signature and the partition entries. `sfdisk -d` dumps the partition table and
+# is blind to it, so a bootloader that rewrites sector 0 and nothing else reads
+# as "the partition table is unchanged".
+#
+# It MATTERS on a dual-boot disk and it is measured rather than assumed: with a
+# bios_grub partition present, bootupd's BIOS component succeeds, and
+# `grub2-install --target i386-pc` writes GRUB's boot.img here. sgdisk leaves
+# this region zeroed when it writes a protective MBR, so "all zero" and "not all
+# zero" distinguish the two cases with no before-snapshot needed.
+mbr_bootcode_sha() {  # $1 = block device
+  sudo -n dd if="$1" bs=440 count=1 status=none 2>/dev/null | sha256sum | awk '{print $1}'
+}
+# sha256 of 440 zero bytes — what an untouched protective MBR's boot code is.
+MBR_ZERO_SHA=$(head -c 440 /dev/zero | sha256sum | awk '{print $1}')
+
+sfdisk_norm() {  # $1 = output file
+  sudo -n sfdisk -d "$LOOP" 2>/dev/null | sed "s|${LOOP}|LOOPDEV|g" > "$1"
+  chmod 644 "$1" 2>/dev/null
 }
 
 raw_sha() {   # $1 = block device — sha256 of every byte of it
@@ -486,6 +565,19 @@ python3 /w/plain-boot-drive.py --work /w --name '"$1"' \
   else
     bad "[$1] the installed system reached a login" "verdict=$verdict — see $WORK/serial-$1.log"
   fi
+  # A greeter that cannot open a compositor in a GPU-less guest exits cleanly
+  # and is restarted for as long as the guest runs. That is a property of
+  # running APEX in this lab, not of the install — but it is ALSO the reason
+  # multi-user.target and graphical.target are never announced, so it is
+  # reported rather than left for the next reader to rediscover.
+  local loops units
+  loops=$(grep -m1 '^scheduled-restart-jobs=' "$bootout" | cut -d= -f2-)
+  units=$(grep -m1 '^restart-looping-units=' "$bootout" | cut -d= -f2-)
+  if [ -n "$loops" ] && [ "$loops" != 0 ]; then
+    info "[$1] FINDING: $loops restart(s) of ${units:-unknown} during the boot window."
+    info "[$1]   systemd does not announce a target while a unit in it is cycling, which"
+    info "[$1]   is why graphical.target/multi-user.target may be absent on a booted guest."
+  fi
   sudo -n chmod 644 "$WORK/serial-$1.log" 2>/dev/null
   return 0
 }
@@ -506,15 +598,33 @@ run_partition_path() {
   # an ESP at all, and a "close enough" GUID would make this suite prove that a
   # guard it never reached was satisfied.
   sudo -n sgdisk --zap-all "$LOOP" >/dev/null 2>&1
-  sudo -n sgdisk -n1:0:+512M -t1:C12A7328-F81F-11D2-BA4B-00A0C93EC93B -c1:EFI-SYSTEM \
-                 -n2:0:+2G   -t2:EBD0A0A2-B9E5-4433-87C0-68B6B72699C7 -c2:WINDATA \
-                 -n3:0:0     -t3:0FC63DAF-8483-4772-8E79-3D69D8477DE4 -c3:APEXROOT \
-                 "$LOOP" >/dev/null 2>&1 || die "sgdisk could not rig the multi-OS disk"
+  # The type GUIDs are the real ones: the engine reads p_esp's to decide whether
+  # it is an ESP at all, and a "close enough" GUID would make this suite prove
+  # that a guard it never reached was satisfied.
+  if [ "$FIXTURE" = "windows+biosboot" ]; then
+    # See the FIXTURE comment at the top for why the 1 MiB bios_grub is here and
+    # what it compensates for. It is 21686148-…, the same type the engine's own
+    # whole-disk path creates.
+    sudo -n sgdisk -n1:0:+1M   -t1:21686148-6449-6E6F-744E-656564454649 -c1:BIOS-BOOT \
+                   -n2:0:+512M -t2:C12A7328-F81F-11D2-BA4B-00A0C93EC93B -c2:EFI-SYSTEM \
+                   -n3:0:+2G   -t3:EBD0A0A2-B9E5-4433-87C0-68B6B72699C7 -c3:WINDATA \
+                   -n4:0:0     -t4:0FC63DAF-8483-4772-8E79-3D69D8477DE4 -c4:APEXROOT \
+                   "$LOOP" >/dev/null 2>&1 || die "sgdisk could not rig the multi-OS disk"
+    I_ESP=2; I_DATA=3; I_ROOT=4
+  else
+    sudo -n sgdisk -n1:0:+512M -t1:C12A7328-F81F-11D2-BA4B-00A0C93EC93B -c1:EFI-SYSTEM \
+                   -n2:0:+2G   -t2:EBD0A0A2-B9E5-4433-87C0-68B6B72699C7 -c2:WINDATA \
+                   -n3:0:0     -t3:0FC63DAF-8483-4772-8E79-3D69D8477DE4 -c3:APEXROOT \
+                   "$LOOP" >/dev/null 2>&1 || die "sgdisk could not rig the multi-OS disk"
+    I_ESP=1; I_DATA=2; I_ROOT=3
+    info "fixture=windows (Windows-EXACT: no bios_grub). The install is EXPECTED to fail"
+    info "  at bootupd's BIOS component for a LAB reason — see the FIXTURE comment."
+  fi
   sudo -n partprobe "$LOOP" >/dev/null 2>&1
   sudo -n udevadm settle --timeout=30 >/dev/null 2>&1
-  P_ESP=$(part_node "$LOOP" 1)  || die "no ESP node appeared on $LOOP"
-  P_DATA=$(part_node "$LOOP" 2) || die "no data node appeared on $LOOP"
-  P_ROOT=$(part_node "$LOOP" 3) || die "no root node appeared on $LOOP"
+  P_ESP=$(part_node "$LOOP" "$I_ESP")   || die "no ESP node appeared on $LOOP"
+  P_DATA=$(part_node "$LOOP" "$I_DATA") || die "no data node appeared on $LOOP"
+  P_ROOT=$(part_node "$LOOP" "$I_ROOT") || die "no root node appeared on $LOOP"
 
   sudo -n mkfs.vfat -F32 -n EFISYS "$P_ESP" >/dev/null 2>&1 || die "mkfs.vfat failed on $P_ESP"
   sudo -n mkfs.ext4 -F -L WINDATA "$P_DATA" >/dev/null 2>&1 || die "mkfs.ext4 failed on $P_DATA"
@@ -544,9 +654,7 @@ run_partition_path() {
   sudo -n umount "$MNT"
 
   DATA_SHA_BEFORE=$(raw_sha "$P_DATA")
-  # shellcheck disable=SC2024  # the redirect is the shell's; $WORK is chown'd to it
-  sudo -n sfdisk -d "$LOOP" > "$WORK/sfdisk-before.txt" 2>/dev/null
-  sudo -n chmod 644 "$WORK/sfdisk-before.txt"
+  sfdisk_norm "$WORK/sfdisk-before.txt"
   printf '%s\n' "$ESP_MS_BEFORE" > "$WORK/esp-microsoft-before.txt"
   info "rigged: ESP=$P_ESP data=$P_DATA (sha ${DATA_SHA_BEFORE:0:16}…) free=$P_ROOT"
 
@@ -648,7 +756,7 @@ EOF"
     # installed APEX mounts that shared ESP read-write at every boot.
     hdr "PATH 1 — what the other operating system looks like after APEX has BOOTED once"
     attach "$IMG"
-    P_ESP=$(part_node "$LOOP" 1); P_DATA=$(part_node "$LOOP" 2); P_ROOT=$(part_node "$LOOP" 3)
+    P_ESP=$(part_node "$LOOP" "$I_ESP"); P_DATA=$(part_node "$LOOP" "$I_DATA"); P_ROOT=$(part_node "$LOOP" "$I_ROOT")
     assert_neighbour_intact "after-first-boot"
   fi
   release_loop
@@ -665,14 +773,27 @@ assert_neighbour_intact() {  # $1 = when
     bad "[partition/$when] the neighbour's data partition is byte-identical" \
         "${DATA_SHA_BEFORE:0:16}… -> ${now:0:16}…"
   fi
-  # shellcheck disable=SC2024  # the redirect is the shell's; $WORK is chown'd to it
-  sudo -n sfdisk -d "$LOOP" > "$WORK/sfdisk-$when.txt" 2>/dev/null
-  sudo -n chmod 644 "$WORK/sfdisk-$when.txt"
+  sfdisk_norm "$WORK/sfdisk-$when.txt"
   if diff -u "$WORK/sfdisk-before.txt" "$WORK/sfdisk-$when.txt" > "$WORK/sfdisk-diff-$when.txt" 2>&1; then
     ok "[partition/$when] the partition table is unchanged" "PARTUUIDs intact — Windows' BCD still resolves"
   else
     bad "[partition/$when] the partition table is unchanged" "see $WORK/sfdisk-diff-$when.txt"
     sed 's/^/    /' "$WORK/sfdisk-diff-$when.txt"
+  fi
+  # Sector 0, which sfdisk -d cannot see. Reported as a FINDING, not asserted
+  # either way: which answer is correct depends on whether bootupd's BIOS
+  # component ran, and that is decided by the lab-only --generic-image.
+  local mbr_now
+  mbr_now=$(mbr_bootcode_sha "$LOOP")
+  if [ "$mbr_now" = "$MBR_ZERO_SHA" ]; then
+    info "[partition/$when] FINDING: the MBR boot code (sector 0, first 440 B) is still all zero"
+    info "[partition/$when]   bootupd's BIOS component wrote nothing there."
+  else
+    info "[partition/$when] FINDING: the MBR boot code (sector 0, first 440 B) is NOT zero — ${mbr_now:0:12}…"
+    info "[partition/$when]   grub2-install --target i386-pc wrote boot.img into it. On a real"
+    info "[partition/$when]   Windows disk this replaces the protective-MBR boot code. UEFI"
+    info "[partition/$when]   firmware never executes it, so Windows still boots; and on real"
+    info "[partition/$when]   hardware the BIOS component does not run at all (no --generic-image)."
   fi
   sudo -n mkdir -p "$ESPMNT"
   if sudo -n mount -o ro "$P_ESP" "$ESPMNT" 2>/dev/null; then
@@ -900,6 +1021,7 @@ EOF"
 # ═════════════════════════════════════════════════════════════════════════════
 printf 'image (partition path): %s\n' "$IMAGE"
 printf 'registry ref (disk path): %s\n' "$NETINSTALL_REF"
+printf 'partition fixture: %s\n' "$FIXTURE"
 printf 'boot phase: %s\n' "$([ "$DO_BOOT" = 1 ] && echo "yes, ${BOOT_TIMEOUT}s timeout" || echo "SKIPPED (--no-boot)")"
 
 case "$WANT_PATHS" in

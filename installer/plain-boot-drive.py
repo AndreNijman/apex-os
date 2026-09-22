@@ -43,6 +43,8 @@ import time
 # The markers, in the order they should appear. Each is a string the GUEST
 # emits; none is produced by this script or by the suite that calls it.
 SWITCH_MARKER = "Switching root"
+# ORDER IS THE REPORTING PRIORITY: the first of these found in the serial log is
+# what `reached-by` names, so the strongest evidence comes first.
 REACHED_MARKERS = [
     ("login-prompt", "login:"),
     ("graphical-target", "Reached target Graphical Interface"),
@@ -51,6 +53,43 @@ REACHED_MARKERS = [
     # configurations; both spellings are the same event.
     ("multiuser-target", "Reached target multi-user.target"),
     ("graphical-target", "Reached target graphical.target"),
+    # ── getty.target, added 2026-09-22 after a REAL boot went unrecognised ──
+    # Measured on an APEX partition-mode install that booted perfectly: none of
+    # the five markers above ever appeared, and the disk was nonetheless up with
+    # a working system. Two independent reasons, both properties of the image
+    # rather than of the install:
+    #
+    #  * APEX's greeter is greetd, and greetd's configured session is `sway`,
+    #    a full wlroots compositor (/etc/greetd/config.toml says why: cage does
+    #    not give quickshell wlr-layer-shell). The qemu line below has
+    #    `-nodefaults -display none` and NO display adapter, so there is no DRM
+    #    device for sway to open. It exits, greetd exits, and greetd.service
+    #    (Restart=always, RestartSec=1) is restarted — thirteen times in 143
+    #    seconds on the run that prompted this. systemd does not announce
+    #    multi-user.target or graphical.target while a unit in them is still
+    #    cycling, so neither line is ever printed on a machine that is, in every
+    #    other sense, booted. greetd also carries Conflicts=getty@tty1.service,
+    #    which is why no tty1 login appears either.
+    #  * no serial getty exists to print "login:" — see the note in
+    #    test-installer-live-paths.sh's BOOT_KARGS about which console= wins.
+    #
+    # getty.target is systemd's own statement, in its own words ("Login
+    # Prompts"). It is a MUCH WEAKER claim than the four above and it is listed
+    # in WEAK_MARKERS rather than here, because a target with nothing wanting it
+    # is reached trivially and instantly: measured at 3.9 s on a guest where
+    # greetd's Conflicts=getty@tty1 had removed the only getty and no serial
+    # getty was generated. A driver that STOPPED there would be reporting "a
+    # user could log in" off a target that had nothing to start — the
+    # gate-that-inspects-nothing shape. So it is recorded, reported under its
+    # own name, and never ends the wait.
+]
+
+# Recorded and reported, but NOT terminal: finding one of these does not end the
+# boot window. If the timeout expires with only these, the verdict says so in
+# those words rather than claiming a login was reached.
+WEAK_MARKERS = [
+    ("getty-target", "Reached target getty.target"),
+    ("getty-target", "Reached target Login Prompts"),
 ]
 # Failures worth stopping on rather than waiting out the whole timeout.
 FAIL_MARKERS = [
@@ -107,6 +146,17 @@ def main():
            "-drive", "if=virtio,format=raw,file=%s,media=disk" % a.disk,
            "-debugcon", "file:%s" % dbg, "-global", "isa-debugcon.iobase=0x402",
            "-serial", "file:%s" % serial,
+           # A DRM device and a keyboard, so the guest can reach a real login.
+           # Not cosmetic, and not about seeing anything — `-display none` still
+           # shows nobody anything. APEX's greeter is greetd running sway, a
+           # wlroots compositor, and wlroots needs a DRM node; with `-nodefaults`
+           # and no display adapter there is none, so sway exits, greetd is
+           # restarted forever, and graphical.target is NEVER announced on a
+           # guest that is otherwise completely booted. virtio-gpu-pci gives
+           # logind a master-of-seat device for seat0; usb-kbd gives it an input
+           # device, since a seat with no input is not one a user could log in at.
+           "-device", "virtio-gpu-pci",
+           "-device", "qemu-xhci", "-device", "usb-kbd",
            "-display", "none", "-nodefaults"]
 
     err = open(qerr, "wb")
@@ -114,6 +164,7 @@ def main():
     deadline = time.time() + a.timeout
     switched_at = None
     reached_by = ""
+    weak_by = ""
     verdict = "no-verdict"
     try:
         # ── the pivot ────────────────────────────────────────────────────────
@@ -135,6 +186,9 @@ def main():
             raise SystemExit
 
         # ── somewhere a user could log in ───────────────────────────────────
+        # The wait ends only on a STRONG marker. A weak one is remembered so the
+        # timeout can report what was actually seen, and is never mistaken for
+        # the strong one.
         while time.time() < deadline:
             txt = read(serial)
             for name, marker in REACHED_MARKERS:
@@ -144,6 +198,9 @@ def main():
             if reached_by:
                 verdict = "booted"
                 break
+            for name, marker in WEAK_MARKERS:
+                if marker in txt and not weak_by:
+                    weak_by = name
             hit = [n for n, m in FAIL_MARKERS if m in txt]
             if hit:
                 verdict = "pivoted-then-%s" % hit[0]
@@ -153,7 +210,8 @@ def main():
                 break
             time.sleep(0.5)
         else:
-            verdict = "pivoted-but-never-reached-a-login"
+            verdict = ("pivoted-and-reached-%s-but-no-login" % weak_by) if weak_by \
+                      else "pivoted-but-never-reached-a-login"
     except SystemExit:
         pass
     finally:
@@ -170,8 +228,20 @@ def main():
     print("qemu-rc=%s" % proc.returncode)
     print("switched-root=%s" % ("yes" if SWITCH_MARKER in txt else "no"))
     print("reached-by=%s" % (reached_by or "none"))
+    print("weak-marker=%s" % (weak_by or "none"))
+    for name, marker in WEAK_MARKERS:
+        print("weak[%s][%s]=%s" % (name, marker, "yes" if marker in txt else "no"))
     for name, marker in REACHED_MARKERS:
         print("marker[%s][%s]=%s" % (name, marker, "yes" if marker in txt else "no"))
+    # A unit that keeps cycling is why a booted guest can fail to announce
+    # multi-user.target, so the count is REPORTED rather than left to be
+    # rediscovered from the serial log by hand.
+    restarts = txt.count("Scheduled restart job")
+    print("scheduled-restart-jobs=%d" % restarts)
+    if restarts:
+        import re as _re
+        svcs = sorted(set(_re.findall(r"([\w@.\-]+)\.service: Scheduled restart job", txt)))
+        print("restart-looping-units=%s" % (",".join(svcs) or "unknown"))
     print("seconds-to-pivot=%s" % (
         "%.0f" % (switched_at - (deadline - a.timeout)) if switched_at else "n/a"))
     print("serial-bytes=%d" % len(txt))
