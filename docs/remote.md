@@ -128,3 +128,48 @@ Every verb that talks to `apex-remoted` fails with the remedy rather than a
 connection error: it names the socket it tried and tells you to run
 `systemctl --user enable --now apex-remoted` — which is what `apex remote
 enable` does for you.
+
+## What a paired device may ask, and the one thing it may not
+
+`apex-remoted` is a forwarder, not a filter. Its `control()` refuses exactly
+two verbs on the control channel — `attach` and `receive`, because both take
+the connection over and would wedge it — and hands everything else to
+`apex-agentd` under the origin `claude-remote-control`. So what a phone can do
+is decided by `apex-agentd`'s own per-verb rules, in one place, and not by a
+denylist here that would drift from them.
+
+Two verbs exist for the phone's pickers, and they are deliberately cheap:
+
+| verb | what it answers | cost |
+| --- | --- | --- |
+| `projects` | every project the runtime remembers: root, name, slug, detected toolchains, when it was last opened, and the capsule (§8) it is bound to | one small JSON record per project; no subprocess |
+| `profiles` | one row per adapter: its program, whether that program is on **this machine's** `PATH`, whether the adapter needs a program named by the caller, and whether its profile (§5) is installed here | a `stat` per table entry and per `PATH` element |
+| `worktrees` | per-worktree git status for every remembered project, or for one slug | runs `git worktree list`, a rev walk and `merge-tree --write-tree` in each project — seconds on a large machine |
+
+A client builds a picker from the first two and asks the third only for the
+project the user chose. That split is the reason they are separate verbs.
+
+`projects` and `profiles` carry **counts and paths the machine already
+publishes through `worktrees`, and no content**. A profile row never carries
+the configured model, a plugin, a marketplace, an MCP server, a skill or a
+credential — `apex agent profile doctor` has all of that and none of it crosses
+this wire. `secret` is a count of credential-class entries that exist, never a
+name and never a value.
+
+**`decide` is refused from any origin that is not local, and that is the
+design.** Every verb in the privilege vocabulary is a root capability
+(`request.rs`'s `Verb::capability`, all eight), so §7's row for both columns
+ends at a human at this machine. The check sits *before* the pending lookup, so
+a paired device is told `permission_denied` whether or not the request id
+exists — the refusal cannot be used to discover which requests are open on
+somebody's computer. A phone can see pending requests, see what was decided,
+and **revoke** a grant of either kind; revoking carries no origin check,
+because revocation only ever removes authority.
+
+The exception that exists is a different verb with a different shape.
+`renew_system_grant` accepts a non-local caller when the owner has written
+`origin = remote_elevation_allowed`, and what that opt-in costs is a
+`second_factor`: a WebAuthn assertion from a key the owner enrolled with `apex
+agent key add`, over a nonce the daemon issued and bound to that one session,
+grant kind and window. Remote approval of a root operation, if it is ever
+built, has to be that shape and not a relaxed origin check.

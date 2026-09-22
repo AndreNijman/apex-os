@@ -1,0 +1,29 @@
+{
+  "reply": "projects",
+  "projects": [
+    {
+      "root": "/var/home/andre/Projects/apex/apex-os",
+      "name": "apex-os",
+      "slug": "apex-os-1a2b3c4d",
+      "languages": ["container", "kotlin", "rust"],
+      "last_opened": 1758499200,
+      "capsule": "rust"
+    },
+    {
+      "root": "/var/home/andre/Projects/apex/apex-shell",
+      "name": "apex-shell",
+      "slug": "apex-shell-5e6f7a8b",
+      "languages": ["qml"],
+      "last_opened": 1758412800,
+      "capsule": null
+    },
+    {
+      "root": "/var/home/andre/Projects/scratch",
+      "name": "scratch",
+      "languages": [],
+      "slug": "scratch-9c0d1e2f",
+      "last_opened": 0,
+      "capsule": null
+    }
+  ]
+}

@@ -985,6 +985,66 @@ pub enum Request {
         #[serde(default)]
         project: Option<String>,
     },
+    /// Every project the runtime remembers, most recently opened first.
+    ///
+    /// The cheap half of [`Request::Worktrees`], and a separate verb for
+    /// exactly that reason. Answering `worktrees` runs git in every remembered
+    /// project — `git worktree list`, a rev walk, and `merge-tree
+    /// --write-tree`, which writes objects — which is seconds on a machine
+    /// with a few large checkouts. This one reads
+    /// [`crate::project::list`]: one small JSON record per project off
+    /// `$XDG_STATE_HOME/apex/agent/projects`, no subprocess at all. So a
+    /// client that wants a *picker* — "which project shall I start an agent
+    /// in" — asks this, and asks `worktrees` only once the user has chosen
+    /// one.
+    ///
+    /// ## What it discloses, and why that is not a widening
+    ///
+    /// Absolute repository roots, directory names, detected toolchains and a
+    /// capsule binding. `worktrees` already answers with the root and the path
+    /// of every worktree under it, with no origin check, so nothing here is
+    /// reachable to a caller that could not already reach it — this is the
+    /// same set, without the git. A caller that could learn a path from this
+    /// and not from `worktrees` does not exist.
+    ///
+    /// ## It has a write in it, stated rather than discovered
+    ///
+    /// [`crate::project::list`] deletes the record of a project whose
+    /// directory has gone. That is a write, performed while answering a read,
+    /// and a remote caller can cause it. It is bounded to forgetting a
+    /// registration for a directory that is no longer there — the same thing
+    /// the next local `apex agent run` would do — and `worktrees` already
+    /// calls the same function.
+    Projects,
+    /// The agent profiles (§5) this runtime understands, and how each stands
+    /// on this machine.
+    ///
+    /// One row per adapter [`Request::Hello`] lists, so a client can render
+    /// the picker it already has without a second vocabulary. What the row
+    /// adds to the bare id is the four things a client cannot derive and has
+    /// had to guess:
+    ///
+    /// * whether the adapter's **program is on this machine's `PATH`** — a
+    ///   phone that offers `codex` on a machine with no `codex` offers a
+    ///   button whose only outcome is the daemon's refusal;
+    /// * whether the adapter **needs a program named by the caller**
+    ///   (`generic`), which until now every client hard-coded as
+    ///   `id == "generic"` because the daemon published no flag;
+    /// * whether APEX **describes a profile** for it at all, and whether that
+    ///   profile is **installed here**;
+    /// * how many parts of it are reusable, mixed, machine-local and secret.
+    ///
+    /// ## No content, only counts — and that is the audit
+    ///
+    /// [`crate::profile::doctor`]'s sections name the configured model, the
+    /// enabled plugins, the marketplaces and the MCP servers, and its
+    /// `problems` name skill directories and plugins. None of that crosses
+    /// this wire. The reply carries counts by class and a home-relative
+    /// directory name, which is what a picker needs and is the whole of it. In
+    /// particular `secret` is a COUNT of credential-class entries present and
+    /// never a name and never a value — `profile::plan_export` is where the
+    /// values are kept out of a bundle, and this verb does not go near them.
+    Profiles,
     /// Read the tail of a session's transcript.
     Logs {
         id: u32,
@@ -1568,6 +1628,23 @@ pub enum Response {
     Worktrees {
         worktrees: Vec<crate::worktree::WorktreeStatus>,
     },
+    /// Every remembered project, most recently opened first.
+    ///
+    /// A struct variant for `Sessions`' reason: serde's internally-tagged
+    /// representation cannot serialize a newtype variant wrapping a sequence,
+    /// and it fails at runtime rather than at compile time.
+    ///
+    /// [`crate::project::Project`] is sent as it is stored rather than
+    /// reshaped into a wire twin. A twin would be a second definition of the
+    /// same record to keep in step, and the stored one is already the shape
+    /// `apex project list --json` prints.
+    Projects {
+        projects: Vec<crate::project::Project>,
+    },
+    /// One row per adapter: its program, and its profile as it stands here.
+    Profiles {
+        profiles: Vec<crate::profile::ProfileSummary>,
+    },
     Logs {
         id: u32,
         /// UTF-8 lossy transcript tail.
@@ -1994,6 +2071,27 @@ mod tests {
                 rp_id: "apex-agent.localhost".into(),
                 expires_ms: 1_700_000_000_000,
                 instructions: "fido2-assert -G -w -p -i /dev/stdin /dev/hidraw0".into(),
+            },
+            // Two more sequence-carrying struct variants, here for the
+            // reason the note above this list gives: an internally-tagged
+            // newtype around a Vec serialises to an error at RUNTIME, and the
+            // daemon would discover it by dropping the connection.
+            Response::Projects { projects: vec![] },
+            Response::Projects {
+                projects: vec![crate::project::Project {
+                    root: "/home/t/p".into(),
+                    name: "p".into(),
+                    slug: "p-1a2b".into(),
+                    languages: vec!["rust".into(), "kotlin".into()],
+                    last_opened: 1_700_000_000,
+                    capsule: Some("rust".into()),
+                }],
+            },
+            Response::Profiles { profiles: vec![] },
+            Response::Profiles {
+                profiles: crate::profile::summarise_adapters(std::path::Path::new(
+                    "/nonexistent-home-for-a-round-trip",
+                )),
             },
             Response::ToolDecision { deny: None },
             Response::ToolDecision {
@@ -2454,6 +2552,13 @@ mod tests {
             Request::Worktrees {
                 project: Some("apex-os".into()),
             },
+            // Unit variants, so the round trip is testing that the tag alone
+            // is a whole request — `{"cmd":"projects"}` with no other key. A
+            // client that sent `{"cmd":"projects","project":null}` instead
+            // would still parse, but the shape asserted here is the one the
+            // Android builder emits and the one the fixture carries.
+            Request::Projects,
+            Request::Profiles,
         ];
 
         for v in variants {

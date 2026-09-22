@@ -79,6 +79,7 @@ use std::collections::BTreeMap;
 use std::io;
 use std::path::{Path, PathBuf};
 
+use serde::{Deserialize, Serialize};
 use serde_json::{Map, Value};
 
 /// Whether a piece of profile state can be carried to another machine.
@@ -2028,6 +2029,146 @@ pub fn summary(profile: &Profile, home: &Path) -> BTreeMap<String, Value> {
     out
 }
 
+/// One adapter, and its profile as it stands on this machine, for the wire.
+///
+/// ## Why this is per-ADAPTER and not per-profile
+///
+/// [`PROFILES`] has one entry. [`crate::adapter::ADAPTERS`] has several, and
+/// the adapter id is what [`crate::protocol::RunRequest::agent`] takes and what
+/// every client already renders. A listing keyed on profiles would answer
+/// "claude" to a client asking which agents it may start and leave the other
+/// five unexplained; this answers for all of them and says, per row, whether
+/// APEX describes a profile for it.
+///
+/// ## What it deliberately does not carry
+///
+/// No file names, no configured model, no plugin, marketplace, MCP server or
+/// skill name, and no credential — not the value and not the name.
+/// [`doctor`]'s `sections` and `problems` carry several of those and are not
+/// reachable from here. What crosses is counts by [`Class`], the adapter's own
+/// compiled-in strings, and a home-relative directory (`~/.claude`).
+///
+/// `secret` is a count of credential-class entries that exist, which is the
+/// one number a person needs to answer "is this profile carrying a login on
+/// that machine". It cannot be turned back into a name: [`CLAUDE`]'s secret
+/// entries are compiled in, so anyone who can read this file already knows
+/// which paths the count is over.
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+pub struct ProfileSummary {
+    /// Adapter id — the value `RunRequest.agent` takes.
+    pub agent: String,
+    /// Human-facing name, from the adapter.
+    pub display: String,
+    /// The binary this adapter runs, or `None` for `generic`, which runs
+    /// whatever the caller names.
+    pub program: Option<String>,
+    /// Whether that binary resolves on the daemon's own `PATH`.
+    ///
+    /// The daemon's, because the daemon is what spawns it — a client cannot
+    /// derive this and a client that assumed the agent was installed offered a
+    /// button whose only outcome was a refusal after a round trip.
+    ///
+    /// `false` for `generic`, which has no program of its own; pair it with
+    /// [`ProfileSummary::command_required`] rather than reading it alone.
+    pub program_found: bool,
+    /// Whether this adapter needs a program named by the caller.
+    ///
+    /// The flag clients have been hard-coding as `id == "generic"` because
+    /// none was published. `session::start` branches on exactly this: the
+    /// generic adapter takes `args.first()` as its program and the session is
+    /// refused when there is none. Published so a client stops guessing, and
+    /// so an adapter added later that behaves the same way needs no client
+    /// release.
+    pub command_required: bool,
+    /// Whether APEX has a profile description (§5) for this adapter.
+    ///
+    /// `false` is not a fault: it means this runtime cannot say what the
+    /// agent's configuration directory contains, so it neither mounts it
+    /// selectively nor exports it — not that the agent is unusable.
+    pub described: bool,
+    /// The profile directory, home-relative (`~/.claude`), when described.
+    pub root: Option<String>,
+    /// Whether that directory exists on this machine.
+    pub installed: bool,
+    /// Entries present here, by class. All four are zero when `described` is
+    /// false, because there is no table to count over.
+    pub reusable: usize,
+    pub mixed: usize,
+    pub machine_local: usize,
+    /// Credential-class entries present. A count; never a name, never a value.
+    pub secret: usize,
+}
+
+/// Does `program` resolve on `PATH`?
+///
+/// Deliberately not `which(1)`: this is called while answering a request, and
+/// spawning a process per adapter to answer a picker is several processes for
+/// something four `stat` calls settle. A name containing a separator is taken
+/// as a path and checked directly, which is what `execvp` does.
+fn on_path(program: &str) -> bool {
+    if program.is_empty() {
+        return false;
+    }
+    if program.contains('/') {
+        return is_executable(Path::new(program));
+    }
+    let Some(path) = std::env::var_os("PATH") else {
+        return false;
+    };
+    std::env::split_paths(&path).any(|dir| is_executable(&dir.join(program)))
+}
+
+/// Every adapter, summarised for [`crate::protocol::Response::Profiles`].
+///
+/// Cheap enough to answer on a screen open, which is the requirement that
+/// shaped it: no directory walk (so no counting of the thousands of transcript
+/// files under `~/.claude/projects`), no JSON parsed out of the user's
+/// settings, and no subprocess. One `symlink_metadata` per table entry and one
+/// per `PATH` element per adapter.
+pub fn summarise_adapters(home: &Path) -> Vec<ProfileSummary> {
+    crate::adapter::ADAPTERS
+        .iter()
+        .map(|a| {
+            let described = by_agent(a.id);
+            let present = |class: Class| -> usize {
+                described
+                    .map(|p| {
+                        p.entries
+                            .iter()
+                            .filter(|e| {
+                                e.class == class
+                                    && p.entry_path(home, e).symlink_metadata().is_ok()
+                            })
+                            .count()
+                    })
+                    .unwrap_or(0)
+            };
+            ProfileSummary {
+                agent: a.id.to_string(),
+                display: described.map(|p| p.display).unwrap_or(a.display).to_string(),
+                program: (!a.program.is_empty()).then(|| a.program.to_string()),
+                program_found: on_path(a.program),
+                // The adapter with no program of its own is the adapter whose
+                // program the caller must name. Derived from the compiled-in
+                // table rather than from the id, so it stays true of the next
+                // adapter like it without a client release — and
+                // `the_generic_adapter_is_the_one_that_needs_a_command` pins
+                // that this still selects `generic` today.
+                command_required: a.program.is_empty(),
+                described: described.is_some(),
+                root: described.map(|p| display_home(&p.root_dir(home), home)),
+                installed: described
+                    .map(|p| p.root_dir(home).is_dir())
+                    .unwrap_or(false),
+                reusable: present(Class::Reusable),
+                mixed: present(Class::Mixed),
+                machine_local: present(Class::MachineLocal),
+                secret: present(Class::Secret),
+            }
+        })
+        .collect()
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -3056,5 +3197,196 @@ mod tests {
                 e.role
             );
         }
+    }
+
+    // ── the wire summary (P1-054) ───────────────────────────────────────────
+
+    #[test]
+    fn every_adapter_gets_a_row_so_a_picker_can_render_all_of_them() {
+        // The listing is keyed on ADAPTERS and not on PROFILES, which is the
+        // whole design decision. PROFILES has one entry; a client asking which
+        // agents it may start would get "claude" and no account of the other
+        // five, which is worse than no verb at all because it reads as a
+        // complete answer.
+        let f = Fixture::new("summary-rows");
+        let rows = summarise_adapters(&f.home);
+        assert_eq!(rows.len(), crate::adapter::ADAPTERS.len());
+        for a in crate::adapter::ADAPTERS {
+            assert!(
+                rows.iter().any(|r| r.agent == a.id),
+                "no row for the {} adapter",
+                a.id
+            );
+        }
+    }
+
+    #[test]
+    fn the_generic_adapter_is_the_one_that_needs_a_command() {
+        // The flag a phone had to hard-code as `id == "generic"` because the
+        // daemon published none, and the gap a device found: the Start screen
+        // offered `generic`, the daemon takes `args.first()` as its program,
+        // and the button's only possible outcome was a refusal after a round
+        // trip. Derived from the compiled-in table rather than from the id, so
+        // this asserts BOTH that the derivation still picks generic today and
+        // that nothing else is picked by accident.
+        let f = Fixture::new("summary-generic");
+        let rows = summarise_adapters(&f.home);
+        let needing: Vec<&str> = rows
+            .iter()
+            .filter(|r| r.command_required)
+            .map(|r| r.agent.as_str())
+            .collect();
+        assert_eq!(needing, vec!["generic"]);
+
+        let generic = rows.iter().find(|r| r.agent == "generic").unwrap();
+        assert_eq!(generic.program, None, "generic carries no program of its own");
+        assert!(
+            !generic.program_found,
+            "an adapter with no program cannot have been found on PATH"
+        );
+
+        // And every other row states a program, so a client that shows one has
+        // something to show.
+        for r in rows.iter().filter(|r| !r.command_required) {
+            assert!(r.program.is_some(), "{} states no program", r.agent);
+        }
+    }
+
+    #[test]
+    fn a_described_profile_reports_its_directory_and_what_is_in_it() {
+        let f = Fixture::new("summary-described");
+        let rows = summarise_adapters(&f.home);
+        let claude = rows.iter().find(|r| r.agent == "claude").unwrap();
+
+        assert!(claude.described, "claude has a profile description");
+        assert_eq!(claude.root.as_deref(), Some("~/.claude"));
+        assert!(claude.installed, "the fixture built the directory");
+        assert!(claude.reusable > 0, "no reusable entry was counted");
+        assert!(
+            claude.secret > 0,
+            "the fixture writes .credentials.json and daemon/, and neither was counted"
+        );
+
+        // An adapter APEX has no profile table for says so, rather than
+        // reporting an empty profile — which would read as "installed and
+        // carrying nothing" for an agent whose configuration this runtime
+        // simply cannot describe.
+        let other = rows
+            .iter()
+            .find(|r| !r.described)
+            .expect("at least one adapter has no profile description");
+        assert_eq!(other.root, None);
+        assert!(!other.installed);
+        assert_eq!(
+            (other.reusable, other.mixed, other.machine_local, other.secret),
+            (0, 0, 0, 0),
+            "counts over a table that does not exist must be zero, not invented"
+        );
+    }
+
+    #[test]
+    fn an_absent_profile_directory_is_reported_and_not_guessed() {
+        // A home with nothing in it. `installed` false and every count zero —
+        // the answer a fresh machine must give, and the one a client renders
+        // as "claude has no profile here yet" rather than as a parse failure.
+        let empty = std::env::temp_dir().join(format!(
+            "apex-profile-empty-{}-{}",
+            std::process::id(),
+            std::time::SystemTime::now()
+                .duration_since(std::time::UNIX_EPOCH)
+                .map(|d| d.subsec_nanos())
+                .unwrap_or(0)
+        ));
+        std::fs::create_dir_all(&empty).unwrap();
+        let rows = summarise_adapters(&empty);
+        let claude = rows.iter().find(|r| r.agent == "claude").unwrap();
+        assert!(claude.described, "the description is compiled in, not read");
+        assert!(!claude.installed);
+        assert_eq!(
+            (claude.reusable, claude.mixed, claude.machine_local, claude.secret),
+            (0, 0, 0, 0)
+        );
+        std::fs::remove_dir_all(&empty).ok();
+    }
+
+    #[test]
+    fn the_summary_carries_counts_and_never_content() {
+        // THE AUDIT, as a test rather than as a paragraph. `doctor`'s sections
+        // name the configured model, the enabled plugins, the marketplaces and
+        // the MCP servers; its `problems` name skill directories and plugins;
+        // and `settings.json`'s `env` block is where a token lives. The
+        // fixture puts a real-looking value in each of those places. None of
+        // them may appear in the serialised reply.
+        //
+        // Asserted on the SERIALISED form, because that is what crosses the
+        // wire — a field added later that carried one of these would fail here
+        // without anyone remembering to extend the list.
+        let f = Fixture::new("summary-audit");
+        let text = serde_json::to_string(&summarise_adapters(&f.home)).unwrap();
+        for leak in [
+            // credential values
+            "oauth",
+            "ghp_realvalue",
+            "sk-real",
+            "tok-real",
+            // configuration content
+            "opus",
+            "p@mkt",
+            "acme/mkt",
+            "statusline.sh",
+            "someone@example",
+            // names of things inside the profile
+            "SKILL.md",
+            "demo",
+            "go.md",
+            "chat.jsonl",
+            "some-project",
+            ".credentials.json",
+        ] {
+            assert!(
+                !text.contains(leak),
+                "the profiles reply carries {leak:?}, which is content and not a count:\n{text}"
+            );
+        }
+
+        // And the home directory itself never crosses: the root is stated
+        // home-relative, so a reply cannot be used to learn the user's name.
+        assert!(
+            !text.contains(&f.home.display().to_string()),
+            "the reply names an absolute home path:\n{text}"
+        );
+        assert!(text.contains("~/.claude"), "the root was not stated at all");
+    }
+
+    #[test]
+    fn on_path_finds_an_executable_and_refuses_the_rest() {
+        let dir = std::env::temp_dir().join(format!(
+            "apex-profile-path-{}-{}",
+            std::process::id(),
+            std::time::SystemTime::now()
+                .duration_since(std::time::UNIX_EPOCH)
+                .map(|d| d.subsec_nanos())
+                .unwrap_or(0)
+        ));
+        std::fs::create_dir_all(&dir).unwrap();
+        let bin = dir.join("apex-fake-agent");
+        std::fs::write(&bin, "#!/bin/sh\n").unwrap();
+
+        // Not executable yet. A file on PATH that cannot be executed is not an
+        // installed agent, and reporting it as one is the failure this guards:
+        // the client would offer the button and the daemon would refuse it.
+        assert!(!is_executable(&bin));
+
+        use std::os::unix::fs::PermissionsExt;
+        std::fs::set_permissions(&bin, std::fs::Permissions::from_mode(0o755)).unwrap();
+        assert!(is_executable(&bin));
+
+        // A name with a separator is a path and is checked directly, which is
+        // what execvp does — not searched for under every PATH element.
+        assert!(on_path(&bin.display().to_string()));
+        assert!(!on_path(&dir.join("not-there").display().to_string()));
+        assert!(!on_path(""), "an empty program name is not on PATH");
+
+        std::fs::remove_dir_all(&dir).ok();
     }
 }

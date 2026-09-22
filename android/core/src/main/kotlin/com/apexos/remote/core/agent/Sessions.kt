@@ -379,18 +379,60 @@ object Agentd {
      * `apex-agentd` decides this on the adapter's **id**, not on a capability
      * it reports: `session.rs:135` reads
      * `req.args.first().filter(|_| adapter.id == "generic")` and refuses when
-     * that is empty. So the id is what this pins on, because that is the rule
-     * the daemon actually applies — and the daemon publishes no flag that
-     * would let a client ask instead.
+     * that is empty. That is the rule the daemon actually applies, and the
+     * line above this one used to end "and the daemon publishes no flag that
+     * would let a client ask instead".
+     *
+     * **It does now.** `Request::Profiles` answers with
+     * [AgentProfile.commandRequired] per adapter, derived from the compiled-in
+     * adapter table, so an adapter added later that behaves the same way needs
+     * no release of this app. Pass [profiles] whenever the screen has them.
+     *
+     * The id rule is kept as the fallback and not as the answer, because the
+     * machine on the other end may be older than the verb: a daemon that
+     * cannot be asked still branches on `generic`, and a client that treated
+     * "no profiles listing" as "no adapter needs a command" would offer the
+     * button that could only fail — which is the defect a device found.
      *
      * `Hello.agents` lists `generic` on every runtime, so a phone that offered
      * it without asking for a command offered a button that could only fail.
      * It did, until a device measured it.
      */
-    fun commandIsRequired(agent: String?): Boolean = agent == GENERIC_ADAPTER
+    fun commandIsRequired(agent: String?, profiles: List<AgentProfile> = emptyList()): Boolean {
+        val stated = profiles.firstOrNull { it.agent == agent }
+        return stated?.commandRequired ?: (agent == GENERIC_ADAPTER)
+    }
 
     /** The adapter id that carries no program. */
     const val GENERIC_ADAPTER = "generic"
+
+    /**
+     * Every project the machine remembers.
+     *
+     * The cheap half of [worktrees], and the one a picker asks. `worktrees`
+     * runs git in every remembered project — including `merge-tree
+     * --write-tree`, which writes objects — and that cost is the documented
+     * reason the Start screen offered a free-text directory instead of a
+     * picker. This reads one small JSON record per project and runs no
+     * subprocess, so a screen may ask it on open and ask `worktrees` only for
+     * the project the user then chose.
+     *
+     * Takes no arguments. Not even an optional slug: narrowing a listing of
+     * three to one saves nothing that is worth a second shape on the wire, and
+     * `worktrees` already has the narrow form for the expensive question.
+     */
+    fun projects(): String = """{"cmd":"projects"}"""
+
+    /**
+     * Every adapter, with its program and its profile as they stand there.
+     *
+     * The verb that lets a Start screen say, before the tap rather than after
+     * it, that an agent is not installed on that machine — [AgentProfile] has
+     * the account of why each field is worth a round trip. Also carries
+     * [AgentProfile.commandRequired], which this app previously derived from
+     * the adapter id because nothing published it.
+     */
+    fun profiles(): String = """{"cmd":"profiles"}"""
 
     /**
      * Start a session.
@@ -652,6 +694,28 @@ object Agentd {
             ListSerializer(WorktreeStatus.serializer()),
             array,
         )
+    }
+
+    /**
+     * The remembered projects.
+     *
+     * An empty list is a real answer — a machine where nobody has opened a
+     * project yet — and arrives as `{"reply":"projects","projects":[]}`, not
+     * as an error. A caller must render it as "nothing opened there yet" and
+     * never as a failure; the version-skew case is the separate one
+     * [isTooOld] names, and it arrives as an `AgentError`.
+     */
+    fun readProjects(reply: String): List<ProjectRecord> {
+        val obj = require(reply, "projects")
+        val array = obj["projects"] ?: return emptyList()
+        return json.decodeFromJsonElement(ListSerializer(ProjectRecord.serializer()), array)
+    }
+
+    /** One row per adapter the machine can launch. See [AgentProfile]. */
+    fun readProfiles(reply: String): List<AgentProfile> {
+        val obj = require(reply, "profiles")
+        val array = obj["profiles"] ?: return emptyList()
+        return json.decodeFromJsonElement(ListSerializer(AgentProfile.serializer()), array)
     }
 
     /**

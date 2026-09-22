@@ -1,0 +1,47 @@
+{
+  "reply": "profiles",
+  "profiles": [
+    {
+      "agent": "claude",
+      "display": "Claude Code",
+      "program": "claude",
+      "program_found": true,
+      "command_required": false,
+      "described": true,
+      "root": "~/.claude",
+      "installed": true,
+      "reusable": 5,
+      "mixed": 2,
+      "machine_local": 6,
+      "secret": 2
+    },
+    {
+      "agent": "codex",
+      "display": "Codex CLI",
+      "program": "codex",
+      "program_found": false,
+      "command_required": false,
+      "described": false,
+      "root": null,
+      "installed": false,
+      "reusable": 0,
+      "mixed": 0,
+      "machine_local": 0,
+      "secret": 0
+    },
+    {
+      "agent": "generic",
+      "display": "Generic",
+      "program": null,
+      "program_found": false,
+      "command_required": true,
+      "described": false,
+      "root": null,
+      "installed": false,
+      "reusable": 0,
+      "mixed": 0,
+      "machine_local": 0,
+      "secret": 0
+    }
+  ]
+}
