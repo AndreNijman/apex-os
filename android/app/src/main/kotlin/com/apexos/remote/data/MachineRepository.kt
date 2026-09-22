@@ -70,6 +70,27 @@ class MachineRepository(context: Context) {
      */
     fun crashConsentBlocking(): Boolean = storage.load().settings.crashReports
 
+    /**
+     * The store, read blocking.
+     *
+     * Exists for the same reason [crashConsentBlocking] does, and the same
+     * script enforces it: `PushReceiver` is a `BroadcastReceiver` with no
+     * coroutine scope of its own, so it cannot await [load] — and reaching for
+     * `AppStorage(context.filesDir)` there would put a second name for the
+     * storage location in the tree. `InsecureStorageTest` walks that directory
+     * and accounts for every byte, which is evidence only while this file is
+     * the single thing that says where it is.
+     */
+    fun loadBlocking(): MachineStore = storage.load()
+
+    /**
+     * Read-modify-write the store, blocking, for the same callers as
+     * [loadBlocking]. The block runs under [AppStorage.update]'s own
+     * serialisation rather than a second one here.
+     */
+    fun updateBlocking(block: (MachineStore) -> MachineStore): MachineStore =
+        storage.update(block)
+
     /** The last report, for the screen that offers to share it. */
     suspend fun crash(): String? = withContext(Dispatchers.IO) { storage.loadCrash() }
 

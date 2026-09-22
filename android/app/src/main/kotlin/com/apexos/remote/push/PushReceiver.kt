@@ -6,7 +6,6 @@ import android.content.Context
 import android.content.Intent
 import android.content.pm.PackageManager
 import android.os.Build
-import com.apexos.remote.core.AppStorage
 import com.apexos.remote.core.Base64Url
 import com.apexos.remote.core.PairedMachine
 import com.apexos.remote.core.PushRegistration
@@ -14,6 +13,7 @@ import com.apexos.remote.core.agent.Alert
 import com.apexos.remote.core.agent.Push
 import com.apexos.remote.core.agent.UnifiedPush
 import com.apexos.remote.ui.Notifier
+import com.apexos.remote.data.MachineRepository
 
 /**
  * Where a UnifiedPush distributor delivers (P1-058).
@@ -78,8 +78,8 @@ class PushReceiver : BroadcastReceiver() {
             acknowledge(context, token, it)
         }
         val bytes = intent.getByteArrayExtra(UnifiedPush.EXTRA_BYTES_MESSAGE) ?: return
-        val storage = AppStorage(context.filesDir)
-        val store = storage.load()
+        val storage = MachineRepository(context)
+        val store = storage.loadBlocking()
         val machine = store.machines.firstOrNull { it.push?.token == token } ?: return
         val registration = machine.push ?: return
         val key = Base64Url.decode(registration.key) ?: return
@@ -96,7 +96,7 @@ class PushReceiver : BroadcastReceiver() {
         // between the two shows the notification at most twice rather than
         // going on accepting the same envelope for ever.
         if (body.seq <= registration.lastSeq) return
-        storage.update { current ->
+        storage.updateBlocking { current ->
             val m = current.find(machine.deviceId) ?: return@update current
             val seen = m.push ?: return@update current
             current.with(m.copy(push = seen.copy(lastSeq = maxOf(seen.lastSeq, body.seq))))
@@ -131,7 +131,7 @@ class PushReceiver : BroadcastReceiver() {
         UnifiedPush.ackFor(intent.getStringExtra(UnifiedPush.EXTRA_MESSAGE_ID))?.let {
             acknowledge(context, token, it)
         }
-        AppStorage(context.filesDir).update { store ->
+        MachineRepository(context).updateBlocking { store ->
             val machine = store.machines.firstOrNull { it.push?.token == token } ?: return@update store
             val was = machine.push ?: return@update store
             if (was.endpoint == endpoint) return@update store
@@ -168,7 +168,7 @@ class PushReceiver : BroadcastReceiver() {
     private fun unregistered(context: Context, token: String) = clear(context, token)
 
     private fun clear(context: Context, token: String) {
-        AppStorage(context.filesDir).update { store ->
+        MachineRepository(context).updateBlocking { store ->
             val machine = store.machines.firstOrNull { it.push?.token == token } ?: return@update store
             store.with(machine.copy(push = null))
         }
@@ -237,7 +237,7 @@ object Distributors {
      * a guess is better than not acknowledging at all.
      */
     fun forToken(context: Context, token: String): String? {
-        val stored = AppStorage(context.filesDir).load().machines
+        val stored = MachineRepository(context).loadBlocking().machines
             .firstOrNull { it.push?.token == token }
             ?.push
             ?.distributor
@@ -305,12 +305,12 @@ object PushRegistrar {
      *   distributor and push is therefore not available on this phone.
      */
     fun registerIfNeeded(context: Context, machine: PairedMachine): String? {
-        val storage = AppStorage(context.filesDir)
-        storage.load().find(machine.deviceId)?.push?.let { return it.token }
+        val storage = MachineRepository(context)
+        storage.loadBlocking().find(machine.deviceId)?.push?.let { return it.token }
         val distributor = Distributors.chosen(context) ?: return null
         val token = UnifiedPush.newToken()
         var created = false
-        storage.update { store ->
+        storage.updateBlocking { store ->
             val current = store.find(machine.deviceId) ?: return@update store
             // Somebody registered between the read above and this write. Their
             // token is the live one; ours has been broadcast to nobody.
@@ -334,7 +334,7 @@ object PushRegistrar {
                 ),
             )
         }
-        if (!created) return storage.load().find(machine.deviceId)?.push?.token
+        if (!created) return storage.loadBlocking().find(machine.deviceId)?.push?.token
         val register = Intent(UnifiedPush.ACTION_REGISTER).apply {
             `package` = distributor
             putExtra(UnifiedPush.EXTRA_TOKEN, token)
@@ -368,7 +368,7 @@ object PushRegistrar {
      * rings, with nothing anywhere saying so.
      */
     fun sent(context: Context, machine: PairedMachine, endpoint: String) {
-        AppStorage(context.filesDir).update { store ->
+        MachineRepository(context).updateBlocking { store ->
             val current = store.find(machine.deviceId) ?: return@update store
             val push = current.push ?: return@update store
             store.with(current.copy(push = push.copy(sentEndpoint = endpoint)))
@@ -386,15 +386,15 @@ object PushRegistrar {
      * thing on this phone that can end that.
      */
     fun forget(context: Context, machine: PairedMachine) {
-        val storage = AppStorage(context.filesDir)
+        val storage = MachineRepository(context)
         // From storage and not from the argument, for the reason
         // [registerIfNeeded] gives: a screen's `PairedMachine` predates every
         // write the receiver has made, so a phone that registered since the
         // list was loaded would have its token read as null and the
         // distributor would never be told to stop.
-        val token = storage.load().find(machine.deviceId)?.push?.token
+        val token = storage.loadBlocking().find(machine.deviceId)?.push?.token
         val distributor = token?.let { Distributors.forToken(context, it) }
-        storage.update { store ->
+        storage.updateBlocking { store ->
             val current = store.find(machine.deviceId) ?: return@update store
             store.with(current.copy(push = null))
         }
