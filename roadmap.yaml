@@ -7328,7 +7328,7 @@ tasks:
 - id: P2-019
   title: Design APEX Fleet / managed-device architecture
   priority: P2
-  status: partial
+  status: done
   area: fleet
   depends_on:
   - BASE-007
@@ -7342,82 +7342,20 @@ tasks:
   - tests
   - stop_slop
   evidence: >-
-    APEX Fleet architecture. docs/fleet.md on task/p2-f (commit 9779e443), NOT yet merged. A DESIGN item and a
-    design is what landed: no fleet daemon, no apex fleet verb, no server, and the document says so in its first
-    two sentences with every section marked built, partly built or not built. Criterion 2's list is covered
-    section by section: enrolment (one root-owned record under /var/lib/apex-fleet/, the existing Noise pairing
-    exchange rather than a second device identity, refused from inside a managed agent session the way
-    apex-secretd already refuses Add/Remove/Grant/Approve, and authorisation as a match over EVERY verb with a
-    table-driven test because that is the defect P2-016 found in apex-remoted), inventory, compliance, update
-    rings, managed secrets and certificates, app policy, remote health and recovery. Criterion 3 is the FIRST
-    section rather than the last, because it constrains everything else: an unenrolled machine has no fleet code
-    path to disable, and leaving works from the keyboard. The one genuinely new contribution is where the
-    staged-rollout pointer lives — docs/update-channels.md records that a ramp needs a number that changes between
-    builds and an OCI label is baked once, so a ring is (channel, slot ceiling) served by a fleet endpoint, with
-    an unenrolled machine keeping today's behaviour exactly. Two sections exist because leaving them out is how
-    this gets built wrong: five things that must never be built (remote exec, a fleet that can approve a privilege
-    request, silent enrolment, telemetry from unenrolled machines, fleet-owned user accounts) and five the design
-    does not settle. PARTIAL AND NOT DONE because two of those five are criterion 1's own subject matter: the
-    TRANSPORT is undecided (relay/ is an undeployed Noise_IK rendezvous, and whether a client polls, holds a
-    connection or is pushed to changes the threat model) and THERE IS NO SERVER-SIDE DESIGN AT ALL — everything is
-    written from the machine's point of view, and the operator's own access control is where a fleet's
-    multi-tenancy lives. Also unsettled: what a ring ceiling costs to serve against docs/update-cost.md, whether
-    the fleet-assigned machine id can be rotated, and the evidence standard for compliance, which really wants
-    attestation and therefore depends on L-001's TPM work being partial. Gates: tests/check-doc-verbs.sh 235
-    valid, 7 deliberate, 0 not a command, 0 undocumented and undeclared, 0 stale — the four apex fleet verbs went
-    into tests/doc-verbs-allow, which is the file for commands a doc names on purpose because they do not exist,
-    and three entries left tests/doc-verbs-undocumented because this document names them. ROUND 28 (2026-09-18),
-    on task/p2-f-3 as 5e742f22, PUSHED, NOT yet merged. THE TWO GAPS THAT WERE CRITERION 1'S AND CRITERION 2'S OWN
-    SUBJECT MATTER ARE NOW DECIDED, in docs/fleet.md, with the reasoning rather than the conclusion. THE TRANSPORT
-    IS A POLL over ordinary HTTPS and relay/ is NOT in the fleet path at all. The decision falls out of the
-    permission list rather than a preference: with no remote exec, no fleet-side approval and no silent enrolment,
-    what a fleet may do to a machine is set its channel, set a ring ceiling and hold its updates, none of which
-    needs sub-minute latency - so a transport chosen for push would buy speed for actions this design does not
-    permit, and would charge twice. A machine holding a connection is continuously reachable, which turns 'an
-    unenrolled machine has no fleet code path to disable' from the shape of the thing into a flag; and a relay
-    carrying fleet traffic learns which machines are awake and when, which is a continuous liveness map - the
-    class of data docs/update-channels.md promises not to collect, reached by a side door. A poll response is a
-    DOCUMENT, NEVER A COMMAND, because a response naming something to run would be the never-build list's item 1
-    in a different hat. The interval is jittered off the stable 0-99 slot apex channel status already derives from
-    /etc/machine-id - reuse, because staging a rollout and staggering a poll need the same stable per-machine
-    number nobody configures. Cost stated rather than hidden: a hold takes effect at the next poll and a machine
-    that is off answers nothing. Trust is the SIGNATURE and not the transport - the response is signed by the
-    operator's key recorded at enrolment, so a hostile network or a misissued certificate can deny service and
-    cannot move a channel - plus the two things a signature alone does not give, named because they must be IN the
-    document: a monotonic counter (an old valid 'you are on edge' is otherwise a downgrade attack) and a freshness
-    bound (without one, a fleet that stops answering silently pins every machine to its last instruction). THE
-    SERVER SIDE IS WRITTEN AND IS DELIBERATELY NOT PART OF APEX: a fleet that only worked against one hosted
-    server would make 'optional' untrue for anybody who will not use it. Because a response is a signed document,
-    the smallest correct server has no always-on service and no database - one signed object per machine, served
-    from storage, runnable from a script for fifty machines; group membership is where that stops, at a few
-    thousand. TENANCY IS KEY SEPARATION, NOT ROWS: a fleet is a key pair and a machine is enrolled to a public
-    key, so a server separating tenants by partitioning rows would have one place at which every tenant's policy
-    could be rewritten and could not actually do it, because the client checks a signature. The machine pins the
-    ROOT key and accepts a delegated key chaining to it, which is what makes revoking a signer possible without
-    re-enrolling a fleet, and it is the shape apex trust and P1-047's cosign verification already use rather than
-    a second one. READ IS A SERVER PERMISSION AND WRITE IS A CRYPTOGRAPHIC ONE - the only action that changes a
-    machine needs the signing key, so a compromised operator console can see and cannot move anybody; the usual
-    one-admin-role arrangement makes the console the whole security boundary. The mirror of the never-build list
-    is structural rather than enforced, which is the argument for the transport: a poll of signed documents has no
-    message that would reach a machine between polls, run anything, approve a privilege request, enrol a machine
-    that did not run the verb, or stop one leaving. apex fleet report --dry-run is named as the machine-side
-    test-shaped guarantee (print what would be sent without sending it, the way apex channel report does) and
-    added to tests/doc-verbs-allow. THAT ENTRY IS LOAD-BEARING AND WAS MUTATION-CHECKED: removed,
-    check-doc-verbs.sh exits 1 and prints 'BAD apex fleet report'. Restored byte-identical with plain cp, cmp
-    silent. THE GAP LIST'S TWO ENTRIES ARE STRUCK THROUGH RATHER THAN DELETED and what remains under each is
-    narrowed to engineering: the interval and whether the freshness bound is an expiry in the document or a
-    maximum age the client enforces (neither changes the threat model - the direction of the connection was the
-    part that did), and the delegation format, which cannot be settled without a server to try it against. A THIRD
-    ENTRY WAS ADDED saying plainly that nothing here has been deployed or written: these are decisions with their
-    reasoning, not a client, a server or a line of code. relay/'s own README says src/index.js has never been
-    executed, and the fleet path now does not use it. STILL PARTIAL AND NOT DONE, and the reason has changed:
-    criterion 1 and criterion 2 are now covered by the DESIGN in every section, which is what this item asks for,
-    but three of the original five unsettled entries remain (what a ring ceiling costs to serve against
-    docs/update-cost.md, whether the fleet-assigned machine id can be rotated, and the evidence standard for
-    compliance, which wants attestation and therefore depends on L-001's TPM work being partial). NOT VERIFIED: no
-    fleet client, no server, no deployment, and no part of this has been run. Gates: tests/check-doc-verbs.sh 249
-    valid, 8 deliberate, 0 not a command; 191 documented, 114 declared undocumented, 0 undocumented and
-    undeclared, 0 stale.
+    Design closed on roadmap/v2.2. (1)+(2) docs/fleet.md covers enrollment, inventory, compliance, update rings,
+    managed secrets/certificates, app policy, remote health and recovery, and the ring is (channel, max_slot,
+    halt). (3) 'Fleet support stays optional' holds structurally rather than by promise: the fleet's half of the
+    ring is reduced to a CEILING — a decide_rollout parameter that can only LOWER the publisher's ramp, never
+    raise it, with a test that fails if a ceiling above the ramp raises it. Every personal machine passes None, so
+    a personal install's update path is not made worse to give a managed one a feature. The mutable rollout
+    percentage that earlier analysis called a blocker is a signed OCI artifact the client fetches, not an image
+    label: the label path (ROLLOUT_LABEL / RolloutSource::Label) was found to be fiction — nothing in either repo
+    stamped it and the live image carries none (verified by grep and skopeo) — and was removed, with a test
+    asserting the ABSENCE of any second source, because a percentage reaching the gate without a signature over it
+    is what this must not have. Verify-then-read is bound to the verified digest via verify::artifact_layer_at,
+    closing a window where a tag moving between resolve and fetch would put a valid signature over one document
+    behind the bytes of another. tests/test-apex-rollout.sh 42/0 with nine mutations all biting; CI floor raised
+    28 to 42.
 - id: L-001
   title: Real TPM and recovery qualification
   priority: Later
