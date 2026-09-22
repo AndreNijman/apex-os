@@ -495,6 +495,16 @@ mkdir -p "$L/syslib2/usr/lib"; printf 'x\n' > "$L/syslib2/usr/lib/libbaz.so"
 is "…and /usr/lib counts as one" false \
    "$(succeeds deb_layout_ok "$L/syslib2" baz && echo true || echo false)"
 
+mklayout usrlocal
+mkdir -p "$L/usrlocal/usr/local/bin"; printf 'x\n' > "$L/usrlocal/usr/local/bin/foo"
+out=$(callerr deb_layout_ok "$L/usrlocal" foo)
+if grep -qF "symlink into /var" <<<"$out"; then
+    ok "/usr/local is refused, because on APEX it is a symlink into /var"
+else
+    bad "/usr/local is refused, because on APEX it is a symlink into /var" \
+        "got: $(head -1 <<<"$out")"
+fi
+
 mklayout kmod
 mkdir -p "$L/kmod/usr/lib/modules/6.1.0"; printf 'x\n' > "$L/kmod/usr/lib/modules/6.1.0/foo.ko"
 is "a kernel module needs an image build, not an extension" false \
@@ -811,6 +821,19 @@ sed 's/^Package: hello/Package: shadower/' "$B/ctl/control" > "$S/ctl/control"
 printf 'not really ls\n' > "$S/data/usr/bin/ls"; chmod 755 "$S/data/usr/bin/ls"
 mk /tmp/shadower.deb "$S/ctl" "$S/data"
 
+# A data package: no program, no maintainer script. A font or an icon theme
+# has nothing to start, and nothing that was ever going to create one.
+D=/tmp/d; rm -rf "$D"; mkdir -p "$D/ctl" "$D/data/usr/share/fonts/truetype/fx"
+sed -e 's/^Package: hello/Package: fixture-fonts/' "$B/ctl/control" > "$D/ctl/control"
+printf 'TTF\n' > "$D/data/usr/share/fonts/truetype/fx/Fixture.ttf"
+mk /tmp/fonts.deb "$D/ctl" "$D/data"
+# The same payload, but now a maintainer script is what would have made it
+# usable — that is the refusal.
+cp -a "$D" /tmp/d2
+cp "$B/ctl/postinst" /tmp/d2/ctl/postinst
+sed -i 's/^Package: fixture-fonts/Package: fixture-fonts-scripted/' /tmp/d2/ctl/control
+mk /tmp/fonts-scripted.deb /tmp/d2/ctl /tmp/d2/data
+
 set --
 source /repo/files/system/libexec/apex-pkg >/dev/null 2>&1
 set +e
@@ -845,6 +868,17 @@ echo "PROBE_NOFLAG_VERIFY $(grep -c 'cannot verify' /tmp/out3.log)"
 echo "PROBE_NOFLAG_CACHED $([ -e /var/lib/apex/pkg/deb/hello.deb ] && echo yes || echo no)"
 bash /repo/files/system/libexec/apex-pkg install --allow-unsigned /tmp/hello.deb >/tmp/out4.log 2>&1
 echo "PROBE_FLAG_ACCEPTED $(grep -c 'accepting /tmp/hello.deb unverified' /tmp/out4.log)"
+
+rm -rf "$WORK/root3"; mkdir -p "$WORK/root3"
+( extract_debs "$WORK/root3" /tmp/fonts.deb ) >/tmp/out5.log 2>&1
+echo "PROBE_RC_DATA $?"
+echo "PROBE_DATA_SAID $(grep -c 'a data package' /tmp/out5.log)"
+echo "PROBE_DATA_FILE $([ -e "$WORK/root3/usr/share/fonts/truetype/fx/Fixture.ttf" ] && echo yes || echo no)"
+echo "PROBE_DATA_ENTRY $(cat /var/lib/apex/pkg/deb/fixture-fonts.entry 2>/dev/null)"
+rm -rf "$WORK/root4"; mkdir -p "$WORK/root4"
+( extract_debs "$WORK/root4" /tmp/fonts-scripted.deb ) >/tmp/out6.log 2>&1
+echo "PROBE_RC_DATA_SCRIPTED $?"
+echo "PROBE_DATA_SCRIPTED_MSG $(grep -c 'created by its maintainer script' /tmp/out6.log)"
 grep -o "already provides '/usr/bin/ls'" /tmp/out2.log | head -1 | sed 's/^/PROBE_SHADOW_MSG /'
 sed 's/^/PROBE_LOG2 /' /tmp/out2.log
 PROBE_EOF
@@ -901,6 +935,24 @@ PROBE_EOF
         else
             ok "leg B: --allow-unsigned gets past the gate, saying so"
         fi
+
+        # A package with no program AND no maintainer script is data, not a
+        # broken install. Refusing it would be refusing it for a reason that is
+        # not true — the rule is "useless without its postinst", and a package
+        # with no postinst cannot be.
+        is "leg B: a data package with no maintainer script installs" "0" \
+           "$(probe PROBE_RC_DATA)"
+        is "leg B: …and says that is what it is" "1" "$(probe PROBE_DATA_SAID)"
+        is "leg B: …and its files reach the payload" "yes" "$(probe PROBE_DATA_FILE)"
+        is "leg B: …and a witness path is recorded for later rebuilds" \
+           "/usr/share/fonts/truetype/fx/Fixture.ttf" "$(probe PROBE_DATA_ENTRY)"
+        if [ "$(probe PROBE_RC_DATA_SCRIPTED)" = "0" ]; then
+            bad "leg B: the same payload WITH a maintainer script is refused" "it installed"
+        else
+            ok "leg B: the same payload WITH a maintainer script is refused"
+        fi
+        is "leg B: …and the refusal names the script as the reason" "1" \
+           "$(probe PROBE_DATA_SCRIPTED_MSG)"
 
         # Every warning the user must see is in the log, not only in the source.
         if grep -q "PROBE_LOG.*were NOT run" <<<"$out"; then

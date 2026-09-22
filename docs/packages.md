@@ -203,6 +203,11 @@ once did precisely that through the RPM path — twelve `/usr/bin` entries
 shipped as dangling symlinks, `/usr/bin/wine` absent, and the install printed
 "done".
 
+A package with no program **and no maintainer script** is a different thing
+and installs normally: a font, an icon theme or a set of headers has nothing
+to start, and nothing that was ever going to create one. The rule is "useless
+without its `postinst`", so a package with no `postinst` cannot trip it.
+
 ### Its dependencies are reported, never resolved
 
 `libgtk-3-0` is not a Fedora package name and no mapping between the two is
@@ -248,6 +253,7 @@ hierarchies a `.deb` may write. Everything else is refused by name:
 | Refused | Reason |
 |---|---|
 | Anything outside `/usr` and `/opt` (`/etc`, `/var`, …) | a system extension merges nothing else, and a Debian conffile's whole lifecycle is dpkg's |
+| `/usr/local` | it is a symlink into `/var` on an ostree system, so a payload directory lands on the symlink rather than inside the merged tree |
 | A shared library in `/usr/lib`, `/usr/lib64`, `/lib`, `/lib64` | a Debian build of a library in front of the image's own is unrecoverable without a rollback |
 | Anything in a Debian multiarch directory (`/usr/lib/x86_64-linux-gnu`) | Fedora's linker never looks there, and moving it to `/usr/lib64` is the row above |
 | Kernel modules and firmware | they need an initramfs and a real deployment |

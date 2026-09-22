@@ -1322,6 +1322,16 @@ deb_layout_ok() {
     local t p l bad=0 tgt d comp rest files=0
     while IFS=$'\t' read -r t p l; do
         case "$p" in
+            # /usr/local is a SYMLINK to ../var/usrlocal on an ostree system,
+            # so a payload directory there does not land inside the hierarchy
+            # the extension merges — it lands on top of the symlink itself. The
+            # shadow guard happens to catch it today, but only because that
+            # symlink dangles in the deployment tree, which is an accident of
+            # /var/usrlocal not existing there rather than a rule. Debian
+            # policy forbids a package shipping /usr/local anyway.
+            /usr/local|/usr/local/*)
+                warn "refusing '${name}': it ships '${p}', and /usr/local on APEX is a symlink into /var that an extension cannot merge"
+                bad=1; continue ;;
             /usr|/opt|/usr/*|/opt/*) ;;
             *)
                 warn "refusing '${name}': it ships '${p}', and a system extension merges only /usr and /opt"
@@ -1514,8 +1524,19 @@ extract_debs() {
 
         deb_layout_ok "$scratch" "$name"
         deb_shadow_ok "$scratch" "$root" "$imgroot" "$name"
-        entry="$(deb_entry_point "$scratch")" \
-            || die "refusing '${name}': it ships no program APEX can start — no executable in /usr/bin and no desktop entry whose Exec is a path the package ships. Its entry point is created by a maintainer script${LD_SCRIPTS:+ (${LD_SCRIPTS})}, and APEX never runs those: they assume dpkg, apt and a Debian filesystem, and on this machine they write an apt source that would become a second update channel"
+        # No program, and a maintainer script that would have created one, is
+        # the refusal this rule exists for. No program and NO maintainer script
+        # is a data package — a font, an icon theme, a set of headers — which
+        # has nothing to start and nothing that was ever going to create one.
+        # Refusing that would be refusing it for a reason that is not true.
+        if entry="$(deb_entry_point "$scratch")"; then
+            :
+        elif [ -n "$LD_SCRIPTS" ]; then
+            die "refusing '${name}': it ships no program APEX can start — no executable in /usr/bin and no desktop entry whose Exec is a path the package ships. Its entry point is created by its maintainer script(s) (${LD_SCRIPTS}), and APEX never runs those: they assume dpkg, apt and a Debian filesystem"
+        else
+            entry=""
+            msg "'${name}': a data package — it ships no program, and no maintainer script that would have created one"
+        fi
 
         if [ -n "$LD_SCRIPTS" ]; then
             warn "'${name}': its maintainer script(s) — ${LD_SCRIPTS} — were NOT run. They assume dpkg and a Debian layout; APEX extracts the payload only"
@@ -1534,6 +1555,11 @@ extract_debs() {
         install -d -m0700 "$DEB_DIR"
         deb_walk "$scratch" | awk -F'\t' '$1 != "d" { print $2 }' | LC_ALL=C sort \
             > "$(deb_manifest "$name")"
+        # The witness deb_superseded_by_image asks about on every later
+        # rebuild. A data package has no entry point, so the first path it
+        # ships stands in: the question is only ever "has the image started
+        # providing this", and any path the package owns answers it.
+        [ -n "$entry" ] || entry="$(head -1 "$(deb_manifest "$name")")"
         printf '%s\n' "$entry" > "$(deb_entry_file "$name")"
         printf '%s\n' "$LD_DEPENDS" > "${DEB_DIR}/${name}.depends"
         msg "${name}: $(wc -l < "$(deb_manifest "$name")") file(s), entry point ${entry}"
