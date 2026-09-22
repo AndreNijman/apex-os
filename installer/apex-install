@@ -496,6 +496,25 @@ if [ "$NETINSTALL" = 1 ]; then
 Nothing has been erased — your disks are untouched.
 Use the full offline ISO, which needs no download."
   note "Network install: APEX-OS will be downloaded from $TARGET_IMAGE."
+elif [ "${1:-}" = --check-passphrase ]; then
+  # --check-passphrase is a one-shot, NO-DISK advisory check: it asks whether a
+  # passphrase can be typed on the initramfs keymap and prints one line. It
+  # reads no image, touches no disk and is documented to always exit 0, because
+  # the encrypt page calls it to fill in a form field and a non-zero exit there
+  # must never be read as "refuse the install".
+  #
+  # It was nonetheless dying here, before its own argument was ever parsed —
+  # the parse is ~800 lines below this refusal. On any machine without
+  # localhost/apex-os:daily every call answered
+  # `APEX-INSTALL-FAILED: The APEX-OS image ... is not present`, exit 1. That is
+  # a GUI field reporting an install failure, and an advisory check that is a
+  # gate after all.
+  #
+  # It passed locally only because a developer's machine happens to have the
+  # image; it failed on every CI runner, which is why five of the seven reds in
+  # `Run installer disk-encryption suite` were this one refusal. Measured:
+  # 62 passed / 0 failed here, 24 passed / 7 failed there, same commit.
+  :
 elif ! podman image exists "$IMAGE" 2>/dev/null && [ ! -e /run/install/repo/container ]; then
   die "The APEX-OS image ($IMAGE) is not present in the live environment."
 fi
