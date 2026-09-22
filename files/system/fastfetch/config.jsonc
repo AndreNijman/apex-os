@@ -1,8 +1,16 @@
 {
     "$schema": "https://github.com/fastfetch-cli/fastfetch/raw/dev/doc/json_schema.json",
     // APEX-OS system fastfetch config (apex-logs 33-fastfetch-terminal.md).
-    // Invoked from /etc/bashrc as `fastfetch --config /etc/fastfetch/config.jsonc
-    // --logo-color-1 <white|black>` so the logo colour tracks the colour scheme.
+    // Invoked from /usr/share/apex/shell/greeting.sh (sourced by both /etc/bashrc
+    // and the seeded ~/.zshrc) as `fastfetch --config /etc/fastfetch/config.jsonc
+    // --logo-color-1 <white|black> [--color <accent>]` so the logo colour tracks
+    // the colour scheme and the accent tracks the wallpaper.
+    //
+    // Every accent below is `{#keys}` — a reference to display.color.keys — and
+    // never a literal escape, because that is the one thing `--color` can
+    // override at runtime. The value set here is only what a session shows
+    // before matugen has extracted a palette from a wallpaper, so it stays the
+    // APEX brand chartreuse.
     "logo": {
         "type": "file",
         "source": "/etc/fastfetch/apex-logo.txt",
@@ -16,8 +24,8 @@
         // Leading blank line vertically centres the info block against the taller
         // logo (fastfetch has no native vertical centring).
         "break",
-        { "type": "title", "format": "{#38;2;161;201;153}{user-name}{#}@{#38;2;161;201;153}{host-name}{#}" },
-        { "type": "custom", "format": "{#38;2;161;201;153}╭──────────╮" },
+        { "type": "title", "format": "{#keys}{user-name}{#}@{#keys}{host-name}{#}" },
+        { "type": "custom", "format": "{#keys}╭──────────╮" },
         { "type": "os",     "key": "│ os       │", "format": "{name} {version-id}" },
         // Kernel: `uname -r` is 7.1.3-cachyos1.fc43.x86_64 — the CachyOS COPR
         // build id is compiled into the kernel package and cannot be renamed
@@ -29,6 +37,6 @@
         { "type": "wm",     "key": "│ wm       │" },
         { "type": "cpu",    "key": "│ cpu      │" },
         { "type": "memory", "key": "│ memory   │" },
-        { "type": "custom", "format": "{#38;2;161;201;153}╰──────────╯" }
+        { "type": "custom", "format": "{#keys}╰──────────╯" }
     ]
 }

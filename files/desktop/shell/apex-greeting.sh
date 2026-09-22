@@ -58,14 +58,40 @@ if [ "${_apex_greet}" = 1 ]; then
     case "$(gsettings get org.gnome.desktop.interface color-scheme 2>/dev/null)" in
         *light*) _apex_logo_color=black ;;
     esac
-    if [ -r /etc/fastfetch/config.jsonc ]; then
+    # Accent colour, so the greeting tracks the desktop palette instead of the
+    # static brand chartreuse it used to be built around. APEX Shell's matugen
+    # pipeline rewrites this file on every wallpaper change, already formatted as
+    # an SGR parameter string (38;2;R;G;B) — the greeting is POSIX sh and has no
+    # business doing hex arithmetic to use a colour.
+    _apex_accent_file="${XDG_CACHE_HOME:-$HOME/.cache}/apex-shell/accent-ansi"
+    _apex_accent=""
+    if [ -r "${_apex_accent_file}" ]; then
+        read -r _apex_accent < "${_apex_accent_file}" || _apex_accent=""
+    fi
+    # Only digits and semicolons reach a terminal escape. A truncated or
+    # part-written file (matugen rewrites it under the running shell) would
+    # otherwise be pasted straight into the output.
+    case "${_apex_accent}" in
+        ""|*[!0-9\;]*) _apex_accent="" ;;
+    esac
+
+    # No accent yet — a first login before any wallpaper has been picked — means
+    # no --color at all, leaving the config's own default rather than forcing
+    # some colour that may not suit the scheme. Spelled out as four branches
+    # because this file is SOURCED: building the argument list with `set --`
+    # would overwrite the calling shell's positional parameters.
+    if [ -r /etc/fastfetch/config.jsonc ] && [ -n "${_apex_accent}" ]; then
+        fastfetch --config /etc/fastfetch/config.jsonc --logo-color-1 "${_apex_logo_color}" --color "${_apex_accent}"
+    elif [ -r /etc/fastfetch/config.jsonc ]; then
         fastfetch --config /etc/fastfetch/config.jsonc --logo-color-1 "${_apex_logo_color}"
-    else
+    elif [ -n "${_apex_accent}" ]; then
         # Config missing (a partial image, or a user deleted it): still greet
         # rather than silently printing nothing at all.
+        fastfetch --logo-color-1 "${_apex_logo_color}" --color "${_apex_accent}"
+    else
         fastfetch --logo-color-1 "${_apex_logo_color}"
     fi
-    unset _apex_logo_color
+    unset _apex_logo_color _apex_accent _apex_accent_file
 fi
 
 unset _apex_greet
