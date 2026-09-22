@@ -119,7 +119,40 @@ scratch_fs_ok() {
   [ "${avail_gb:-0}" -ge "$NEED_SCRATCH_GB" ]
 }
 
-# Returns a usable scratch DIRECTORY on stdout, or nothing.
+# ── When there is no scratch volume at all: stage INSIDE the target root ─────
+#
+# The rules above are right about WHERE NOT to stage and wrong about what to do
+# when nothing qualifies. On the commonest machine this installer will ever meet
+# — a laptop with ONE internal disk, booted from a plain single-partition USB —
+# every candidate fails by construction: the live session automounts nothing
+# under /run/media because the stick has no second partition, /mnt and /media
+# are empty, and /var/tmp IS the RAM overlay this whole section exists to
+# refuse. The install then aborted, telling the user to fetch "the full offline
+# ISO" — which has never been published. That is a dead end, not a refusal.
+#
+# There is in fact a disk with room on that machine: the one about to be
+# installed to. The v1.0.0 installer that shipped on the published ISO staged
+# there and installed successfully on real hardware. stage_setup() below is that
+# design; pick_scratch says when to use it by answering with the sentinel
+# STAGE_TARGET instead of a directory.
+#
+# This is a FALLBACK and not the new default. A separate volume is still chosen
+# first whenever one exists, because staging on the target means the target is
+# partitioned and formatted BEFORE the download — so a download that fails
+# leaves an erased disk, where the external-scratch path leaves it untouched.
+# Trading that guarantee away is worth it only when the alternative is refusing
+# to install at all.
+STAGE_TARGET='@target'
+
+# Keep this much of the target free for the OS being installed. The staged store
+# and the install live on the same filesystem at the same time: ~22 GB of blobs
+# plus the deployed system, and the blobs only go away at stage_teardown.
+STAGE_RESERVE_GB="${APEX_STAGE_RESERVE_GB:-15}"
+
+# Returns a usable scratch DIRECTORY on stdout, or the sentinel STAGE_TARGET
+# when there is none and the target root must be used instead. Returns non-zero
+# ONLY when the user named a staging directory explicitly and it is unusable —
+# a bad override is an error to report, never a silent fallback.
 pick_scratch() {
   local c
   if [ -n "${APEX_OCI_SCRATCH:-}" ]; then
@@ -129,11 +162,222 @@ pick_scratch() {
   fi
   # Any mounted, writable, real filesystem with room. /run/media/* is where the
   # live session automounts a second partition on the USB stick.
-  for c in /run/media/*/* /run/media/* /mnt/* /media/* /var/tmp; do
+  #
+  # APEX_SCRATCH_CANDIDATES is a TEST SEAM, in the same spirit as
+  # APEX_SYSFS_BLOCK above: it replaces the list of places to look, so a suite
+  # can present the single-disk USB-boot machine (nothing qualifies) and the
+  # machine with a spare drive (something does) without inventing filesystems.
+  # It cannot weaken scratch_fs_ok — every candidate still goes through it, so
+  # a tmpfs named here is refused exactly as /var/tmp on a live ISO is.
+  for c in ${APEX_SCRATCH_CANDIDATES:-/run/media/*/* /run/media/* /mnt/* /media/* /var/tmp}; do
     [ -d "$c" ] || continue
     if scratch_fs_ok "$c"; then printf '%s\n' "${c%/}/apex-install-scratch"; return 0; fi
   done
-  return 1
+  printf '%s\n' "${STAGE_TARGET:-@target}"
+  return 0
+}
+
+# How big a staging image the target root can afford, in KB, or non-zero if it
+# cannot afford one at all. Split out from stage_setup because it is the ONLY
+# part of staging-on-target that can be exercised without a block device, and
+# because the same rule has to be applied twice: once against the raw device
+# size BEFORE the disk is touched (so a too-small disk is refused while it is
+# still intact), and once against the real free space after mkfs.
+#
+# The image is SPARSE, so this is a ceiling and not an allocation. The reserve
+# is what guarantees the OS still fits beside it.
+stage_budget_kb() {   # $1 = available KB on the target root
+  local avail_kb="${1:-0}" stage_kb
+  case "$avail_kb" in ''|*[!0-9]*) return 1 ;; esac
+  stage_kb=$(( avail_kb - STAGE_RESERVE_GB * 1024 * 1024 ))
+  [ "$stage_kb" -ge $(( NEED_SCRATCH_GB * 1024 * 1024 )) ] || return 1
+  printf '%s\n' "$stage_kb"
+}
+
+# ── Staging on the target root, as the shipped v1.0.0 installer did it ───────
+# Three details here are not obvious and each one cost a measured install to
+# find. They are recorded so nobody simplifies them back out.
+#
+# 1. The store must NOT be visible inside the target root. `bootc install
+#    to-filesystem` checks the target is empty, and its own error names the only
+#    exception: "Requiring directory contains only mount points". A plain
+#    directory of image layers fails that check. So the backing file is created
+#    on the target filesystem (the only place with room), handed to a loop
+#    device, and then UNLINKED — the inode stays alive for as long as the loop
+#    device holds it, the directory entry is gone, the target root is pristine,
+#    and the space is released automatically at losetup -d.
+#
+# 2. The staging filesystem is xfs, not ext4. The store is hundreds of thousands
+#    of small files and ext4 fixes its inode count at mkfs time: measured with
+#    `-T largefile4`, the pull died with "mkdir …: no space left on device" 5 GB
+#    in, with 35 GB of free BLOCKS. It had run out of inodes. xfs allocates them
+#    dynamically. (xfsprogs is in Containerfile.installer's package list.)
+#
+# 3. TMPDIR has to move too, and this is the one that made the first real test
+#    of the staging fix fail with the SAME out-of-space error it was written to
+#    remove — with 788 GB free in the store. containers/image does not download
+#    a blob straight into its destination; it writes each one to a scratch file
+#    in $TMPDIR, falling back to /var/tmp, which on the live ISO is the RAM
+#    overlay. Proven directly by pointing TMPDIR at a 200 MB tmpfs with a 100 GB
+#    store: `writing blob: storing blob to file "…/4": no space left on device`.
+#
+# The mount point is OUTSIDE $TROOT on purpose — see detail 1.
+STAGE_MNT=""; STAGE_LOOP=""; STAGE_TMPDIR=""
+STAGE_DIR=/run/apex-stage
+# --skip-finalize, and ONLY when staging on the target. bootc finishes a
+# to-filesystem install by remounting the target read-only, and the staging loop
+# device holds a WRITABLE fd on that same filesystem — so the remount fails with
+# EBUSY and a completely successful install reports as a failure. That is
+# measured, not deduced: it is what made the first three staged installs of the
+# v1.0.0 installer look broken. Skipping it costs nothing here (the engine
+# unmounts the target seconds later) and it also skips an fstrim that has no
+# business running mid-install. The paths that do not stage on the target keep
+# finalizing exactly as they do today.
+STAGE_BOOTC_ARGS=()
+stage_setup() {   # $1 = the already-mounted target root
+  local troot="$1" avail_kb stage_kb img
+  avail_kb=$(df -Pk "$troot" 2>/dev/null | awk 'NR==2{print $4}')
+  stage_kb=$(stage_budget_kb "${avail_kb:-0}") || {
+    echo "the target has only $(( ${avail_kb:-0} / 1024 / 1024 )) GB free; staging the download needs ${NEED_SCRATCH_GB} GB beside the ${STAGE_RESERVE_GB} GB the system itself needs" | tee -a "$LOG"
+    return 1; }
+  log "staging: ${stage_kb}KB sparse ceiling on the target (of ${avail_kb}KB free)"
+  img="$troot/.apex-stage.img"
+  truncate -s "${stage_kb}K" "$img" 2>>"$LOG" || return 1
+  STAGE_LOOP=$(losetup -f --show "$img" 2>>"$LOG") || return 1
+  # See detail 1: the directory entry goes, the inode stays.
+  rm -f "$img" 2>>"$LOG" || return 1
+  mkfs.xfs -q -f "$STAGE_LOOP" >>"$LOG" 2>&1 || return 1
+  mkdir -p "$STAGE_DIR" 2>>"$LOG" || return 1
+  # A staging filesystem left mounted here by a run that was killed outright
+  # would otherwise be silently stacked under this one, and then never released.
+  umount -R "$STAGE_DIR" 2>/dev/null || true
+  mount "$STAGE_LOOP" "$STAGE_DIR" >>"$LOG" 2>&1 || return 1
+  STAGE_MNT="$STAGE_DIR"
+  mkdir -p "$STAGE_MNT/tmp" 2>>"$LOG" || return 1
+  STAGE_TMPDIR="$STAGE_MNT/tmp"
+  STAGE_BOOTC_ARGS=(--skip-finalize)
+  # Logged because every out-of-space failure this design has had was about
+  # WHERE something was, and none of the logs said.
+  log "staging: loop=$STAGE_LOOP mnt=$STAGE_MNT tmpdir=$STAGE_TMPDIR"
+  log "staging: $(df -Pk "$STAGE_MNT" 2>/dev/null | awk 'NR==2{print $4" KB free on the staging fs"}'), $(df -Pk /var/tmp 2>/dev/null | awk 'NR==2{print $4" KB free on /var/tmp (unused: TMPDIR is redirected)"}')"
+  return 0
+}
+
+# Idempotent, and called from unmount_target as well as the success path: a loop
+# device still attached to a (deleted) file on the target filesystem keeps that
+# filesystem busy, so leaving one behind is what would stop the NEXT attempt
+# from being able to unmount the target at all.
+stage_teardown() {
+  [ -n "$STAGE_MNT$STAGE_LOOP" ] || return 0
+  # Lazy umount as a fallback: podman may still hold overlay mounts under the
+  # store at the moment a failure path runs.
+  [ -n "$STAGE_MNT" ] && { umount -R "$STAGE_MNT" 2>/dev/null || umount -l "$STAGE_MNT" 2>/dev/null || true; }
+  [ -n "$STAGE_LOOP" ] && { losetup -d "$STAGE_LOOP" 2>/dev/null || true; }
+  # netinstall_fetch_into exported TMPDIR into the staging filesystem, which has
+  # just gone away. Leaving it set makes the very next `mktemp -d` — the one the
+  # account step uses to mount the freshly installed root — fail with "No such
+  # file or directory", i.e. a perfect install with no account on it.
+  unset TMPDIR
+  STAGE_MNT=""; STAGE_LOOP=""; STAGE_TMPDIR=""; STAGE_BOOTC_ARGS=()
+  return 0
+}
+
+# ── The download itself, wherever it is going ────────────────────────────────
+# One function for both staging homes, so the external-scratch path and the
+# on-target fallback cannot drift apart. It sets OCI_SCRATCH, STORE_SCRATCH,
+# SRC_VOL, SRC_ARGS and PODMAN_STORE, and dies on failure.
+#
+# The only thing that differs between the two callers is what is TRUE about the
+# disk when it fails, and the messages say which — a "nothing has been erased"
+# on the path where the disk was erased first would be a lie in the frightening
+# direction.
+netinstall_fetch_into() {   # $1 = a directory on a real filesystem with room
+  local scratch="$1" attempt _wait pull_ok _state _tmp
+  if [ "${STAGE_ON_TARGET:-0}" = 1 ]; then
+    _state="$TARGET has already been erased — on this machine the download and the
+install are the same step. Start the installer again to redo the whole install;
+a second run on the same disk is safe."
+  else
+    _state="Nothing has been erased — your disks are untouched."
+  fi
+  OCI_SCRATCH="$scratch/oci"
+  STORE_SCRATCH="$scratch/store"
+  _tmp="$scratch/tmp"
+  mkdir -p "$OCI_SCRATCH" "$STORE_SCRATCH" "$_tmp" \
+    || die "Could not create the staging directory at $scratch.
+
+$_state"
+  # TMPDIR, for the reason recorded at stage_setup detail 3: containers/image
+  # writes every blob to a scratch file under $TMPDIR before it reaches its
+  # destination, and the default /var/tmp is the RAM overlay on a live ISO. That
+  # is the same RAM write this whole section exists to remove, and it applies to
+  # BOTH staging homes — it is not specific to the on-target fallback.
+  export TMPDIR="$_tmp"
+  note "Staging to $scratch (needs ~${NEED_SCRATCH_GB} GB)."
+  log "scratch: $scratch ($(df -PBG "$scratch" 2>/dev/null | awk 'NR==2{print $4}') free, TMPDIR=$TMPDIR)"
+
+  note "Downloading APEX-OS from $TARGET_IMAGE — this is the slow part."
+  if [ -f "$OCI_SCRATCH/index.json" ]; then
+    note "Already downloaded."
+    pull_ok=1
+  else
+    pull_ok=0
+    # skopeo, not `podman pull`: it writes the COMPRESSED blobs straight into an
+    # OCI directory and never decompresses them into containers-storage. That is
+    # the whole point — it is the difference between ~5.8 GB on disk and ~12 GB
+    # in RAM. It also fetches layers in parallel by default.
+    #
+    # Back off between attempts. The first version retried with NO delay at all,
+    # so all three attempts completed inside one second — which is one attempt
+    # wearing a disguise, and gives a flapping link or a slow DNS server no
+    # chance whatsoever to come good.
+    for attempt in 1 2 3; do
+      if [ "$attempt" != 1 ]; then
+        _wait=$(( attempt * 5 ))
+        note "Download failed — waiting ${_wait}s, then retrying (attempt $attempt of 3)…"
+        sleep "$_wait"
+      fi
+      if skopeo copy --retry-times 3 \
+           "docker://$TARGET_IMAGE" "oci:$OCI_SCRATCH:apex" 2>&1 | tee -a "$LOG"; then
+        pull_ok=1; break
+      fi
+    done
+    [ "$pull_ok" = 1 ] || die "Could not download APEX-OS from $TARGET_IMAGE after 3 attempts.
+
+$_state
+
+The network looked usable when this started, so the download itself failed:
+the connection may have dropped, or the registry may be unreachable from here.
+The exact error is above and in $LOG."
+  fi
+  note "Download complete."
+
+  # ── Install FROM the OCI directory, exactly as the offline ISO does ────────
+  # bootc reads compressed blobs straight out of this tree, so nothing is
+  # re-tarred into the container's /var/tmp — the second of the two RAM writes
+  # this path used to make.
+  SRC_VOL=(-v "$OCI_SCRATCH":/run/apex-oci:ro)
+  SRC_ARGS=(--source-imgref "oci:/run/apex-oci" --target-imgref "$TARGET_IMAGE")
+
+  # bootc still has to RUN from somewhere, and the netinstall live environment
+  # has no bootc of its own. Materialise the runner from the OCI directory we
+  # already have — a local decompress, no second download — into a store on the
+  # SAME scratch filesystem, so containers-storage never touches the RAM overlay.
+  note "Preparing the installer runtime…"
+  if ! podman --root "$STORE_SCRATCH/graph" --runroot "$STORE_SCRATCH/run" \
+         image exists "$TARGET_IMAGE" 2>/dev/null; then
+    skopeo copy "oci:$OCI_SCRATCH:apex" \
+      "containers-storage:[overlay@$STORE_SCRATCH/graph+$STORE_SCRATCH/run]$TARGET_IMAGE" \
+      2>&1 | tee -a "$LOG" \
+      || die "Could not prepare the installer runtime from the downloaded image.
+
+$_state
+The exact error is above and in $LOG."
+  fi
+  # Every later `podman` call in this script must use that store, not the
+  # RAM-backed default one.
+  PODMAN_STORE=(--root "$STORE_SCRATCH/graph" --runroot "$STORE_SCRATCH/run")
+  return 0
 }
 
 # On the live ISO the image is ALSO present as an OCI directory (ISO /container,
@@ -359,6 +603,11 @@ restore_console() {
 # disk with no way forward. Deepest mount first. Safe to call at any time.
 TROOT=/run/apex-target
 unmount_target() {
+  # FIRST, always: the staging loop device is backed by a deleted file on the
+  # target filesystem, so nothing under $TROOT can be released while it is still
+  # attached. A leftover loop is exactly the kind of debris that makes the next
+  # run refuse with "currently mounted" — the stranding this function prevents.
+  stage_teardown
   umount "$TROOT/boot/efi" 2>/dev/null || true
   umount "$TROOT"          2>/dev/null || true
   [ -n "${DEPLOY_MNT:-}" ] && { umount "$DEPLOY_MNT/proc" 2>/dev/null || true; umount "$DEPLOY_MNT/var" 2>/dev/null || true; }
@@ -1859,99 +2108,121 @@ hotspot, or use the full offline ISO, which needs no network at all." ;;
   esac
 
   # ── Stage to disk, not to RAM ─────────────────────────────────────────────
-  # See NEED_SCRATCH_GB above for why. Chosen BEFORE the download so a machine
-  # that cannot hold the image is told now, with its disks untouched, rather
-  # than after several GB have gone into the RAM overlay.
-  SCRATCH="$(pick_scratch || true)"
-  if [ -z "$SCRATCH" ]; then
-    ram_gb=$(awk '/^MemTotal:/{printf "%d", $2/1024/1024}' /proc/meminfo 2>/dev/null || echo 0)
-    die "There is nowhere to put the download.
+  # See NEED_SCRATCH_GB above for why, and the STAGE_TARGET comment for what
+  # happens on a machine that has no scratch volume at all.
+  #
+  # Two orderings, and the difference is exactly the guarantee this step can
+  # make:
+  #
+  #   * a real scratch volume exists → download FIRST, disks untouched. A
+  #     failure here costs nothing.
+  #   * nothing qualifies → stage inside the target root, which means the
+  #     target is partitioned and formatted BEFORE the download. The disk is
+  #     committed at that point. This is the case the published v1.0.0
+  #     installer shipped and installed with on real hardware, and it is the
+  #     only thing that turns the single-disk USB-boot laptop from a refusal
+  #     into an install.
+  #
+  # Neither ordering stages into RAM, which is the rule 63857891 added and this
+  # does not relax: the fallback's store lives on a loop device backed by the
+  # TARGET DISK, with TMPDIR pointed at it too.
+  STAGE_ON_TARGET=0
+  SCRATCH="$(pick_scratch)" || die "The staging directory you asked for (APEX_OCI_SCRATCH=${APEX_OCI_SCRATCH:-})
+cannot be used: it is not a writable directory on a real filesystem with
+${NEED_SCRATCH_GB} GB free, or it is on the disk about to be erased.
 
 Nothing has been erased — your disks are untouched.
 
-A network install needs about ${NEED_SCRATCH_GB} GB of WRITABLE DISK to stage
-APEX-OS before writing it. This machine has ${ram_gb} GB of RAM and no suitable
-disk, and staging into RAM is what this installer refuses to do: it would run
-out partway through and leave a half-written machine.
+Unset APEX_OCI_SCRATCH to let the installer choose for itself."
+  if [ "$SCRATCH" = "$STAGE_TARGET" ]; then
+    STAGE_ON_TARGET=1
+    SCRATCH=""
+    # ── Is the target big enough to hold the download AND the system? ───────
+    # Asked HERE, against the raw device, because here the disk is still
+    # intact. The shipped installer asked the same question inside its
+    # stage_setup — i.e. after mkfs — so a too-small disk was erased before
+    # being told no. The same rule is applied again after mkfs against real
+    # free space; this one is what makes the refusal survivable.
+    # A RAW device size is not free space, and the gap is not small: this path
+    # spends ~513 MiB of the disk on the BIOS-boot and EFI partitions before
+    # mkfs runs, and the filesystem then keeps its own metadata. Without a
+    # margin, a disk a couple of GB above the line passes HERE, gets
+    # partitioned, and fails the same rule again in stage_setup — which is the
+    # "erased for nothing" outcome this check exists to prevent.
+    _tsize=$(lsblk -bdno SIZE "$TARGET" 2>/dev/null | tr -dc '0-9')
+    _tsize_kb=$(( ${_tsize:-0} / 1024 - 2 * 1024 * 1024 ))
+    [ "$_tsize_kb" -ge 0 ] || _tsize_kb=0
+    if ! stage_budget_kb "$_tsize_kb" >/dev/null; then
+      die "$TARGET is too small to install APEX-OS over the network.
 
-Any of these fixes it:
-  * Use the full offline ISO. It carries the OS and needs no staging at all.
-  * Plug in a USB stick or drive with ${NEED_SCRATCH_GB} GB free and try again —
-    it is used as scratch space only, and is not erased.
-  * Add a second partition with ${NEED_SCRATCH_GB} GB free to the stick you
-    booted from."
-  fi
-  OCI_SCRATCH="$SCRATCH/oci"
-  STORE_SCRATCH="$SCRATCH/store"
-  mkdir -p "$OCI_SCRATCH" "$STORE_SCRATCH" \
-    || die "Could not create the staging directory at $SCRATCH."
-  note "Staging to $SCRATCH (needs ~${NEED_SCRATCH_GB} GB; nothing there is erased)."
-  log "scratch: $SCRATCH ($(df -PBG "$SCRATCH" 2>/dev/null | awk 'NR==2{print $4}') free)"
+Nothing has been erased — your disks are untouched.
 
-  note "Downloading APEX-OS from $TARGET_IMAGE — this is the slow part, and nothing has been erased yet."
-  if [ -f "$OCI_SCRATCH/index.json" ]; then
-    note "Already downloaded."
-    pull_ok=1
-  else
-    pull_ok=0
-    # skopeo, not `podman pull`: it writes the COMPRESSED blobs straight into an
-    # OCI directory and never decompresses them into containers-storage. That is
-    # the whole point — it is the difference between ~5.8 GB on disk and ~12 GB
-    # in RAM. It also fetches layers in parallel by default.
+There is no separate drive or spare partition to download onto, so APEX-OS has
+to be staged on $TARGET itself: about ${NEED_SCRATCH_GB} GB while it installs,
+on top of the ${STAGE_RESERVE_GB} GB the installed system needs. $TARGET has
+about $(( _tsize_kb / 1024 / 1024 )) GB to give.
+
+Either install to a larger disk, or plug in a USB stick or drive with
+${NEED_SCRATCH_GB} GB free — it is used as scratch space only and is not
+erased — and try again."
+    fi
+    # ── Reachability, checked while everything is still intact ──────────────
+    # On this path the download happens AFTER the disk is erased, so this is
+    # the last moment anything can be verified for free. `skopeo inspect --raw`
+    # fetches the manifest only: in about a second it proves DNS resolves, the
+    # registry answers, the repository is readable without credentials, and the
+    # tag for THIS edition exists. Every one of those used to be discovered
+    # several minutes in, after the wipe.
     #
-    # Back off between attempts. The first version retried with NO delay at all,
-    # so all three attempts completed inside one second — which is one attempt
-    # wearing a disguise, and gives a flapping link or a slow DNS server no
-    # chance whatsoever to come good.
+    # What it cannot prove is that a link working now still works in ten
+    # minutes. Nothing can, and the message below does not pretend otherwise.
+    note "Checking APEX-OS can be downloaded from $TARGET_IMAGE …"
+    insp_ok=0
     for attempt in 1 2 3; do
       if [ "$attempt" != 1 ]; then
         _wait=$(( attempt * 5 ))
-        note "Download failed — waiting ${_wait}s, then retrying (attempt $attempt of 3)…"
+        note "Could not reach the registry — waiting ${_wait}s, then retrying (attempt $attempt of 3)…"
         sleep "$_wait"
       fi
-      if skopeo copy --retry-times 3 \
-           "docker://$TARGET_IMAGE" "oci:$OCI_SCRATCH:apex" 2>&1 | tee -a "$LOG"; then
-        pull_ok=1; break
-      fi
+      if skopeo inspect --raw "docker://$TARGET_IMAGE" >>"$LOG" 2>&1; then insp_ok=1; break; fi
     done
-    [ "$pull_ok" = 1 ] || die "Could not download APEX-OS from $TARGET_IMAGE after 3 attempts.
+    [ "$insp_ok" = 1 ] || die "Could not reach APEX-OS at $TARGET_IMAGE after 3 attempts.
 
 Nothing has been erased — your disks are untouched.
 
-The network looked usable when this started, so the download itself failed:
-the connection may have dropped, or the registry may be unreachable from here.
-The exact error is above and in $LOG.
-
-If this keeps happening, use the full offline ISO — it contains the whole system
-and needs no network at all."
-  fi
-  note "Download complete."
-
-  # ── Install FROM the OCI directory, exactly as the offline ISO does ────────
-  # bootc reads compressed blobs straight out of this tree, so nothing is
-  # re-tarred into the container's /var/tmp — the second of the two RAM writes
-  # this path used to make.
-  SRC_VOL=(-v "$OCI_SCRATCH":/run/apex-oci:ro)
-  SRC_ARGS=(--source-imgref "oci:/run/apex-oci" --target-imgref "$TARGET_IMAGE")
-
-  # bootc still has to RUN from somewhere, and the netinstall live environment
-  # has no bootc of its own. Materialise the runner from the OCI directory we
-  # already have — a local decompress, no second download — into a store on the
-  # SAME scratch disk, so containers-storage never touches the RAM overlay.
-  note "Preparing the installer runtime…"
-  if ! podman --root "$STORE_SCRATCH/graph" --runroot "$STORE_SCRATCH/run" \
-         image exists "$TARGET_IMAGE" 2>/dev/null; then
-    skopeo copy "oci:$OCI_SCRATCH:apex" \
-      "containers-storage:[overlay@$STORE_SCRATCH/graph+$STORE_SCRATCH/run]$TARGET_IMAGE" \
-      2>&1 | tee -a "$LOG" \
-      || die "Could not prepare the installer runtime from the downloaded image.
+The network itself looked usable, so the problem is between here and the image
+registry: the connection may have dropped, the registry may be unreachable from
+this network, or this edition may not have been published. The exact error is at
+the end of $LOG."
+    # ── The fallback runs tools the normal whole-disk path never needs ─────
+    # Whole-disk mode hands the filesystem name to bootc, which brings its own
+    # mkfs; only partition mode checks for one. This path does its own
+    # partitioning, its own mkfs and its own loop device, so every tool it uses
+    # is checked HERE — before the disk is touched — rather than being
+    # discovered missing with the partition table already gone.
+    for _t in losetup truncate mkfs.xfs findmnt; do
+      have "$_t" || die "$_t is missing from this installer, so APEX-OS cannot be staged on $TARGET.
 
 Nothing has been erased — your disks are untouched.
-The exact error is above and in $LOG."
+
+Plug in a USB stick or drive with ${NEED_SCRATCH_GB} GB free — it is used as
+scratch space only and is not erased — and try again."
+    done
+    if [ "$INSTALL_MODE" = disk ] && [ "$ENCRYPT" != yes ]; then
+      for _t in sgdisk wipefs partprobe udevadm lsblk mkfs.vfat "mkfs.$ROOTFS_TYPE"; do
+        have "$_t" || die "$_t is missing from this installer, so $DISK cannot be prepared for a staged install.
+
+Nothing has been erased — your disks are untouched.
+
+Plug in a USB stick or drive with ${NEED_SCRATCH_GB} GB free — it is used as
+scratch space only and is not erased — and try again."
+      done
+    fi
+    log "staging: no scratch volume qualified — staging inside the target root on $TARGET"
+    note "No spare drive or partition was found, so APEX-OS will be downloaded onto $TARGET itself as it installs."
+  else
+    netinstall_fetch_into "$SCRATCH"
   fi
-  # Every later `podman` call in this script must use that store, not the
-  # RAM-backed default one.
-  PODMAN_STORE=(--root "$STORE_SCRATCH/graph" --runroot "$STORE_SCRATCH/run")
 fi
 
 # ── The encryption helper has to EXIST before the disk is destroyed ─────────
@@ -1960,13 +2231,36 @@ fi
 # still before anything has been written. An encrypted disk whose recovery key
 # was never created is the stranding case this whole item exists to prevent, so
 # a missing helper is a refusal, never a "carry on without the recovery key".
+#
+# Split out so the answer is produced by ONE piece of code wherever it is asked.
+# It is asked here on every path that already has the image, and again from the
+# encrypted branch on the one path that does not — see luks_helper_checked.
+luks_helper_ok() {
+  [ "$ENCRYPT" = yes ] || return 0
+  if [ -n "${APEX_LUKS_ENROLL_LOCAL:-}" ]; then
+    [ -x "$APEX_LUKS_ENROLL_LOCAL" ] || return 1
+    log "luks: using the test-only local enrolment helper $APEX_LUKS_ENROLL_LOCAL"
+    return 0
+  fi
+  podman ${PODMAN_STORE[@]+"${PODMAN_STORE[@]}"} run --rm "$IMAGE" \
+    test -x "$LUKS_ENROLL_PATH" >>"$LOG" 2>&1
+}
+luks_helper_checked=0
 if [ "$ENCRYPT" = yes ]; then
   if [ -n "${APEX_LUKS_ENROLL_LOCAL:-}" ]; then
     [ -x "$APEX_LUKS_ENROLL_LOCAL" ] \
       || die "APEX_LUKS_ENROLL_LOCAL=$APEX_LUKS_ENROLL_LOCAL is not executable. Nothing has been erased."
     log "luks: using the test-only local enrolment helper $APEX_LUKS_ENROLL_LOCAL"
-  elif ! podman ${PODMAN_STORE[@]+"${PODMAN_STORE[@]}"} run --rm "$IMAGE" \
-         test -x "$LUKS_ENROLL_PATH" >>"$LOG" 2>&1; then
+    luks_helper_checked=1
+  elif [ "${NETINSTALL:-0}" = 1 ] && [ "${STAGE_ON_TARGET:-0}" = 1 ]; then
+    # The image has NOT been downloaded yet on this path: the only place with
+    # room for it is the target disk, so it arrives after the disk is prepared.
+    # Asking now would run `podman run` against a store that holds nothing and
+    # refuse a perfectly good image. Deferred to the encrypted branch, which
+    # asks the moment the image exists — still before one byte of the system is
+    # written, and before any user data could be locked away.
+    log "luks: enrolment-helper check deferred — the image downloads onto the target"
+  elif ! luks_helper_ok; then
     die "This APEX-OS image cannot set up an encrypted disk: it does not contain
 the enrolment helper ($LUKS_ENROLL_PATH) that creates the recovery key.
 
@@ -1975,10 +2269,20 @@ Nothing has been erased — your disks are untouched.
 An encrypted disk with no recovery key is a disk you can be permanently locked
 out of, so the installer will not make one. Go back and turn encryption off to
 install APEX-OS unencrypted, or use a newer ISO."
+  else
+    luks_helper_checked=1
   fi
 fi
 
-note "Do not power off — $TARGET is being erased and rewritten from here on."
+if [ "${STAGE_ON_TARGET:-0}" = 1 ]; then
+  # Say plainly what is about to happen and in what order, because on this path
+  # the download and the destruction are the SAME step. Someone who reads "do
+  # not power off" and then watches a progress bar for twenty minutes deserves
+  # to know that pulling the plug now is not recoverable.
+  note "Do not power off — $TARGET is being erased now, and APEX-OS downloads onto it as it goes. This is the slow part."
+else
+  note "Do not power off — $TARGET is being erased and rewritten from here on."
+fi
 
 # ── Dry-run stop: the last line before anything is destroyed ─────────────────
 # APEX_DRY_RUN=1 runs the ENTIRE validation path for real — every guard, on the
@@ -2064,6 +2368,19 @@ if [ "$INSTALL_MODE" = partition ]; then
       { echo "--- backed up neighbour EFI files to EFI/fedora/apex-backup ---"
         ls -l "$TROOT/boot/efi/EFI/fedora/apex-backup" 2>/dev/null; } >>"$LOG" 2>&1 || true
     fi
+  fi
+  # ── Nowhere else to stage: the download goes onto the target we just made ──
+  # The target root is mounted at this point and is the only filesystem on this
+  # machine with room, which is what makes the fallback possible here and not
+  # earlier. See stage_setup.
+  if [ "${rc:-0}" = 0 ] && [ "${STAGE_ON_TARGET:-0}" = 1 ]; then
+    if stage_setup "$TROOT"; then
+      netinstall_fetch_into "$STAGE_MNT"
+    else
+      rc=79
+    fi
+  fi
+  if [ "${rc:-0}" = 0 ]; then
     set_nvram_args_for "$DISK"
     podman ${PODMAN_STORE[@]+"${PODMAN_STORE[@]}"} run --rm --privileged --pid=host --net=host --security-opt label=disable \
       -v /var/lib/containers:/var/lib/containers -v /dev:/dev \
@@ -2072,14 +2389,18 @@ if [ "$INSTALL_MODE" = partition ]; then
       ${SRC_VOL[@]+"${SRC_VOL[@]}"} "$IMAGE" \
       bootc install to-filesystem \
         --skip-fetch-check --acknowledge-destructive \
+        ${STAGE_BOOTC_ARGS[@]+"${STAGE_BOOTC_ARGS[@]}"} \
         ${NVRAM_BOOTC_ARGS[@]+"${NVRAM_BOOTC_ARGS[@]}"} \
         --karg quiet --karg splash ${SRC_ARGS[@]+"${SRC_ARGS[@]}"} \
         "$TROOT" 2>&1 | tee -a "$LOG"
     rc=${PIPESTATUS[0]}
     { echo "--- ESP $ESP_DEV after install ---"; find "$TROOT/boot/efi" -maxdepth 3; } >>"$LOG" 2>&1 || true
   fi
-  umount "$TROOT/boot/efi" 2>/dev/null || true
-  umount "$TROOT" 2>/dev/null || true
+  # Before the umounts: the staging loop device holds a writable fd on a deleted
+  # file on $TROOT's filesystem, so $TROOT cannot be released while it exists.
+  stage_teardown
+  umount -R "$TROOT/boot/efi" 2>/dev/null || umount -l "$TROOT/boot/efi" 2>/dev/null || true
+  umount -R "$TROOT" 2>/dev/null || umount -l "$TROOT" 2>/dev/null || true
 elif [ "$ENCRYPT" = yes ]; then
   # ── encrypted whole disk: partition, LUKS2, then to-filesystem ────────────
   #
@@ -2288,6 +2609,26 @@ elif [ "$ENCRYPT" = yes ]; then
     mount "$ESP_PART" "$TROOT/boot/efi" >>"$LOG" 2>&1 \
       || { rc=77; echo "mounting the EFI partition failed" | tee -a "$LOG"; }
   fi
+  # ── Nowhere else to stage: the download goes inside the encrypted root ────
+  # Every staged byte is encrypted on the way in, which is slower and correct.
+  # This is the first point on this path at which a filesystem with room exists.
+  if [ "${rc:-0}" = 0 ] && [ "${STAGE_ON_TARGET:-0}" = 1 ]; then
+    if stage_setup "$TROOT"; then
+      netinstall_fetch_into "$STAGE_MNT"
+      # The check that could not run before the wipe, run at the first instant
+      # the image exists — and still before bootc writes anything, so the
+      # encrypted volume holds no data and nothing is locked away. rc=74's
+      # message already describes exactly this state.
+      if [ "$luks_helper_checked" = 0 ] && ! luks_helper_ok; then
+        rc=74
+        echo "the downloaded APEX-OS image does not contain $LUKS_ENROLL_PATH" | tee -a "$LOG"
+      else
+        luks_helper_checked=1
+      fi
+    else
+      rc=79
+    fi
+  fi
   if [ "${rc:-0}" = 0 ]; then
     # ── the kernel arguments that make the machine unlockable ──────────────
     # The initramfs is GENERIC (`hostonly=no`, built in the image), so it cannot
@@ -2339,6 +2680,7 @@ elif [ "$ENCRYPT" = yes ]; then
       ${SRC_VOL[@]+"${SRC_VOL[@]}"} "$IMAGE" \
       bootc install to-filesystem \
         --skip-fetch-check --acknowledge-destructive \
+        ${STAGE_BOOTC_ARGS[@]+"${STAGE_BOOTC_ARGS[@]}"} \
         ${NVRAM_BOOTC_ARGS[@]+"${NVRAM_BOOTC_ARGS[@]}"} \
         --karg quiet --karg splash "${LUKS_KARGS[@]}" \
         ${SRC_ARGS[@]+"${SRC_ARGS[@]}"} \
@@ -2397,6 +2739,10 @@ elif [ "$ENCRYPT" = yes ]; then
   # that is still there. The result is the account step failing with
   # `useradd: failure while writing changes to /etc/passwd` on a machine whose
   # install went perfectly. Measured on the loopback install, 2026-09-20.
+  # The staging loop device is backed by a deleted file INSIDE the encrypted
+  # root, so it has to go before anything under $TROOT can be released — and
+  # before `cryptsetup close` could ever succeed.
+  stage_teardown
   umount -R "$TROOT/boot/efi" 2>/dev/null || true
   umount -R "$TROOT/boot"     2>/dev/null || true
   umount -R "$TROOT"          2>/dev/null || true
@@ -2418,6 +2764,115 @@ elif [ "$ENCRYPT" = yes ]; then
       { echo "--- mounts still under $TROOT ---"; findmnt -R "$TROOT"; } >>"$LOG" 2>&1 || true
       rc=78; echo "could not release $TROOT after the install ($_resid mount(s) left)" | tee -a "$LOG"
     fi
+  fi
+elif [ "${STAGE_ON_TARGET:-0}" = 1 ]; then
+  # ── whole disk, no scratch volume: partition it ourselves, then stage ─────
+  #
+  # `bootc install to-disk` partitions the disk itself and is the right thing to
+  # use whenever we can. This is the one case where we cannot: the image has to
+  # be on a filesystem BEFORE bootc runs, the only disk with room is the one
+  # being installed to, and to-disk would erase that staging area as its first
+  # act. So the layout is built here and the install is to-filesystem — the same
+  # shape partition mode and the encrypted path already use. This is what the
+  # published v1.0.0 installer did, and it is the installer that booted on real
+  # hardware.
+  #
+  # The layout is MIRRORED from a real `bootc install to-disk --filesystem
+  # btrfs` run, read back with sfdisk rather than guessed:
+  #   1  1 MiB    21686148-6449-6E6F-744E-656564454649  BIOS-BOOT
+  #   2  512 MiB  C12A7328-F81F-11D2-BA4B-00A0C93EC93B  EFI-SYSTEM
+  #   3  rest     4F68BCE3-E8CD-4DB1-96E7-FBCAF984B709  root
+  # The BIOS-boot partition is there because bootc makes one; leaving it out
+  # would make this layout quietly different from to-disk's on exactly the
+  # legacy-BIOS machines that took a whole log entry to support.
+  WROTE_DISK=1   # the partition table goes now — everything on the disk with it
+  note "Preparing $DISK …"
+  mkdir -p "$TROOT"
+  wipefs -a "$DISK" >>"$LOG" 2>&1 || true
+  if ! sgdisk --zap-all "$DISK" >>"$LOG" 2>&1 \
+    || ! sgdisk -n1:0:+1M   -t1:21686148-6449-6E6F-744E-656564454649 -c1:BIOS-BOOT \
+                -n2:0:+512M -t2:C12A7328-F81F-11D2-BA4B-00A0C93EC93B -c2:EFI-SYSTEM \
+                -n3:0:0     -t3:4F68BCE3-E8CD-4DB1-96E7-FBCAF984B709 -c3:apex-root \
+                "$DISK" >>"$LOG" 2>&1; then
+    rc=70; echo "sgdisk could not write the partition table on $DISK" | tee -a "$LOG"
+  fi
+  if [ "${rc:-0}" = 0 ]; then
+    partprobe "$DISK" >>"$LOG" 2>&1 || true
+    udevadm settle --timeout=30 >>"$LOG" 2>&1 || true
+    # Resolve the device nodes by ASKING, never by pasting a number onto the
+    # disk name: that is /dev/sda1 on one machine and /dev/nvme0n1p1 on the next.
+    _parts=()
+    while read -r _n; do _parts+=("/dev/$_n"); done < <(
+      lsblk -rno NAME,TYPE "$DISK" 2>/dev/null | awk '$2=="part"{print $1}')
+    if [ "${#_parts[@]}" != 3 ]; then
+      rc=70
+      echo "expected 3 partitions on $DISK after partitioning, found ${#_parts[@]}" | tee -a "$LOG"
+    else
+      # Assert what we just built rather than assuming it: a wrong ESP here
+      # would send the boot files to the root partition and produce a machine
+      # that installs perfectly and does not boot.
+      _pt=$(lsblk -dno PARTTYPE "${_parts[1]}" 2>/dev/null | tr 'A-Z' 'a-z' | tr -d ' ')
+      if [ "$_pt" != c12a7328-f81f-11d2-ba4b-00a0c93ec93b ]; then
+        rc=70; echo "${_parts[1]} is not an ESP (parttype '$_pt')" | tee -a "$LOG"
+      else
+        ESP_DEV="${_parts[1]}"
+        TARGET="${_parts[2]}"
+        log "partitioned $DISK: BIOS-BOOT=${_parts[0]} ESP=$ESP_DEV root=$TARGET"
+      fi
+    fi
+  fi
+  if [ "${rc:-0}" = 0 ]; then
+    mkfs.vfat -F32 -n EFI-SYSTEM "$ESP_DEV" >>"$LOG" 2>&1 \
+      || { rc=71; echo "mkfs.vfat failed on the EFI partition $ESP_DEV" | tee -a "$LOG"; }
+  fi
+  if [ "${rc:-0}" = 0 ]; then
+    mkfs."$ROOTFS_TYPE" $MKFS_FORCE -L apex-root "$TARGET" >>"$LOG" 2>&1 \
+      || { rc=80; echo "mkfs.$ROOTFS_TYPE failed on $TARGET" | tee -a "$LOG"; }
+  fi
+  if [ "${rc:-0}" = 0 ]; then
+    mount "$TARGET" "$TROOT" >>"$LOG" 2>&1 || { rc=80; echo "mounting $TARGET failed" | tee -a "$LOG"; }
+  fi
+  if [ "${rc:-0}" = 0 ]; then
+    mkdir -p "$TROOT/boot/efi"
+    mount "$ESP_DEV" "$TROOT/boot/efi" >>"$LOG" 2>&1 \
+      || { rc=80; echo "mounting the ESP $ESP_DEV failed" | tee -a "$LOG"; }
+  fi
+  if [ "${rc:-0}" = 0 ]; then
+    if stage_setup "$TROOT"; then
+      netinstall_fetch_into "$STAGE_MNT"
+    else
+      rc=79
+    fi
+  fi
+  if [ "${rc:-0}" = 0 ]; then
+    set_nvram_args_for "$DISK"
+    podman ${PODMAN_STORE[@]+"${PODMAN_STORE[@]}"} run --rm --privileged --pid=host --net=host --security-opt label=disable \
+      -v /var/lib/containers:/var/lib/containers -v /dev:/dev \
+      ${NVRAM_ARGS[@]+"${NVRAM_ARGS[@]}"} \
+      -v "$TROOT":"$TROOT":rshared \
+      ${SRC_VOL[@]+"${SRC_VOL[@]}"} "$IMAGE" \
+      bootc install to-filesystem \
+        --skip-fetch-check --acknowledge-destructive \
+        ${STAGE_BOOTC_ARGS[@]+"${STAGE_BOOTC_ARGS[@]}"} \
+        ${NVRAM_BOOTC_ARGS[@]+"${NVRAM_BOOTC_ARGS[@]}"} \
+        --karg quiet --karg splash ${SRC_ARGS[@]+"${SRC_ARGS[@]}"} \
+        "$TROOT" 2>&1 | tee -a "$LOG"
+    rc=${PIPESTATUS[0]}
+    { echo "--- ESP $ESP_DEV after install ---"; find "$TROOT/boot/efi" -maxdepth 3; } >>"$LOG" 2>&1 || true
+  fi
+  # Staging first, then a PREFIX-matched sweep: podman shares $TROOT rshared, so
+  # mounts bootc makes inside the container appear on the host too, and one left
+  # behind under $TROOT is what makes the account step below write through a
+  # read-only mount of the same btrfs superblock.
+  stage_teardown
+  umount -R "$TROOT/boot/efi" 2>/dev/null || true
+  umount -R "$TROOT"          2>/dev/null || true
+  _resid=$(findmnt -rno TARGET 2>/dev/null | grep -c "^$TROOT" || true)
+  if [ "${_resid:-0}" != 0 ]; then
+    log "staged install: $_resid mount(s) still under $TROOT — releasing lazily"
+    findmnt -rno TARGET 2>/dev/null | grep "^$TROOT" | sort -r | while read -r _m; do
+      umount -Rl "$_m" 2>>"$LOG" || true
+    done
   fi
 else
   # --net=host: no netavark needed in the live env; bootc install is offline.
@@ -2485,6 +2940,19 @@ again to try again." ;;
 
 Do not reboot expecting to log in. Start the installer again — a second run on
 the same disk is safe, and it will redo the whole install." ;;
+  79) die "APEX-OS could not be staged on ${TARGET_DESC:-$TARGET}, so the download had nowhere to go (see $LOG).
+
+${TARGET_DESC:-$TARGET} has been erased and NOTHING has been installed on it, so
+it will not boot. Your other disks were not touched.
+
+This machine has no spare drive or partition, so the installer stages the
+download on the disk it is installing to. Plug in a USB stick or drive with
+${NEED_SCRATCH_GB} GB free — it is used as scratch space only and is not erased
+— and start the installer again." ;;
+  80) die "Could not create or mount the filesystems on $DISK (see $LOG).
+
+$DISK has been erased. Your other disks were not touched. Start the installer
+again to try again — a second attempt on the same disk is safe." ;;
   90) die "Could not format $TARGET as $ROOTFS_TYPE (mkfs failed — see $LOG). The partition was NOT changed; your other partitions are untouched." ;;
   91) die "Could not mount the freshly formatted $TARGET (see $LOG). $TARGET was reformatted and is now empty; your other partitions are untouched." ;;
   92) die "Could not read/mount the EFI System Partition $ESP_DEV (see $LOG). Nothing was formatted; $TARGET and your other partitions are untouched." ;;
