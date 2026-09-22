@@ -1,10 +1,11 @@
 # ──────────────────────────────────────────────────────────────────────────────
-#  Promote a digest onto stable, candidate or beta. Roadmap §26.
+#  Promote a digest onto stable, candidate or beta, and move the staged-rollout
+#  ramp. Roadmap §26.
 #
-#  `edge` is not here. It is moved by build-image.yml with `apex`, `daily`,
-#  `gaming-mesa` and `gaming-nvidia`, because edge IS every successful build of
-#  main and a channel that lagged its own definition would be a lie the first
-#  time somebody switched onto it.
+#  `edge` is not promoted here. It is moved by build-image.yml with `apex`,
+#  `daily`, `gaming-mesa` and `gaming-nvidia`, because edge IS every successful
+#  build of main and a channel that lagged its own definition would be a lie the
+#  first time somebody switched onto it. It CAN be halted here — see `mode`.
 #
 #  The other three exist to be slower, so they move only when a person says so.
 #  Two things are checked before anything is written, and both are the kind of
@@ -23,24 +24,69 @@
 #      violation of it is a stable user taking a build nobody ran. edge is above
 #      beta, beta above candidate, candidate above stable.
 #
+#  ── The staged rollout, and why it lives in this file ───────────────────────
+#
+#  §26's second half needs a percentage that CHANGES between builds — 1, then 5,
+#  then 25 — and an OCI label is baked once per image, so a label cannot hold
+#  it. The pointer is a small signed JSON document published at `:rollout` in
+#  this same repository and re-published whenever the number moves. Every step
+#  below that touches it is in this workflow rather than a new one for a reason
+#  that reaches into the client: `trust::expected_rollout_signer` derives the
+#  Sigstore identity a machine will accept for that document by taking the image
+#  signer and swapping `build-image.yml` for `promote-channel.yml`. Rename this
+#  file and every machine silently stops believing the ramp.
+#
+#  A ramp is therefore a re-dispatch of this workflow with a higher `percent`,
+#  and a stop-ship is one with `halt`. There is no service to run: the machine
+#  GETs an object from the registry it already contacts on every update, and
+#  what makes the object trustworthy is the signature over it rather than the
+#  transport. What that costs is written down in docs/update-channels.md —
+#  chiefly that a registry object is a BROADCAST, so a ramp is per-channel and
+#  never per-machine, and no operator learns who took what.
+#
 #  Nothing here fires on a push. It is workflow_dispatch only, and it shares
 #  build-image.yml's concurrency group so a promotion cannot interleave with a
 #  publish.
+#
+#  NOT VERIFIED: no run of this workflow has ever published a rollout document.
+#  It has been reviewed and never executed. The client half — fetch, verify,
+#  decide, hold — is exercised end to end against real cryptography by
+#  tests/test-apex-rollout.sh, and the shape this workflow writes is asserted
+#  against the client's parser by the same suite.
 # ──────────────────────────────────────────────────────────────────────────────
 name: Promote a channel
 
 on:
   workflow_dispatch:
     inputs:
-      channel:
-        description: "Which channel to move"
+      mode:
+        description: "promote: move the tag and set its ramp. rollout-only: change the ramp or halt a release, moving no tag"
         type: choice
-        options: [candidate, beta, stable]
+        options: [promote, rollout-only]
+        default: promote
+        required: true
+      channel:
+        description: "Which channel. edge is valid for rollout-only, never for promote"
+        type: choice
+        options: [candidate, beta, stable, edge]
         required: true
       digest:
-        description: "The image digest to move it to (sha256:...)"
+        description: "The image digest (sha256:...)"
         type: string
         required: true
+      percent:
+        description: "How many machines this release may reach, 0-100"
+        type: string
+        default: "100"
+        required: true
+      halt:
+        description: "Stop this digest reaching any further machines"
+        type: boolean
+        default: false
+      reason:
+        description: "Why, in your own words. Required for a halt; printed to the user verbatim"
+        type: string
+        default: ""
 
 concurrency:
   group: apex-image-publish
@@ -57,7 +103,7 @@ env:
 
 jobs:
   promote:
-    name: Promote ${{ inputs.channel }}
+    name: ${{ inputs.mode }} ${{ inputs.channel }}
     runs-on: ubuntu-24.04
     steps:
       - name: Install cosign
@@ -68,9 +114,14 @@ jobs:
           set -euo pipefail
           command -v skopeo >/dev/null || { sudo apt-get update -qq && sudo apt-get install -y -qq skopeo; }
 
-      - name: Check the digest is well formed
+      - name: Check the inputs
         env:
           DIGEST: ${{ inputs.digest }}
+          MODE: ${{ inputs.mode }}
+          TARGET: ${{ inputs.channel }}
+          PERCENT: ${{ inputs.percent }}
+          HALT: ${{ inputs.halt }}
+          REASON: ${{ inputs.reason }}
         run: |
           set -euo pipefail
           # Before anything reaches a registry command. A malformed digest here
@@ -83,6 +134,25 @@ jobs:
           hex="${DIGEST#sha256:}"
           if [ "${#hex}" -ne 64 ] || ! printf '%s' "$hex" | grep -qE '^[0-9a-f]{64}$'; then
             echo "::error::'$DIGEST' is not a sha256 digest"
+            exit 1
+          fi
+          if ! printf '%s' "$PERCENT" | grep -qE '^(100|[0-9]{1,2})$'; then
+            echo "::error::percent must be a whole number 0-100, got '$PERCENT'"
+            exit 1
+          fi
+          # A halt with no reason is a machine telling its user "no" and nothing
+          # else. The client prints this string verbatim; there has to be one.
+          if [ "$HALT" = true ] && [ -z "${REASON// }" ]; then
+            echo "::error::a halt must carry a reason. It is what the user reads."
+            exit 1
+          fi
+          # edge moves on every build of main, by build-image.yml. Promoting it
+          # here would write a tag that the next build overwrites within the
+          # hour, which is worse than refusing: the operator would believe a
+          # promotion happened.
+          if [ "$MODE" = promote ] && [ "$TARGET" = edge ]; then
+            echo "::error::edge is moved by build-image.yml on every successful build of main."
+            echo "::error::Use mode=rollout-only to halt or ramp it."
             exit 1
           fi
 
@@ -107,6 +177,7 @@ jobs:
           echo "signed by $IDENTITY"
 
       - name: The digest must already be on the channel above this one
+        if: inputs.mode == 'promote'
         env:
           DIGEST: ${{ inputs.digest }}
           TARGET: ${{ inputs.channel }}
@@ -129,6 +200,7 @@ jobs:
           echo "  ok   :$above is already at this digest"
 
       - name: Move the tag
+        if: inputs.mode == 'promote'
         env:
           DIGEST: ${{ inputs.digest }}
           TARGET: ${{ inputs.channel }}
@@ -152,6 +224,13 @@ jobs:
           # following this channel will actually receive is what the registry
           # answers, so that is what is asserted — the same rule build-image.yml
           # applies to the migration tags.
+          #
+          # In rollout-only mode nothing moved, and this is the check that keeps
+          # the ramp honest instead: a rollout entry names a digest, and the
+          # client ignores an entry whose digest is not what the channel
+          # currently resolves to. Writing an entry for a digest this channel is
+          # not serving would publish a ramp that does nothing, and the operator
+          # would have no way to see that from the run.
           creds="$GHCR_USER:$GHCR_TOKEN"
           got="$(skopeo inspect --creds "$creds" --format '{{.Digest}}' "docker://$IMAGE:$TARGET" 2>/dev/null || echo MISSING)"
           if [ "$got" != "$DIGEST" ]; then
@@ -159,10 +238,182 @@ jobs:
             exit 1
           fi
           echo "  ok   :$TARGET -> $got"
+
+      # ── the mutable pointer ────────────────────────────────────────────────
+      - name: Read the rollout document that is already published
+        id: current
+        env:
+          GHCR_USER: ${{ github.actor }}
+          GHCR_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+        run: |
+          set -euo pipefail
+          creds="$GHCR_USER:$GHCR_TOKEN"
+          # Redirectable, and defaulted to what a runner has. tests/test-apex-
+          # rollout.sh lifts the python below out of this file and RUNS it, so
+          # that the document a machine parses is the document this workflow
+          # writes rather than a copy of it that drifts.
+          D="${ROLLOUT_DIR:-/tmp}"; export ROLLOUT_DIR="$D"
+          rm -rf "$D/rollout-old"
+          if skopeo copy --quiet --src-creds "$creds" \
+               "docker://$IMAGE:rollout" "dir:$D/rollout-old" 2>"$D/rollout-old.err"; then
+            python3 - <<'PY'
+          import json, os, shutil, sys
+          D = os.environ.get("ROLLOUT_DIR", "/tmp")
+          m = json.load(open(f"{D}/rollout-old/manifest.json"))
+          want = "application/vnd.apexos.rollout.v1+json"
+          # The layer the manifest NAMES, never "the first file in the
+          # directory": `skopeo copy … dir:` writes the config blob beside it,
+          # and taking the wrong one would reset the serial to zero — the one
+          # field a client refuses to go backwards on, so the next document
+          # would be refused by every machine as a replay.
+          hit = [l for l in m.get("layers", []) if l.get("mediaType") == want]
+          if not hit:
+              sys.exit("::error::the published :rollout carries no rollout layer. Refusing to "
+                       "replace an object of a shape this workflow did not write.")
+          shutil.copyfile(f"{D}/rollout-old/" + hit[0]["digest"].split(":", 1)[1],
+                          f"{D}/rollout-current.json")
+          PY
+            echo "found=yes" >> "$GITHUB_OUTPUT"
+            echo "the published document is:"; cat "$D/rollout-current.json"
+          else
+            # No document yet. Normal exactly once, and distinguished from a
+            # registry that would not answer — replacing serial 12 with serial 1
+            # because ghcr.io returned 503 is a replay this workflow published
+            # itself, and every machine would then refuse the real next one.
+            if grep -qiE 'manifest unknown|name unknown|not found' "$D/rollout-old.err"; then
+              echo "found=no" >> "$GITHUB_OUTPUT"
+              echo "no rollout document is published yet; this will be serial 1"
+            else
+              echo "::error::could not read $IMAGE:rollout:"; cat "$D/rollout-old.err"
+              exit 1
+            fi
+          fi
+
+      - name: Write the new rollout document
+        env:
+          DIGEST: ${{ inputs.digest }}
+          TARGET: ${{ inputs.channel }}
+          PERCENT: ${{ inputs.percent }}
+          HALT: ${{ inputs.halt }}
+          REASON: ${{ inputs.reason }}
+          FOUND: ${{ steps.current.outputs.found }}
+        run: |
+          set -euo pipefail
+          python3 - <<'PY'
+          import json, os, time
+
+          now = int(time.time())
+          D = os.environ.get("ROLLOUT_DIR", "/tmp")
+          old = json.load(open(f"{D}/rollout-current.json")) if os.environ["FOUND"] == "yes" else {}
+
+          entry = {
+              "channel": os.environ["TARGET"],
+              "digest": os.environ["DIGEST"],
+              "percent": int(os.environ["PERCENT"]),
+              "halt": os.environ["HALT"] == "true",
+          }
+          reason = os.environ.get("REASON", "").strip()
+          if reason:
+              entry["reason"] = reason
+
+          # Every other channel's entry is carried forward untouched. A
+          # promotion of candidate must not silently clear a halt on beta.
+          others = [e for e in old.get("channels", []) if e.get("channel") != entry["channel"]]
+
+          doc = {
+              "schema": 1,
+              # Monotonic, and never reset: the client refuses to go backwards
+              # on it, because an old validly-signed "everybody takes this"
+              # re-served after a halt is a downgrade attack that needs no key.
+              "serial": int(old.get("serial", 0)) + 1,
+              "issued": now,
+              # Fourteen days. The client caps the age at thirty whatever this
+              # says, so this is the publisher promising to re-publish sooner
+              # than it has to — and a ramp that has not moved in a fortnight is
+              # not a ramp any more.
+              "expires": now + 14 * 24 * 3600,
+              "repository": os.environ["IMAGE"],
+              "channels": others + [entry],
+          }
+          json.dump(doc, open(f"{D}/rollout.json", "w"), indent=2, sort_keys=True)
+          print(json.dumps(doc, indent=2, sort_keys=True))
+          PY
+
+      - name: Publish and sign it
+        env:
+          GHCR_USER: ${{ github.actor }}
+          GHCR_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+        run: |
+          set -euo pipefail
+          creds="$GHCR_USER:$GHCR_TOKEN"
+          D="${ROLLOUT_DIR:-/tmp}"; export ROLLOUT_DIR="$D"
+          rm -rf "$D/rollout-new" && mkdir -p "$D/rollout-new"
+          # An OCI image manifest with one layer, assembled by hand. `oras` would
+          # do this and is one more tool to install and pin; skopeo is already
+          # here for the tag move above, and `dir:` is the transport the client's
+          # own fetch path reads — `apexd/apex/src/verify.rs::fetch` copies to
+          # `dir:` and parses exactly this manifest.
+          python3 - <<'PY'
+          import hashlib, json, os, shutil
+
+          D = os.environ.get("ROLLOUT_DIR", "/tmp")
+          body = open(f"{D}/rollout.json", "rb").read()
+          bh = hashlib.sha256(body).hexdigest()
+          shutil.copyfile(f"{D}/rollout.json", f"{D}/rollout-new/{bh}")
+          cfg = b"{}"
+          ch = hashlib.sha256(cfg).hexdigest()
+          open(f"{D}/rollout-new/{ch}", "wb").write(cfg)
+          json.dump({
+              "schemaVersion": 2,
+              "mediaType": "application/vnd.oci.image.manifest.v1+json",
+              "artifactType": "application/vnd.apexos.rollout.v1+json",
+              "config": {
+                  "mediaType": "application/vnd.oci.empty.v1+json",
+                  "digest": "sha256:" + ch,
+                  "size": len(cfg),
+              },
+              "layers": [{
+                  "mediaType": "application/vnd.apexos.rollout.v1+json",
+                  "digest": "sha256:" + bh,
+                  "size": len(body),
+              }],
+          }, open(f"{D}/rollout-new/manifest.json", "w"))
+          PY
+          skopeo copy --retry-times 3 --dest-creds "$creds" \
+            "dir:$D/rollout-new" "docker://$IMAGE:rollout"
+          got="$(skopeo inspect --creds "$creds" --format '{{.Digest}}' "docker://$IMAGE:rollout")"
+          # Signed under THIS workflow's Sigstore identity, which is not
+          # build-image.yml's. See the header: the client derives the identity it
+          # expects by swapping the workflow filename, so this file's name is
+          # part of the trust chain.
+          cosign sign --yes "$IMAGE@$got"
+          echo "  ok   :rollout -> $got, signed"
           {
-            echo "### Channel promoted"
+            echo "### Rollout document"
             echo ""
-            echo "\`$IMAGE:$TARGET\` now resolves to \`$DIGEST\`."
+            echo '```json'
+            cat "$D/rollout.json"
+            echo '```'
             echo ""
-            echo "Machines following it take it on their next \`apex update\`."
+            echo "\`$IMAGE:rollout\` is \`$got\`. Machines read it on their next \`apex update\`."
+          } >> "$GITHUB_STEP_SUMMARY"
+
+      - name: Say what happened
+        env:
+          TARGET: ${{ inputs.channel }}
+          DIGEST: ${{ inputs.digest }}
+          MODE: ${{ inputs.mode }}
+        run: |
+          set -euo pipefail
+          {
+            echo "### ${MODE}: ${TARGET}"
+            echo ""
+            if [ "$MODE" = promote ]; then
+              echo "\`$IMAGE:$TARGET\` now resolves to \`$DIGEST\`."
+            else
+              echo "No tag was moved. \`$IMAGE:$TARGET\` was already \`$DIGEST\`."
+            fi
+            echo ""
+            echo "Machines following it take it on their next \`apex update\`, subject to the"
+            echo "rollout document above."
           } >> "$GITHUB_STEP_SUMMARY"

@@ -816,6 +816,22 @@ pub fn update(opts: UpdateOptions) -> i32 {
         }
     }
 
+    // §26's staged rollout. The publisher's ramp, read from a signed document
+    // in the registry the machine already contacts — see
+    // `apexd_core::channel::decide_rollout` for why it is not a label and
+    // `docs/update-channels.md` for what that costs.
+    //
+    // Not an error and not a non-zero exit: a machine outside the ramp has
+    // nothing wrong with it and nothing to do about it. The OS image is left
+    // alone and packages, flatpaks and firmware still update, because a staged
+    // rollout is about the image and nothing else.
+    if !opts.firmware_only && !opts.force {
+        if let Some(why) = crate::channel::rollout_hold() {
+            print!("{why}");
+            return finish_update(started, worst, &opts);
+        }
+    }
+
     if !opts.firmware_only {
         // What the machine is running BEFORE the pull, so the next run can tell
         // whether this one was rebooted into. Written first: a record written

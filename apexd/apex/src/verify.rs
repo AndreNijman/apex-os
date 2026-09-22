@@ -710,6 +710,87 @@ pub fn fetch(roots: &Roots, repo: &str, tag: &str) -> Result<Fetched, Artifact> 
     Ok(Fetched { manifest: text, blobs, _keep: Some(tmp) })
 }
 
+/// The bytes of the first layer of `media` in the artifact at `repo:tag`,
+/// having first confirmed that the manifest served is the one named by
+/// `expect`.
+///
+/// **`expect` is the whole point of this function.** The caller resolved the
+/// tag to a digest and verified a signature over THAT DIGEST; this then fetches
+/// by tag, which is a second round trip to a registry that is free to answer
+/// differently. Without this check the sequence would be "verify one object,
+/// read another", and a registry that moved the tag between the two calls —
+/// or an attacker who could — would have its bytes parsed and acted on with a
+/// signature over something else standing behind them. The signature is not
+/// over the tag. It is over the digest, and the digest is what has to be read.
+///
+/// The blob is then checked against the digest its manifest names — `blob` does
+/// that for every caller — so the chain is complete: signature over the
+/// manifest digest, manifest digest over the manifest, manifest over the blob.
+pub fn artifact_layer_at(
+    roots: &Roots,
+    repo: &str,
+    tag: &str,
+    expect: &str,
+    media: &str,
+) -> Result<Vec<u8>, String> {
+    let fetched = match fetch(roots, repo, tag) {
+        Ok(f) => f,
+        Err(Artifact::Absent) => return Err(format!("{repo}:{tag} does not exist")),
+        Err(Artifact::Unavailable(why)) => return Err(why),
+    };
+    let path = fetched.blobs.join("manifest.json");
+    let got = sha256_of(&path)?;
+    let want = expect.split_once(':').map(|(_, h)| h).unwrap_or(expect);
+    if !got.eq_ignore_ascii_case(want) {
+        return Err(format!(
+            "{repo}:{tag} served sha256:{got}, and the signature that was checked is over {expect}; \
+             the tag moved between resolving it and reading it, so nothing was read"
+        ));
+    }
+    let layers = layers_of(&fetched.manifest, media)?;
+    let layer = layers
+        .first()
+        .ok_or_else(|| format!("{repo}:{tag} carries no {media} layer"))?;
+    blob(&fetched, layer)
+}
+
+/// The sha256 of a file, lower-case hex, through the openssl this program
+/// already depends on rather than a second hashing crate.
+fn sha256_of(path: &Path) -> Result<String, String> {
+    let out = Command::new("/usr/bin/openssl")
+        .args(["dgst", "-sha256", "-r"])
+        .arg(path)
+        .output()
+        .map_err(|e| format!("could not run openssl: {e}"))?;
+    if !out.status.success() {
+        return Err(format!(
+            "could not hash {}: {}",
+            path.display(),
+            String::from_utf8_lossy(&out.stderr).trim()
+        ));
+    }
+    let text = String::from_utf8_lossy(&out.stdout);
+    Ok(text.split_whitespace().next().unwrap_or("").to_ascii_lowercase())
+}
+
+/// Whether a [`resolve`] failure means the registry ANSWERED and holds no such
+/// tag, as opposed to not having answered at all.
+///
+/// The distinction is the difference between two different facts, and a caller
+/// that conflates them refuses on the wrong one. `apex channel set` is the
+/// caller that cares: a tag the registry does not serve is a switch that would
+/// strand the machine and must be refused, while a registry that could not be
+/// reached is a fact about the network — the user's aeroplane, their captive
+/// portal — and refusing a configuration change over that would be this
+/// program deciding a laptop may not be configured offline.
+///
+/// One spelling, [`classify_skopeo_failure`]'s, reused rather than a second
+/// pattern: two lists of registry error strings drift, and the one that drifts
+/// is the one nobody is testing that day.
+pub fn tag_is_absent(err: &str) -> bool {
+    matches!(classify_skopeo_failure(err), Artifact::Absent)
+}
+
 /// The digest the registry currently serves for a tag.
 ///
 /// This is the load-bearing difference between a readout and a gate: `apex
@@ -719,14 +800,32 @@ pub fn fetch(roots: &Roots, repo: &str, tag: &str) -> Result<Fetched, Artifact> 
 /// aliases for one digest that moves on every successful main build.
 pub fn resolve(roots: &Roots, reference: &str) -> Result<String, String> {
     if roots.fixture.is_some() {
-        if let Ok(Some(why)) = roots.read_optional("/registry/resolve.error") {
-            return Err(why.trim().to_string());
+        // Per-tag first, then the single answer. A fixture used to resolve one
+        // tag; the rollout document means one machine resolves TWO — its
+        // channel and `:rollout` — and a fixture that answered the same digest
+        // for both would make the document's digest binding untestable, which
+        // is the one check that keeps a stale entry from gating a build it was
+        // never about.
+        // The last colon, but only after the last slash — a colon before that
+        // is a port on the registry host, not a tag.
+        let tag = match (reference.rfind(':'), reference.rfind('/')) {
+            (Some(c), Some(sl)) if c > sl => &reference[c + 1..],
+            (Some(c), None) => &reference[c + 1..],
+            _ => "",
+        };
+        let per_tag = if tag.is_empty() { String::new() } else { format!(".{tag}") };
+        for suffix in [per_tag, String::new()] {
+            if let Ok(Some(why)) = roots.read_optional(&format!("/registry/resolve{suffix}.error")) {
+                return Err(why.trim().to_string());
+            }
+            if let Some(d) = roots
+                .read_optional(&format!("/registry/resolve{suffix}"))
+                .map_err(|e| e.to_string())?
+            {
+                return Ok(d.trim().to_string());
+            }
         }
-        return roots
-            .read_optional("/registry/resolve")
-            .map_err(|e| e.to_string())?
-            .map(|s| s.trim().to_string())
-            .ok_or_else(|| "this fixture root resolves no tag".to_string());
+        return Err("this fixture root resolves no tag".to_string());
     }
     let out = Command::new("/usr/bin/skopeo")
         .args(["inspect", "--format", "{{.Digest}}", &format!("docker://{reference}")])
@@ -830,9 +929,9 @@ struct Candidate<'a> {
 }
 
 /// Who this machine will accept a signature from.
-struct Expect {
-    signer: String,
-    issuer: String,
+pub struct Expect {
+    pub signer: String,
+    pub issuer: String,
 }
 
 fn verify_signed_bytes(roots: &Roots, work: &Path, c: &Candidate<'_>, want: &Expect) -> Verdict {
@@ -982,13 +1081,29 @@ fn verify_signed_bytes(roots: &Roots, work: &Path, c: &Candidate<'_>, want: &Exp
 // ── the two artifacts ────────────────────────────────────────────────────────
 
 /// The identity and issuer this machine expects, and nothing inferred.
-fn expectations(roots: &Roots) -> Expect {
+pub fn expectations(roots: &Roots) -> Expect {
     let signer = crate::trust::expected_signer(roots);
     let issuer = match roots.read_optional(ISSUER_OVERRIDE) {
         Ok(Some(s)) if !s.trim().is_empty() => s.trim().to_string(),
         _ => crate::trust::EXPECTED_ISSUER.to_string(),
     };
     Expect { signer, issuer }
+}
+
+/// Who this machine will accept a ROLLOUT DOCUMENT from.
+///
+/// A different workflow signs it — the image is signed per build by
+/// `build-image.yml` and the document has to be publishable between builds —
+/// so it is a different Sigstore identity, and verifying the document against
+/// the image's identity would refuse every document ever published.
+///
+/// Same issuer, because it is the same GitHub Actions token endpoint.
+pub fn rollout_expectations(roots: &Roots) -> Expect {
+    let issuer = match roots.read_optional(ISSUER_OVERRIDE) {
+        Ok(Some(s)) if !s.trim().is_empty() => s.trim().to_string(),
+        _ => crate::trust::EXPECTED_ISSUER.to_string(),
+    };
+    Expect { signer: crate::trust::expected_rollout_signer(roots), issuer }
 }
 
 /// One layer's cosign annotations.
@@ -1074,8 +1189,17 @@ fn from_artifact(a: Artifact, what: &str) -> Verdict {
     }
 }
 
-/// Verify the `.sig` artifact for a digest.
+/// Verify the `.sig` artifact for a digest, against the image signer.
 pub fn verify_signature(roots: &Roots, repo: &str, digest: &str) -> Verdict {
+    verify_signature_as(roots, repo, digest, &expectations(roots))
+}
+
+/// Verify the `.sig` artifact for a digest against a named identity.
+///
+/// Split out from [`verify_signature`] rather than duplicated: the rollout
+/// document is an ordinary cosign-signed object in the same repository, and a
+/// second verifier for it would be a second place for this to be got wrong.
+pub fn verify_signature_as(roots: &Roots, repo: &str, digest: &str, want: &Expect) -> Verdict {
     let Some(tag) = cosign_tag(digest, ".sig") else {
         return Verdict::CouldNotRun(format!("unusable digest: {digest}"));
     };
@@ -1094,7 +1218,6 @@ pub fn verify_signature(roots: &Roots, repo: &str, digest: &str) -> Verdict {
             "{repo}:{tag} carries no {MEDIA_SIMPLE_SIGNING} layer"
         ));
     }
-    let want = expectations(roots);
     let mut last = Verdict::CouldNotRun("no layer was examined".to_string());
     // Every layer, and any one verifying is enough: a re-signed image carries
     // more than one signature, and taking only the first would refuse it.
@@ -1130,7 +1253,7 @@ pub fn verify_signature(roots: &Roots, repo: &str, digest: &str) -> Verdict {
                 signature_b64: &ann.signature,
                 signed: &bytes,
             },
-            &want,
+            want,
         );
         if matches!(v, Verdict::Verified { .. }) {
             return v;

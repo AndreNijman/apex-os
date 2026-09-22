@@ -43,11 +43,29 @@
 //! is one of a hundred values, and it is not in the report `apex channel
 //! report` would send.
 //!
-//! What is missing, and named rather than faked: the percentage has to live
-//! somewhere that can change between builds — 1, then 5, then 25 — and an OCI
-//! label is baked once per image. So the gate is implemented and tested, the
-//! percentage is read from the image's own label when it carries one, and the
-//! default is 100. Every image published so far is at 100, which is the truth.
+//! The percentage has to live somewhere that can change between builds — 1,
+//! then 5, then 25 — and an OCI label is baked once per image, so a label
+//! cannot be it. The pointer is a **signed rollout document**, published as its
+//! own object in the same registry under the `rollout` tag and re-published
+//! whenever the number moves. [`RolloutDoc`] is that document and
+//! [`decide_rollout`] is the whole of what a machine does with one.
+//!
+//! Why the registry rather than a service: the machine already contacts that
+//! registry on every update, so the document costs no new host, no new trust
+//! root, and no new fact about the machine that anybody can observe. APEX
+//! operates no server and this does not ask it to. The cost is stated in
+//! `docs/update-channels.md`: a document in a registry is a **broadcast**, so
+//! a ramp is per-channel and never per-machine, and there is no back channel —
+//! the operator learns nothing about who took what except from the opt-in
+//! health report, which is off by default.
+//!
+//! There is no second source. A machine that cannot reach the document, cannot
+//! read it, or holds one that does not apply to it reaches everybody — which is
+//! what every APEX image published so far does. An image label was named here
+//! as a fallback for a while and was never stamped by anything; it is gone,
+//! because a fallback the registry serves is no use to a machine that could not
+//! reach the registry, and a percentage that reaches the gate without a
+//! signature over it is the one thing this must not have.
 
 use crate::recover::Health;
 
@@ -216,22 +234,327 @@ pub fn bucket(machine_id: &str) -> u8 {
 
 /// Whether a machine in `bucket` takes a release published at `percent`.
 ///
-/// `percent` above 100 is clamped rather than refused: it arrives from an image
-/// label, and a typo there must not stop a machine updating.
+/// `percent` above 100 is clamped rather than refused: it arrives from a
+/// document a person typed, and a typo there must not stop a machine updating.
 pub fn admits(bucket: u8, percent: u8) -> bool {
     u32::from(bucket) < u32::from(percent.min(100))
 }
 
-/// What every image published so far is at, and what an image with no rollout
-/// label means.
+/// What a machine with no usable rollout document is at, which is every APEX
+/// machine today.
 pub const FULL_ROLLOUT: u8 = 100;
 
-/// The OCI label a build stamps to hold a release back.
+// There is no OCI label for the ramp, and the absence is deliberate.
+//
+// `org.apexos.rollout.percent` was named here for a while and nothing ever
+// stamped it — MEASURED 2026-09-22: no Containerfile, no workflow and no script
+// in either repository writes it, and the live image carries no such label. It
+// could not have worked: the number has to move between builds and a label is
+// baked once, which is the observation the signed document below exists to
+// answer. The absence is written down rather than quietly left blank because a
+// constant with a test beside it reads as a wired gate, and that is the mistake
+// worth not repeating.
+
+
+// ── the mutable pointer: a signed rollout document ───────────────────────────
+
+/// The tag the rollout document is published under, in the same repository as
+/// the image.
 ///
-/// Named here because the reader and the writer are in different repositories'
-/// worth of tooling, and a label whose spelling drifts is a gate that silently
-/// stops gating.
-pub const ROLLOUT_LABEL: &str = "org.apexos.rollout.percent";
+/// A separate object rather than a label on the image, because the number has
+/// to move between builds and a label is baked once. A tag in the registry the
+/// machine already talks to rather than an endpoint, because an endpoint is a
+/// server somebody has to run, a second name to trust, and a record of which
+/// machines asked.
+pub const ROLLOUT_TAG: &str = "rollout";
+
+/// The media type of the document layer inside that object.
+pub const ROLLOUT_MEDIA_TYPE: &str = "application/vnd.apexos.rollout.v1+json";
+
+/// The schema this build understands. A document declaring a higher one is
+/// ignored whole rather than read in part.
+pub const ROLLOUT_SCHEMA: u32 = 1;
+
+/// How old a document may be before the client stops believing it, whatever it
+/// says about its own expiry.
+///
+/// Thirty days. Longer than any ramp worth the name — a rollout that takes more
+/// than a month is not a rollout — and short enough that a publisher who stops
+/// publishing releases every machine back to its own behaviour inside a month
+/// instead of pinning it to a last instruction forever. `docs/fleet.md` asked
+/// whether the freshness bound belongs in the document or in the client; the
+/// answer is both, and the client's cap is the one that cannot be forgotten by
+/// whoever writes the document.
+pub const MAX_DOCUMENT_AGE: u64 = 30 * 24 * 60 * 60;
+
+/// How far into the future a document may claim to have been issued.
+///
+/// A machine whose clock is wrong is common; a machine whose clock is wrong
+/// must not silently ignore every document, and must not accept one minted for
+/// a date it cannot have reached. An hour covers a timezone mistake and a
+/// slow NTP, and nothing longer is needed because the ceiling above is
+/// measured from `issued`.
+pub const MAX_CLOCK_SKEW: u64 = 60 * 60;
+
+/// One channel's current rollout state.
+#[derive(Debug, Clone, PartialEq, Eq, serde::Serialize, serde::Deserialize)]
+pub struct RolloutEntry {
+    /// `stable`, `candidate`, `beta` or `edge`. A string rather than [`Channel`]
+    /// so a document naming a channel this build has never heard of is data to
+    /// be skipped rather than a parse failure that discards the whole document.
+    pub channel: String,
+    /// The digest this entry is about.
+    ///
+    /// Load-bearing. Without it a 5% entry written for candidate build X would
+    /// go on holding machines back from build Y the moment the tag moved, and
+    /// nobody would see it happen — the entry would still read as current.
+    pub digest: String,
+    /// The slots admitted, 0–100. 100 is everybody.
+    pub percent: u8,
+    /// Stop this digest reaching any further machines.
+    #[serde(default)]
+    pub halt: bool,
+    /// Why, in the publisher's own words. Printed to the user verbatim.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub reason: Option<String>,
+}
+
+/// The document itself.
+///
+/// Small on purpose. It carries the ramp and nothing else: no machine list, no
+/// identifiers, no commands. A response that named something to run would be
+/// remote execution through a data channel — `docs/fleet.md`'s first
+/// never-build item, wearing a different hat.
+#[derive(Debug, Clone, PartialEq, Eq, serde::Serialize, serde::Deserialize)]
+pub struct RolloutDoc {
+    /// Absent means 1, on the same rule §25 uses for every other stored schema.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub schema: Option<u32>,
+    /// Monotonic. A client refuses to go backwards on it, because an old
+    /// validly-signed document is otherwise a replay: "everybody takes this"
+    /// re-served after it was halted.
+    pub serial: u64,
+    /// Unix seconds. What [`MAX_DOCUMENT_AGE`] is measured from.
+    pub issued: u64,
+    /// Unix seconds. The publisher's own bound, which may be shorter than the
+    /// client's and may not be longer.
+    pub expires: u64,
+    /// The repository this document governs.
+    ///
+    /// The signature already binds the document to a repository, and this is
+    /// checked anyway: `signature=warn` is a configuration a machine can be in,
+    /// and a document lifted from one repository and served from another must
+    /// not govern the second one even then.
+    pub repository: String,
+    pub channels: Vec<RolloutEntry>,
+}
+
+impl RolloutDoc {
+    pub fn schema_version(&self) -> u32 {
+        self.schema.unwrap_or(1)
+    }
+
+    pub fn entry(&self, channel: Channel) -> Option<&RolloutEntry> {
+        self.channels.iter().find(|e| e.channel == channel.as_str())
+    }
+}
+
+/// Where the percentage that governed this decision came from.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum RolloutSource {
+    /// The signed document in the registry.
+    Document,
+    /// Nothing said otherwise, so everybody.
+    Default,
+}
+
+impl RolloutSource {
+    pub fn as_str(self) -> &'static str {
+        match self {
+            RolloutSource::Document => "the signed rollout document",
+            RolloutSource::Default => "nothing — no rollout is in progress",
+        }
+    }
+}
+
+/// What the update path should do about the staged rollout.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub enum Rollout {
+    /// Take it.
+    Admitted { percent: u8, source: RolloutSource },
+    /// This machine's slot is outside the ramp. It is not broken and there is
+    /// nothing to fix; it is not its turn.
+    Held { slot: u8, percent: u8 },
+    /// The publisher stopped this release.
+    Halted { reason: String },
+}
+
+/// Everything the decision needs, and nothing it can go and read for itself.
+///
+/// Pure, on the division the rest of this crate uses: the CLI measures the
+/// machine and the registry, this decides. Every field is something a caller
+/// had to obtain, which is what makes the whole table exercisable from a test.
+#[derive(Debug, Clone)]
+pub struct RolloutQuery<'a> {
+    /// Unix seconds, as the machine understands them.
+    pub now: u64,
+    /// This machine's slot, 0–99. See [`bucket`].
+    pub slot: u8,
+    pub channel: Channel,
+    /// The repository the machine follows, without a tag.
+    pub repository: &'a str,
+    /// What the channel's tag resolves to right now — the digest the machine is
+    /// about to pull. `None` when the registry could not be asked.
+    pub target_digest: Option<&'a str>,
+    /// The document, if one was fetched AND its signature was accepted. A
+    /// document whose signature failed must never reach this function: pass
+    /// `None` and say so in a note. Trusting the contents of an object whose
+    /// signature did not verify is the only mistake here that cannot be
+    /// recovered from.
+    pub document: Option<&'a RolloutDoc>,
+    /// The highest serial this machine has already accepted.
+    pub seen_serial: Option<u64>,
+    /// A ceiling an enrolled machine's fleet set, which may only LOWER the
+    /// percentage and may never raise it. `None` on every machine today: no
+    /// fleet client exists, and `docs/fleet.md` is a design. It is a parameter
+    /// rather than a future edit so that "a fleet may hold its machines back
+    /// and may not push them ahead" is a property of this function instead of a
+    /// promise in a document.
+    pub fleet_ceiling: Option<u8>,
+}
+
+/// The decision, and everything the machine could not use and why.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct RolloutAnswer {
+    pub rollout: Rollout,
+    /// One line per thing that was ignored. Never empty for a document that was
+    /// fetched and not used: a pointer silently discarded is a ramp that
+    /// silently does not happen.
+    pub notes: Vec<String>,
+}
+
+/// Decide, and say what was ignored on the way.
+///
+/// Every uncertainty admits. A machine that cannot reach the document, cannot
+/// resolve its tag, or holds a document it cannot read takes its update exactly
+/// as it does today — the shape the rest of this program already uses for the
+/// same reason, and it costs nothing here: a machine that could not resolve the
+/// tag cannot pull the image either, so failing open at this gate changes
+/// nothing except which message the user reads.
+///
+/// The one thing that is NOT an uncertainty is a document that verified and
+/// says stop.
+pub fn decide_rollout(q: &RolloutQuery<'_>) -> RolloutAnswer {
+    let mut notes = Vec::new();
+    let entry = usable_entry(q, &mut notes);
+
+    if let Some(e) = entry {
+        if e.halt {
+            let why = e
+                .reason
+                .clone()
+                .unwrap_or_else(|| "the publisher gave no reason".to_string());
+            return RolloutAnswer { rollout: Rollout::Halted { reason: why }, notes };
+        }
+    }
+
+    let (mut percent, source) = match entry {
+        Some(e) => (e.percent.min(100), RolloutSource::Document),
+        // No usable document means no ramp, and no ramp means everybody. There
+        // is deliberately no second source to fall back to: see [`FULL_ROLLOUT`].
+        None => (FULL_ROLLOUT, RolloutSource::Default),
+    };
+
+    if let Some(ceiling) = q.fleet_ceiling {
+        let ceiling = ceiling.min(100);
+        if ceiling < percent {
+            notes.push(format!(
+                "this machine's fleet lowered the ceiling from {percent}% to {ceiling}%"
+            ));
+            percent = ceiling;
+        }
+    }
+
+    let rollout = if admits(q.slot, percent) {
+        Rollout::Admitted { percent, source }
+    } else {
+        Rollout::Held { slot: q.slot, percent }
+    };
+    RolloutAnswer { rollout, notes }
+}
+
+/// The entry that applies to this machine, or `None` and a note saying why not.
+fn usable_entry<'a>(q: &RolloutQuery<'a>, notes: &mut Vec<String>) -> Option<&'a RolloutEntry> {
+    let doc = q.document?;
+    if doc.schema_version() > ROLLOUT_SCHEMA {
+        notes.push(format!(
+            "the rollout document is schema {} and this build reads {ROLLOUT_SCHEMA}, so it was ignored whole rather than read in part",
+            doc.schema_version()
+        ));
+        return None;
+    }
+    if doc.repository != q.repository {
+        notes.push(format!(
+            "the rollout document governs {} and this machine follows {}, so it was ignored",
+            doc.repository, q.repository
+        ));
+        return None;
+    }
+    if q.now > doc.expires {
+        notes.push(format!(
+            "the rollout document expired at unix {} and it is unix {}, so this machine is on its own configuration",
+            doc.expires, q.now
+        ));
+        return None;
+    }
+    if q.now.saturating_sub(doc.issued) > MAX_DOCUMENT_AGE {
+        notes.push(format!(
+            "the rollout document was issued at unix {} and nothing older than {MAX_DOCUMENT_AGE} seconds is believed, whatever its own expiry says",
+            doc.issued
+        ));
+        return None;
+    }
+    if doc.issued > q.now.saturating_add(MAX_CLOCK_SKEW) {
+        notes.push(format!(
+            "the rollout document is dated unix {}, which is ahead of this machine's clock (unix {}); check the clock",
+            doc.issued, q.now
+        ));
+        return None;
+    }
+    if let Some(seen) = q.seen_serial {
+        if doc.serial < seen {
+            notes.push(format!(
+                "the rollout document is serial {} and this machine has already accepted {seen}; an older document served again is a replay, so it was ignored",
+                doc.serial
+            ));
+            return None;
+        }
+    }
+    let Some(entry) = doc.entry(q.channel) else {
+        notes.push(format!(
+            "the rollout document says nothing about {}, so no rollout is staged for it",
+            q.channel.as_str()
+        ));
+        return None;
+    };
+    let Some(target) = q.target_digest else {
+        notes.push(
+            "the registry could not be asked what this channel resolves to, so the rollout document was not applied"
+                .to_string(),
+        );
+        return None;
+    };
+    if entry.digest != target {
+        notes.push(format!(
+            "the rollout document's {} entry is about {}, and this channel now resolves to {}; the entry is stale and was ignored",
+            q.channel.as_str(),
+            entry.digest,
+            target
+        ));
+        return None;
+    }
+    Some(entry)
+}
 
 // ── the health signal that stops a rollout ───────────────────────────────────
 
@@ -470,7 +793,7 @@ mod tests {
         let taken = (0..100u8).filter(|b| admits(*b, 1)).count();
         assert_eq!(taken, 1);
         assert_eq!((0..100u8).filter(|b| admits(*b, 25)).count(), 25);
-        // A label with a typo must not stop a machine updating.
+        // A percent with a typo in it must not stop a machine updating.
         assert!(admits(99, 255));
     }
 
@@ -568,12 +891,345 @@ mod tests {
         assert!(!rebooted_into_new(&r, ""));
     }
 
+
+    // ── the rollout document ─────────────────────────────────────────────────
+
+    const REPO: &str = "ghcr.io/andrenijman/apex-os";
+    const D1: &str = "sha256:1111111111111111111111111111111111111111111111111111111111111111";
+    const D2: &str = "sha256:2222222222222222222222222222222222222222222222222222222222222222";
+    const NOW: u64 = 1_790_000_000;
+
+    fn doc(entries: Vec<RolloutEntry>) -> RolloutDoc {
+        RolloutDoc {
+            schema: Some(ROLLOUT_SCHEMA),
+            serial: 7,
+            issued: NOW - 3600,
+            expires: NOW + 7 * 24 * 3600,
+            repository: REPO.to_string(),
+            channels: entries,
+        }
+    }
+
+    fn entry(channel: &str, digest: &str, percent: u8) -> RolloutEntry {
+        RolloutEntry {
+            channel: channel.to_string(),
+            digest: digest.to_string(),
+            percent,
+            halt: false,
+            reason: None,
+        }
+    }
+
+    fn query<'a>(slot: u8, document: Option<&'a RolloutDoc>) -> RolloutQuery<'a> {
+        RolloutQuery {
+            now: NOW,
+            slot,
+            channel: Channel::Candidate,
+            repository: REPO,
+            target_digest: Some(D1),
+            document,
+            seen_serial: None,
+            fleet_ceiling: None,
+        }
+    }
+
     #[test]
-    fn the_rollout_label_is_spelled_once() {
-        // The writer is a Containerfile and the reader is this crate. A label
-        // whose spelling drifts is a gate that silently stops gating, and
-        // nothing else in the system would notice.
-        assert_eq!(ROLLOUT_LABEL, "org.apexos.rollout.percent");
+    fn a_machine_with_no_document_and_no_label_behaves_exactly_as_it_does_today() {
+        // The property that makes this an addition rather than a change. Every
+        // APEX machine in the field is in this state and must stay in it.
+        for slot in 0..100u8 {
+            let a = decide_rollout(&query(slot, None));
+            assert_eq!(
+                a.rollout,
+                Rollout::Admitted { percent: 100, source: RolloutSource::Default },
+                "slot {slot}"
+            );
+            assert!(a.notes.is_empty(), "{:?}", a.notes);
+        }
+    }
+
+    #[test]
+    fn a_ramp_admits_the_slots_below_it_and_holds_the_rest() {
+        let d = doc(vec![entry("candidate", D1, 25)]);
+        let taken = (0..100u8)
+            .filter(|s| {
+                matches!(
+                    decide_rollout(&query(*s, Some(&d))).rollout,
+                    Rollout::Admitted { .. }
+                )
+            })
+            .count();
+        assert_eq!(taken, 25);
+        // And a held machine is told which slot it is and where the ramp got
+        // to, because "not yet" with no number is indistinguishable from broken.
+        let a = decide_rollout(&query(40, Some(&d)));
+        assert_eq!(a.rollout, Rollout::Held { slot: 40, percent: 25 });
+        let a = decide_rollout(&query(24, Some(&d)));
+        assert_eq!(
+            a.rollout,
+            Rollout::Admitted { percent: 25, source: RolloutSource::Document }
+        );
+    }
+
+    #[test]
+    fn a_halt_stops_every_slot_and_carries_the_publishers_own_words() {
+        let mut e = entry("candidate", D1, 100);
+        e.halt = true;
+        e.reason = Some("gpu-driver fails to bind on RTX 30-series".to_string());
+        let d = doc(vec![e]);
+        for slot in [0u8, 50, 99] {
+            match decide_rollout(&query(slot, Some(&d))).rollout {
+                Rollout::Halted { reason } => {
+                    assert_eq!(reason, "gpu-driver fails to bind on RTX 30-series")
+                }
+                other => panic!("slot {slot} was not halted: {other:?}"),
+            }
+        }
+        // A halt at 100% still halts: the percentage is not what stops it.
+        // And a halt with no reason still says something rather than nothing.
+        let mut e = entry("candidate", D1, 100);
+        e.halt = true;
+        let d = doc(vec![e]);
+        match decide_rollout(&query(0, Some(&d))).rollout {
+            Rollout::Halted { reason } => assert!(!reason.is_empty()),
+            other => panic!("{other:?}"),
+        }
+    }
+
+    #[test]
+    fn an_entry_about_a_digest_this_channel_no_longer_resolves_to_is_stale() {
+        // The defect this binding exists to prevent: a 5% entry written for
+        // build X goes on holding machines back from build Y once the tag
+        // moves, and the entry still reads as current.
+        let d = doc(vec![entry("candidate", D2, 5)]);
+        let a = decide_rollout(&query(50, Some(&d)));
+        assert_eq!(
+            a.rollout,
+            Rollout::Admitted { percent: 100, source: RolloutSource::Default }
+        );
+        assert_eq!(a.notes.len(), 1);
+        assert!(a.notes[0].contains("stale"), "{:?}", a.notes);
+        // A halt is bound the same way. A halt on a digest nobody is being
+        // offered any more is over.
+        let mut e = entry("candidate", D2, 100);
+        e.halt = true;
+        let d = doc(vec![e]);
+        assert!(matches!(
+            decide_rollout(&query(50, Some(&d))).rollout,
+            Rollout::Admitted { .. }
+        ));
+    }
+
+    #[test]
+    fn an_expired_document_returns_the_machine_to_its_own_configuration() {
+        // A fleet that stops answering must not pin every machine to its last
+        // instruction forever.
+        let mut d = doc(vec![entry("candidate", D1, 5)]);
+        d.expires = NOW - 1;
+        let a = decide_rollout(&query(50, Some(&d)));
+        assert!(matches!(a.rollout, Rollout::Admitted { source: RolloutSource::Default, .. }));
+        assert!(a.notes[0].contains("expired"), "{:?}", a.notes);
+    }
+
+    #[test]
+    fn the_client_stops_believing_an_old_document_whatever_its_own_expiry_says() {
+        // The half of the freshness bound that cannot be forgotten by whoever
+        // writes the document: an expiry ten years out is still an expiry.
+        let mut d = doc(vec![entry("candidate", D1, 5)]);
+        d.issued = NOW - MAX_DOCUMENT_AGE - 1;
+        d.expires = NOW + 10 * 365 * 24 * 3600;
+        let a = decide_rollout(&query(50, Some(&d)));
+        assert!(matches!(a.rollout, Rollout::Admitted { source: RolloutSource::Default, .. }));
+        assert!(a.notes[0].contains(&MAX_DOCUMENT_AGE.to_string()), "{:?}", a.notes);
+        // One second inside the window is still believed, so the bound is a
+        // bound and not an off-by-a-month.
+        d.issued = NOW - MAX_DOCUMENT_AGE;
+        assert_eq!(
+            decide_rollout(&query(50, Some(&d))).rollout,
+            Rollout::Held { slot: 50, percent: 5 }
+        );
+    }
+
+    #[test]
+    fn a_document_dated_ahead_of_the_clock_is_refused_within_an_hour_of_slack() {
+        let mut d = doc(vec![entry("candidate", D1, 5)]);
+        d.issued = NOW + MAX_CLOCK_SKEW + 1;
+        let a = decide_rollout(&query(50, Some(&d)));
+        assert!(matches!(a.rollout, Rollout::Admitted { source: RolloutSource::Default, .. }));
+        assert!(a.notes[0].contains("clock"), "{:?}", a.notes);
+        // A machine an hour out is common and still gets its ramp.
+        d.issued = NOW + MAX_CLOCK_SKEW;
+        assert_eq!(
+            decide_rollout(&query(50, Some(&d))).rollout,
+            Rollout::Held { slot: 50, percent: 5 }
+        );
+    }
+
+    #[test]
+    fn an_older_document_served_again_is_a_replay_and_is_refused() {
+        // Without this, "everybody takes this" re-served after a halt is a
+        // downgrade attack that needs no key at all — only the ability to hand
+        // the machine an object the publisher really did sign, once.
+        let mut e = entry("candidate", D1, 100);
+        e.halt = true;
+        e.reason = Some("this build eats /etc".to_string());
+        let halted = doc(vec![e]);
+        assert!(matches!(
+            decide_rollout(&query(50, Some(&halted))).rollout,
+            Rollout::Halted { .. }
+        ));
+
+        let mut old = doc(vec![entry("candidate", D1, 100)]);
+        old.serial = 6;
+        let mut q = query(50, Some(&old));
+        q.seen_serial = Some(halted.serial);
+        let a = decide_rollout(&q);
+        assert!(matches!(a.rollout, Rollout::Admitted { source: RolloutSource::Default, .. }));
+        assert!(a.notes[0].contains("replay"), "{:?}", a.notes);
+
+        // The same serial is not a replay — it is the same document, fetched
+        // again, which is what every poll after the first one is.
+        let same = doc(vec![entry("candidate", D1, 100)]);
+        let mut q = query(50, Some(&same));
+        q.seen_serial = Some(same.serial);
+        assert!(matches!(
+            decide_rollout(&q).rollout,
+            Rollout::Admitted { source: RolloutSource::Document, .. }
+        ));
+    }
+
+    #[test]
+    fn a_document_for_another_repository_governs_nothing_here() {
+        let mut d = doc(vec![entry("candidate", D1, 5)]);
+        d.repository = "ghcr.io/someone-else/apex-os".to_string();
+        let a = decide_rollout(&query(50, Some(&d)));
+        assert!(matches!(a.rollout, Rollout::Admitted { source: RolloutSource::Default, .. }));
+        assert!(a.notes[0].contains("someone-else"), "{:?}", a.notes);
+    }
+
+    #[test]
+    fn a_newer_schema_is_ignored_whole_rather_than_read_in_part() {
+        let mut d = doc(vec![entry("candidate", D1, 5)]);
+        d.schema = Some(ROLLOUT_SCHEMA + 1);
+        let a = decide_rollout(&query(50, Some(&d)));
+        assert!(matches!(a.rollout, Rollout::Admitted { source: RolloutSource::Default, .. }));
+        assert!(a.notes[0].contains("schema"), "{:?}", a.notes);
+        // Absent means 1, the §25 rule every other stored schema follows.
+        d.schema = None;
+        assert_eq!(d.schema_version(), 1);
+        assert_eq!(
+            decide_rollout(&query(50, Some(&d))).rollout,
+            Rollout::Held { slot: 50, percent: 5 }
+        );
+    }
+
+    #[test]
+    fn a_document_that_says_nothing_about_this_channel_stages_nothing_for_it() {
+        let d = doc(vec![entry("beta", D1, 5)]);
+        let a = decide_rollout(&query(50, Some(&d)));
+        assert!(matches!(a.rollout, Rollout::Admitted { source: RolloutSource::Default, .. }));
+        assert!(a.notes[0].contains("candidate"), "{:?}", a.notes);
+    }
+
+    #[test]
+    fn a_registry_that_could_not_be_asked_does_not_hold_the_update() {
+        // Fail open, and it costs nothing: a machine that cannot resolve the
+        // tag cannot pull the image either, so the only thing this changes is
+        // which sentence the user reads.
+        let d = doc(vec![entry("candidate", D1, 5)]);
+        let mut q = query(50, Some(&d));
+        q.target_digest = None;
+        let a = decide_rollout(&q);
+        assert!(matches!(a.rollout, Rollout::Admitted { source: RolloutSource::Default, .. }));
+        assert!(a.notes[0].contains("could not be asked"), "{:?}", a.notes);
+    }
+
+    #[test]
+    fn a_fleet_may_lower_the_ceiling_and_may_never_raise_it() {
+        // The property `docs/fleet.md` promises, held here rather than in the
+        // document: an enrolled machine's operator can hold their fleet back
+        // and cannot push it ahead of the publisher's ramp.
+        let d = doc(vec![entry("candidate", D1, 50)]);
+        let mut q = query(60, Some(&d));
+        q.fleet_ceiling = Some(90);
+        let a = decide_rollout(&q);
+        assert_eq!(a.rollout, Rollout::Held { slot: 60, percent: 50 }, "a fleet raised the ramp");
+        assert!(a.notes.is_empty(), "{:?}", a.notes);
+
+        let mut q = query(40, Some(&d));
+        q.fleet_ceiling = Some(10);
+        let a = decide_rollout(&q);
+        assert_eq!(a.rollout, Rollout::Held { slot: 40, percent: 10 });
+        assert!(a.notes[0].contains("fleet lowered"), "{:?}", a.notes);
+
+        // And with no document at all, a fleet can still hold its own machines
+        // back from a release everybody else is taking.
+        let mut q = query(40, None);
+        q.fleet_ceiling = Some(10);
+        assert_eq!(decide_rollout(&q).rollout, Rollout::Held { slot: 40, percent: 10 });
+    }
+
+    #[test]
+    fn a_percentage_over_a_hundred_is_clamped_rather_than_refused() {
+        let d = doc(vec![entry("candidate", D1, 255)]);
+        assert_eq!(
+            decide_rollout(&query(99, Some(&d))).rollout,
+            Rollout::Admitted { percent: 100, source: RolloutSource::Document }
+        );
+    }
+
+    #[test]
+    fn the_document_round_trips_through_json_as_the_publisher_writes_it() {
+        // The writer is a workflow and the reader is this crate, and nothing
+        // else connects them. A field renamed on one side is a ramp that
+        // silently stops ramping.
+        let text = r#"{
+          "schema": 1,
+          "serial": 12,
+          "issued": 1790000000,
+          "expires": 1790604800,
+          "repository": "ghcr.io/andrenijman/apex-os",
+          "channels": [
+            {"channel":"candidate","digest":"sha256:aa","percent":5},
+            {"channel":"beta","digest":"sha256:bb","percent":100,"halt":true,"reason":"boot loop"}
+          ]
+        }"#;
+        let d: RolloutDoc = serde_json::from_str(text).expect("the published shape must parse");
+        assert_eq!(d.serial, 12);
+        assert_eq!(d.entry(Channel::Candidate).unwrap().percent, 5);
+        assert!(!d.entry(Channel::Candidate).unwrap().halt);
+        let b = d.entry(Channel::Beta).unwrap();
+        assert!(b.halt);
+        assert_eq!(b.reason.as_deref(), Some("boot loop"));
+        assert_eq!(d.entry(Channel::Stable), None);
+        // And back out again, so the workflow can read what it wrote.
+        let again: RolloutDoc = serde_json::from_str(&serde_json::to_string(&d).unwrap()).unwrap();
+        assert_eq!(again, d);
+    }
+
+    #[test]
+    fn the_tag_and_media_type_are_spelled_once() {
+        // The writer is a workflow in another file and the reader is this
+        // crate; a spelling that drifts is a pointer nobody fetches.
+        assert_eq!(ROLLOUT_TAG, "rollout");
+        assert_eq!(ROLLOUT_MEDIA_TYPE, "application/vnd.apexos.rollout.v1+json");
+        assert_eq!(ROLLOUT_SCHEMA, 1);
+    }
+
+    #[test]
+    fn a_machine_with_no_usable_document_is_on_nobody_s_ramp() {
+        // There is exactly one fallback and it is "everybody". This asserts the
+        // absence: a second source added later — a label, a config file, an
+        // environment variable — would be a way for a percentage to reach the
+        // gate without a signature over it, and this is where that gets caught.
         assert_eq!(FULL_ROLLOUT, 100);
+        for slot in [0u8, 1, 50, 99] {
+            let a = decide_rollout(&query(slot, None));
+            assert_eq!(
+                a.rollout,
+                Rollout::Admitted { percent: 100, source: RolloutSource::Default },
+                "slot {slot} was gated by something other than a signed document"
+            );
+        }
     }
 }
