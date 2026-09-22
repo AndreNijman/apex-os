@@ -915,17 +915,21 @@ else
     else
         bad "the deferred re-check sits between the download and the write" "$encline"
     fi
-    # ═══ THIS ONE IS EXPECTED TO BE RED ON roadmap/v2.2 @ 280b6cb35 ═══
-    # It is not a flake and it is not a harness problem. On the encrypted
-    # staging fallback IMAGE is the REGISTRY ref and PODMAN_STORE is still
-    # empty — netinstall_fetch_into is what sets it — yet the enrolment helper
-    # is invoked as `podman run "$IMAGE" "$LUKS_ENROLL_PATH"` ~70 lines BEFORE
-    # that download. On a live ISO that podman run pulls ~15 GB into the
-    # default containers-storage, i.e. the RAM overlay the entire staging
-    # design exists to avoid, on the one machine shape the fallback was added
-    # for. The engine's own comment at the deferral says the check is "deferred
-    # to the encrypted branch, which asks the moment the image exists" — the
-    # check moved, the enrolment call it depends on did not.
+    # ═══ THE ASSERTION THIS SECTION WAS WRITTEN FOR ═══
+    # RED on roadmap/v2.2 @ 280b6cb35 when it was written; green since the
+    # engine was reordered. The account below is the record of the DEFECT, in
+    # the past tense, not a description of today's engine.
+    #
+    # On the encrypted staging fallback IMAGE is the REGISTRY ref and
+    # PODMAN_STORE is still empty — netinstall_fetch_into is what sets it — yet
+    # the enrolment helper was invoked as `podman run "$IMAGE"
+    # "$LUKS_ENROLL_PATH"` ~70 lines BEFORE that download. On a live ISO that
+    # podman run pulls ~15 GB into the default containers-storage, i.e. the RAM
+    # overlay the entire staging design exists to avoid, on the one machine
+    # shape the fallback was added for. The engine's own comment at the
+    # deferral said the check is "deferred to the encrypted branch, which asks
+    # the moment the image exists" — the check had moved, the enrolment call it
+    # depends on had not. It has now, on every encrypted path.
     if [ "$e_enrol" -gt "$e_fetch" ]; then
         ok "the enrolment helper runs only once the image exists" \
            "enrol=$e_enrol fetch=$e_fetch"
@@ -935,14 +939,20 @@ else
     fi
 fi
 
-# THE SCAN IS NOT A TAUTOLOGY, and on a red assertion that has to be shown
-# rather than claimed. A copy of the engine with the enrolment block MOVED to
-# after the staging block must make the same scan say yes. This is a probe,
-# not a proposed patch: it is never written back, and whether the enrolment
-# belongs after mkfs.btrfs is a decision for whoever fixes this.
+# THE SCAN IS NOT A TAUTOLOGY, and that has to be SHOWN rather than claimed.
+# A copy of the engine with the enrolment block moved back ABOVE the staging
+# block — where it sat before the fix — must make the same scan say no. It is a
+# mutant built on a copy and never written back.
+#
+# THIS PROBE USED TO POINT THE OTHER WAY, and the flip is the whole point.
+# While the engine was red it moved the block DOWN and required a yes; the
+# moment the engine was fixed that probe could not be built at all, because the
+# block is already below the fetch — so a fix to the engine alone would have
+# left this suite at 89/1 with a DIFFERENT red. Same shape, same strength, one
+# case either way: a mutation check mutates AWAY from the state of the tree.
 ORDPROBE="$WORK/engine-reordered"
 cp "$ENGINE" "$ORDPROBE"
-if python3 - "$ORDPROBE" <<'PY' 2>/dev/null
+if python3 - "$ORDPROBE" <<'PYMUT' 2>/dev/null
 import sys
 p = sys.argv[1]
 lines = open(p, encoding="utf-8").read().split("\n")
@@ -952,35 +962,38 @@ except StopIteration:
     sys.exit(1)
 start = max(i for i in range(note) if lines[i] == '  if [ "${rc:-0}" = 0 ]; then')
 end = next(i for i in range(start + 1, len(lines)) if lines[i] == '  fi')
-try:
-    rec = next(i for i, l in enumerate(lines) if '[ "$luks_helper_checked" = 0 ]' in l)
-except StopIteration:
+# The encrypted branch's own staging block is the LAST one above the enrolment.
+# The two unencrypted paths open theirs with the same line, hence [-1] and not
+# a search from the top.
+stages = [i for i in range(start)
+          if lines[i] == '  if [ "${rc:-0}" = 0 ] && [ "${STAGE_ON_TARGET:-0}" = 1 ]; then']
+if not stages:
     sys.exit(1)
-close = next(i for i in range(rec + 1, len(lines)) if lines[i] == '  fi')
-if not (start > close):
-    block = lines[start:end + 1]
-    del lines[start:end + 1]
-    close -= (end + 1 - start)
-    lines[close + 1:close + 1] = block
-    open(p, "w", encoding="utf-8").write("\n".join(lines))
-    sys.exit(0)
-sys.exit(1)
-PY
+block = lines[start:end + 1]
+del lines[start:end + 1]
+lines[stages[-1]:stages[-1]] = block
+open(p, "w", encoding="utf-8").write("\n".join(lines))
+sys.exit(0)
+PYMUT
 then
-    if ! bash -n "$ORDPROBE" 2>/dev/null; then
-        bad "the order scan can also say yes" "the reordered probe does not parse"
+    if cmp -s "$ENGINE" "$ORDPROBE"; then
+        bad "the order scan can also say no" "the mutation changed nothing"
+    elif ! bash -n "$ORDPROBE" 2>/dev/null; then
+        bad "the order scan can also say no" "the reordered mutant does not parse"
     else
         probeline=$(enc_scan "$ORDPROBE")
         p_enrol=$(printf '%s\n' "$probeline" | tr ' ' '\n' | sed -n 's/^enrol=//p')
         p_fetch=$(printf '%s\n' "$probeline" | tr ' ' '\n' | sed -n 's/^fetch=//p')
-        if [ "${p_enrol:-0}" -gt "${p_fetch:-0}" ] && [ "${p_fetch:-0}" != 0 ]; then
-            ok "the order scan can also say yes" "moved enrolment after the fetch -> $probeline"
+        if [ "${p_fetch:-0}" != 0 ] && [ "${p_enrol:-0}" != 0 ] \
+           && [ "${p_enrol:-0}" -lt "${p_fetch:-0}" ]; then
+            ok "the order scan can also say no" \
+               "enrolment moved back above the fetch -> $probeline"
         else
-            bad "the order scan can also say yes" "$probeline — the scan may be measuring nothing"
+            bad "the order scan can also say no" "$probeline — the scan may be measuring nothing"
         fi
     fi
 else
-    bad "the order scan can also say yes" "could not build the reordered probe"
+    bad "the order scan can also say no" "could not build the reordered mutant"
 fi
 rm -f "$ORDPROBE"
 
