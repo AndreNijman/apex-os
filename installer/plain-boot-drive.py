@@ -146,17 +146,37 @@ def main():
            "-drive", "if=virtio,format=raw,file=%s,media=disk" % a.disk,
            "-debugcon", "file:%s" % dbg, "-global", "isa-debugcon.iobase=0x402",
            "-serial", "file:%s" % serial,
-           # A DRM device and a keyboard, so the guest can reach a real login.
-           # Not cosmetic, and not about seeing anything — `-display none` still
-           # shows nobody anything. APEX's greeter is greetd running sway, a
-           # wlroots compositor, and wlroots needs a DRM node; with `-nodefaults`
-           # and no display adapter there is none, so sway exits, greetd is
-           # restarted forever, and graphical.target is NEVER announced on a
-           # guest that is otherwise completely booted. virtio-gpu-pci gives
-           # logind a master-of-seat device for seat0; usb-kbd gives it an input
-           # device, since a seat with no input is not one a user could log in at.
-           "-device", "virtio-gpu-pci",
-           "-device", "qemu-xhci", "-device", "usb-kbd",
+           # ── A USER-MODE NIC, because a first-boot unit waits on the network ──
+           # APEX ships apex-flatpak-preinstall.service with
+           #     After=network-online.target / Wants=network-online.target
+           #     WantedBy=multi-user.target
+           # On a guest with NO network device at all, network-online.target can
+           # only be reached by NetworkManager-wait-online timing out, the unit
+           # then FAILS, and multi-user.target is held past any sensible boot
+           # window — on a machine that is otherwise completely up. Measured:
+           # greetd on restart 3 at 42 s with no target announced.
+           # `-netdev user` is qemu's built-in SLIRP: no bridge, no tap, no
+           # privilege, nothing on the host's network, and no route anyone can
+           # reach the guest by. It exists so the guest can answer its own
+           # "am I online" question, which is what the unit is waiting for.
+           "-netdev", "user,id=net0", "-device", "virtio-net-pci,netdev=net0",
+           # ── NO DISPLAY ADAPTER, AND THIS WAS TESTED BOTH WAYS ───────────
+           # The tempting change here is to add `-device virtio-gpu-pci` plus a
+           # USB keyboard, so that greetd's sway has a DRM node and a seat and
+           # the guest can reach graphical.target instead of cycling greetd
+           # forever. It was tried on 2026-09-22 and it BREAKS THE BOOT: with
+           # virtio-gpu-pci present, GRUB hands off and the kernel then produces
+           # NOT ONE BYTE on the serial console — measured at 8438 bytes frozen
+           # at "Booting `APEX-OS (ostree:0)'" with qemu spinning at 100% CPU for
+           # three minutes, against 13 seconds to pivot on the identical disk
+           # with no adapter. The guest is not slow, it is stuck, and the only
+           # variable is the device.
+           #
+           # So: no display adapter. The cost is that this lab cannot reach a
+           # graphical login and must read its verdict from dracut's pivot and
+           # the systemd startup that follows. That cost is named in the suite's
+           # own header rather than hidden behind a device that makes the guest
+           # silent.
            "-display", "none", "-nodefaults"]
 
     err = open(qerr, "wb")
