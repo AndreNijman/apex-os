@@ -235,3 +235,57 @@ fn the_phone_sends_no_decide_request() {
         );
     }
 }
+
+#[test]
+fn the_picker_verbs_exist_and_carry_no_arguments() {
+    // P1-054's second criterion — "start a new agent with selected
+    // profile/project/worktree" — was unmeetable for two of those three
+    // because neither verb existed. They do now, and this is the half that
+    // cannot be argued with: the daemon's own serde either takes the request
+    // the phone builds or it does not.
+    assert!(
+        matches!(parse("projects"), Request::Projects),
+        "`projects` parsed as {:?}",
+        parse("projects")
+    );
+    assert!(
+        matches!(parse("profiles"), Request::Profiles),
+        "`profiles` parsed as {:?}",
+        parse("profiles")
+    );
+
+    // Unit variants: the tag alone is the whole request. Asserted from the
+    // daemon's side as well as the phone's, because a daemon that started
+    // requiring an argument would break a phone that sends none — and this is
+    // where that is caught rather than on a user's device.
+    let bare: Request =
+        serde_json::from_str(r#"{"cmd":"projects"}"#).expect("a projects request carries no fields");
+    assert!(matches!(bare, Request::Projects));
+    let bare: Request =
+        serde_json::from_str(r#"{"cmd":"profiles"}"#).expect("a profiles request carries no fields");
+    assert!(matches!(bare, Request::Profiles));
+}
+
+#[test]
+fn projects_is_not_worktrees_wearing_a_different_name() {
+    // The two verbs answer different questions at very different costs, and a
+    // client that treated them as interchangeable would reintroduce the reason
+    // the Start screen had no picker: `worktrees` runs git in every remembered
+    // project, so asking it to populate a form is seconds of subprocess before
+    // a text field appears.
+    //
+    // Asserted as the thing a reader can check: `worktrees` takes a project
+    // and `projects` takes nothing, so they cannot be substituted for one
+    // another by accident.
+    match parse("worktrees_one") {
+        Request::Worktrees { project } => assert_eq!(project.as_deref(), Some("apex")),
+        other => panic!("`worktrees` with a project parsed as {other:?}"),
+    }
+    assert!(
+        serde_json::from_str::<Request>(r#"{"cmd":"projects","project":"apex"}"#)
+            .map(|r| matches!(r, Request::Projects))
+            .unwrap_or(false),
+        "a `projects` request with a stray key must still be a projects request, \
+         not silently a narrowed one"
+    );
+}

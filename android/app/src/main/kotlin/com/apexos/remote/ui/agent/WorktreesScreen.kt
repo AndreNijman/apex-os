@@ -32,6 +32,7 @@ import androidx.compose.ui.text.style.TextOverflow
 import androidx.compose.ui.unit.dp
 import com.apexos.remote.core.agent.ConflictStatus
 import com.apexos.remote.core.agent.Project
+import com.apexos.remote.core.agent.ProjectRecord
 import com.apexos.remote.core.agent.TestStatus
 import com.apexos.remote.core.agent.WorktreeStatus
 import com.apexos.remote.ui.WorktreesUiState
@@ -111,7 +112,7 @@ fun WorktreesScreen(
                 else -> LazyColumn(Modifier.weight(1f)) {
                     for (project in state.projects) {
                         item(key = "p" + project.slug + project.name) {
-                            ProjectHeading(project)
+                            ProjectHeading(project, state.recordFor(project))
                         }
                         for (row in project.worktrees) {
                             item(key = "w" + row.path) {
@@ -129,9 +130,21 @@ fun WorktreesScreen(
 }
 
 @Composable
-private fun ProjectHeading(project: Project) {
+private fun ProjectHeading(project: Project, record: ProjectRecord?) {
     Column(Modifier.fillMaxWidth().padding(start = 16.dp, end = 16.dp, top = 18.dp, bottom = 6.dp)) {
         Text(project.name, style = MaterialTheme.typography.titleSmall)
+        // The WORKSPACE (§8's capsule) and the toolchains, from the runtime's
+        // own project record. P1-056 asks to browse workspaces, and a capsule
+        // binding is the only thing in this runtime that is one — it lives on
+        // the project record and on nothing in the `worktrees` reply, which is
+        // why this screen now makes two requests instead of one.
+        workspaceLine(record)?.let {
+            Text(
+                it,
+                style = MaterialTheme.typography.labelSmall,
+                color = MaterialTheme.colorScheme.onSurfaceVariant,
+            )
+        }
         project.path?.let {
             Text(
                 it,
@@ -422,4 +435,24 @@ private fun NoWorktrees() {
         color = MaterialTheme.colorScheme.onSurfaceVariant,
         modifier = Modifier.padding(start = 16.dp, top = 8.dp, bottom = 12.dp),
     )
+}
+
+/**
+ * The workspace and toolchain line under a project heading.
+ *
+ * Null when there is no record — a machine with the `worktrees` verb and not
+ * the `projects` one. That is the one case where saying nothing is right:
+ * "this project has no workspace" and "this app could not ask" are different
+ * facts, and printing the first for the second is the failure this project
+ * calls "permission denied is not absence".
+ *
+ * With a record, the workspace is always stated, bound or not. An omitted line
+ * for an unbound project would read as "unknown", and the difference matters
+ * when the next thing you do is start an agent in it.
+ */
+fun workspaceLine(record: ProjectRecord?): String? {
+    if (record == null) return null
+    val workspace = record.capsule?.let { "workspace $it" } ?: "no workspace bound"
+    val languages = record.languages.joinToString(", ")
+    return if (languages.isEmpty()) workspace else "$workspace · $languages"
 }

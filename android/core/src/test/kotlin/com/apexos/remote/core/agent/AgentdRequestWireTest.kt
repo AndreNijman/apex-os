@@ -152,16 +152,75 @@ class AgentdRequestWireTest {
             Agentd.run("/x", 80, 24, agent = "claude").contains("args"),
             "a request with no extra arguments must not mention any",
         )
-        // And the rule the screen and the link both consult.
+        // And the rule the screen and the link both consult. With no profiles
+        // listing — a machine older than the `profiles` verb — it is still the
+        // id rule, because that machine still branches on `generic`.
         assertTrue(Agentd.commandIsRequired("generic"), "generic carries no program")
         assertFalse(Agentd.commandIsRequired("claude"), "claude does")
         assertFalse(Agentd.commandIsRequired(null), "the machine's default is not generic by name")
     }
 
     @Test
+    fun `the daemon's own flag beats the id guess when the daemon states one`() {
+        // The guess this retires: `id == "generic"` was hard-coded here
+        // because the daemon published no flag, and its own comment said so.
+        // `Request::Profiles` publishes `command_required`, derived from the
+        // adapter table — so an adapter added later that needs a program named
+        // by the caller works with no release of this app.
+        //
+        // Asserted with a row that DISAGREES with the id rule in both
+        // directions, because a test using only rows that agree would pass
+        // against an implementation that ignored the listing entirely.
+        val stated = listOf(
+            AgentProfile(agent = "someagent", commandRequired = true),
+            AgentProfile(agent = "generic", commandRequired = false),
+        )
+        assertTrue(
+            Agentd.commandIsRequired("someagent", stated),
+            "an adapter the daemon says needs a command was offered without one",
+        )
+        assertFalse(
+            Agentd.commandIsRequired("generic", stated),
+            "the id rule overrode the daemon's own answer",
+        )
+
+        // An adapter the listing does not mention falls back to the id rule
+        // rather than to `false`. False would be the dangerous default: it
+        // offers the button that can only fail.
+        assertTrue(Agentd.commandIsRequired("generic", listOf(AgentProfile(agent = "claude"))))
+    }
+
+    @Test
     fun `worktrees is a verb — the note that said it was not read the wrong enum`() {
         expect("worktrees_all", Agentd.worktrees())
         expect("worktrees_one", Agentd.worktrees("apex"))
+    }
+
+    @Test
+    fun `projects and profiles are verbs, and neither carries an argument`() {
+        // P1-054's second criterion — "start a new agent with selected
+        // profile/project/worktree" — had no picker for two of those three
+        // because neither verb existed. `StartAgentScreen`'s doc comment said
+        // so, correctly, and this is the assertion that it is no longer true:
+        // the fixture these are compared against is the one the daemon's own
+        // serde parses in `android_requests_wire.rs`.
+        expect("projects", Agentd.projects())
+        expect("profiles", Agentd.profiles())
+
+        // The tag alone is the whole request. A stray key here would still
+        // parse on the daemon side — serde ignores unknown fields on a unit
+        // variant — so the assertion has to be made on this side, where it can
+        // fail.
+        assertEquals(setOf("cmd"), json.parseToJsonElement(Agentd.projects()).jsonObject.keys)
+        assertEquals(setOf("cmd"), json.parseToJsonElement(Agentd.profiles()).jsonObject.keys)
+
+        // And `projects` is not `worktrees` under another name: they answer
+        // different questions at very different costs, and a screen that
+        // opened by calling the expensive one is why there was no picker.
+        assertFalse(
+            Agentd.projects() == Agentd.worktrees(),
+            "the cheap listing and the git walk are the same request",
+        )
     }
 
     @Test
@@ -214,6 +273,7 @@ class AgentdRequestWireTest {
                 "receive", "receive_hostile_name",
                 "run_minimal", "run_full", "run_generic_with_args",
                 "worktrees_all", "worktrees_one",
+                "projects", "profiles",
                 "requests", "grants", "system_grants",
                 "revoke_one", "revoke_all", "revoke_system_grant",
             ),

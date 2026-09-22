@@ -44,6 +44,8 @@ use apex_agent_core::adapter;
 use apex_agent_core::auth::{Authenticator, PolkitAuthenticator};
 use apex_agent_core::config::Config;
 use apex_agent_core::paths;
+use apex_agent_core::profile;
+use apex_agent_core::project;
 use apex_agent_core::protocol::{
     ErrorKind, Request, Response, SessionInfo, PROTOCOL_VERSION,
 };
@@ -947,6 +949,35 @@ fn dispatch(daemon: &Arc<Daemon>, request: Request, caller: &mut privilege::Call
                     .collect()
             };
             worktrees::handle(project, &daemon.tests, &sessions)
+        }
+
+        Request::Projects => {
+            // No origin check, and the same one `Worktrees` does not have.
+            // That verb already answers a caller with the absolute root of
+            // every remembered project and the path of every worktree under
+            // it; this answers with the roots and nothing git-derived, so
+            // gating it would refuse a strictly smaller disclosure than the
+            // one beside it allows — a gate that reads as security and buys
+            // none.
+            //
+            // The registry is NOT touched. Joining sessions to projects is the
+            // client's to do from `SessionInfo::project`, which is the project
+            // root verbatim, so there is nothing to hold a lock for.
+            Response::Projects {
+                projects: project::list(),
+            }
+        }
+
+        Request::Profiles => {
+            // `paths::home()`, not `$HOME` read here: the daemon may have been
+            // started by `systemd --user` without a full login environment,
+            // and `paths::home` falls back to the passwd database for exactly
+            // that case. A profile listing that reported nothing installed
+            // because the environment was thin would be read as a broken
+            // install.
+            Response::Profiles {
+                profiles: profile::summarise_adapters(&paths::home()),
+            }
         }
 
         Request::ToolCheck {

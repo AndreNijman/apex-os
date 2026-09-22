@@ -127,9 +127,17 @@ class MachineLink(
          * [Agentd.commandIsRequired].
          */
         args: List<String> = emptyList(),
+        /**
+         * What `profiles` said about the adapters, when the caller has it.
+         *
+         * Only ever used to decide whether this adapter needs a program named
+         * by the caller. Empty falls back to the id rule, which is what a
+         * machine older than the `profiles` verb still needs.
+         */
+        profiles: List<AgentProfile> = emptyList(),
     ): AgentSession {
         require(cwd.startsWith("/")) { "a working directory must be absolute, and `$cwd` is not" }
-        require(!(Agentd.commandIsRequired(agent) && args.isEmpty())) {
+        require(!(Agentd.commandIsRequired(agent, profiles) && args.isEmpty())) {
             "the $agent adapter runs a program you name, and none was given"
         }
         return Agentd.readSession(
@@ -237,6 +245,31 @@ class MachineLink(
 
     /** The same, grouped into the projects the daemon walked. */
     fun projects(): List<Project> = Project.group(worktrees())
+
+    // ---- the picker verbs (P1-054) ---------------------------------------
+    //
+    // Deliberately NOT folded into `projects()` above, which is the expensive
+    // worktree walk under a similar name. The two answer different questions:
+    // `projects()` is "what is the git status of everything", which runs
+    // `merge-tree --write-tree` in every remembered project; these two are
+    // "what could I start an agent in, and with what", which read records and
+    // stat paths. A screen that opened by calling the wrong one would put
+    // seconds of git in front of a text field, which is exactly why the Start
+    // screen had no picker.
+
+    /**
+     * Every project the machine remembers, most recently opened first.
+     *
+     * Already in that order from the daemon; [ProjectRecord.ordered] restates
+     * it rather than trusting it, because the first row is a screen's default
+     * selection and a silent dependence on somebody else's sort is a default
+     * that changes without anyone choosing to change it.
+     */
+    fun projectRecords(): List<ProjectRecord> =
+        ProjectRecord.ordered(Agentd.readProjects(request(Agentd.projects())))
+
+    /** Every adapter, with its program and profile as they stand there. */
+    fun profiles(): List<AgentProfile> = Agentd.readProfiles(request(Agentd.profiles()))
 
     // ---- approvals (P1-057) ---------------------------------------------
     //

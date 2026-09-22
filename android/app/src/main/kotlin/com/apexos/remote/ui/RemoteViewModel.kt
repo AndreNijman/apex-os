@@ -21,7 +21,9 @@ import com.apexos.remote.core.agent.Agentd
 import com.apexos.remote.core.agent.GrantState
 import com.apexos.remote.core.agent.Grants
 import com.apexos.remote.core.agent.PrivilegeRequest
+import com.apexos.remote.core.agent.AgentProfile
 import com.apexos.remote.core.agent.Project
+import com.apexos.remote.core.agent.ProjectRecord
 import com.apexos.remote.core.agent.Reply
 import com.apexos.remote.core.agent.SystemGrant
 import com.apexos.remote.core.agent.WorktreeStatus
@@ -138,6 +140,8 @@ data class AgentUiState(
     val nowSeconds: Long = System.currentTimeMillis() / 1000,
     val worktrees: WorktreesUiState = WorktreesUiState(),
     val approvals: ApprovalsUiState = ApprovalsUiState(),
+    /** What the Start screen picks from (P1-054 criterion 2). */
+    val picker: PickerUiState = PickerUiState(),
     /**
      * Text fetched from the MACHINE's clipboard and not yet put on the phone's.
      *
@@ -204,6 +208,17 @@ data class ClipboardPull(val text: String, val token: Long)
  */
 data class WorktreesUiState(
     val projects: List<Project> = emptyList(),
+    /**
+     * The runtime's own project records, joined to the groups by slug.
+     *
+     * A SECOND, cheap request beside the git walk, and the thing that makes
+     * P1-056's "workspaces" real: §8's capsule binding lives on this record
+     * and on nothing in the `worktrees` reply. Empty against a machine that
+     * has the `worktrees` verb and not the `projects` one — a narrow window,
+     * three days wide, but a real one — and a heading with no record simply
+     * omits the line rather than claiming the project has no workspace.
+     */
+    val records: List<ProjectRecord> = emptyList(),
     val loading: Boolean = false,
     /** The last time this was asked, unix seconds, or 0 for never. */
     val askedSeconds: Long = 0,
@@ -212,7 +227,63 @@ data class WorktreesUiState(
 ) {
     val rows: List<WorktreeStatus> get() = projects.flatMap { it.rows }
     val everAsked: Boolean get() = askedSeconds > 0 || loading
+
+    /**
+     * The runtime's record for a grouped project, or null.
+     *
+     * Joined on the SLUG, which the daemon states on every worktree row, and
+     * never on the name: two checkouts of one repository share a name and are
+     * different projects, and on this developer's machine that is the normal
+     * case rather than the exception. A group with no slug — a listing from a
+     * daemon older than that field — matches nothing, which is correct: there
+     * is no evidence about which record it is.
+     */
+    fun recordFor(project: Project): ProjectRecord? =
+        project.slug.takeIf { it.isNotEmpty() }?.let { slug -> records.firstOrNull { it.slug == slug } }
 }
+
+/**
+ * What the Start screen picks from (P1-054 criterion 2).
+ *
+ * ## Three fetches, and why they are three
+ *
+ * `projects` and `profiles` are cheap and are asked together when the screen
+ * opens. `worktrees` is not — it runs git in the named project, including
+ * `merge-tree --write-tree` — so it is asked for ONE project, only once the
+ * user has chosen it. That split is the whole reason these are separate verbs:
+ * a screen that fetched worktree status for every remembered project on open
+ * would put seconds of git in front of a text field, which is the documented
+ * reason this screen had no picker at all for four rounds.
+ *
+ * [tooOld] is not a kind of failure, and it is not an empty list. It is what a
+ * machine says when its APEX predates these verbs, and every machine in the
+ * field does today: they landed after the published image. A screen that drew
+ * it as "no projects" would report a version skew as a fact about the machine
+ * — and, worse here than on the Worktrees screen, would make the free-text
+ * directory field look like the only thing that ever existed.
+ */
+data class PickerUiState(
+    val projects: List<ProjectRecord> = emptyList(),
+    val profiles: List<AgentProfile> = emptyList(),
+    /**
+     * Worktree names in the chosen project, or empty when none is chosen.
+     *
+     * Names, not paths: `RunRequest.worktree` is "create or reuse this git
+     * worktree under the project", so what goes on the wire is the name. The
+     * main tree is deliberately excluded — starting "in the main tree" is
+     * leaving this blank, and offering the project's own name as a worktree
+     * would create `.apex/worktrees/<project>`, a second checkout nobody asked
+     * for.
+     */
+    val worktrees: List<String> = emptyList(),
+    /** The slug [worktrees] was fetched for, so a stale answer is not shown. */
+    val worktreesFor: String? = null,
+    val loading: Boolean = false,
+    val loadingWorktrees: Boolean = false,
+    val asked: Boolean = false,
+    val tooOld: Boolean = false,
+    val failure: String? = null,
+)
 
 /**
  * Privilege requests and grants (P1-057).
@@ -649,6 +720,11 @@ class RemoteViewModel(application: Application) : AndroidViewModel(application) 
         block: (ApprovalsUiState) -> ApprovalsUiState,
     ) = updateAgents(machine) { it.copy(approvals = block(it.approvals)) }
 
+    private fun updatePicker(
+        machine: PairedMachine? = null,
+        block: (PickerUiState) -> PickerUiState,
+    ) = updateAgents(machine) { it.copy(picker = block(it.picker)) }
+
     // ---- the machine's clipboard (P1-059 criterion 3, receive) ----------
 
     /**
@@ -768,9 +844,19 @@ class RemoteViewModel(application: Application) : AndroidViewModel(application) 
         updateWorktrees(machine) { it.copy(loading = true, failure = null) }
         try {
             val projects = withContext(Dispatchers.IO) { link.projects() }
+            // The cheap listing beside the expensive one, so a heading can
+            // name the project's workspace. Its failure is NOT this request's
+            // failure: a machine that walked its worktrees and cannot answer
+            // `projects` has given the user everything this screen is
+            // primarily for, and turning that into a red banner would report a
+            // three-day version window as a broken screen.
+            val records = runCatching {
+                withContext(Dispatchers.IO) { link.projectRecords() }
+            }.getOrDefault(emptyList())
             updateWorktrees(machine) {
                 it.copy(
                     projects = projects,
+                    records = records,
                     loading = false,
                     askedSeconds = System.currentTimeMillis() / 1000,
                     tooOld = false,
@@ -798,6 +884,111 @@ class RemoteViewModel(application: Application) : AndroidViewModel(application) 
                     askedSeconds = System.currentTimeMillis() / 1000,
                     failure = describe(e),
                 )
+            }
+        }
+    }
+
+    // ---- the Start screen's pickers (P1-054 criterion 2) ----------------
+
+    /**
+     * Fetch what the Start screen picks from: projects and profiles.
+     *
+     * Both in ONE coroutine and not two, so the screen has one loading state
+     * and one failure rather than two that can disagree — a half-loaded picker
+     * that shows real projects beside a guessed adapter list is worse than one
+     * that is still loading.
+     *
+     * Deliberately NOT on the four-second poll. These change when a person
+     * opens a project or installs an agent, which is not something a phone
+     * needs to watch; polling them would spend a round trip every four seconds
+     * on an answer that is the same all day.
+     *
+     * `withContext(Dispatchers.IO)` is mandatory, not stylistic:
+     * `StrictMode.enableDeathOnNetwork()` kills the process for a socket on
+     * the main thread.
+     */
+    fun loadPickers() = viewModelScope.launch {
+        val machine = _state.value.agents.machine ?: return@launch
+        val link = links[machine.deviceId] ?: return@launch
+        updatePicker(machine) { it.copy(loading = true, failure = null) }
+        try {
+            val (projects, profiles) = withContext(Dispatchers.IO) {
+                link.projectRecords() to link.profiles()
+            }
+            updatePicker(machine) {
+                it.copy(
+                    projects = projects,
+                    profiles = profiles,
+                    loading = false,
+                    asked = true,
+                    tooOld = false,
+                    failure = null,
+                )
+            }
+        } catch (e: AgentError) {
+            // A machine older than these verbs. Not a failure to draw as one,
+            // and above all not an empty list: the screen falls back to the
+            // free-text directory it has always had and says why, rather than
+            // showing a picker with nothing in it and letting the user
+            // conclude they have no projects.
+            val old = Agentd.isTooOld(e)
+            updatePicker(machine) {
+                it.copy(
+                    loading = false,
+                    asked = true,
+                    tooOld = old,
+                    failure = if (old) null else describe(e),
+                )
+            }
+        } catch (e: Exception) {
+            updatePicker(machine) {
+                it.copy(loading = false, asked = true, failure = describe(e))
+            }
+        }
+    }
+
+    /**
+     * Fetch the worktree names in ONE project, for the worktree picker.
+     *
+     * The expensive half, asked only for the project the user chose. It is the
+     * same `worktrees` verb the Worktrees screen uses, narrowed by slug — and
+     * a slug is what it takes, never a path: the daemon resolves a slug by
+     * searching the remembered set, so the directories it can be made to run
+     * git in are exactly the ones the user already chose to remember.
+     *
+     * The answer is stamped with the slug it was for. Without that, choosing
+     * project A, then B before A's git finished, would show A's worktrees
+     * under B — and the user would start an agent in a tree belonging to
+     * another project.
+     */
+    fun loadPickerWorktrees(slug: String) = viewModelScope.launch {
+        val machine = _state.value.agents.machine ?: return@launch
+        val link = links[machine.deviceId] ?: return@launch
+        if (slug.isEmpty()) {
+            updatePicker(machine) { it.copy(worktrees = emptyList(), worktreesFor = null) }
+            return@launch
+        }
+        updatePicker(machine) { it.copy(loadingWorktrees = true) }
+        try {
+            val rows = withContext(Dispatchers.IO) { link.worktrees(slug) }
+            updatePicker(machine) {
+                it.copy(
+                    // The main tree is not a worktree to create: see
+                    // `PickerUiState.worktrees`.
+                    worktrees = rows.filter { w -> w.isAgent }.map { w -> w.name },
+                    worktreesFor = slug,
+                    loadingWorktrees = false,
+                )
+            }
+        } catch (e: Exception) {
+            // Silent, and that is the choice rather than an omission. The
+            // worktree field is free text and always was; a project whose
+            // worktrees could not be listed still starts an agent in its main
+            // tree, and a banner about a picker the user may not have wanted
+            // would be noise on the way to the Start button. A real failure
+            // shows when Start is pressed, from the daemon's own words.
+            updatePicker(machine) {
+                it.copy(worktrees = emptyList(), worktreesFor = slug, loadingWorktrees = false)
             }
         }
     }
@@ -1205,6 +1396,11 @@ class RemoteViewModel(application: Application) : AndroidViewModel(application) 
                         worktree = worktree,
                         checkpoint = checkpoint,
                         args = args,
+                        // So the "this adapter needs a program" refusal is the
+                        // daemon's own rule rather than this app's guess at
+                        // it. Empty when the machine predates `profiles`, and
+                        // the id rule still applies there.
+                        profiles = _state.value.agents.picker.profiles,
                     )
                 }
                 _state.update {
