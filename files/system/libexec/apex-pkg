@@ -1111,10 +1111,6 @@ alternatives_place() {
     case "$target" in /usr/*|/opt/*) ;; *) warn "alternatives: refusing '${link}' — its target '${target}' is outside /usr and /opt"; return 1 ;; esac
     case "$link$target" in *..*) warn "alternatives: refusing '${link}' — '..' in a path"; return 1 ;; esac
 
-    if image_owns "$link"; then
-        warn "alternatives: not creating '${link}' — APEX-OS already owns it, and the overlay must never shadow the image's copy"
-        return 1
-    fi
     if [ ! -e "${root}${target}" ] && [ ! -L "${root}${target}" ] && ! image_owns "$target"; then
         warn "alternatives: not creating '${link}' — '${target}' is in neither this package set nor the image"
         return 1
