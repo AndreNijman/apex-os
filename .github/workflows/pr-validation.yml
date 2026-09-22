@@ -21,6 +21,54 @@ permissions:
   contents: read
 
 jobs:
+  # ── why there are eighteen jobs and not six ──────────────────────────────
+  #
+  # Measured on run 35719820281, the last green one before this changed:
+  #
+  #     Select tests   5s | Android 2m00 | Static 3m02 | Rust 3m34
+  #     Installer 6m37 | Package engine 14m00        total wall-clock 14m20
+  #
+  # `engine` was 70 steps run one after another on one runner, and there was
+  # no hot step to fix: its twelve slowest were 70s, 65s, 63s, 60s, 58s, 46s,
+  # 37s, 36s, 36s, 33s, 31s, 31s. Nothing but parallelism answers that shape.
+  #
+  # So `engine` is nine shards, `installer` three and `static` three. The
+  # partition is by DEPENDENCY FOOTPRINT rather than by suite count — a matrix
+  # over the 37 bare `./tests/*.sh` steps would have been easy and nearly
+  # useless, because those steps are the 0–5s ones; the time is in the eight
+  # `apt-get update` runs, two Fedora containers and a dozen 30–70s live
+  # suites. Each shard now installs only what its own steps need, in parallel
+  # with the others. Expected pole: `Installer safety` at ~3m45, which is the
+  # one suite that builds a GTK4 container image and cannot usefully be split.
+  #
+  # THREE RULES HOLD THE SPLIT TOGETHER, and all three are checked rather than
+  # promised:
+  #
+  #  1. Every suite that ran still runs. The steps were MOVED, not rewritten,
+  #     and tests/check-suites-run-in-ci.sh greps this directory by suite
+  #     basename, so a suite dropped in the move fails that gate.
+  #  2. Relative order inside a shard is the order it had in the monolith.
+  #     That matters because several steps depend on running BEFORE an
+  #     install: test-apex-hypr-lua.sh, test-apex-hypr-focus.sh and
+  #     test-apex-input-live.sh are asserted to skip on a runner with no
+  #     compositor, and would start measuring — and failing their own floors —
+  #     if labwc were installed above them.
+  #  3. A shard that lost an inherited prerequisite re-establishes it. The
+  #     monolith's installs were inherited by every later step by accident of
+  #     being one job: squashfs-tools and the userns knob from step 3, the bus
+  #     tools from 23, bubblewrap from 36, labwc from 33 and 64, shellcheck
+  #     from 57, fish, nushell, tmux, zellij, sshd, nftables — and the
+  #     apex-shell TREE the vendor step clones, which is state rather than a
+  #     tool and which the first audit here missed. Every consumer was tracked
+  #     down (grep for the binary or the path, never for the package name) and
+  #     is in a shard that provides it, or in one that adds the `Allow
+  #     unprivileged user namespaces` step. Without that, `unshare -r` is
+  #     refused, the suite SKIPS with status 0, and a skip reads as success —
+  #     the defect this whole file is about.
+  #
+  # And `result` requires all eighteen: tests/check-ci-jobs-aggregated.sh
+  # fails if a shard is missing from it, because a job the required status
+  # does not read is a job whose failure cannot block a merge.
   changes:
     name: Select tests
     runs-on: ubuntu-24.04
@@ -792,22 +840,6 @@ jobs:
         if: ${{ !cancelled() }}
         run: ./tests/test-bootc-install-guard.sh
 
-      # windows-installer/ is Windows-targeted code in a repository that is
-      # developed, built and tested entirely on Linux, so every one of its unit
-      # tests compiles for the HOST and the Windows-only paths are skipped by
-      # cfg(). Its first round shipped 655 lines and recorded honestly that no
-      # .exe had ever been built here — the toolchain looked unavailable
-      # because APEX is bootc and read-only, so `dnf install` on the host is
-      # refused. It installs fine in a container.
-      #
-      # This builds the real PE32+ binary and RUNS it under wine. The exit code
-      # is not the assertion: a binary that dies in the loader exits non-zero
-      # exactly like one that ran and refused, so the check is on the program's
-      # own usage text and its read-only disclaimer reaching the user.
-      - name: the Windows binary builds, and it runs
-        if: ${{ !cancelled() }}
-        run: ./tests/test-windows-installer.sh
-
       # §27's trust readout, structural half. In `static` because the check
       # that matters most here compares two files in DIFFERENT selectors: the
       # cosign identity in .github/workflows/build-image.yml against the one
@@ -951,6 +983,65 @@ jobs:
         if: ${{ !cancelled() }}
         run: ./tests/test-apex-recover.sh
 
+      - name: §14 the daemon, the CLI and the unit agree
+        if: ${{ !cancelled() }}
+        run: |
+          set -euo pipefail
+          test -f files/scripts/check-ai-parity
+          python3 files/scripts/check-ai-parity
+          python3 files/scripts/check-ai-parity --self-test
+
+      # ── the selector, checked ─────────────────────────────────────────────
+      # IN `static` AND NOWHERE ELSE, AND THAT IS THE WHOLE POINT. A gate about
+      # the path selector must not be one the path selector can switch off.
+      # `.github/workflows/` is in the ENGINE selector, so before 2026-09-22 a
+      # push to `roadmap/v2.2` that did not happen to touch a workflow file
+      # would have skipped the engine job — and a skipped job counts as success
+      # at `result`. The check written to hold the selector honest would have
+      # been disarmed by the selector. `static` carries no `needs` and no `if`
+      # on `changes`, so it runs on every event this workflow accepts.
+      #
+      # It extracts the `Classify changed paths` block above and RUNS it, so it
+      # cannot drift from the code it is about, and it is proved in both
+      # directions: against the previous revision of this file it fails 2 of 7,
+      # and three deliberate mutants — merge-base for every branch, a base that
+      # selects everything, the all-zeros fallback deleted — each fail exactly
+      # the assertion written for them, the last one reproducing the rc=128 the
+      # comment at the top of that step describes.
+      - name: A push to the integration branch selects what the merge would
+        if: ${{ !cancelled() }}
+        run: ./tests/check-ci-selector-parity.sh
+
+  static-windows:
+    name: Static validation — Windows installer
+    runs-on: ubuntu-24.04
+    steps:
+      - name: Checkout
+        uses: actions/checkout@v4
+
+      # windows-installer/ is Windows-targeted code in a repository that is
+      # developed, built and tested entirely on Linux, so every one of its unit
+      # tests compiles for the HOST and the Windows-only paths are skipped by
+      # cfg(). Its first round shipped 655 lines and recorded honestly that no
+      # .exe had ever been built here — the toolchain looked unavailable
+      # because APEX is bootc and read-only, so `dnf install` on the host is
+      # refused. It installs fine in a container.
+      #
+      # This builds the real PE32+ binary and RUNS it under wine. The exit code
+      # is not the assertion: a binary that dies in the loader exits non-zero
+      # exactly like one that ran and refused, so the check is on the program's
+      # own usage text and its read-only disclaimer reaching the user.
+      - name: the Windows binary builds, and it runs
+        if: ${{ !cancelled() }}
+        run: ./tests/test-windows-installer.sh
+
+  static-chaos:
+    name: Static validation — chaos harness
+    runs-on: ubuntu-24.04
+    steps:
+      - name: Checkout
+        uses: actions/checkout@v4
+
       # §14's cross-file constants. The daemon, the CLI and the unit all have to
       # agree about the socket names, the store root, the protocol version and
       # the refusal of a TCP endpoint — and they are in three different
@@ -988,35 +1079,6 @@ jobs:
       - name: P1-062 the chaos harness — the boot-path rule, and every verdict arm
         if: ${{ !cancelled() }}
         run: ./tests/test-apex-chaos.sh
-
-      - name: §14 the daemon, the CLI and the unit agree
-        if: ${{ !cancelled() }}
-        run: |
-          set -euo pipefail
-          test -f files/scripts/check-ai-parity
-          python3 files/scripts/check-ai-parity
-          python3 files/scripts/check-ai-parity --self-test
-
-      # ── the selector, checked ─────────────────────────────────────────────
-      # IN `static` AND NOWHERE ELSE, AND THAT IS THE WHOLE POINT. A gate about
-      # the path selector must not be one the path selector can switch off.
-      # `.github/workflows/` is in the ENGINE selector, so before 2026-09-22 a
-      # push to `roadmap/v2.2` that did not happen to touch a workflow file
-      # would have skipped the engine job — and a skipped job counts as success
-      # at `result`. The check written to hold the selector honest would have
-      # been disarmed by the selector. `static` carries no `needs` and no `if`
-      # on `changes`, so it runs on every event this workflow accepts.
-      #
-      # It extracts the `Classify changed paths` block above and RUNS it, so it
-      # cannot drift from the code it is about, and it is proved in both
-      # directions: against the previous revision of this file it fails 2 of 7,
-      # and three deliberate mutants — merge-base for every branch, a base that
-      # selects everything, the all-zeros fallback deleted — each fail exactly
-      # the assertion written for them, the last one reproducing the rc=128 the
-      # comment at the top of that step describes.
-      - name: A push to the integration branch selects what the merge would
-        if: ${{ !cancelled() }}
-        run: ./tests/check-ci-selector-parity.sh
 
   rust:
     name: Rust validation
@@ -1900,7 +1962,7 @@ jobs:
           retention-days: 14
 
   installer:
-    name: Installer safety and UI
+    name: Installer safety
     needs: changes
     if: needs.changes.outputs.installer == 'true'
     runs-on: ubuntu-24.04
@@ -1914,6 +1976,15 @@ jobs:
       - name: Run installer safety suite
         working-directory: installer
         run: ./test-installer.sh
+
+  installer-ui:
+    name: Installer locale, keyboard and encryption
+    needs: changes
+    if: needs.changes.outputs.installer == 'true'
+    runs-on: ubuntu-24.04
+    steps:
+      - name: Checkout
+        uses: actions/checkout@v4
 
       # The keyboard/locale/timezone half. Kept as its own step so a failure
       # names which half broke rather than being buried in the big suite.
@@ -1970,6 +2041,49 @@ jobs:
       - name: Run installer disk-encryption suite
         working-directory: installer
         run: ./test-installer-luks.sh
+
+  installer-a11y:
+    name: Installer accessibility
+    needs: changes
+    if: needs.changes.outputs.installer == 'true'
+    runs-on: ubuntu-24.04
+    steps:
+      - name: Checkout
+        uses: actions/checkout@v4
+
+      # The keyboard/locale/timezone half. Kept as its own step so a failure
+      # names which half broke rather than being buried in the big suite.
+      #
+      # Both degrade honestly on this runner rather than lying: the engine cases
+      # SKIP when no APEX-OS image can be put where preflight looks, and the
+      # end-to-end keymap measurement SKIPs without Xvfb, cage and python3-gi.
+      # Installing them here is what makes the criterion actually measured in CI
+      # instead of skipped on every run.
+      - name: Install the compositor and X server the keymap suite measures with
+        run: |
+          sudo apt-get update -qq
+          # One package at a time. `apt-get install a b c` aborts the WHOLE
+          # command if any single name is unavailable, so one bad name would
+          # silently cost Xvfb as well — and the suite would then SKIP the
+          # assertion that carries the criterion while the step still reported
+          # success.
+          # xdotool, at-spi2-core, dbus-x11 and libglib2.0-bin are the
+          # accessibility audit's half: real X key events into the real toolkit,
+          # a private accessibility bus, and gdbus to read the tree back. Without
+          # them test-installer-a11y.sh SKIPs, and a skip there means the
+          # criterion is unmeasured rather than met.
+          for p in xvfb cage python3-gi gir1.2-gtk-4.0 gir1.2-adw-1 \
+                   libxkbcommon0 xkb-data binutils \
+                   xdotool at-spi2-core dbus-x11 libglib2.0-bin; do
+            sudo apt-get install -y -qq "$p" || echo "note: $p unavailable"
+          done
+          # Say what actually arrived, so a SKIP below can be traced without
+          # guessing.
+          for b in Xvfb cage; do
+            command -v "$b" >/dev/null && echo "have: $b" || echo "MISSING: $b"
+          done
+          python3 -c 'import gi; gi.require_version("Gtk","4.0"); gi.require_version("Adw","1"); from gi.repository import Gtk, Adw; print("have: python3-gi with Gtk4 + Adw")' \
+            || echo "MISSING: python3-gi Gtk4/Adw"
 
       # P2-003's acceptance line ends "keyboard-only installer validated", and
       # this is the step that validates it. Not a sweep for missing labels: the
@@ -2041,6 +2155,12 @@ jobs:
           # the length of the job. `|| true`: the suite treats a missing user
           # namespace in CI as a FAILURE rather than a skip, so a runner that
           # refuses this is red and visible instead of quietly uncovered.
+          #
+          # It cleared the knob for the WHOLE of the monolithic engine job, and
+          # 68 steps below it inherited that. Since the split it clears it for
+          # the `engine` shard only; every other shard takes the same knob in
+          # its own `Allow unprivileged user namespaces` step. Nothing here
+          # changed — but if this step ever moves, those shards keep working.
           sudo sysctl -w kernel.apparmor_restrict_unprivileged_userns=0 || true
           unshare -rm true && echo "unprivileged user namespaces: available"
 
@@ -2243,78 +2363,6 @@ jobs:
         if: ${{ !cancelled() }}
         run: ./tests/test-apex-env-devices-live.sh
 
-      # What the login session picker calls the three desktops. BASE-013's
-      # third criterion — compositor names stay implementation details for
-      # normal users — failed on the one surface every user sees at every
-      # login: the greeter rendered `Name=` verbatim, so the carousel read
-      # "labwc (APEX) / niri / Hyprland".
-      #
-      # This runs here rather than only in an image build because two of the
-      # three things it checks are build rules: Containerfile.base's rename of
-      # the Hyprland package's own entry, and Containerfile.apex's sweep over
-      # the finished directory. Both are LIFTED OUT of the Containerfiles and
-      # run against a staging tree, so the gate that normally costs a
-      # multi-hour image build is exercised on every PR in under a second, and
-      # the greeter's enumeration is lifted out of GreetContext.qml and run
-      # rather than re-implemented — this tree already carries three copies of
-      # that loop. It starts no compositor and opens no window.
-      - name: Run session-picker wording assertions
-        if: ${{ !cancelled() }}
-        run: ./tests/test-apex-greet-sessions.sh
-
-      # P2-018's first criterion, and the half that did not exist until now:
-      # APEX Safe Graphics shipped as a session a PERSON enters, and NOTHING
-      # noticed a failure. greetd is a stock Fedora unit with no Restart=, no
-      # StartLimitBurst and no OnFailure=, and apex-boot-health's units are
-      # inert on every published image because they condition on
-      # LoaderBootCountPath while every APEX image boots GRUB.
-      #
-      # It runs beside the session-picker suite because it needs exactly what
-      # that one needs — python3 and the shipped GreetContext.qml — and because
-      # it lifts BOTH greeter hooks out of that same file and runs them. It
-      # starts no compositor, no greeter and no session, opens no window, and
-      # touches no real /var/lib/apex-greet.
-      #
-      # THE FLOOR IS NOT DECORATION HERE. This suite's most important
-      # assertions are the three fail-open mutations — the helper replaced by
-      # `sleep 60`, then deleted, then run with timeout(1) off PATH — and each
-      # requires the greeter's launch hook to return 0 anyway. A suite that
-      # stopped finding its input would assert none of that and exit 0, and the
-      # change it guards is the one that can leave somebody at a password
-      # prompt that never proceeds.
-      #
-      # `skipped` must be 0 for the same reason it must be in the firewall step
-      # below: a could-not-run is not a pass. That is not hypothetical for this
-      # suite — its unwritable-state-directory section USED to skip on exactly
-      # this runner, because CI is root and chmod 0555 does not stop root. It
-      # was rewritten to make the directory uncreatable by shape instead, and
-      # this line is what stops that regressing quietly.
-      #
-      # §5 also skips its nine assertions without node(1), which is the other
-      # way this suite could go quiet. A GitHub runner always has node — the
-      # actions themselves need it — so a skip there means the runner image
-      # changed under us, and that is worth failing over rather than passing
-      # with the preselection rule unexecuted.
-      - name: Run session-watchdog assertions
-        if: ${{ !cancelled() }}
-        run: |
-          set -euo pipefail
-          out="$(./tests/test-apex-session-watchdog.sh 2>&1)"
-          printf '%s\n' "$out"
-          summary="$(printf '%s' "$out" | grep -E '^session-watchdog: ' || true)"
-          [ -n "$summary" ] || { echo "::error::the session-watchdog suite printed no summary line"; exit 1; }
-          read -r passed _ failed _ skipped _ <<<"$(printf '%s' "$summary" | sed 's/^session-watchdog: //')"
-          echo "measured: passed=$passed failed=$failed skipped=$skipped"
-          [ "$failed" = 0 ] || { echo "::error::$failed session-watchdog assertions failed"; exit 1; }
-          [ "$skipped" = 0 ] || {
-              echo "::error::$skipped session-watchdog assertions could not run ($summary); a could-not-run is not a pass"
-              exit 1
-          }
-          [ "$passed" -ge 91 ] || {
-              echo "::error::only $passed session-watchdog assertions ran; 91 ran as both uid 0 and uid 1000 on 2026-09-13, so some no longer execute"
-              exit 1
-          }
-
       # P2-016's guest and kiosk halves. Two claims, tested two ways.
       #
       # Criterion 3 -- "kiosk/shared-device policy is possible WITHOUT
@@ -2368,970 +2416,39 @@ jobs:
         if: ${{ !cancelled() }}
         run: ./tests/test-apex-switch-user.sh
 
-      # What a screen reader and a keyboard-only user get from the login
-      # screen. P2-003's "accessible login" and P2-004's "keyboard layout
-      # before password" both land on the same surface, so they are measured
-      # on the same one.
+  engine-pkg:
+    name: Package engine — packages
+    needs: changes
+    if: needs.changes.outputs.engine == 'true'
+    runs-on: ubuntu-24.04
+    steps:
+      - name: Checkout
+        uses: actions/checkout@v4
+
+      # ── the knob the monolithic job used to clear once, for everything ────
       #
-      # This is NOT a grep for Accessible.name. The shipped GreetSurface.qml is
-      # built under qmltestrunner on the offscreen platform, the accessible
-      # name and role are READ OFF THE LIVE OBJECTS — the same attached objects
-      # QAccessible publishes to AT-SPI — and the focus order is measured by
-      # posting real Qt.Key_Tab events through the window's delivery agent. The
-      # difference is not academic: `KeyNavigation.tab: passwordInput` reads
-      # like a complete tab chain and was in fact a two-element ring that could
-      # not reach the session picker at all.
+      # `Install squashfs-tools for the AppImage suite` clears
+      # kernel.apparmor_restrict_unprivileged_userns at step 3 of 72, and every
+      # step after it inherited a cleared value without saying so — the AppImage
+      # suite's own Leg B, the firewall parse, the netns device services, the
+      # root-approval probe, the confined agent sessions and the rootless-podman
+      # package suites all depend on it. Splitting the job breaks that
+      # inheritance, and the failure mode is the one this file is full of:
+      # `unshare -r` is refused, the suite SKIPS with status 0, and a skip
+      # reads as success.
       #
-      # It opens no window and starts no compositor; WAYLAND_DISPLAY is removed
-      # from the environment before the runner is invoked. It skips with
-      # status 0 where qmltestrunner is not installed.
-      # ubuntu-24.04 ships Qt 6.4, and the greeter imports QtQuick.Effects for
-      # its wallpaper blur — MultiEffect is Qt 6.5 and later. So this suite can
-      # never run on the runner itself: apt has no qml6-module-qtquick-effects
-      # to install, the surface would fail to build, and the suite would skip on
-      # every PR for ever. A skip nobody notices is how a suite goes quietly
-      # vacuous, which is the failure this whole unit exists to measure.
+      # So every shard that holds a step which used to run after that install
+      # clears the knob for itself, above the first such step. That is every
+      # shard but `engine`, which carries the real install at its own original
+      # position — `Run package-engine assertions` and `Run .deb package
+      # assertions` ran BEFORE it in the monolith and still do here.
       #
-      # So it runs in a Fedora container, which is what APEX is built from
-      # anyway — the Qt the greeter actually ships against rather than the one
-      # the runner happens to carry. Verified by running it: 22 assertions, same
-      # result as on a Fedora workstation.
-      #
-      # A container that cannot be pulled or a dnf that cannot resolve leaves
-      # the suite unrun and says so, rather than reddening the job over a
-      # network hiccup — the same trade the labwc step above makes.
-      # ── the four accessibility steps run even after an earlier failure ────
-      # Not `continue-on-error`: these steps still fail the job. `!cancelled()`
-      # only stops an UNRELATED red step earlier in this job from hiding them.
-      #
-      # That is not hypothetical. `Run virtualization assertions` is red on
-      # roadmap/v2.2 itself, a hundred lines above these, and GitHub stops a job
-      # at its first failing step — so on 2026-09-12 all four accessibility
-      # suites silently stopped running in CI while reporting nothing at all.
-      # A job that halts at step N is evidence about steps 1..N and about
-      # nothing after it, and a unit whose whole argument is "a second machine
-      # finds what a laptop cannot" cannot afford to lose the second machine to
-      # somebody else's red step.
-      - name: Run greeter accessibility assertions
+      # The runner is ephemeral and unshared, so this affects nothing else.
+      - name: Allow unprivileged user namespaces
         if: ${{ !cancelled() }}
         run: |
-          if ! docker run --rm -v "$PWD":/w -w /w fedora:43 bash -c '
-                dnf -y install --setopt=install_weak_deps=False \
-                    qt6-qtdeclarative-devel >/dev/null 2>&1 || exit 97
-                ./tests/test-apex-greet-a11y.sh'; then
-              rc=$?
-              if [ "$rc" -eq 97 ]; then
-                  echo "could not install Qt in the container; the greeter a11y suite did not run"
-              else
-                  exit "$rc"
-              fi
-          fi
-
-      # The AT-SPI walk: the greeter in a real window on a private wlroots
-      # compositor, read back over D-Bus exactly as Orca reads it. This was the
-      # last accessibility suite in this unit verified on ONE laptop, and the
-      # round-18b dispatch is the argument for not leaving it there — CI found
-      # two false greens in the installer audit that a laptop could not.
-      #
-      # Same Fedora container as the step above, for the same reason (the
-      # greeter imports QtQuick.Effects, which is Qt 6.5+, and the runner ships
-      # 6.4), plus four things that step does not need:
-      #
-      #   labwc                     a wlroots compositor. The suite refuses the
-      #                             offscreen QPA deliberately: offscreen
-      #                             provides no platform accessibility, so the
-      #                             bridge publishes nothing and every assertion
-      #                             would read an empty tree and have to be
-      #                             written to expect one.
-      #   xorg-x11-server-Xwayland  labwc exits at startup without it ("cannot
-      #                             create xwayland server"). Nothing in the
-      #                             suite is an X client; labwc simply will not
-      #                             start.
-      #   mesa-dri-drivers          llvmpipe. Without it the Qt client cannot
-      #                             make an EGL context in a container with no
-      #                             /dev/dri, and it fails in the most confusing
-      #                             possible way: the process stays alive, its
-      #                             stderr is empty, and it registers nothing.
-      #   at-spi2-core, python3-gobject, dbus-daemon, glib2
-      #                             the bus, the registry, and the walker.
-      #
-      # Verified by running it in this exact container before it was written
-      # here, not dispatched blind: 31 passed, 0 failed, identical to the
-      # laptop's 31. That run is also what corrected tests/lib/atspi.sh — see
-      # its "the flag a screen reader sets" note. On a bare container
-      # org.a11y.Status starts FALSE, Qt publishes nothing, and the suite reads
-      # as "the greeter has no accessibility tree"; on a developer machine the
-      # flags are already true, which is why the old finding said Qt ignored
-      # them.
-      #
-      # exit 97 = the container could not resolve its packages: reported as
-      # "did not run" rather than reddening the job, the same trade the greeter
-      # a11y step makes.
-      - name: Run greeter AT-SPI assertions
-        if: ${{ !cancelled() }}
-        run: |
-          if ! docker run --rm -v "$PWD":/w -w /w fedora:43 bash -c '
-                dnf -y install --setopt=install_weak_deps=False \
-                    qt6-qtdeclarative-devel qt6-qtwayland labwc \
-                    xorg-x11-server-Xwayland mesa-dri-drivers \
-                    at-spi2-core python3-gobject dbus-daemon glib2 \
-                    >/dev/null 2>&1 || exit 97
-                ./tests/test-apex-greet-atspi.sh'; then
-              rc=$?
-              if [ "$rc" -eq 97 ]; then
-                  echo "could not install the accessibility stack in the container; the AT-SPI walk did not run"
-              else
-                  exit "$rc"
-              fi
-          fi
-
-      - name: Run greeter keyboard-layout assertions
-        if: ${{ !cancelled() }}
-        run: ./tests/test-apex-greet-layout.sh
-
-      # The other half of the same finding, and the more important one: the
-      # greeter's markup is right and a screen reader still receives nothing,
-      # because the greet session has no D-Bus session bus for Qt's
-      # accessibility bridge to publish on. greetd's own command string is
-      # parsed out of the shipped TOML and RUN, with the compositor and
-      # quickshell replaced by stubs on a private PATH.
-      #
-      # It asserts ABSENCE, so it goes RED when somebody fixes the greeter --
-      # which is the intended behaviour, and its failure messages say so.
-      #
-      # dbus-daemon and gdbus are what it needs; without them it SKIPs and says
-      # nothing was measured.
-      - name: Install the bus tools the greeter session-bus suite measures with
-        if: ${{ !cancelled() }}
-        run: |
-          sudo apt-get update -qq
-          for p in dbus dbus-x11 libglib2.0-bin at-spi2-core; do
-            sudo apt-get install -y -qq "$p" || echo "note: $p unavailable"
-          done
-          for b in dbus-daemon dbus-run-session gdbus; do
-            command -v "$b" >/dev/null && echo "have: $b" || echo "MISSING: $b"
-          done
-          # at-spi2-core is what the wrapper execs. Without it the two
-          # accessibility-bus assertions SKIP with a reason rather than being
-          # measured, which is a runner that says nothing about the half of the
-          # change that matters most.
-          # `|| true` is load-bearing, not decoration: this step runs under
-          # `bash -e`, a for-loop exits with its last command's status, and a
-          # final `[ -x ]` that is false therefore FAILED THE WHOLE STEP on the
-          # first dispatch — while the packages it was reporting on had
-          # installed perfectly.
-          for f in /usr/libexec/at-spi-bus-launcher /usr/lib/at-spi2-core/at-spi-bus-launcher; do
-            [ -x "$f" ] && echo "have: $f" || true
-          done
-          true
-
-      - name: Run greeter session-bus assertions
-        if: ${{ !cancelled() }}
-        run: ./tests/test-apex-greet-session-bus.sh
-
-      # The image ships a screen reader, and nothing starts it. Reads
-      # Containerfile.core by parsing its dnf5 invocations rather than grepping
-      # for the word -- "orca" is in that stanza's prose as well as its install
-      # line. The rpmdb section SKIPs on a runner, which has no ostree
-      # deployment to ask; the two sections that gate the change do run.
-      - name: Run accessibility-stack assertions
-        if: ${{ !cancelled() }}
-        run: ./tests/test-apex-a11y-stack.sh
-
-      # §9's resolver, which is the same engine as the package suite above and
-      # a separate file because it is a separate claim: that engine INSTALLS,
-      # this one CHOOSES. A choice is a policy, and the policy is invisible
-      # until someone reads the source.
-      #
-      # `dnf5` and `flatpak` are faked from fixture files — again with a hard
-      # exit if they do not resolve to the fakes, so the failure mode is a
-      # refusal rather than a run that queries Fedora's mirrors and the
-      # developer's own Flatpak remotes. That makes the ranking testable at
-      # all: both "this exists" and "this does not" are reachable.
-      #
-      # The load-bearing assertion is that an exact-name repository package
-      # still wins, because `apex install <name>` already ships and a silent
-      # re-route would be a behaviour change on a shipped command. The one
-      # exception is the curated table, and the suite checks that it explains
-      # itself and stays overridable with --source.
-      - name: Run resolver assertions
-        if: ${{ !cancelled() }}
-        run: ./tests/test-apex-resolve.sh
-
-      # The display engine is the one generator that can reach hardware, so its
-      # suite asserts that it does not: fake hyprctl/wlr-randr first on PATH
-      # record every call, and the run fails if a MUTATING one appears. There is
-      # no compositor on the runner, but the guard is set anyway — the bug it
-      # exists for was a test that reconfigured the live desktop it ran on, and
-      # a developer running this locally is exactly that situation.
-      - name: Run display-settings assertions
-        if: ${{ !cancelled() }}
-        env:
-          APEX_DISPLAY_NO_LIVE: "1"
-        run: ./tests/test-apex-display.sh
-
-      # The seeded Hyprland Lua tree in a REAL Hyprland, not just through
-      # --verify-config. Three things only a running instance can answer:
-      # `hyprctl configerrors` is clean; `hyprctl reload` re-reads a generated
-      # module rewritten under it (Lua caches modules, and a loader that did not
-      # clear the cache would make every saved display layout a no-op); and
-      # `hyprctl keyword` is refused under a Lua config, which is why the live
-      # paths use `hyprctl eval`.
-      #
-      # Nests Hyprland inside a HEADLESS labwc, so it draws nothing and cannot
-      # reach a developer's real session. Skips with status 0 where neither
-      # binary is installed, which is what the runner will normally do — the
-      # value is on a machine that has them.
-      - name: Run the Hyprland Lua config assertions
-        if: ${{ !cancelled() }}
-        run: |
-          # Run BARE, this step used to go green whatever the suite did — and on
-          # ubuntu-24.04 what it does is print `0 passed, 0 failed, 1 skipped`
-          # and exit 0, because labwc is not installed and there is no nested
-          # compositor to drive. A green check over nothing, with the reason
-          # visible only to someone who opened the log and read it. Both halves
-          # are fixed here: the skip is SAID, in the run summary, and the
-          # count is floored so the suite silently dropping assertions on a
-          # machine that CAN run it is an error rather than a smaller number
-          # nobody compares.
-          set -uo pipefail
-          rc=0; out="$(./tests/test-apex-hypr-lua.sh 2>&1)" || rc=$?
-          printf '%s\n' "$out"
-          [ "$rc" = 0 ] || { echo "::error::test-apex-hypr-lua.sh exited $rc"; exit 1; }
-          summary="$(printf '%s\n' "$out" | grep -E '^apex hypr-lua: [0-9]+ passed, [0-9]+ failed, [0-9]+ skipped$' || true)"
-          [ -n "$summary" ] || { echo "::error::test-apex-hypr-lua.sh printed no summary line; nothing below can be believed"; exit 1; }
-          [ "$(printf '%s\n' "$summary" | wc -l)" = 1 ] || { echo "::error::more than one line looked like test-apex-hypr-lua.sh's summary"; exit 1; }
-          passed="$(printf '%s' "$summary" | awk '{print $3}')"
-          failed="$(printf '%s' "$summary" | awk '{print $5}')"
-          skipped="$(printf '%s' "$summary" | awk '{print $7}')"
-          echo "measured: passed=$passed failed=$failed skipped=$skipped"
-          [ "$failed" = 0 ] || { echo "::error::$failed apex hypr-lua assertions failed"; exit 1; }
-          if [ "$passed" -eq 0 ]; then
-              [ "$skipped" -gt 0 ] || { echo "::error::test-apex-hypr-lua.sh asserted nothing and did not say why"; exit 1; }
-              echo "::warning::test-apex-hypr-lua.sh asserted NOTHING on this runner ($skipped skipped) — it needs a nested labwc and ubuntu-24.04 has none, so this step is a could-not-run, not a pass. Its 22 assertions only ever run on a machine with the compositors installed."
-          else
-              [ "$passed" -ge 22 ] || { echo "::error::only $passed apex hypr-lua assertions ran; 22 ran on 2026-09-18, so some no longer execute"; exit 1; }
-          fi
-
-      # What SUPER+arrow actually DOES, which no config grep can answer. The
-      # seeded session focus-follows-mouse, so a keyboard focus change that
-      # leaves the pointer behind is undone by the next twitch of the mouse —
-      # the defect Andre reported. The suite measures the pointer's position
-      # after a directional focus, and runs the whole thing a second time with
-      # `no_warps = true` where those assertions MUST fail. A gate that agrees
-      # with whatever the configuration says is the dominant defect family in
-      # this tree; the control is what stops this being one.
-      #
-      # Same nesting as the step above, same reason it usually skips here.
-      - name: Run the Hyprland focus + switcher assertions
-        if: ${{ !cancelled() }}
-        run: |
-          set -uo pipefail
-          rc=0; out="$(./tests/test-apex-hypr-focus.sh 2>&1)" || rc=$?
-          printf '%s\n' "$out"
-          [ "$rc" = 0 ] || { echo "::error::test-apex-hypr-focus.sh exited $rc"; exit 1; }
-          summary="$(printf '%s\n' "$out" | grep -E '^apex hypr-focus: [0-9]+ passed, [0-9]+ failed, [0-9]+ skipped$' || true)"
-          [ -n "$summary" ] || { echo "::error::test-apex-hypr-focus.sh printed no summary line; nothing below can be believed"; exit 1; }
-          [ "$(printf '%s\n' "$summary" | wc -l)" = 1 ] || { echo "::error::more than one line looked like test-apex-hypr-focus.sh's summary"; exit 1; }
-          passed="$(printf '%s' "$summary" | awk '{print $3}')"
-          failed="$(printf '%s' "$summary" | awk '{print $5}')"
-          skipped="$(printf '%s' "$summary" | awk '{print $7}')"
-          echo "measured: passed=$passed failed=$failed skipped=$skipped"
-          [ "$failed" = 0 ] || { echo "::error::$failed apex hypr-focus assertions failed"; exit 1; }
-          if [ "$passed" -eq 0 ]; then
-              [ "$skipped" -gt 0 ] || { echo "::error::test-apex-hypr-focus.sh asserted nothing and did not say why"; exit 1; }
-              echo "::warning::test-apex-hypr-focus.sh asserted NOTHING on this runner ($skipped skipped) — it needs a nested labwc + Hyprland + quickshell and ubuntu-24.04 has none, so this step is a could-not-run, not a pass. Its 17 assertions only ever run on a machine with the compositors installed."
-          else
-              [ "$passed" -ge 19 ] || { echo "::error::only $passed apex hypr-focus assertions ran; 19 ran on 2026-09-20, so some no longer execute"; exit 1; }
-          fi
-
-      # The input half of the same argument. test-apex-input.sh proves each
-      # compositor's validator ACCEPTS what is generated; only a running
-      # instance proves the value arrives, that `hyprctl reload` re-reads a
-      # module rewritten under it, and that every option name the read-back
-      # asks for still exists — `getoption` answers "no such option" for a name
-      # it does not know, and a read-back treating that as "unset" would show a
-      # working control as untouched forever.
-      #
-      # Same nesting, so it draws nothing and cannot reach a real session, and
-      # the same status-0 skip where the binaries are absent.
-      - name: Run the live input-settings assertions
-        if: ${{ !cancelled() }}
-        run: |
-          # Run BARE, this step used to go green whatever the suite did — and on
-          # ubuntu-24.04 what it does is print `0 passed, 0 failed, 1 skipped`
-          # and exit 0, because labwc is not installed and there is no nested
-          # compositor to drive. A green check over nothing, with the reason
-          # visible only to someone who opened the log and read it. Both halves
-          # are fixed here: the skip is SAID, in the run summary, and the
-          # count is floored so the suite silently dropping assertions on a
-          # machine that CAN run it is an error rather than a smaller number
-          # nobody compares.
-          set -uo pipefail
-          rc=0; out="$(./tests/test-apex-input-live.sh 2>&1)" || rc=$?
-          printf '%s\n' "$out"
-          [ "$rc" = 0 ] || { echo "::error::test-apex-input-live.sh exited $rc"; exit 1; }
-          summary="$(printf '%s\n' "$out" | grep -E '^apex input-live: [0-9]+ passed, [0-9]+ failed, [0-9]+ skipped$' || true)"
-          [ -n "$summary" ] || { echo "::error::test-apex-input-live.sh printed no summary line; nothing below can be believed"; exit 1; }
-          [ "$(printf '%s\n' "$summary" | wc -l)" = 1 ] || { echo "::error::more than one line looked like test-apex-input-live.sh's summary"; exit 1; }
-          passed="$(printf '%s' "$summary" | awk '{print $3}')"
-          failed="$(printf '%s' "$summary" | awk '{print $5}')"
-          skipped="$(printf '%s' "$summary" | awk '{print $7}')"
-          echo "measured: passed=$passed failed=$failed skipped=$skipped"
-          [ "$failed" = 0 ] || { echo "::error::$failed apex input-live assertions failed"; exit 1; }
-          if [ "$passed" -eq 0 ]; then
-              [ "$skipped" -gt 0 ] || { echo "::error::test-apex-input-live.sh asserted nothing and did not say why"; exit 1; }
-              echo "::warning::test-apex-input-live.sh asserted NOTHING on this runner ($skipped skipped) — it needs a nested labwc and ubuntu-24.04 has none, so this step is a could-not-run, not a pass. Its 22 assertions only ever run on a machine with the compositors installed."
-          else
-              [ "$passed" -ge 22 ] || { echo "::error::only $passed apex input-live assertions ran; 22 ran on 2026-09-18, so some no longer execute"; exit 1; }
-          fi
-
-      # §17's fourth generator. The shell has written Hyprland .conf/.lua and
-      # niri .kdl on every keybind edit for a long time; labwc got nothing,
-      # because it has no IPC to push bindings over and no include mechanism to
-      # append a generated file to. So on labwc the Keybinds page was fully
-      # interactive and completely inert.
-      #
-      # The suite splices into fixture files only — it must never touch a real
-      # ~/.config/labwc/rc.xml, which is what the helper's own default would do
-      # if `apply` were ever called without --rc.
-      # The model lives in apex-shell, so the suite needs that tree. It vendors
-      # the MATCHING branch, falling back to the default one, and says which.
-      #
-      # This used to clone the default branch unconditionally, and the comment
-      # justified it: "exactly what Containerfile.base does — so a shell change
-      # that moves the keybind defaults fails here until it lands, which is the
-      # documented merge order doing its job." That premise was true and is not
-      # any more. build-image.yml pinned apex-shell to `main` while this program
-      # develops both repos on roadmap/v2.2 and is forbidden from pushing main
-      # until the final integration, so the "merge order" this relied on cannot
-      # happen while the program runs — apex-shell/main last moved 2026-09-04
-      # and roadmap/v2.2 was 137 commits ahead of it. The image was being built
-      # from two repos at different ages, and this check was comparing against
-      # the older one, so it could not have noticed.
-      #
-      # Both are pinned to the matching branch now. Keep the two in step: if one
-      # is ever changed, the other is wrong.
-      - name: Vendor apex-shell for the keybind model
-        if: ${{ !cancelled() }}
-        run: |
-          set -euo pipefail
-          # The integration branch sits between the exact match and the default
-          # branch, for the reason spelled out on the input-parity step above:
-          # apex-shell has no `task/*` twin for most of this program's
-          # branches, so "no matching branch" meant "compare against main",
-          # and main is 137 commits behind the work — the exact staleness the
-          # paragraph above says this step was changed to stop having. It is
-          # latent here rather than red only because the keybind assertions
-          # happen to still pass against the older model; that is luck, not a
-          # property. Exact match stays first, so apex-os `main` still
-          # vendors apex-shell `main`.
-          #
-          # Kept deliberately identical to the input-parity step above. If one
-          # is ever changed, the other is wrong.
-          want="${GITHUB_HEAD_REF:-${GITHUB_REF_NAME:-}}"
-          shell_ref=""
-          for cand in "$want" roadmap/v2.2; do
-            [ -n "$cand" ] || continue
-            if git ls-remote --exit-code --heads \
-                 https://github.com/AndreNijman/apex-shell "$cand" >/dev/null 2>&1; then
-              shell_ref="$cand"; break
-            fi
-          done
-          if [ -n "$shell_ref" ]; then
-            echo "keybind model: vendoring apex-shell branch '$shell_ref'"
-            git clone --depth 1 --branch "$shell_ref" \
-              https://github.com/AndreNijman/apex-shell.git \
-              "${GITHUB_WORKSPACE}/../apex-shell"
-          else
-            echo "::warning::keybind model: apex-shell has no '$want' and no roadmap/v2.2; using its default branch"
-            git clone --depth 1 https://github.com/AndreNijman/apex-shell.git \
-              "${GITHUB_WORKSPACE}/../apex-shell"
-          fi
-          git -C "${GITHUB_WORKSPACE}/../apex-shell" log -1 --format='vendored apex-shell %h %s'
-          test -f "${GITHUB_WORKSPACE}/../apex-shell/src/services/config_tab/KeybindService.qml"
-
-      - name: Run labwc keybind generator assertions
-        if: ${{ !cancelled() }}
-        env:
-          # Turns "no shell tree, skip everything" into a failure. Without it the
-          # suite reported passed=0 failed=0 and a green tick on its first CI
-          # run, having asserted precisely nothing.
-          APEX_REQUIRE_SHELL_TREE: "1"
-        run: ./tests/test-labwc-keybinds.sh
-
-      # The half of the reported bug the suite above cannot reach. It passes
-      # --no-reload to every `apply` on purpose, so it never starts labwc and
-      # never presses a key; test-labwc-session.sh starts labwc and reloads it
-      # but never presses a key either. So "the XML is correct" and "the
-      # compositor survived" were both proven and "the key the user just bound
-      # now does something" was proven by neither — which is the entire
-      # complaint: rebind the launcher, watch the UI confirm it, press the key,
-      # nothing happens.
-      #
-      # This starts labwc under WLR_BACKENDS=headless in a private
-      # XDG_RUNTIME_DIR with WAYLAND_DISPLAY unset, so it draws nothing and has
-      # no parent session to leak a keystroke into, and synthesises the
-      # keypresses with wtype over virtual-keyboard-unstable-v1. It asserts
-      # that isolation as three hard failures before the first key, and unsets
-      # the inherited LABWC_PID — `labwc --reconfigure` SIGHUPs whatever that
-      # names, and inheriting it would reload a developer's own session.
-      #
-      # It reuses the apex-shell tree vendored above, and skips with status 0
-      # where labwc or wtype will not run, so a runner that cannot host a
-      # compositor reports a skip rather than a false green or a false red.
-      - name: Install a compositor and a synthetic keyboard
-        if: ${{ !cancelled() }}
-        run: |
-          # Tolerant on purpose. The suite below skips with status 0 where labwc
-          # or wtype will not run, so a runner that cannot host a compositor
-          # reports a skip — but that safety net protects the SUITE, not this
-          # step. `apt-get install` of a package the image's enabled components
-          # do not carry exits non-zero and would redden the whole job over a
-          # missing test dependency, which is a worse outcome than not running
-          # the test. So a failed install is reported and the suite is left to
-          # skip.
-          sudo apt-get update -qq || true
-          sudo apt-get install -y -qq labwc wtype \
-            || echo "labwc/wtype unavailable on this runner; the reload suite will skip"
-
-      - name: Run the keybind reload assertions
-        if: ${{ !cancelled() }}
-        run: ./tests/test-labwc-keybind-reload.sh
-
-      # P2-018's recovery session, in the same job for the same reason: it
-      # starts a real labwc under WLR_BACKENDS=headless, so it needs the
-      # compositor this step just installed and nothing else. Its own
-      # structural half runs anywhere and its live half skips cleanly where
-      # labwc will not start, so a runner that cannot host a compositor
-      # reports a skip rather than a false green.
-      #
-      # The assertion that matters here is the one no structural check can
-      # make: an unparseable rc.xml is planted exactly where the user's lives
-      # and the session has to come up anyway, which is what `labwc -C` buys
-      # and what its absence would silently cost.
-      - name: Run the safe-graphics recovery assertions
-        if: ${{ !cancelled() }}
-        run: ./tests/test-apex-safe-graphics.sh
-
-      # End-to-end, against a real daemon on an isolated socket: that the
-      # daemon resolves the asking session from the connection's PEER
-      # CREDENTIALS and not from anything the client sent. The negative control
-      # is a session that files a request while claiming
-      # APEX_AGENT_SESSION=99999 and is still attributed correctly.
-      #
-      # Needs no root: every approval uses --no-run, so the suite records
-      # decisions without performing operations and never raises an
-      # authentication prompt.
-      # bubblewrap, so the sandbox boundary is actually exercised on CI rather
-      # than skipped. The secret broker's central claim — that a CONFINED
-      # session cannot read the credential file — is only testable with a real
-      # sandbox, and a runner has no bwrap by default. Without this the one
-      # assertion that matters most is the one that never runs.
-      - name: Install bubblewrap
-        if: ${{ !cancelled() }}
-        run: |
-          set -euo pipefail
-          sudo apt-get update -qq
-          sudo apt-get install -y -qq bubblewrap
-          bwrap --version
-          # Ubuntu 24.04 blocks unprivileged user namespaces through AppArmor,
-          # so bwrap installs fine and then fails with "setting up uid map:
-          # Permission denied" the moment it runs. Without this the sandbox
-          # section reports a session that "started" and then asserts nothing,
-          # because the script inside never executed.
-          sudo sysctl -w kernel.apparmor_restrict_unprivileged_userns=0 || \
-            echo "note: no apparmor userns restriction on this kernel"
-          # Prove it actually works HERE, so a failure is one clear line at
-          # install time rather than a confusing assertion later.
-          bwrap --ro-bind / / --dev /dev --proc /proc --unshare-pid \
-                /bin/true || {
-            echo "::error::bubblewrap cannot create a namespace on this runner"
-            exit 1
-          }
-          echo "bubblewrap works: a confined session can be built" 
-          # The runtime also refuses to confine a session when the kernel still
-          # honours the legacy TIOCSTI ioctl, because keystroke injection into
-          # the controlling terminal would make confinement meaningless. Report
-          # it rather than letting the suite fail with a less obvious message.
-          sysctl dev.tty.legacy_tiocsti 2>/dev/null || \
-            echo "note: dev.tty.legacy_tiocsti knob absent (compiled out — fine)"
-
-      - name: Run privilege-request assertions
-        if: ${{ !cancelled() }}
-        run: ./tests/test-privilege-requests.sh
-
-      # P1-035's three claims, none of which a unit test can reach: the typed
-      # path arrives at the session it was addressed to and at no other; nothing
-      # that arrives can submit the line; and a managed session may not use the
-      # verb at all. All three need a real daemon, a real PTY and a real socket,
-      # and the suite builds its own — its own XDG_RUNTIME_DIR, its own state,
-      # killed by pid.
-      - name: Run file-injection assertions
-        if: ${{ !cancelled() }}
-        run: ./tests/test-agent-inject.sh
-
-      # P1-036's named guarantee, which is the whole reason the conflict answer
-      # comes from `merge-tree` and not from a real merge: after a status call
-      # on a GENUINELY CONFLICTED worktree, MERGE_HEAD is absent, the staged
-      # entries are unchanged, `git status --porcelain` is byte-identical and
-      # no ref has moved. A unit test cannot reach any of it — it needs a real
-      # repository with a real conflict, and the suite builds one, along with
-      # its own daemon on its own socket and its own project store.
-      - name: Run worktree-status assertions
-        if: ${{ !cancelled() }}
-        run: ./tests/test-agent-worktrees.sh
-
-      # P1-037's acceptance line — an agent session that runs in a disposable
-      # capsule and discards its state — against the REAL disposable engine
-      # from this checkout, a real daemon and a real PTY. Only the capsule
-      # engine is faked, through the override the engine already documents, and
-      # the fake logs every call: a fake that merely exited 0 would let every
-      # assertion pass with the agent running on the host. So this needs no
-      # podman, no distrobox and no image pull, and it cannot fail here for a
-      # reason unrelated to this code.
-      - name: Run disposable-capsule assertions
-        if: ${{ !cancelled() }}
-        run: ./tests/test-agent-disposable.sh
-      # §7's other half, and the one the privilege suite deliberately does not
-      # touch: approving a request WITHOUT --no-run performs the operation and
-      # is gated on being root. That was argued from the code rather than run,
-      # on the grounds that testing it needs a real sudo prompt. It does not —
-      # `unshare -r` gives a process a real effective uid 0, established by the
-      # kernel and read the way ops::effective_uid reads it, and asks nobody
-      # for a password. Nothing in this suite can raise a prompt: no sudo, no
-      # pkexec, no pkcheck.
-      #
-      # The operation that then runs is contained by a mount namespace, with a
-      # stub bound over the absolute path `apex install` execs, so the real
-      # package engine is never reached. The two steps that genuinely need a
-      # person — sudo's own authentication, and capability over the real
-      # machine — are named at the end of the run with the commands to check
-      # them by hand.
-      #
-      # The apparmor knob two steps up is what makes `unshare -r` work on a
-      # 24.04 runner at all; without it this suite skips out loud rather than
-      # passing.
-      - name: Run root-approval assertions
-        if: ${{ !cancelled() }}
-        run: ./tests/test-root-approval.sh
-
-      # §5's two claims, neither of which the unit tests can reach: a portable
-      # bundle carries no credential and no conversation, from a profile on a
-      # real filesystem; and a confined session cannot rewrite the instructions
-      # it was started with, enforced by the mount namespace rather than by an
-      # argument list. The agent is a stub on PATH, so this needs no account,
-      # no network and no API call, and it touches nobody's own profile — the
-      # fixture home is under /var/tmp, because the sandbox masks /tmp.
-      - name: Run agent-profile assertions
-        if: ${{ !cancelled() }}
-        run: ./tests/test-agent-profile.sh
-
-      # The compositor adapter is faked through APEX_WINDOW_ADAPTER, so this
-      # runs with no compositor at all — which is the whole reason the adapter
-      # is a separate program. `restore` is only ever called with --dry-run, so
-      # the suite cannot start a window.
-      - name: Run project-layout assertions
-        if: ${{ !cancelled() }}
-        run: ./tests/test-project-layout.sh
-
-      # fish and nushell cannot source the POSIX agent.sh, so each has its own
-      # integration file — and the only way to know the three agree is to run
-      # all three. fish is in Ubuntu's archive; nushell is not, so it comes from
-      # the pinned upstream release the image also ships. A failed download
-      # degrades that section to a LOUD SKIP rather than a red build, and the
-      # suite refuses to report success if every section skipped.
-      - name: Install fish and nushell
-        if: ${{ !cancelled() }}
-        run: |
-          set -uo pipefail
-          sudo apt-get update -qq
-          sudo apt-get install -y -qq fish
-          fish --version
-          nu_ver=0.99.1
-          url="https://github.com/nushell/nushell/releases/download/${nu_ver}/nu-${nu_ver}-x86_64-unknown-linux-musl.tar.gz"
-          # The whole fetch is the `if` condition, not just the curl: a step runs
-          # under `bash -e`, so an extraction that failed after a successful
-          # download would be a red build rather than the skip promised above.
-          # The member path is `nu-<ver>-x86_64-unknown-linux-musl/nu`, checked
-          # with `tar tzf` against the real asset.
-          if curl -fsSL --retry 2 "$url" -o /tmp/nu.tgz \
-             && tar xzf /tmp/nu.tgz -C /tmp \
-             && sudo install -m0755 "/tmp/nu-${nu_ver}-x86_64-unknown-linux-musl/nu" /usr/local/bin/nu; then
-            nu --version
-          else
-            echo "note: nushell ${nu_ver} is unavailable; its section will skip out loud"
-          fi
-
-      - name: Run fish and nushell agent-integration assertions
-        if: ${{ !cancelled() }}
-        run: ./tests/test-shell-agent.sh
-
-      # The layout templates open panes in a real multiplexer, so a real one has
-      # to be here. tmux is in Ubuntu's archive; zellij is not in any distro, so
-      # it comes from the same pinned upstream release Containerfile.core does —
-      # the version is kept in step by hand, and a failed download degrades that
-      # section to a LOUD SKIP rather than a red build.
-      - name: Install tmux and zellij
-        if: ${{ !cancelled() }}
-        run: |
-          set -uo pipefail
-          sudo apt-get install -y -qq tmux
-          tmux -V
-          zj=v0.45.1
-          url="https://github.com/zellij-org/zellij/releases/download/${zj}/zellij-x86_64-unknown-linux-musl.tar.gz"
-          if curl -fsSL --retry 2 "$url" -o /tmp/zellij.tgz \
-             && sudo tar xzf /tmp/zellij.tgz -C /usr/local/bin zellij \
-             && sudo chmod 0755 /usr/local/bin/zellij; then
-            zellij --version
-          else
-            echo "note: zellij ${zj} is unavailable; its section will skip out loud"
-          fi
-
-      # Both multiplexers run on an isolated socket (TMUX_TMPDIR,
-      # ZELLIJ_SOCKET_DIR under the suite's own temp dir), and XDG_RUNTIME_DIR
-      # is a fixture with no control socket — so this cannot reach an agent
-      # runtime, and every agent pane resolves to `apex agent run` against a
-      # stub on PATH.
-      - name: Run terminal layout template assertions
-        if: ${{ !cancelled() }}
-        run: ./tests/test-mux-layouts.sh
-
-      # §4's whole claim is "agents use credentials without receiving the raw
-      # secret". This stores a sentinel token, uses a capability from inside a
-      # real CONFINED session, and asserts the sentinel appears in neither
-      # stdout, stderr, the session's PTY transcript, nor the audit log — while
-      # the git operation is genuinely attempted against 127.0.0.1:1, which
-      # refuses instantly, so no network is used and the token goes nowhere.
-      - name: Run secret-broker assertions
-        if: ${{ !cancelled() }}
-        env:
-          # The suite's one legitimate skip is its sandbox section: without
-          # bubblewrap a confined session cannot be built, so the boundary
-          # cannot be tested and reporting "failed" would be a lie about what
-          # was checked. bwrap is installed two steps up, so a skip HERE means
-          # that install was lost — and this turns that into a failure rather
-          # than a green job that never ran §4's central assertion.
-          APEX_REQUIRE_SANDBOX: "1"
-        run: ./tests/test-secret-broker.sh
-
-      # P0-003's migration, against a fixture home under /var/tmp with two
-      # obvious fakes in it and a loopback MCP server that refuses without the
-      # bearer token. It proves the order the whole thing rests on — store,
-      # verify, and only then remove — including that an unverifiable
-      # credential is stored and LEFT, which is the outcome an interrupted or
-      # ungranted run has to have.
-      - name: Run credential-migration assertions
-        if: ${{ !cancelled() }}
-        run: ./tests/test-secret-migrate.sh
-
-      # P2-001/P2-002's backup framework, end to end through the real CLI. Two
-      # things it MEASURES rather than asserts: that a canary planted in the
-      # source appears in no byte written to the target — chunks, manifest,
-      # head and the object names — and that a private key written by REAL
-      # root cannot be opened by the account that owns the backups. The second
-      # half uses `sudo -n`, which this runner has, and the suite says which
-      # assertions it did not make when that is missing rather than passing
-      # vacuously. Everything it touches is under one `mktemp -d -p /var/tmp`;
-      # APEX_BACKUP_KEYS keeps it out of /var/lib.
-      #
-      # There is no R2 section in it, and that is not an omission: `Api::loopback`
-      # is `#[cfg(test)]`, so a shipped apex-secretd always addresses
-      # api.cloudflare.com and the store's host pin would refuse a credential
-      # stored for anywhere else. The backup framework's own R2 call sequence is
-      # proven in the `rust` job instead, against the same loopback double that
-      # 401s an unauthenticated request.
-      - name: §13.5 backup — encrypted at rest, versioned restore, and the four verdicts
-        if: ${{ !cancelled() }}
-        run: ./tests/test-apex-backup.sh
-
-      # P2-001's ssh target, against a REAL sshd on loopback — the fixture the
-      # target's own source named as the reason it used to be refused, since a
-      # transport proven against a fake `ssh` on PATH is a test of the argument
-      # list and not of a backup.
-      #
-      # openssh-server is installed explicitly rather than assumed. The suite
-      # exits 2 with COULD NOT RUN when there is no sshd, which is neither a
-      # pass nor a failure, and a step that took that as a pass would make the
-      # ssh target look proven on every runner while being proven on none —
-      # `set -e` here turns that 2 into a failed step, which is the point.
-      #
-      # The sshd it starts is UNPRIVILEGED, on a kernel-chosen high port, from a
-      # config file inside its own fixture, and it is killed by pid. Nothing
-      # under /etc/ssh and no system unit is read or written.
-      - name: §13.5 backup over ssh — a real sshd on loopback
-        if: ${{ !cancelled() }}
-        run: |
-          set -euo pipefail
-          sudo apt-get update -qq
-          sudo apt-get install -y -qq openssh-server
-          ./tests/test-apex-backup-ssh.sh
-
-      # P2-001's s3 target, through a REAL apex-secretd, against a loopback
-      # double that recomputes the SigV4 signature with nothing but Python's
-      # `hmac` and `hashlib` and answers 403 when it does not match.
-      #
-      # Three implementations of the signature and that is the point: the one
-      # under test, botocore's numbers pinned as known-answer tests beside it,
-      # and the double's. A signer compared only with itself is a signer that
-      # will be consistently wrong and fail only at a real S3.
-      #
-      # NO AWS ACCOUNT AND NO OUTBOUND CONNECTION. The endpoint is 127.0.0.1 on
-      # a kernel-chosen port and the access key id is AWS's own documentation
-      # example, which authorises nothing.
-      - name: §13.5 backup to S3 — SigV4 against an independent verifier
-        if: ${{ !cancelled() }}
-        run: ./tests/test-apex-backup-s3.sh
-
-      # ── suites that existed and that CI had never once invoked ───────────
-      #
-      # These two were among the thirteen `check-suites-run-in-ci.sh` found on
-      # 2026-09-12: real assertion counts, landed, reviewed, and named in no
-      # workflow. They are wired here rather than in `rust` because neither
-      # needs a toolchain — one parses a static ruleset and one parses the
-      # Containerfiles — and because the engine selector `^(files/|tests/|
-      # Containerfile)` is exactly the set of files they are ABOUT, which is
-      # the rule the six comments in the `changes` job were written to enforce.
-      #
-      # `!cancelled()` on each, so that a suite CI has never run cannot, by
-      # going red on its first outing, skip the two coverage gates below it and
-      # switch off the very checks that found it.
-      - name: Install nftables for the ruleset parse
-        if: ${{ !cancelled() }}
-        run: |
-          sudo apt-get update -qq
-          sudo apt-get install -y -qq nftables || echo "note: nftables unavailable"
-          # `nft -c` applies nothing, but libnftables still opens a netlink
-          # socket, so it needs CAP_NET_ADMIN — which this job does not have.
-          # The suite's own fallback is a private user+network namespace, and
-          # that is refused on Ubuntu 24.04 unless this knob is cleared. The
-          # bubblewrap step near the top of this job already clears it; this is
-          # the belt to that braces, so a reordering there cannot silently turn
-          # every parse assertion below into a SKIP. The value is per-boot on
-          # an ephemeral VM.
-          sudo sysctl -w kernel.apparmor_restrict_unprivileged_userns=0 || \
-            echo "note: apparmor userns knob unavailable"
-          command -v nft >/dev/null && echo "have: $(nft --version)" || echo "MISSING: nft"
-
-      # P1-044's default-drop policy, asserted rule by rule against the shipped
-      # files/system/nftables/apex.nft. It never loads the ruleset — `nft -c`
-      # parses — so it cannot disconnect the machine running it, which is why
-      # it is safe here and why its live sibling is not.
-      #
-      # It degrades honestly rather than vacuously: with no nft, or with nft
-      # unable to reach netlink even inside a private netns, the parse
-      # assertion reports SKIP with the reason instead of passing. The step
-      # above is what keeps that skip from being the normal outcome — and the
-      # summary check below is what keeps it from being an outcome CI accepts.
-      #
-      # A SKIP here is a COULD NOT RUN, and a could-not-run must not report a
-      # green tick: without this the whole point of wiring the suite in would
-      # be lost the first time the runner image dropped nftables, and the step
-      # would go on passing while inspecting the ruleset not at all. That is
-      # the exact defect class this suite was found by. The pass floor is a
-      # floor and not an equality so that adding an assertion does not require
-      # editing this file, but a DROP in the count fails, which is the
-      # direction that hides a deleted rule.
-      - name: Run firewall policy assertions
-        if: ${{ !cancelled() }}
-        run: |
-          set -euo pipefail
-          out="$(./tests/test-apex-firewall.sh 2>&1)"
-          printf '%s\n' "$out"
-          summary="$(printf '%s' "$out" | grep -E '^apex-firewall: ' || true)"
-          [ -n "$summary" ] || { echo "::error::the firewall suite printed no summary line"; exit 1; }
-          read -r passed _ failed _ skipped _ <<<"$(printf '%s' "$summary" | sed 's/^apex-firewall: //')"
-          echo "measured: passed=$passed failed=$failed skipped=$skipped"
-          [ "$failed" = 0 ] || { echo "::error::$failed firewall assertions failed"; exit 1; }
-          [ "$skipped" = 0 ] || {
-              echo "::error::$skipped firewall assertions could not run on this runner ($summary); a could-not-run is not a pass"
-              exit 1
-          }
-          [ "$passed" -ge 32 ] || {
-              echo "::error::only $passed firewall assertions ran; 32 ran on 2026-09-12, so some no longer execute"
-              exit 1
-          }
-
-      # P2-005's device packages, read out of the Containerfiles the way
-      # BuildKit reads them — comments dropped, continuations joined, each RUN
-      # body parsed with `bash -n` — rather than grepped. Every gap it guards
-      # was a package that was present and enabled nothing, or absent behind a
-      # name that looked like it covered the case: no gvfs-fuse, so a mounted
-      # share existed only inside GTK; no bolt, so a Thunderbolt dock sat at
-      # authorized=0 with nothing able to authorise it.
-      #
-      # `Containerfile` is in the engine selector, so a PR that deletes a
-      # package name from an install list selects this job.
-      #
-      # The count floor is here for the same reason as the firewall one above:
-      # every assertion in this suite is a `grep` over a parsed Containerfile,
-      # so a checkout that put the Containerfiles somewhere else, or a parser
-      # that returned nothing, would make the suite assert nothing and exit 0.
-      # 39 assertions ran on this branch on 2026-09-13; a drop is a suite that
-      # stopped looking, not a suite that got shorter.
-      - name: Run device-image package assertions
-        if: ${{ !cancelled() }}
-        run: |
-          set -euo pipefail
-          out="$(./tests/test-device-image.sh 2>&1)"
-          printf '%s\n' "$out"
-          summary="$(printf '%s' "$out" | grep -E '^device image: ' || true)"
-          [ -n "$summary" ] || { echo "::error::the device-image suite printed no summary line"; exit 1; }
-          read -r passed _ failed _ <<<"$(printf '%s' "$summary" | sed 's/^device image: //')"
-          echo "measured: passed=$passed failed=$failed"
-          [ "$failed" = 0 ] || { echo "::error::$failed device-image assertions failed"; exit 1; }
-          [ "$passed" -ge 39 ] || {
-              echo "::error::only $passed device-image assertions ran; 39 ran on 2026-09-13, so some no longer execute"
-              exit 1
-          }
-
-      # tests/test-apex-devices.sh — 108 assertions over six device areas, and
-      # until this line no CI run had executed one of them. It was DEBT in
-      # tests/suites-not-in-ci.txt, not a decision.
-      #
-      # The floor below is the point of the step as much as `failed = 0` is, and
-      # it had rotted: it still read 55 while 76 assertions were running, so a
-      # change that silently stopped half the suite executing would have passed
-      # it. Raise it with the suite. It is meant to be a tripwire on a suite
-      # that stopped looking, and a tripwire 21 assertions behind is not one.
-      #
-      # It is shell-only: it drives files/system/libexec/apex-devices against a
-      # fixture tree under mktemp, with a $PATH of its own stubs, so it reaches
-      # no device on the machine running it. Engine job, because the engine
-      # selector is `^(files/|tests/|…)` and the helper it drives lives under
-      # files/.
-      #
-      # The point of the suite is the EACCES sweep's finding — that a reader
-      # which collapses "permission denied" into "there is none" is the same
-      # bug in fourteen places — so its fixtures are deliberately unreadable in
-      # places and it counts a `skipped` of its own. The step therefore fails on
-      # skipped > 0 as well as on failed > 0, and separately on a bare `SKIP`
-      # line, which would be an echo that bypassed the counter.
-      - name: P1 devices — 108 assertions over six device areas
-        if: ${{ !cancelled() }}
-        run: |
-          set -euo pipefail
-          rc=0; out="$(./tests/test-apex-devices.sh 2>&1)" || rc=$?
-          printf '%s\n' "$out"
-          [ "$rc" = 0 ] || { echo "::error::the devices suite exited $rc"; exit 1; }
-          summary="$(printf '%s\n' "$out" | grep -E '^apex-devices: [0-9]+ passed, [0-9]+ failed, [0-9]+ skipped$' || true)"
-          [ -n "$summary" ] || { echo "::error::the devices suite printed no summary line"; exit 1; }
-          [ "$(printf '%s\n' "$summary" | wc -l)" = 1 ] || { echo "::error::more than one line looked like the summary; the parse below would read the wrong one"; exit 1; }
-          passed="$(printf '%s' "$summary" | awk '{print $2}')"
-          failed="$(printf '%s' "$summary" | awk '{print $4}')"
-          skipped="$(printf '%s' "$summary" | awk '{print $6}')"
-          echo "measured: passed=$passed failed=$failed skipped=$skipped"
-          [ "$failed" = 0 ] || { echo "::error::$failed device assertions failed"; exit 1; }
-          [ "$skipped" = 0 ] || { echo "::error::$skipped device assertions could not run on this runner; a could-not-run is not a pass"; exit 1; }
-          [ "$passed" -ge 108 ] || { echo "::error::only $passed device assertions ran; 108 ran on 2026-09-18, so some no longer execute"; exit 1; }
-          if printf '%s\n' "$out" | grep -qE '^[[:space:]]*SKIP'; then
-              echo "::error::the devices suite printed a SKIP line; the counter above is the same signal, and this catches an echo that bypasses the helper"
-              exit 1
-          fi
-
-      - name: ShellCheck the privileged helpers
-        if: ${{ !cancelled() }}
-        run: |
-          set -euo pipefail
-          sudo apt-get update -qq
-          sudo apt-get install -y -qq shellcheck
-          # A hard gate, not advisory: these run as root, and the warning class
-          # shellcheck catches here is exactly the class that is invisible in
-          # review — unquoted expansions and recursive deletes that an empty
-          # variable turns into a path on the live system. The file is clean at
-          # this level today, so any finding is one this PR introduced.
-          # tests/in-login-session.sh is here for the same reason the four
-          # libexec helpers are: it is the only thing under tests/ that
-          # invokes `sudo`, so an unquoted expansion in it is an unquoted
-          # expansion in a command that runs as root.
-          shellcheck -S warning files/system/libexec/apex-pkg \
-            tests/in-login-session.sh \
-            files/system/libexec/apex-boot-migrate \
-            tests/test-boot-migrate.sh \
-            files/system/libexec/apex-env \
-            files/system/libexec/apex-plugin \
-            files/system/libexec/apex-disposable \
-            files/system/libexec/apex-vm \
-            files/system/libexec/apex-screen-reader \
-            tests/test-apex-recover.sh \
-            tests/test-apex-pkg.sh tests/test-apex-deb.sh \
-            tests/test-apex-pkg.sh tests/test-apex-appimage.sh \
-            tests/test-apex-firstrun.sh \
-            tests/test-labwc-keybinds.sh tests/test-apex-env.sh \
-            tests/test-apex-resolve.sh tests/test-apex-blueprint.sh \
-            tests/test-apex-modes.sh tests/test-apex-plugin.sh \
-            tests/test-apex-host.sh tests/test-apex-dispatch.sh \
-            tests/test-apex-ai.sh tests/test-apex-env-devices-live.sh \
-            tests/test-apex-greet-sessions.sh \
-            tests/test-apex-session-watchdog.sh \
-            files/system/libexec/apex-session-watchdog \
-            tests/test-apex-greet-a11y.sh tests/test-apex-greet-layout.sh \
-            tests/test-apex-greet-session-bus.sh tests/test-apex-a11y-stack.sh \
-            tests/test-labwc-keybind-reload.sh \
-            tests/test-apex-safe-graphics.sh \
-            tests/test-apex-gaming-session.sh \
-            files/system/libexec/apex-gaming-session \
-            files/system/libexec/apex-safe-graphics \
-            files/system/libexec/apex-safe-graphics-terminal \
-            tests/test-apex-chaos.sh tests/test-apex-vm.sh
-          # The chaos harness separately, with -x so the driver's `. lib.sh`
-          # is followed, and the cases as bash fragments because they are
-          # sourced rather than executed and have no shebang of their own.
-          # It belongs under a HARD gate for the same reason the libexec
-          # helpers do: these scripts run `mount`, `chmod 0000` and `rm` with
-          # expansions, and an empty variable in one of those is a path on the
-          # machine running it.
-          shellcheck -S warning -x tests/chaos/run-chaos tests/chaos/chaos-loop \
-            tests/chaos/lib.sh
-          shellcheck -S warning -x tests/chaos/cases/*.sh
-          # The VM lab, with -x for the same reason: it sources the chaos
-          # library for the verdict record, and it runs `rm -rf` and `chown -R`
-          # on paths built from variables inside a container it starts itself.
-          shellcheck -S warning -x tests/vmlab/run-vmlab tests/vmlab/mk-guest
-
-      # tests/test-device-services-netns.sh — 12 assertions about whether a
-      # printer, a Windows share and an NFS export can actually be reached
-      # through the shipped policy, and whether `apex firewall allow <name>`
-      # opens the port the catalogue says it does. It asserts no RULE; P1-044
-      # owns those. It was DEBT in tests/suites-not-in-ci.txt.
-      #
-      # It sends REAL packets, and it can do that here because it sends them
-      # inside `unshare -rmn`: a private user, mount and network namespace with
-      # a veth pair and a peer that is a sleeping process addressed by pid. The
-      # machine running it has no interface added, no rule loaded and no port
-      # opened. It needs unshare, nsenter, ip, nft and python3, and it needs the
-      # apparmor userns knob the nftables step above already clears — that is
-      # why it is placed after it and not earlier.
-      #
-      # Its own report() exits 0 when everything was SKIPPED, because it exits
-      # on the failure count alone. So a runner that refused the namespace would
-      # hand this step a green tick over nothing measured at all. The skipped
-      # counter is read back and required to be zero for exactly that reason.
-      - name: P1 device services — a printer, a share and an export through the real policy
-        if: ${{ !cancelled() }}
-        run: |
-          set -euo pipefail
-          rc=0; out="$(./tests/test-device-services-netns.sh 2>&1)" || rc=$?
-          printf '%s\n' "$out"
-          [ "$rc" = 0 ] || { echo "::error::the device-services netns suite exited $rc"; exit 1; }
-          summary="$(printf '%s\n' "$out" | grep -E '^device services \(netns\): [0-9]+ passed, [0-9]+ failed, [0-9]+ skipped$' || true)"
-          [ -n "$summary" ] || { echo "::error::the device-services netns suite printed no summary line"; exit 1; }
-          [ "$(printf '%s\n' "$summary" | wc -l)" = 1 ] || { echo "::error::more than one line looked like the summary; the parse below would read the wrong one"; exit 1; }
-          counts="$(printf '%s' "$summary" | sed 's/^device services (netns): //')"
-          passed="$(printf '%s' "$counts" | awk '{print $1}')"
-          failed="$(printf '%s' "$counts" | awk '{print $3}')"
-          skipped="$(printf '%s' "$counts" | awk '{print $5}')"
-          echo "measured: passed=$passed failed=$failed skipped=$skipped"
-          [ "$failed" = 0 ] || { echo "::error::$failed device-services assertions failed"; exit 1; }
-          [ "$skipped" = 0 ] || {
-              echo "::error::$skipped device-services assertions could not run ($summary). This suite's own report() exits 0 on a skip-only run, so without this line a runner that refused the namespace would show a green tick over nothing measured at all"
-              exit 1
-          }
-          [ "$passed" -ge 12 ] || { echo "::error::only $passed device-services assertions ran; 12 ran on 2026-09-13, so some no longer execute"; exit 1; }
-          if printf '%s\n' "$out" | grep -qE '^[[:space:]]*SKIP'; then
-              echo "::error::the device-services netns suite printed a SKIP line; the counter above is the same signal, and this catches an echo that bypasses the helper"
-              exit 1
-          fi
+          sudo sysctl -w kernel.apparmor_restrict_unprivileged_userns=0 \
+            || echo "note: no apparmor userns restriction on this kernel"
 
       # tests/test-apex-multilib.sh — the engine's multilib DECISIONS, judged
       # against packages Fedora actually ships. test-apex-pkg.sh asserts the
@@ -3638,6 +2755,681 @@ jobs:
               exit 1
           fi
 
+  engine-greeter:
+    name: Package engine — greeter
+    needs: changes
+    if: needs.changes.outputs.engine == 'true'
+    runs-on: ubuntu-24.04
+    steps:
+      - name: Checkout
+        uses: actions/checkout@v4
+
+      # ── the knob the monolithic job used to clear once, for everything ────
+      #
+      # `Install squashfs-tools for the AppImage suite` clears
+      # kernel.apparmor_restrict_unprivileged_userns at step 3 of 72, and every
+      # step after it inherited a cleared value without saying so — the AppImage
+      # suite's own Leg B, the firewall parse, the netns device services, the
+      # root-approval probe, the confined agent sessions and the rootless-podman
+      # package suites all depend on it. Splitting the job breaks that
+      # inheritance, and the failure mode is the one this file is full of:
+      # `unshare -r` is refused, the suite SKIPS with status 0, and a skip
+      # reads as success.
+      #
+      # So every shard that holds a step which used to run after that install
+      # clears the knob for itself, above the first such step. That is every
+      # shard but `engine`, which carries the real install at its own original
+      # position — `Run package-engine assertions` and `Run .deb package
+      # assertions` ran BEFORE it in the monolith and still do here.
+      #
+      # The runner is ephemeral and unshared, so this affects nothing else.
+      - name: Allow unprivileged user namespaces
+        if: ${{ !cancelled() }}
+        run: |
+          sudo sysctl -w kernel.apparmor_restrict_unprivileged_userns=0 \
+            || echo "note: no apparmor userns restriction on this kernel"
+
+      # What the login session picker calls the three desktops. BASE-013's
+      # third criterion — compositor names stay implementation details for
+      # normal users — failed on the one surface every user sees at every
+      # login: the greeter rendered `Name=` verbatim, so the carousel read
+      # "labwc (APEX) / niri / Hyprland".
+      #
+      # This runs here rather than only in an image build because two of the
+      # three things it checks are build rules: Containerfile.base's rename of
+      # the Hyprland package's own entry, and Containerfile.apex's sweep over
+      # the finished directory. Both are LIFTED OUT of the Containerfiles and
+      # run against a staging tree, so the gate that normally costs a
+      # multi-hour image build is exercised on every PR in under a second, and
+      # the greeter's enumeration is lifted out of GreetContext.qml and run
+      # rather than re-implemented — this tree already carries three copies of
+      # that loop. It starts no compositor and opens no window.
+      - name: Run session-picker wording assertions
+        if: ${{ !cancelled() }}
+        run: ./tests/test-apex-greet-sessions.sh
+
+      # P2-018's first criterion, and the half that did not exist until now:
+      # APEX Safe Graphics shipped as a session a PERSON enters, and NOTHING
+      # noticed a failure. greetd is a stock Fedora unit with no Restart=, no
+      # StartLimitBurst and no OnFailure=, and apex-boot-health's units are
+      # inert on every published image because they condition on
+      # LoaderBootCountPath while every APEX image boots GRUB.
+      #
+      # It runs beside the session-picker suite because it needs exactly what
+      # that one needs — python3 and the shipped GreetContext.qml — and because
+      # it lifts BOTH greeter hooks out of that same file and runs them. It
+      # starts no compositor, no greeter and no session, opens no window, and
+      # touches no real /var/lib/apex-greet.
+      #
+      # THE FLOOR IS NOT DECORATION HERE. This suite's most important
+      # assertions are the three fail-open mutations — the helper replaced by
+      # `sleep 60`, then deleted, then run with timeout(1) off PATH — and each
+      # requires the greeter's launch hook to return 0 anyway. A suite that
+      # stopped finding its input would assert none of that and exit 0, and the
+      # change it guards is the one that can leave somebody at a password
+      # prompt that never proceeds.
+      #
+      # `skipped` must be 0 for the same reason it must be in the firewall step
+      # below: a could-not-run is not a pass. That is not hypothetical for this
+      # suite — its unwritable-state-directory section USED to skip on exactly
+      # this runner, because CI is root and chmod 0555 does not stop root. It
+      # was rewritten to make the directory uncreatable by shape instead, and
+      # this line is what stops that regressing quietly.
+      #
+      # §5 also skips its nine assertions without node(1), which is the other
+      # way this suite could go quiet. A GitHub runner always has node — the
+      # actions themselves need it — so a skip there means the runner image
+      # changed under us, and that is worth failing over rather than passing
+      # with the preselection rule unexecuted.
+      - name: Run session-watchdog assertions
+        if: ${{ !cancelled() }}
+        run: |
+          set -euo pipefail
+          out="$(./tests/test-apex-session-watchdog.sh 2>&1)"
+          printf '%s\n' "$out"
+          summary="$(printf '%s' "$out" | grep -E '^session-watchdog: ' || true)"
+          [ -n "$summary" ] || { echo "::error::the session-watchdog suite printed no summary line"; exit 1; }
+          read -r passed _ failed _ skipped _ <<<"$(printf '%s' "$summary" | sed 's/^session-watchdog: //')"
+          echo "measured: passed=$passed failed=$failed skipped=$skipped"
+          [ "$failed" = 0 ] || { echo "::error::$failed session-watchdog assertions failed"; exit 1; }
+          [ "$skipped" = 0 ] || {
+              echo "::error::$skipped session-watchdog assertions could not run ($summary); a could-not-run is not a pass"
+              exit 1
+          }
+          [ "$passed" -ge 91 ] || {
+              echo "::error::only $passed session-watchdog assertions ran; 91 ran as both uid 0 and uid 1000 on 2026-09-13, so some no longer execute"
+              exit 1
+          }
+
+      - name: Run greeter keyboard-layout assertions
+        if: ${{ !cancelled() }}
+        run: ./tests/test-apex-greet-layout.sh
+
+      # The other half of the same finding, and the more important one: the
+      # greeter's markup is right and a screen reader still receives nothing,
+      # because the greet session has no D-Bus session bus for Qt's
+      # accessibility bridge to publish on. greetd's own command string is
+      # parsed out of the shipped TOML and RUN, with the compositor and
+      # quickshell replaced by stubs on a private PATH.
+      #
+      # It asserts ABSENCE, so it goes RED when somebody fixes the greeter --
+      # which is the intended behaviour, and its failure messages say so.
+      #
+      # dbus-daemon and gdbus are what it needs; without them it SKIPs and says
+      # nothing was measured.
+      - name: Install the bus tools the greeter session-bus suite measures with
+        if: ${{ !cancelled() }}
+        run: |
+          sudo apt-get update -qq
+          for p in dbus dbus-x11 libglib2.0-bin at-spi2-core; do
+            sudo apt-get install -y -qq "$p" || echo "note: $p unavailable"
+          done
+          for b in dbus-daemon dbus-run-session gdbus; do
+            command -v "$b" >/dev/null && echo "have: $b" || echo "MISSING: $b"
+          done
+          # at-spi2-core is what the wrapper execs. Without it the two
+          # accessibility-bus assertions SKIP with a reason rather than being
+          # measured, which is a runner that says nothing about the half of the
+          # change that matters most.
+          # `|| true` is load-bearing, not decoration: this step runs under
+          # `bash -e`, a for-loop exits with its last command's status, and a
+          # final `[ -x ]` that is false therefore FAILED THE WHOLE STEP on the
+          # first dispatch — while the packages it was reporting on had
+          # installed perfectly.
+          for f in /usr/libexec/at-spi-bus-launcher /usr/lib/at-spi2-core/at-spi-bus-launcher; do
+            [ -x "$f" ] && echo "have: $f" || true
+          done
+          true
+
+      - name: Run greeter session-bus assertions
+        if: ${{ !cancelled() }}
+        run: ./tests/test-apex-greet-session-bus.sh
+
+      # The image ships a screen reader, and nothing starts it. Reads
+      # Containerfile.core by parsing its dnf5 invocations rather than grepping
+      # for the word -- "orca" is in that stanza's prose as well as its install
+      # line. The rpmdb section SKIPs on a runner, which has no ostree
+      # deployment to ask; the two sections that gate the change do run.
+      - name: Run accessibility-stack assertions
+        if: ${{ !cancelled() }}
+        run: ./tests/test-apex-a11y-stack.sh
+      # ── the same vendor step, because a shard inherits nothing ───────────
+      #
+      # tests/test-labwc-keybind-reload.sh generates the labwc binding file
+      # from apex-shell's KeybindService.qml and then PRESSES the rebound key
+      # under a nested labwc. It looks for the model at `../apex-shell`, and
+      # when it cannot find one it prints `SKIP: no apex-shell checkout found`
+      # and exits 0 — a green tick over nothing, which is the defect this
+      # whole file is about. In the monolithic job the tree happened to be
+      # there because a step thirty lines up had cloned it. A shard inherits
+      # nothing, so it clones its own.
+      #
+      # Kept byte-identical to the copy in `engine-desktop`. If one is ever
+      # changed, the other is wrong.
+      - name: Vendor apex-shell for the keybind model
+        if: ${{ !cancelled() }}
+        run: |
+          set -euo pipefail
+          # The integration branch sits between the exact match and the default
+          # branch, for the reason spelled out on the input-parity step above:
+          # apex-shell has no `task/*` twin for most of this program's
+          # branches, so "no matching branch" meant "compare against main",
+          # and main is 137 commits behind the work — the exact staleness the
+          # paragraph above says this step was changed to stop having. It is
+          # latent here rather than red only because the keybind assertions
+          # happen to still pass against the older model; that is luck, not a
+          # property. Exact match stays first, so apex-os `main` still
+          # vendors apex-shell `main`.
+          #
+          # Kept deliberately identical to the input-parity step above. If one
+          # is ever changed, the other is wrong.
+          want="${GITHUB_HEAD_REF:-${GITHUB_REF_NAME:-}}"
+          shell_ref=""
+          for cand in "$want" roadmap/v2.2; do
+            [ -n "$cand" ] || continue
+            if git ls-remote --exit-code --heads \
+                 https://github.com/AndreNijman/apex-shell "$cand" >/dev/null 2>&1; then
+              shell_ref="$cand"; break
+            fi
+          done
+          if [ -n "$shell_ref" ]; then
+            echo "keybind model: vendoring apex-shell branch '$shell_ref'"
+            git clone --depth 1 --branch "$shell_ref" \
+              https://github.com/AndreNijman/apex-shell.git \
+              "${GITHUB_WORKSPACE}/../apex-shell"
+          else
+            echo "::warning::keybind model: apex-shell has no '$want' and no roadmap/v2.2; using its default branch"
+            git clone --depth 1 https://github.com/AndreNijman/apex-shell.git \
+              "${GITHUB_WORKSPACE}/../apex-shell"
+          fi
+          git -C "${GITHUB_WORKSPACE}/../apex-shell" log -1 --format='vendored apex-shell %h %s'
+          test -f "${GITHUB_WORKSPACE}/../apex-shell/src/services/config_tab/KeybindService.qml"
+
+      # The half of the reported bug the suite above cannot reach. It passes
+      # --no-reload to every `apply` on purpose, so it never starts labwc and
+      # never presses a key; test-labwc-session.sh starts labwc and reloads it
+      # but never presses a key either. So "the XML is correct" and "the
+      # compositor survived" were both proven and "the key the user just bound
+      # now does something" was proven by neither — which is the entire
+      # complaint: rebind the launcher, watch the UI confirm it, press the key,
+      # nothing happens.
+      #
+      # This starts labwc under WLR_BACKENDS=headless in a private
+      # XDG_RUNTIME_DIR with WAYLAND_DISPLAY unset, so it draws nothing and has
+      # no parent session to leak a keystroke into, and synthesises the
+      # keypresses with wtype over virtual-keyboard-unstable-v1. It asserts
+      # that isolation as three hard failures before the first key, and unsets
+      # the inherited LABWC_PID — `labwc --reconfigure` SIGHUPs whatever that
+      # names, and inheriting it would reload a developer's own session.
+      #
+      # It reuses the apex-shell tree vendored above, and skips with status 0
+      # where labwc or wtype will not run, so a runner that cannot host a
+      # compositor reports a skip rather than a false green or a false red.
+      - name: Install a compositor and a synthetic keyboard
+        if: ${{ !cancelled() }}
+        run: |
+          # Tolerant on purpose. The suite below skips with status 0 where labwc
+          # or wtype will not run, so a runner that cannot host a compositor
+          # reports a skip — but that safety net protects the SUITE, not this
+          # step. `apt-get install` of a package the image's enabled components
+          # do not carry exits non-zero and would redden the whole job over a
+          # missing test dependency, which is a worse outcome than not running
+          # the test. So a failed install is reported and the suite is left to
+          # skip.
+          sudo apt-get update -qq || true
+          sudo apt-get install -y -qq labwc wtype \
+            || echo "labwc/wtype unavailable on this runner; the reload suite will skip"
+
+      - name: Run the keybind reload assertions
+        if: ${{ !cancelled() }}
+        run: ./tests/test-labwc-keybind-reload.sh
+
+      # P2-018's recovery session, in the same job for the same reason: it
+      # starts a real labwc under WLR_BACKENDS=headless, so it needs the
+      # compositor this step just installed and nothing else. Its own
+      # structural half runs anywhere and its live half skips cleanly where
+      # labwc will not start, so a runner that cannot host a compositor
+      # reports a skip rather than a false green.
+      #
+      # The assertion that matters here is the one no structural check can
+      # make: an unparseable rc.xml is planted exactly where the user's lives
+      # and the session has to come up anyway, which is what `labwc -C` buys
+      # and what its absence would silently cost.
+      - name: Run the safe-graphics recovery assertions
+        if: ${{ !cancelled() }}
+        run: ./tests/test-apex-safe-graphics.sh
+
+  engine-greeter-a11y:
+    name: Package engine — greeter accessibility
+    needs: changes
+    if: needs.changes.outputs.engine == 'true'
+    runs-on: ubuntu-24.04
+    steps:
+      - name: Checkout
+        uses: actions/checkout@v4
+
+      # ── the knob the monolithic job used to clear once, for everything ────
+      #
+      # `Install squashfs-tools for the AppImage suite` clears
+      # kernel.apparmor_restrict_unprivileged_userns at step 3 of 72, and every
+      # step after it inherited a cleared value without saying so — the AppImage
+      # suite's own Leg B, the firewall parse, the netns device services, the
+      # root-approval probe, the confined agent sessions and the rootless-podman
+      # package suites all depend on it. Splitting the job breaks that
+      # inheritance, and the failure mode is the one this file is full of:
+      # `unshare -r` is refused, the suite SKIPS with status 0, and a skip
+      # reads as success.
+      #
+      # So every shard that holds a step which used to run after that install
+      # clears the knob for itself, above the first such step. That is every
+      # shard but `engine`, which carries the real install at its own original
+      # position — `Run package-engine assertions` and `Run .deb package
+      # assertions` ran BEFORE it in the monolith and still do here.
+      #
+      # The runner is ephemeral and unshared, so this affects nothing else.
+      - name: Allow unprivileged user namespaces
+        if: ${{ !cancelled() }}
+        run: |
+          sudo sysctl -w kernel.apparmor_restrict_unprivileged_userns=0 \
+            || echo "note: no apparmor userns restriction on this kernel"
+
+      # What a screen reader and a keyboard-only user get from the login
+      # screen. P2-003's "accessible login" and P2-004's "keyboard layout
+      # before password" both land on the same surface, so they are measured
+      # on the same one.
+      #
+      # This is NOT a grep for Accessible.name. The shipped GreetSurface.qml is
+      # built under qmltestrunner on the offscreen platform, the accessible
+      # name and role are READ OFF THE LIVE OBJECTS — the same attached objects
+      # QAccessible publishes to AT-SPI — and the focus order is measured by
+      # posting real Qt.Key_Tab events through the window's delivery agent. The
+      # difference is not academic: `KeyNavigation.tab: passwordInput` reads
+      # like a complete tab chain and was in fact a two-element ring that could
+      # not reach the session picker at all.
+      #
+      # It opens no window and starts no compositor; WAYLAND_DISPLAY is removed
+      # from the environment before the runner is invoked. It skips with
+      # status 0 where qmltestrunner is not installed.
+      # ubuntu-24.04 ships Qt 6.4, and the greeter imports QtQuick.Effects for
+      # its wallpaper blur — MultiEffect is Qt 6.5 and later. So this suite can
+      # never run on the runner itself: apt has no qml6-module-qtquick-effects
+      # to install, the surface would fail to build, and the suite would skip on
+      # every PR for ever. A skip nobody notices is how a suite goes quietly
+      # vacuous, which is the failure this whole unit exists to measure.
+      #
+      # So it runs in a Fedora container, which is what APEX is built from
+      # anyway — the Qt the greeter actually ships against rather than the one
+      # the runner happens to carry. Verified by running it: 22 assertions, same
+      # result as on a Fedora workstation.
+      #
+      # A container that cannot be pulled or a dnf that cannot resolve leaves
+      # the suite unrun and says so, rather than reddening the job over a
+      # network hiccup — the same trade the labwc step above makes.
+      # ── the four accessibility steps run even after an earlier failure ────
+      # Not `continue-on-error`: these steps still fail the job. `!cancelled()`
+      # only stops an UNRELATED red step earlier in this job from hiding them.
+      #
+      # That is not hypothetical. `Run virtualization assertions` was red on
+      # roadmap/v2.2 itself, a hundred lines above these in the job they all
+      # used to share, and GitHub stops a job at its first failing step — so on
+      # 2026-09-12 all four accessibility suites silently stopped running in CI
+      # while reporting nothing at all. That suite is in the `engine` shard now
+      # and these two are in `engine-greeter-a11y`, so it cannot reach them;
+      # `!cancelled()` stays because a red step INSIDE a shard would still
+      # hide the ones under it.
+      # A job that halts at step N is evidence about steps 1..N and about
+      # nothing after it, and a unit whose whole argument is "a second machine
+      # finds what a laptop cannot" cannot afford to lose the second machine to
+      # somebody else's red step.
+      - name: Run greeter accessibility assertions
+        if: ${{ !cancelled() }}
+        run: |
+          if ! docker run --rm -v "$PWD":/w -w /w fedora:43 bash -c '
+                dnf -y install --setopt=install_weak_deps=False \
+                    qt6-qtdeclarative-devel >/dev/null 2>&1 || exit 97
+                ./tests/test-apex-greet-a11y.sh'; then
+              rc=$?
+              if [ "$rc" -eq 97 ]; then
+                  echo "could not install Qt in the container; the greeter a11y suite did not run"
+              else
+                  exit "$rc"
+              fi
+          fi
+
+      # The AT-SPI walk: the greeter in a real window on a private wlroots
+      # compositor, read back over D-Bus exactly as Orca reads it. This was the
+      # last accessibility suite in this unit verified on ONE laptop, and the
+      # round-18b dispatch is the argument for not leaving it there — CI found
+      # two false greens in the installer audit that a laptop could not.
+      #
+      # Same Fedora container as the step above, for the same reason (the
+      # greeter imports QtQuick.Effects, which is Qt 6.5+, and the runner ships
+      # 6.4), plus four things that step does not need:
+      #
+      #   labwc                     a wlroots compositor. The suite refuses the
+      #                             offscreen QPA deliberately: offscreen
+      #                             provides no platform accessibility, so the
+      #                             bridge publishes nothing and every assertion
+      #                             would read an empty tree and have to be
+      #                             written to expect one.
+      #   xorg-x11-server-Xwayland  labwc exits at startup without it ("cannot
+      #                             create xwayland server"). Nothing in the
+      #                             suite is an X client; labwc simply will not
+      #                             start.
+      #   mesa-dri-drivers          llvmpipe. Without it the Qt client cannot
+      #                             make an EGL context in a container with no
+      #                             /dev/dri, and it fails in the most confusing
+      #                             possible way: the process stays alive, its
+      #                             stderr is empty, and it registers nothing.
+      #   at-spi2-core, python3-gobject, dbus-daemon, glib2
+      #                             the bus, the registry, and the walker.
+      #
+      # Verified by running it in this exact container before it was written
+      # here, not dispatched blind: 31 passed, 0 failed, identical to the
+      # laptop's 31. That run is also what corrected tests/lib/atspi.sh — see
+      # its "the flag a screen reader sets" note. On a bare container
+      # org.a11y.Status starts FALSE, Qt publishes nothing, and the suite reads
+      # as "the greeter has no accessibility tree"; on a developer machine the
+      # flags are already true, which is why the old finding said Qt ignored
+      # them.
+      #
+      # exit 97 = the container could not resolve its packages: reported as
+      # "did not run" rather than reddening the job, the same trade the greeter
+      # a11y step makes.
+      - name: Run greeter AT-SPI assertions
+        if: ${{ !cancelled() }}
+        run: |
+          if ! docker run --rm -v "$PWD":/w -w /w fedora:43 bash -c '
+                dnf -y install --setopt=install_weak_deps=False \
+                    qt6-qtdeclarative-devel qt6-qtwayland labwc \
+                    xorg-x11-server-Xwayland mesa-dri-drivers \
+                    at-spi2-core python3-gobject dbus-daemon glib2 \
+                    >/dev/null 2>&1 || exit 97
+                ./tests/test-apex-greet-atspi.sh'; then
+              rc=$?
+              if [ "$rc" -eq 97 ]; then
+                  echo "could not install the accessibility stack in the container; the AT-SPI walk did not run"
+              else
+                  exit "$rc"
+              fi
+          fi
+
+  engine-desktop:
+    name: Package engine — desktop session
+    needs: changes
+    if: needs.changes.outputs.engine == 'true'
+    runs-on: ubuntu-24.04
+    steps:
+      - name: Checkout
+        uses: actions/checkout@v4
+
+      # ── the knob the monolithic job used to clear once, for everything ────
+      #
+      # `Install squashfs-tools for the AppImage suite` clears
+      # kernel.apparmor_restrict_unprivileged_userns at step 3 of 72, and every
+      # step after it inherited a cleared value without saying so — the AppImage
+      # suite's own Leg B, the firewall parse, the netns device services, the
+      # root-approval probe, the confined agent sessions and the rootless-podman
+      # package suites all depend on it. Splitting the job breaks that
+      # inheritance, and the failure mode is the one this file is full of:
+      # `unshare -r` is refused, the suite SKIPS with status 0, and a skip
+      # reads as success.
+      #
+      # So every shard that holds a step which used to run after that install
+      # clears the knob for itself, above the first such step. That is every
+      # shard but `engine`, which carries the real install at its own original
+      # position — `Run package-engine assertions` and `Run .deb package
+      # assertions` ran BEFORE it in the monolith and still do here.
+      #
+      # The runner is ephemeral and unshared, so this affects nothing else.
+      - name: Allow unprivileged user namespaces
+        if: ${{ !cancelled() }}
+        run: |
+          sudo sysctl -w kernel.apparmor_restrict_unprivileged_userns=0 \
+            || echo "note: no apparmor userns restriction on this kernel"
+
+      # §9's resolver, which is the same engine as the package suite above and
+      # a separate file because it is a separate claim: that engine INSTALLS,
+      # this one CHOOSES. A choice is a policy, and the policy is invisible
+      # until someone reads the source.
+      #
+      # `dnf5` and `flatpak` are faked from fixture files — again with a hard
+      # exit if they do not resolve to the fakes, so the failure mode is a
+      # refusal rather than a run that queries Fedora's mirrors and the
+      # developer's own Flatpak remotes. That makes the ranking testable at
+      # all: both "this exists" and "this does not" are reachable.
+      #
+      # The load-bearing assertion is that an exact-name repository package
+      # still wins, because `apex install <name>` already ships and a silent
+      # re-route would be a behaviour change on a shipped command. The one
+      # exception is the curated table, and the suite checks that it explains
+      # itself and stays overridable with --source.
+      - name: Run resolver assertions
+        if: ${{ !cancelled() }}
+        run: ./tests/test-apex-resolve.sh
+
+      # The display engine is the one generator that can reach hardware, so its
+      # suite asserts that it does not: fake hyprctl/wlr-randr first on PATH
+      # record every call, and the run fails if a MUTATING one appears. There is
+      # no compositor on the runner, but the guard is set anyway — the bug it
+      # exists for was a test that reconfigured the live desktop it ran on, and
+      # a developer running this locally is exactly that situation.
+      - name: Run display-settings assertions
+        if: ${{ !cancelled() }}
+        env:
+          APEX_DISPLAY_NO_LIVE: "1"
+        run: ./tests/test-apex-display.sh
+
+      # The seeded Hyprland Lua tree in a REAL Hyprland, not just through
+      # --verify-config. Three things only a running instance can answer:
+      # `hyprctl configerrors` is clean; `hyprctl reload` re-reads a generated
+      # module rewritten under it (Lua caches modules, and a loader that did not
+      # clear the cache would make every saved display layout a no-op); and
+      # `hyprctl keyword` is refused under a Lua config, which is why the live
+      # paths use `hyprctl eval`.
+      #
+      # Nests Hyprland inside a HEADLESS labwc, so it draws nothing and cannot
+      # reach a developer's real session. Skips with status 0 where neither
+      # binary is installed, which is what the runner will normally do — the
+      # value is on a machine that has them.
+      - name: Run the Hyprland Lua config assertions
+        if: ${{ !cancelled() }}
+        run: |
+          # Run BARE, this step used to go green whatever the suite did — and on
+          # ubuntu-24.04 what it does is print `0 passed, 0 failed, 1 skipped`
+          # and exit 0, because labwc is not installed and there is no nested
+          # compositor to drive. A green check over nothing, with the reason
+          # visible only to someone who opened the log and read it. Both halves
+          # are fixed here: the skip is SAID, in the run summary, and the
+          # count is floored so the suite silently dropping assertions on a
+          # machine that CAN run it is an error rather than a smaller number
+          # nobody compares.
+          set -uo pipefail
+          rc=0; out="$(./tests/test-apex-hypr-lua.sh 2>&1)" || rc=$?
+          printf '%s\n' "$out"
+          [ "$rc" = 0 ] || { echo "::error::test-apex-hypr-lua.sh exited $rc"; exit 1; }
+          summary="$(printf '%s\n' "$out" | grep -E '^apex hypr-lua: [0-9]+ passed, [0-9]+ failed, [0-9]+ skipped$' || true)"
+          [ -n "$summary" ] || { echo "::error::test-apex-hypr-lua.sh printed no summary line; nothing below can be believed"; exit 1; }
+          [ "$(printf '%s\n' "$summary" | wc -l)" = 1 ] || { echo "::error::more than one line looked like test-apex-hypr-lua.sh's summary"; exit 1; }
+          passed="$(printf '%s' "$summary" | awk '{print $3}')"
+          failed="$(printf '%s' "$summary" | awk '{print $5}')"
+          skipped="$(printf '%s' "$summary" | awk '{print $7}')"
+          echo "measured: passed=$passed failed=$failed skipped=$skipped"
+          [ "$failed" = 0 ] || { echo "::error::$failed apex hypr-lua assertions failed"; exit 1; }
+          if [ "$passed" -eq 0 ]; then
+              [ "$skipped" -gt 0 ] || { echo "::error::test-apex-hypr-lua.sh asserted nothing and did not say why"; exit 1; }
+              echo "::warning::test-apex-hypr-lua.sh asserted NOTHING on this runner ($skipped skipped) — it needs a nested labwc and ubuntu-24.04 has none, so this step is a could-not-run, not a pass. Its 22 assertions only ever run on a machine with the compositors installed."
+          else
+              [ "$passed" -ge 22 ] || { echo "::error::only $passed apex hypr-lua assertions ran; 22 ran on 2026-09-18, so some no longer execute"; exit 1; }
+          fi
+
+      # What SUPER+arrow actually DOES, which no config grep can answer. The
+      # seeded session focus-follows-mouse, so a keyboard focus change that
+      # leaves the pointer behind is undone by the next twitch of the mouse —
+      # the defect Andre reported. The suite measures the pointer's position
+      # after a directional focus, and runs the whole thing a second time with
+      # `no_warps = true` where those assertions MUST fail. A gate that agrees
+      # with whatever the configuration says is the dominant defect family in
+      # this tree; the control is what stops this being one.
+      #
+      # Same nesting as the step above, same reason it usually skips here.
+      - name: Run the Hyprland focus + switcher assertions
+        if: ${{ !cancelled() }}
+        run: |
+          set -uo pipefail
+          rc=0; out="$(./tests/test-apex-hypr-focus.sh 2>&1)" || rc=$?
+          printf '%s\n' "$out"
+          [ "$rc" = 0 ] || { echo "::error::test-apex-hypr-focus.sh exited $rc"; exit 1; }
+          summary="$(printf '%s\n' "$out" | grep -E '^apex hypr-focus: [0-9]+ passed, [0-9]+ failed, [0-9]+ skipped$' || true)"
+          [ -n "$summary" ] || { echo "::error::test-apex-hypr-focus.sh printed no summary line; nothing below can be believed"; exit 1; }
+          [ "$(printf '%s\n' "$summary" | wc -l)" = 1 ] || { echo "::error::more than one line looked like test-apex-hypr-focus.sh's summary"; exit 1; }
+          passed="$(printf '%s' "$summary" | awk '{print $3}')"
+          failed="$(printf '%s' "$summary" | awk '{print $5}')"
+          skipped="$(printf '%s' "$summary" | awk '{print $7}')"
+          echo "measured: passed=$passed failed=$failed skipped=$skipped"
+          [ "$failed" = 0 ] || { echo "::error::$failed apex hypr-focus assertions failed"; exit 1; }
+          if [ "$passed" -eq 0 ]; then
+              [ "$skipped" -gt 0 ] || { echo "::error::test-apex-hypr-focus.sh asserted nothing and did not say why"; exit 1; }
+              echo "::warning::test-apex-hypr-focus.sh asserted NOTHING on this runner ($skipped skipped) — it needs a nested labwc + Hyprland + quickshell and ubuntu-24.04 has none, so this step is a could-not-run, not a pass. Its 17 assertions only ever run on a machine with the compositors installed."
+          else
+              [ "$passed" -ge 19 ] || { echo "::error::only $passed apex hypr-focus assertions ran; 19 ran on 2026-09-20, so some no longer execute"; exit 1; }
+          fi
+
+      # The input half of the same argument. test-apex-input.sh proves each
+      # compositor's validator ACCEPTS what is generated; only a running
+      # instance proves the value arrives, that `hyprctl reload` re-reads a
+      # module rewritten under it, and that every option name the read-back
+      # asks for still exists — `getoption` answers "no such option" for a name
+      # it does not know, and a read-back treating that as "unset" would show a
+      # working control as untouched forever.
+      #
+      # Same nesting, so it draws nothing and cannot reach a real session, and
+      # the same status-0 skip where the binaries are absent.
+      - name: Run the live input-settings assertions
+        if: ${{ !cancelled() }}
+        run: |
+          # Run BARE, this step used to go green whatever the suite did — and on
+          # ubuntu-24.04 what it does is print `0 passed, 0 failed, 1 skipped`
+          # and exit 0, because labwc is not installed and there is no nested
+          # compositor to drive. A green check over nothing, with the reason
+          # visible only to someone who opened the log and read it. Both halves
+          # are fixed here: the skip is SAID, in the run summary, and the
+          # count is floored so the suite silently dropping assertions on a
+          # machine that CAN run it is an error rather than a smaller number
+          # nobody compares.
+          set -uo pipefail
+          rc=0; out="$(./tests/test-apex-input-live.sh 2>&1)" || rc=$?
+          printf '%s\n' "$out"
+          [ "$rc" = 0 ] || { echo "::error::test-apex-input-live.sh exited $rc"; exit 1; }
+          summary="$(printf '%s\n' "$out" | grep -E '^apex input-live: [0-9]+ passed, [0-9]+ failed, [0-9]+ skipped$' || true)"
+          [ -n "$summary" ] || { echo "::error::test-apex-input-live.sh printed no summary line; nothing below can be believed"; exit 1; }
+          [ "$(printf '%s\n' "$summary" | wc -l)" = 1 ] || { echo "::error::more than one line looked like test-apex-input-live.sh's summary"; exit 1; }
+          passed="$(printf '%s' "$summary" | awk '{print $3}')"
+          failed="$(printf '%s' "$summary" | awk '{print $5}')"
+          skipped="$(printf '%s' "$summary" | awk '{print $7}')"
+          echo "measured: passed=$passed failed=$failed skipped=$skipped"
+          [ "$failed" = 0 ] || { echo "::error::$failed apex input-live assertions failed"; exit 1; }
+          if [ "$passed" -eq 0 ]; then
+              [ "$skipped" -gt 0 ] || { echo "::error::test-apex-input-live.sh asserted nothing and did not say why"; exit 1; }
+              echo "::warning::test-apex-input-live.sh asserted NOTHING on this runner ($skipped skipped) — it needs a nested labwc and ubuntu-24.04 has none, so this step is a could-not-run, not a pass. Its 22 assertions only ever run on a machine with the compositors installed."
+          else
+              [ "$passed" -ge 22 ] || { echo "::error::only $passed apex input-live assertions ran; 22 ran on 2026-09-18, so some no longer execute"; exit 1; }
+          fi
+
+      # §17's fourth generator. The shell has written Hyprland .conf/.lua and
+      # niri .kdl on every keybind edit for a long time; labwc got nothing,
+      # because it has no IPC to push bindings over and no include mechanism to
+      # append a generated file to. So on labwc the Keybinds page was fully
+      # interactive and completely inert.
+      #
+      # The suite splices into fixture files only — it must never touch a real
+      # ~/.config/labwc/rc.xml, which is what the helper's own default would do
+      # if `apply` were ever called without --rc.
+      # The model lives in apex-shell, so the suite needs that tree. It vendors
+      # the MATCHING branch, falling back to the default one, and says which.
+      #
+      # This used to clone the default branch unconditionally, and the comment
+      # justified it: "exactly what Containerfile.base does — so a shell change
+      # that moves the keybind defaults fails here until it lands, which is the
+      # documented merge order doing its job." That premise was true and is not
+      # any more. build-image.yml pinned apex-shell to `main` while this program
+      # develops both repos on roadmap/v2.2 and is forbidden from pushing main
+      # until the final integration, so the "merge order" this relied on cannot
+      # happen while the program runs — apex-shell/main last moved 2026-09-04
+      # and roadmap/v2.2 was 137 commits ahead of it. The image was being built
+      # from two repos at different ages, and this check was comparing against
+      # the older one, so it could not have noticed.
+      #
+      # Both are pinned to the matching branch now. Keep the two in step: if one
+      # is ever changed, the other is wrong.
+      - name: Vendor apex-shell for the keybind model
+        if: ${{ !cancelled() }}
+        run: |
+          set -euo pipefail
+          # The integration branch sits between the exact match and the default
+          # branch, for the reason spelled out on the input-parity step above:
+          # apex-shell has no `task/*` twin for most of this program's
+          # branches, so "no matching branch" meant "compare against main",
+          # and main is 137 commits behind the work — the exact staleness the
+          # paragraph above says this step was changed to stop having. It is
+          # latent here rather than red only because the keybind assertions
+          # happen to still pass against the older model; that is luck, not a
+          # property. Exact match stays first, so apex-os `main` still
+          # vendors apex-shell `main`.
+          #
+          # Kept deliberately identical to the input-parity step above. If one
+          # is ever changed, the other is wrong.
+          want="${GITHUB_HEAD_REF:-${GITHUB_REF_NAME:-}}"
+          shell_ref=""
+          for cand in "$want" roadmap/v2.2; do
+            [ -n "$cand" ] || continue
+            if git ls-remote --exit-code --heads \
+                 https://github.com/AndreNijman/apex-shell "$cand" >/dev/null 2>&1; then
+              shell_ref="$cand"; break
+            fi
+          done
+          if [ -n "$shell_ref" ]; then
+            echo "keybind model: vendoring apex-shell branch '$shell_ref'"
+            git clone --depth 1 --branch "$shell_ref" \
+              https://github.com/AndreNijman/apex-shell.git \
+              "${GITHUB_WORKSPACE}/../apex-shell"
+          else
+            echo "::warning::keybind model: apex-shell has no '$want' and no roadmap/v2.2; using its default branch"
+            git clone --depth 1 https://github.com/AndreNijman/apex-shell.git \
+              "${GITHUB_WORKSPACE}/../apex-shell"
+          fi
+          git -C "${GITHUB_WORKSPACE}/../apex-shell" log -1 --format='vendored apex-shell %h %s'
+          test -f "${GITHUB_WORKSPACE}/../apex-shell/src/services/config_tab/KeybindService.qml"
+
+      - name: Run labwc keybind generator assertions
+        if: ${{ !cancelled() }}
+        env:
+          # Turns "no shell tree, skip everything" into a failure. Without it the
+          # suite reported passed=0 failed=0 and a green tick on its first CI
+          # run, having asserted precisely nothing.
+          APEX_REQUIRE_SHELL_TREE: "1"
+        run: ./tests/test-labwc-keybinds.sh
+
       # tests/test-labwc-session.sh — the APEX Floating session, probed by real
       # clients against a real labwc running the SHIPPED config. It was the last
       # DEBT line in tests/suites-not-in-ci.txt, and its note asked the right
@@ -3726,6 +3518,681 @@ jobs:
         if: ${{ !cancelled() }}
         run: ./tests/test-build-local-shell-ref.sh
 
+      # ── LAST IN THIS JOB, AND THAT PLACEMENT IS THE POINT ──────────────────
+      # §16's OS-side CLI. `apex plugin` owns NO plugin rules: every verdict
+      # comes from apex-shell's own src/services/plugins/manifest.js, through
+      # node, because two implementations of a permission model drift and the
+      # failure mode is a CLI that tells a user their plugin is fine while the
+      # shell refuses it. The suite proves that differentially — it asks
+      # manifest.js directly for each fixture and compares the reason code —
+      # which is only meaningful because the CLI really does call that file.
+      #
+      # It reuses the apex-shell tree vendored earlier in this job, and it must
+      # never touch the real ~/.config/apex-shell: `disable` MOVES a directory,
+      # so the suite points both plugin directories at a temp tree and
+      # HARD-EXITS if either resolves outside it.
+      #
+      # EXPECT THIS RED UNTIL apex-shell PR #9 MERGES. manifest.js is on
+      # apex-shell's `p1/plugin-platform` branch and not on `main`, which is
+      # what the vendor step clones — the documented merge order (the shell
+      # lands before or with the OS) doing its job, exactly as it did for 5.3's
+      # keybind suite on PRs #27 and #28. The suite reports it as ONE labelled
+      # assertion naming PR #9 and still runs its other 62, rather than
+      # refusing at the top and reporting passed=0 with a red tick.
+      #
+      # WHY IT IS THE LAST STEP: a failed step skips every step BELOW it in the
+      # same job. Placed mid-job — where it was first written — a known-red
+      # step would silently disable the bubblewrap install, the
+      # privilege-request, project-layout and secret-broker suites, and the
+      # ShellCheck gate, for every PR until the shell landed. That is the
+      # "a skipped check counts as success" shape this repository has been
+      # bitten by, and it would have switched off the shellcheck gate on the
+      # very files this branch adds. Anything expected to be red belongs at the
+      # bottom of its job.
+      #
+      # The shard split narrowed that blast radius rather than repealing the
+      # rule: those suites now live in `engine-agent` and `engine-lint`, which
+      # this step cannot reach at all. It stays LAST in `engine-desktop`
+      # because it still needs the apex-shell tree that shard vendors, and a
+      # step expected to be red must stay below everything it could take with
+      # it.
+      - name: Run plugin CLI assertions
+        if: ${{ !cancelled() }}
+        run: ./tests/test-apex-plugin.sh
+
+  engine-agent:
+    name: Package engine — agent runtime
+    needs: changes
+    if: needs.changes.outputs.engine == 'true'
+    runs-on: ubuntu-24.04
+    steps:
+      - name: Checkout
+        uses: actions/checkout@v4
+
+      # End-to-end, against a real daemon on an isolated socket: that the
+      # daemon resolves the asking session from the connection's PEER
+      # CREDENTIALS and not from anything the client sent. The negative control
+      # is a session that files a request while claiming
+      # APEX_AGENT_SESSION=99999 and is still attributed correctly.
+      #
+      # Needs no root: every approval uses --no-run, so the suite records
+      # decisions without performing operations and never raises an
+      # authentication prompt.
+      # bubblewrap, so the sandbox boundary is actually exercised on CI rather
+      # than skipped. The secret broker's central claim — that a CONFINED
+      # session cannot read the credential file — is only testable with a real
+      # sandbox, and a runner has no bwrap by default. Without this the one
+      # assertion that matters most is the one that never runs.
+      - name: Install bubblewrap
+        if: ${{ !cancelled() }}
+        run: |
+          set -euo pipefail
+          sudo apt-get update -qq
+          sudo apt-get install -y -qq bubblewrap
+          bwrap --version
+          # Ubuntu 24.04 blocks unprivileged user namespaces through AppArmor,
+          # so bwrap installs fine and then fails with "setting up uid map:
+          # Permission denied" the moment it runs. Without this the sandbox
+          # section reports a session that "started" and then asserts nothing,
+          # because the script inside never executed.
+          sudo sysctl -w kernel.apparmor_restrict_unprivileged_userns=0 || \
+            echo "note: no apparmor userns restriction on this kernel"
+          # Prove it actually works HERE, so a failure is one clear line at
+          # install time rather than a confusing assertion later.
+          bwrap --ro-bind / / --dev /dev --proc /proc --unshare-pid \
+                /bin/true || {
+            echo "::error::bubblewrap cannot create a namespace on this runner"
+            exit 1
+          }
+          echo "bubblewrap works: a confined session can be built" 
+          # The runtime also refuses to confine a session when the kernel still
+          # honours the legacy TIOCSTI ioctl, because keystroke injection into
+          # the controlling terminal would make confinement meaningless. Report
+          # it rather than letting the suite fail with a less obvious message.
+          sysctl dev.tty.legacy_tiocsti 2>/dev/null || \
+            echo "note: dev.tty.legacy_tiocsti knob absent (compiled out — fine)"
+
+      - name: Run privilege-request assertions
+        if: ${{ !cancelled() }}
+        run: ./tests/test-privilege-requests.sh
+
+      # P1-035's three claims, none of which a unit test can reach: the typed
+      # path arrives at the session it was addressed to and at no other; nothing
+      # that arrives can submit the line; and a managed session may not use the
+      # verb at all. All three need a real daemon, a real PTY and a real socket,
+      # and the suite builds its own — its own XDG_RUNTIME_DIR, its own state,
+      # killed by pid.
+      - name: Run file-injection assertions
+        if: ${{ !cancelled() }}
+        run: ./tests/test-agent-inject.sh
+
+      # P1-036's named guarantee, which is the whole reason the conflict answer
+      # comes from `merge-tree` and not from a real merge: after a status call
+      # on a GENUINELY CONFLICTED worktree, MERGE_HEAD is absent, the staged
+      # entries are unchanged, `git status --porcelain` is byte-identical and
+      # no ref has moved. A unit test cannot reach any of it — it needs a real
+      # repository with a real conflict, and the suite builds one, along with
+      # its own daemon on its own socket and its own project store.
+      - name: Run worktree-status assertions
+        if: ${{ !cancelled() }}
+        run: ./tests/test-agent-worktrees.sh
+
+      # P1-037's acceptance line — an agent session that runs in a disposable
+      # capsule and discards its state — against the REAL disposable engine
+      # from this checkout, a real daemon and a real PTY. Only the capsule
+      # engine is faked, through the override the engine already documents, and
+      # the fake logs every call: a fake that merely exited 0 would let every
+      # assertion pass with the agent running on the host. So this needs no
+      # podman, no distrobox and no image pull, and it cannot fail here for a
+      # reason unrelated to this code.
+      - name: Run disposable-capsule assertions
+        if: ${{ !cancelled() }}
+        run: ./tests/test-agent-disposable.sh
+      # §7's other half, and the one the privilege suite deliberately does not
+      # touch: approving a request WITHOUT --no-run performs the operation and
+      # is gated on being root. That was argued from the code rather than run,
+      # on the grounds that testing it needs a real sudo prompt. It does not —
+      # `unshare -r` gives a process a real effective uid 0, established by the
+      # kernel and read the way ops::effective_uid reads it, and asks nobody
+      # for a password. Nothing in this suite can raise a prompt: no sudo, no
+      # pkexec, no pkcheck.
+      #
+      # The operation that then runs is contained by a mount namespace, with a
+      # stub bound over the absolute path `apex install` execs, so the real
+      # package engine is never reached. The two steps that genuinely need a
+      # person — sudo's own authentication, and capability over the real
+      # machine — are named at the end of the run with the commands to check
+      # them by hand.
+      #
+      # The apparmor knob two steps up is what makes `unshare -r` work on a
+      # 24.04 runner at all; without it this suite skips out loud rather than
+      # passing.
+      - name: Run root-approval assertions
+        if: ${{ !cancelled() }}
+        run: ./tests/test-root-approval.sh
+
+      # §5's two claims, neither of which the unit tests can reach: a portable
+      # bundle carries no credential and no conversation, from a profile on a
+      # real filesystem; and a confined session cannot rewrite the instructions
+      # it was started with, enforced by the mount namespace rather than by an
+      # argument list. The agent is a stub on PATH, so this needs no account,
+      # no network and no API call, and it touches nobody's own profile — the
+      # fixture home is under /var/tmp, because the sandbox masks /tmp.
+      - name: Run agent-profile assertions
+        if: ${{ !cancelled() }}
+        run: ./tests/test-agent-profile.sh
+
+      # The compositor adapter is faked through APEX_WINDOW_ADAPTER, so this
+      # runs with no compositor at all — which is the whole reason the adapter
+      # is a separate program. `restore` is only ever called with --dry-run, so
+      # the suite cannot start a window.
+      - name: Run project-layout assertions
+        if: ${{ !cancelled() }}
+        run: ./tests/test-project-layout.sh
+
+      # §4's whole claim is "agents use credentials without receiving the raw
+      # secret". This stores a sentinel token, uses a capability from inside a
+      # real CONFINED session, and asserts the sentinel appears in neither
+      # stdout, stderr, the session's PTY transcript, nor the audit log — while
+      # the git operation is genuinely attempted against 127.0.0.1:1, which
+      # refuses instantly, so no network is used and the token goes nowhere.
+      - name: Run secret-broker assertions
+        if: ${{ !cancelled() }}
+        env:
+          # The suite's one legitimate skip is its sandbox section: without
+          # bubblewrap a confined session cannot be built, so the boundary
+          # cannot be tested and reporting "failed" would be a lie about what
+          # was checked. bwrap is installed two steps up, so a skip HERE means
+          # that install was lost — and this turns that into a failure rather
+          # than a green job that never ran §4's central assertion.
+          APEX_REQUIRE_SANDBOX: "1"
+        run: ./tests/test-secret-broker.sh
+
+      # P0-003's migration, against a fixture home under /var/tmp with two
+      # obvious fakes in it and a loopback MCP server that refuses without the
+      # bearer token. It proves the order the whole thing rests on — store,
+      # verify, and only then remove — including that an unverifiable
+      # credential is stored and LEFT, which is the outcome an interrupted or
+      # ungranted run has to have.
+      - name: Run credential-migration assertions
+        if: ${{ !cancelled() }}
+        run: ./tests/test-secret-migrate.sh
+
+  engine-shells:
+    name: Package engine — shells and terminals
+    needs: changes
+    if: needs.changes.outputs.engine == 'true'
+    runs-on: ubuntu-24.04
+    steps:
+      - name: Checkout
+        uses: actions/checkout@v4
+
+      # ── the knob the monolithic job used to clear once, for everything ────
+      #
+      # `Install squashfs-tools for the AppImage suite` clears
+      # kernel.apparmor_restrict_unprivileged_userns at step 3 of 72, and every
+      # step after it inherited a cleared value without saying so — the AppImage
+      # suite's own Leg B, the firewall parse, the netns device services, the
+      # root-approval probe, the confined agent sessions and the rootless-podman
+      # package suites all depend on it. Splitting the job breaks that
+      # inheritance, and the failure mode is the one this file is full of:
+      # `unshare -r` is refused, the suite SKIPS with status 0, and a skip
+      # reads as success.
+      #
+      # So every shard that holds a step which used to run after that install
+      # clears the knob for itself, above the first such step. That is every
+      # shard but `engine`, which carries the real install at its own original
+      # position — `Run package-engine assertions` and `Run .deb package
+      # assertions` ran BEFORE it in the monolith and still do here.
+      #
+      # The runner is ephemeral and unshared, so this affects nothing else.
+      - name: Allow unprivileged user namespaces
+        if: ${{ !cancelled() }}
+        run: |
+          sudo sysctl -w kernel.apparmor_restrict_unprivileged_userns=0 \
+            || echo "note: no apparmor userns restriction on this kernel"
+
+      # fish and nushell cannot source the POSIX agent.sh, so each has its own
+      # integration file — and the only way to know the three agree is to run
+      # all three. fish is in Ubuntu's archive; nushell is not, so it comes from
+      # the pinned upstream release the image also ships. A failed download
+      # degrades that section to a LOUD SKIP rather than a red build, and the
+      # suite refuses to report success if every section skipped.
+      - name: Install fish and nushell
+        if: ${{ !cancelled() }}
+        run: |
+          set -uo pipefail
+          sudo apt-get update -qq
+          sudo apt-get install -y -qq fish
+          fish --version
+          nu_ver=0.99.1
+          url="https://github.com/nushell/nushell/releases/download/${nu_ver}/nu-${nu_ver}-x86_64-unknown-linux-musl.tar.gz"
+          # The whole fetch is the `if` condition, not just the curl: a step runs
+          # under `bash -e`, so an extraction that failed after a successful
+          # download would be a red build rather than the skip promised above.
+          # The member path is `nu-<ver>-x86_64-unknown-linux-musl/nu`, checked
+          # with `tar tzf` against the real asset.
+          if curl -fsSL --retry 2 "$url" -o /tmp/nu.tgz \
+             && tar xzf /tmp/nu.tgz -C /tmp \
+             && sudo install -m0755 "/tmp/nu-${nu_ver}-x86_64-unknown-linux-musl/nu" /usr/local/bin/nu; then
+            nu --version
+          else
+            echo "note: nushell ${nu_ver} is unavailable; its section will skip out loud"
+          fi
+
+      - name: Run fish and nushell agent-integration assertions
+        if: ${{ !cancelled() }}
+        run: ./tests/test-shell-agent.sh
+
+      # The layout templates open panes in a real multiplexer, so a real one has
+      # to be here. tmux is in Ubuntu's archive; zellij is not in any distro, so
+      # it comes from the same pinned upstream release Containerfile.core does —
+      # the version is kept in step by hand, and a failed download degrades that
+      # section to a LOUD SKIP rather than a red build.
+      - name: Install tmux and zellij
+        if: ${{ !cancelled() }}
+        run: |
+          set -uo pipefail
+          sudo apt-get install -y -qq tmux
+          tmux -V
+          zj=v0.45.1
+          url="https://github.com/zellij-org/zellij/releases/download/${zj}/zellij-x86_64-unknown-linux-musl.tar.gz"
+          if curl -fsSL --retry 2 "$url" -o /tmp/zellij.tgz \
+             && sudo tar xzf /tmp/zellij.tgz -C /usr/local/bin zellij \
+             && sudo chmod 0755 /usr/local/bin/zellij; then
+            zellij --version
+          else
+            echo "note: zellij ${zj} is unavailable; its section will skip out loud"
+          fi
+
+      # Both multiplexers run on an isolated socket (TMUX_TMPDIR,
+      # ZELLIJ_SOCKET_DIR under the suite's own temp dir), and XDG_RUNTIME_DIR
+      # is a fixture with no control socket — so this cannot reach an agent
+      # runtime, and every agent pane resolves to `apex agent run` against a
+      # stub on PATH.
+      - name: Run terminal layout template assertions
+        if: ${{ !cancelled() }}
+        run: ./tests/test-mux-layouts.sh
+
+  engine-services:
+    name: Package engine — backup, firewall, devices
+    needs: changes
+    if: needs.changes.outputs.engine == 'true'
+    runs-on: ubuntu-24.04
+    steps:
+      - name: Checkout
+        uses: actions/checkout@v4
+
+      # ── the knob the monolithic job used to clear once, for everything ────
+      #
+      # `Install squashfs-tools for the AppImage suite` clears
+      # kernel.apparmor_restrict_unprivileged_userns at step 3 of 72, and every
+      # step after it inherited a cleared value without saying so — the AppImage
+      # suite's own Leg B, the firewall parse, the netns device services, the
+      # root-approval probe, the confined agent sessions and the rootless-podman
+      # package suites all depend on it. Splitting the job breaks that
+      # inheritance, and the failure mode is the one this file is full of:
+      # `unshare -r` is refused, the suite SKIPS with status 0, and a skip
+      # reads as success.
+      #
+      # So every shard that holds a step which used to run after that install
+      # clears the knob for itself, above the first such step. That is every
+      # shard but `engine`, which carries the real install at its own original
+      # position — `Run package-engine assertions` and `Run .deb package
+      # assertions` ran BEFORE it in the monolith and still do here.
+      #
+      # The runner is ephemeral and unshared, so this affects nothing else.
+      - name: Allow unprivileged user namespaces
+        if: ${{ !cancelled() }}
+        run: |
+          sudo sysctl -w kernel.apparmor_restrict_unprivileged_userns=0 \
+            || echo "note: no apparmor userns restriction on this kernel"
+
+      # P2-001/P2-002's backup framework, end to end through the real CLI. Two
+      # things it MEASURES rather than asserts: that a canary planted in the
+      # source appears in no byte written to the target — chunks, manifest,
+      # head and the object names — and that a private key written by REAL
+      # root cannot be opened by the account that owns the backups. The second
+      # half uses `sudo -n`, which this runner has, and the suite says which
+      # assertions it did not make when that is missing rather than passing
+      # vacuously. Everything it touches is under one `mktemp -d -p /var/tmp`;
+      # APEX_BACKUP_KEYS keeps it out of /var/lib.
+      #
+      # There is no R2 section in it, and that is not an omission: `Api::loopback`
+      # is `#[cfg(test)]`, so a shipped apex-secretd always addresses
+      # api.cloudflare.com and the store's host pin would refuse a credential
+      # stored for anywhere else. The backup framework's own R2 call sequence is
+      # proven in the `rust` job instead, against the same loopback double that
+      # 401s an unauthenticated request.
+      - name: §13.5 backup — encrypted at rest, versioned restore, and the four verdicts
+        if: ${{ !cancelled() }}
+        run: ./tests/test-apex-backup.sh
+
+      # P2-001's ssh target, against a REAL sshd on loopback — the fixture the
+      # target's own source named as the reason it used to be refused, since a
+      # transport proven against a fake `ssh` on PATH is a test of the argument
+      # list and not of a backup.
+      #
+      # openssh-server is installed explicitly rather than assumed. The suite
+      # exits 2 with COULD NOT RUN when there is no sshd, which is neither a
+      # pass nor a failure, and a step that took that as a pass would make the
+      # ssh target look proven on every runner while being proven on none —
+      # `set -e` here turns that 2 into a failed step, which is the point.
+      #
+      # The sshd it starts is UNPRIVILEGED, on a kernel-chosen high port, from a
+      # config file inside its own fixture, and it is killed by pid. Nothing
+      # under /etc/ssh and no system unit is read or written.
+      - name: §13.5 backup over ssh — a real sshd on loopback
+        if: ${{ !cancelled() }}
+        run: |
+          set -euo pipefail
+          sudo apt-get update -qq
+          sudo apt-get install -y -qq openssh-server
+          ./tests/test-apex-backup-ssh.sh
+
+      # P2-001's s3 target, through a REAL apex-secretd, against a loopback
+      # double that recomputes the SigV4 signature with nothing but Python's
+      # `hmac` and `hashlib` and answers 403 when it does not match.
+      #
+      # Three implementations of the signature and that is the point: the one
+      # under test, botocore's numbers pinned as known-answer tests beside it,
+      # and the double's. A signer compared only with itself is a signer that
+      # will be consistently wrong and fail only at a real S3.
+      #
+      # NO AWS ACCOUNT AND NO OUTBOUND CONNECTION. The endpoint is 127.0.0.1 on
+      # a kernel-chosen port and the access key id is AWS's own documentation
+      # example, which authorises nothing.
+      - name: §13.5 backup to S3 — SigV4 against an independent verifier
+        if: ${{ !cancelled() }}
+        run: ./tests/test-apex-backup-s3.sh
+
+      # ── suites that existed and that CI had never once invoked ───────────
+      #
+      # These two were among the thirteen `check-suites-run-in-ci.sh` found on
+      # 2026-09-12: real assertion counts, landed, reviewed, and named in no
+      # workflow. They are wired here rather than in `rust` because neither
+      # needs a toolchain — one parses a static ruleset and one parses the
+      # Containerfiles — and because the engine selector `^(files/|tests/|
+      # Containerfile)` is exactly the set of files they are ABOUT, which is
+      # the rule the six comments in the `changes` job were written to enforce.
+      #
+      # `!cancelled()` on each, so that a suite CI has never run cannot, by
+      # going red on its first outing, skip the two coverage gates below it and
+      # switch off the very checks that found it.
+      - name: Install nftables for the ruleset parse
+        if: ${{ !cancelled() }}
+        run: |
+          sudo apt-get update -qq
+          sudo apt-get install -y -qq nftables || echo "note: nftables unavailable"
+          # `nft -c` applies nothing, but libnftables still opens a netlink
+          # socket, so it needs CAP_NET_ADMIN — which this job does not have.
+          # The suite's own fallback is a private user+network namespace, and
+          # that is refused on Ubuntu 24.04 unless this knob is cleared. This
+          # step used to be the belt to the squashfs-tools and bubblewrap
+          # steps' braces; since the engine job was split into shards those
+          # installs are in other shards, and this one clears the knob for
+          # itself in a step above — so this line is now both the braces and
+          # the belt, and a reordering cannot silently turn every parse
+          # assertion below into a SKIP. The value is per-boot on an
+          # ephemeral VM.
+          sudo sysctl -w kernel.apparmor_restrict_unprivileged_userns=0 || \
+            echo "note: apparmor userns knob unavailable"
+          command -v nft >/dev/null && echo "have: $(nft --version)" || echo "MISSING: nft"
+
+      # P1-044's default-drop policy, asserted rule by rule against the shipped
+      # files/system/nftables/apex.nft. It never loads the ruleset — `nft -c`
+      # parses — so it cannot disconnect the machine running it, which is why
+      # it is safe here and why its live sibling is not.
+      #
+      # It degrades honestly rather than vacuously: with no nft, or with nft
+      # unable to reach netlink even inside a private netns, the parse
+      # assertion reports SKIP with the reason instead of passing. The step
+      # above is what keeps that skip from being the normal outcome — and the
+      # summary check below is what keeps it from being an outcome CI accepts.
+      #
+      # A SKIP here is a COULD NOT RUN, and a could-not-run must not report a
+      # green tick: without this the whole point of wiring the suite in would
+      # be lost the first time the runner image dropped nftables, and the step
+      # would go on passing while inspecting the ruleset not at all. That is
+      # the exact defect class this suite was found by. The pass floor is a
+      # floor and not an equality so that adding an assertion does not require
+      # editing this file, but a DROP in the count fails, which is the
+      # direction that hides a deleted rule.
+      - name: Run firewall policy assertions
+        if: ${{ !cancelled() }}
+        run: |
+          set -euo pipefail
+          out="$(./tests/test-apex-firewall.sh 2>&1)"
+          printf '%s\n' "$out"
+          summary="$(printf '%s' "$out" | grep -E '^apex-firewall: ' || true)"
+          [ -n "$summary" ] || { echo "::error::the firewall suite printed no summary line"; exit 1; }
+          read -r passed _ failed _ skipped _ <<<"$(printf '%s' "$summary" | sed 's/^apex-firewall: //')"
+          echo "measured: passed=$passed failed=$failed skipped=$skipped"
+          [ "$failed" = 0 ] || { echo "::error::$failed firewall assertions failed"; exit 1; }
+          [ "$skipped" = 0 ] || {
+              echo "::error::$skipped firewall assertions could not run on this runner ($summary); a could-not-run is not a pass"
+              exit 1
+          }
+          [ "$passed" -ge 32 ] || {
+              echo "::error::only $passed firewall assertions ran; 32 ran on 2026-09-12, so some no longer execute"
+              exit 1
+          }
+
+      # P2-005's device packages, read out of the Containerfiles the way
+      # BuildKit reads them — comments dropped, continuations joined, each RUN
+      # body parsed with `bash -n` — rather than grepped. Every gap it guards
+      # was a package that was present and enabled nothing, or absent behind a
+      # name that looked like it covered the case: no gvfs-fuse, so a mounted
+      # share existed only inside GTK; no bolt, so a Thunderbolt dock sat at
+      # authorized=0 with nothing able to authorise it.
+      #
+      # `Containerfile` is in the engine selector, so a PR that deletes a
+      # package name from an install list selects this job.
+      #
+      # The count floor is here for the same reason as the firewall one above:
+      # every assertion in this suite is a `grep` over a parsed Containerfile,
+      # so a checkout that put the Containerfiles somewhere else, or a parser
+      # that returned nothing, would make the suite assert nothing and exit 0.
+      # 39 assertions ran on this branch on 2026-09-13; a drop is a suite that
+      # stopped looking, not a suite that got shorter.
+      - name: Run device-image package assertions
+        if: ${{ !cancelled() }}
+        run: |
+          set -euo pipefail
+          out="$(./tests/test-device-image.sh 2>&1)"
+          printf '%s\n' "$out"
+          summary="$(printf '%s' "$out" | grep -E '^device image: ' || true)"
+          [ -n "$summary" ] || { echo "::error::the device-image suite printed no summary line"; exit 1; }
+          read -r passed _ failed _ <<<"$(printf '%s' "$summary" | sed 's/^device image: //')"
+          echo "measured: passed=$passed failed=$failed"
+          [ "$failed" = 0 ] || { echo "::error::$failed device-image assertions failed"; exit 1; }
+          [ "$passed" -ge 39 ] || {
+              echo "::error::only $passed device-image assertions ran; 39 ran on 2026-09-13, so some no longer execute"
+              exit 1
+          }
+
+      # tests/test-apex-devices.sh — 108 assertions over six device areas, and
+      # until this line no CI run had executed one of them. It was DEBT in
+      # tests/suites-not-in-ci.txt, not a decision.
+      #
+      # The floor below is the point of the step as much as `failed = 0` is, and
+      # it had rotted: it still read 55 while 76 assertions were running, so a
+      # change that silently stopped half the suite executing would have passed
+      # it. Raise it with the suite. It is meant to be a tripwire on a suite
+      # that stopped looking, and a tripwire 21 assertions behind is not one.
+      #
+      # It is shell-only: it drives files/system/libexec/apex-devices against a
+      # fixture tree under mktemp, with a $PATH of its own stubs, so it reaches
+      # no device on the machine running it. Engine job, because the engine
+      # selector is `^(files/|tests/|…)` and the helper it drives lives under
+      # files/.
+      #
+      # The point of the suite is the EACCES sweep's finding — that a reader
+      # which collapses "permission denied" into "there is none" is the same
+      # bug in fourteen places — so its fixtures are deliberately unreadable in
+      # places and it counts a `skipped` of its own. The step therefore fails on
+      # skipped > 0 as well as on failed > 0, and separately on a bare `SKIP`
+      # line, which would be an echo that bypassed the counter.
+      - name: P1 devices — 108 assertions over six device areas
+        if: ${{ !cancelled() }}
+        run: |
+          set -euo pipefail
+          rc=0; out="$(./tests/test-apex-devices.sh 2>&1)" || rc=$?
+          printf '%s\n' "$out"
+          [ "$rc" = 0 ] || { echo "::error::the devices suite exited $rc"; exit 1; }
+          summary="$(printf '%s\n' "$out" | grep -E '^apex-devices: [0-9]+ passed, [0-9]+ failed, [0-9]+ skipped$' || true)"
+          [ -n "$summary" ] || { echo "::error::the devices suite printed no summary line"; exit 1; }
+          [ "$(printf '%s\n' "$summary" | wc -l)" = 1 ] || { echo "::error::more than one line looked like the summary; the parse below would read the wrong one"; exit 1; }
+          passed="$(printf '%s' "$summary" | awk '{print $2}')"
+          failed="$(printf '%s' "$summary" | awk '{print $4}')"
+          skipped="$(printf '%s' "$summary" | awk '{print $6}')"
+          echo "measured: passed=$passed failed=$failed skipped=$skipped"
+          [ "$failed" = 0 ] || { echo "::error::$failed device assertions failed"; exit 1; }
+          [ "$skipped" = 0 ] || { echo "::error::$skipped device assertions could not run on this runner; a could-not-run is not a pass"; exit 1; }
+          [ "$passed" -ge 108 ] || { echo "::error::only $passed device assertions ran; 108 ran on 2026-09-18, so some no longer execute"; exit 1; }
+          if printf '%s\n' "$out" | grep -qE '^[[:space:]]*SKIP'; then
+              echo "::error::the devices suite printed a SKIP line; the counter above is the same signal, and this catches an echo that bypasses the helper"
+              exit 1
+          fi
+
+      # tests/test-device-services-netns.sh — 12 assertions about whether a
+      # printer, a Windows share and an NFS export can actually be reached
+      # through the shipped policy, and whether `apex firewall allow <name>`
+      # opens the port the catalogue says it does. It asserts no RULE; P1-044
+      # owns those. It was DEBT in tests/suites-not-in-ci.txt.
+      #
+      # It sends REAL packets, and it can do that here because it sends them
+      # inside `unshare -rmn`: a private user, mount and network namespace with
+      # a veth pair and a peer that is a sleeping process addressed by pid. The
+      # machine running it has no interface added, no rule loaded and no port
+      # opened. It needs unshare, nsenter, ip, nft and python3, and it needs the
+      # apparmor userns knob the nftables step above already clears — that is
+      # why it is placed after it and not earlier.
+      #
+      # Its own report() exits 0 when everything was SKIPPED, because it exits
+      # on the failure count alone. So a runner that refused the namespace would
+      # hand this step a green tick over nothing measured at all. The skipped
+      # counter is read back and required to be zero for exactly that reason.
+      - name: P1 device services — a printer, a share and an export through the real policy
+        if: ${{ !cancelled() }}
+        run: |
+          set -euo pipefail
+          rc=0; out="$(./tests/test-device-services-netns.sh 2>&1)" || rc=$?
+          printf '%s\n' "$out"
+          [ "$rc" = 0 ] || { echo "::error::the device-services netns suite exited $rc"; exit 1; }
+          summary="$(printf '%s\n' "$out" | grep -E '^device services \(netns\): [0-9]+ passed, [0-9]+ failed, [0-9]+ skipped$' || true)"
+          [ -n "$summary" ] || { echo "::error::the device-services netns suite printed no summary line"; exit 1; }
+          [ "$(printf '%s\n' "$summary" | wc -l)" = 1 ] || { echo "::error::more than one line looked like the summary; the parse below would read the wrong one"; exit 1; }
+          counts="$(printf '%s' "$summary" | sed 's/^device services (netns): //')"
+          passed="$(printf '%s' "$counts" | awk '{print $1}')"
+          failed="$(printf '%s' "$counts" | awk '{print $3}')"
+          skipped="$(printf '%s' "$counts" | awk '{print $5}')"
+          echo "measured: passed=$passed failed=$failed skipped=$skipped"
+          [ "$failed" = 0 ] || { echo "::error::$failed device-services assertions failed"; exit 1; }
+          [ "$skipped" = 0 ] || {
+              echo "::error::$skipped device-services assertions could not run ($summary). This suite's own report() exits 0 on a skip-only run, so without this line a runner that refused the namespace would show a green tick over nothing measured at all"
+              exit 1
+          }
+          [ "$passed" -ge 12 ] || { echo "::error::only $passed device-services assertions ran; 12 ran on 2026-09-13, so some no longer execute"; exit 1; }
+          if printf '%s\n' "$out" | grep -qE '^[[:space:]]*SKIP'; then
+              echo "::error::the device-services netns suite printed a SKIP line; the counter above is the same signal, and this catches an echo that bypasses the helper"
+              exit 1
+          fi
+
+  engine-lint:
+    name: Package engine — lint and repository gates
+    needs: changes
+    if: needs.changes.outputs.engine == 'true'
+    runs-on: ubuntu-24.04
+    steps:
+      - name: Checkout
+        uses: actions/checkout@v4
+
+      # ── the knob the monolithic job used to clear once, for everything ────
+      #
+      # `Install squashfs-tools for the AppImage suite` clears
+      # kernel.apparmor_restrict_unprivileged_userns at step 3 of 72, and every
+      # step after it inherited a cleared value without saying so — the AppImage
+      # suite's own Leg B, the firewall parse, the netns device services, the
+      # root-approval probe, the confined agent sessions and the rootless-podman
+      # package suites all depend on it. Splitting the job breaks that
+      # inheritance, and the failure mode is the one this file is full of:
+      # `unshare -r` is refused, the suite SKIPS with status 0, and a skip
+      # reads as success.
+      #
+      # So every shard that holds a step which used to run after that install
+      # clears the knob for itself, above the first such step. That is every
+      # shard but `engine`, which carries the real install at its own original
+      # position — `Run package-engine assertions` and `Run .deb package
+      # assertions` ran BEFORE it in the monolith and still do here.
+      #
+      # The runner is ephemeral and unshared, so this affects nothing else.
+      - name: Allow unprivileged user namespaces
+        if: ${{ !cancelled() }}
+        run: |
+          sudo sysctl -w kernel.apparmor_restrict_unprivileged_userns=0 \
+            || echo "note: no apparmor userns restriction on this kernel"
+
+      - name: ShellCheck the privileged helpers
+        if: ${{ !cancelled() }}
+        run: |
+          set -euo pipefail
+          sudo apt-get update -qq
+          sudo apt-get install -y -qq shellcheck
+          # A hard gate, not advisory: these run as root, and the warning class
+          # shellcheck catches here is exactly the class that is invisible in
+          # review — unquoted expansions and recursive deletes that an empty
+          # variable turns into a path on the live system. The file is clean at
+          # this level today, so any finding is one this PR introduced.
+          # tests/in-login-session.sh is here for the same reason the four
+          # libexec helpers are: it is the only thing under tests/ that
+          # invokes `sudo`, so an unquoted expansion in it is an unquoted
+          # expansion in a command that runs as root.
+          shellcheck -S warning files/system/libexec/apex-pkg \
+            tests/in-login-session.sh \
+            files/system/libexec/apex-boot-migrate \
+            tests/test-boot-migrate.sh \
+            files/system/libexec/apex-env \
+            files/system/libexec/apex-plugin \
+            files/system/libexec/apex-disposable \
+            files/system/libexec/apex-vm \
+            files/system/libexec/apex-screen-reader \
+            tests/test-apex-recover.sh \
+            tests/test-apex-pkg.sh tests/test-apex-deb.sh \
+            tests/test-apex-pkg.sh tests/test-apex-appimage.sh \
+            tests/test-apex-firstrun.sh \
+            tests/test-labwc-keybinds.sh tests/test-apex-env.sh \
+            tests/test-apex-resolve.sh tests/test-apex-blueprint.sh \
+            tests/test-apex-modes.sh tests/test-apex-plugin.sh \
+            tests/test-apex-host.sh tests/test-apex-dispatch.sh \
+            tests/test-apex-ai.sh tests/test-apex-env-devices-live.sh \
+            tests/test-apex-greet-sessions.sh \
+            tests/test-apex-session-watchdog.sh \
+            files/system/libexec/apex-session-watchdog \
+            tests/test-apex-greet-a11y.sh tests/test-apex-greet-layout.sh \
+            tests/test-apex-greet-session-bus.sh tests/test-apex-a11y-stack.sh \
+            tests/test-labwc-keybind-reload.sh \
+            tests/test-apex-safe-graphics.sh \
+            tests/test-apex-gaming-session.sh \
+            files/system/libexec/apex-gaming-session \
+            files/system/libexec/apex-safe-graphics \
+            files/system/libexec/apex-safe-graphics-terminal \
+            tests/test-apex-chaos.sh tests/test-apex-vm.sh
+          # The chaos harness separately, with -x so the driver's `. lib.sh`
+          # is followed, and the cases as bash fragments because they are
+          # sourced rather than executed and have no shebang of their own.
+          # It belongs under a HARD gate for the same reason the libexec
+          # helpers do: these scripts run `mount`, `chmod 0000` and `rm` with
+          # expansions, and an empty variable in one of those is a path on the
+          # machine running it.
+          shellcheck -S warning -x tests/chaos/run-chaos tests/chaos/chaos-loop \
+            tests/chaos/lib.sh
+          shellcheck -S warning -x tests/chaos/cases/*.sh
+          # The VM lab, with -x for the same reason: it sources the chaos
+          # library for the verdict record, and it runs `rm -rf` and `chown -R`
+          # on paths built from variables inside a container it starts itself.
+          shellcheck -S warning -x tests/vmlab/run-vmlab tests/vmlab/mk-guest
+
       - name: Every suite is actually run by CI
         # `if: !cancelled()` for the reason the comment block below gives
         # about placement, read in its other direction. That block is about a
@@ -3744,6 +4211,22 @@ jobs:
           # including tests/test-apex-lid.sh, sixty assertions for a feature the
           # owner asked for by name, which no CI run had ever executed.
           ./tests/check-suites-run-in-ci.sh
+      # ── and the job-level twin of the step above ──────────────────────────
+      #
+      # `result` is the only required status: every other job reports a tick
+      # nothing reads. A job left out of `result.needs` therefore goes red in
+      # the checks list and blocks nothing at all, which is the "a skipped
+      # check counts as success" shape one level up from suites.
+      #
+      # Theoretical while there were five jobs. This file now has eighteen,
+      # because `engine`, `installer` and `static` were split into shards to
+      # take CI wall-clock from 14 minutes to about 4 — and a hand-maintained
+      # list of eighteen names is exactly the thing that goes stale silently.
+      # A typo is worse than an omission: Actions drops an unknown `needs`
+      # entry, so the shard is unaggregated AND the mistake is unreported.
+      - name: Every job is aggregated by the required status
+        if: ${{ !cancelled() }}
+        run: ./tests/check-ci-jobs-aggregated.sh
 
       - name: The build context carries every tracked source file
         # `.containerignore` carried `**/target/`, which also matches
@@ -3775,9 +4258,9 @@ jobs:
         # was itself never run. Discovery now covers both patterns, which is
         # what turned this step up.
         #
-        # `if: !cancelled()` for the same reason as the two steps below it: a
-        # red step ABOVE these gates makes them report `-`, and a skipped check
-        # reads as success.
+        # `if: !cancelled()` for the same reason as the shellcheck-coverage
+        # gate below it: a red step ABOVE these gates makes them report `-`,
+        # and a skipped check reads as success.
         if: ${{ !cancelled() }}
         run: ./tests/check-no-conflict-markers.sh
 
@@ -3800,47 +4283,12 @@ jobs:
           # defect as a path selector naming nothing: the step runs, reports
           # success, and inspects nothing.
           #
-          # This one FINDS the scripts. It lives in the engine job because the
-          # engine selector — `^(files/|tests/|Containerfile|\.github/workflows/)`
+          # This one FINDS the scripts. It lives in an `engine` shard because
+          # the engine selector — `^(files/|tests/|Containerfile|\.github/workflows/)`
           # — covers every directory it walks, so no edit to a discovered script
           # can reach `main` without this step running. Putting it anywhere else
           # would make it another instance of the bug the comments above describe.
           ./tests/check-shellcheck-coverage.sh
-
-      # ── LAST IN THIS JOB, AND THAT PLACEMENT IS THE POINT ──────────────────
-      # §16's OS-side CLI. `apex plugin` owns NO plugin rules: every verdict
-      # comes from apex-shell's own src/services/plugins/manifest.js, through
-      # node, because two implementations of a permission model drift and the
-      # failure mode is a CLI that tells a user their plugin is fine while the
-      # shell refuses it. The suite proves that differentially — it asks
-      # manifest.js directly for each fixture and compares the reason code —
-      # which is only meaningful because the CLI really does call that file.
-      #
-      # It reuses the apex-shell tree vendored earlier in this job, and it must
-      # never touch the real ~/.config/apex-shell: `disable` MOVES a directory,
-      # so the suite points both plugin directories at a temp tree and
-      # HARD-EXITS if either resolves outside it.
-      #
-      # EXPECT THIS RED UNTIL apex-shell PR #9 MERGES. manifest.js is on
-      # apex-shell's `p1/plugin-platform` branch and not on `main`, which is
-      # what the vendor step clones — the documented merge order (the shell
-      # lands before or with the OS) doing its job, exactly as it did for 5.3's
-      # keybind suite on PRs #27 and #28. The suite reports it as ONE labelled
-      # assertion naming PR #9 and still runs its other 62, rather than
-      # refusing at the top and reporting passed=0 with a red tick.
-      #
-      # WHY IT IS THE LAST STEP: a failed step skips every step BELOW it in the
-      # same job. Placed mid-job — where it was first written — a known-red
-      # step would silently disable the bubblewrap install, the
-      # privilege-request, project-layout and secret-broker suites, and the
-      # ShellCheck gate above, for every PR until the shell landed. That is the
-      # "a skipped check counts as success" shape this repository has been
-      # bitten by, and it would have switched off the shellcheck gate on the
-      # very files this branch adds. Anything expected to be red belongs at the
-      # bottom of its job.
-      - name: Run plugin CLI assertions
-        if: ${{ !cancelled() }}
-        run: ./tests/test-apex-plugin.sh
 
   android:
     name: Android client
@@ -4100,7 +4548,32 @@ jobs:
   result:
     name: PR validation
     if: always()
-    needs: [changes, static, rust, installer, engine, android]
+    # EVERY job, and that is not a style point: this is the ONLY required
+    # status, so a job missing from this list is a job whose failure cannot
+    # block a merge — strictly worse than the slow CI the shards were made to
+    # fix. When a shard is added, it is added HERE in the same commit.
+    #
+    # `tests/check-ci-jobs-aggregated.sh` asserts exactly that, by reading the
+    # workflow rather than trusting this comment.
+    needs:
+      - changes
+      - static
+      - static-windows
+      - static-chaos
+      - rust
+      - installer
+      - installer-ui
+      - installer-a11y
+      - engine
+      - engine-pkg
+      - engine-greeter
+      - engine-greeter-a11y
+      - engine-desktop
+      - engine-agent
+      - engine-shells
+      - engine-services
+      - engine-lint
+      - android
     runs-on: ubuntu-24.04
     steps:
       # `skipped` counts as success HERE and only here, and the distinction is
@@ -4108,7 +4581,7 @@ jobs:
       # thing.
       #
       # A job result of `skipped` comes from this workflow's own path filters:
-      # `rust`, `installer`, `engine` and `android` each carry
+      # the `rust`, `installer*`, `engine*` and `android` jobs each carry
       # `if: needs.changes.outputs.X == 'true'`, so a documentation-only PR
       # legitimately does not run them and must not be blocked by them.
       # `changes` itself is in `needs`, so a FAILURE there is caught rather than
