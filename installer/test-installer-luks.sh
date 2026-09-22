@@ -697,6 +697,14 @@ if [ -n "$LOOP_BIG" ] && [ -n "$LOOP_SMALL" ]; then
         bad "…and blkid would have seen a write if there had been one" \
             "blkid reported nothing even after mkfs — the two 'wrote nothing' cases prove nothing"
     fi
+elif [ "$ENGINE_RUNNABLE" != 1 ]; then
+    # The same reason check() and the dry-run block above skip: the engine half
+    # needs an APEX-OS image in ROOT podman storage and passwordless sudo, and
+    # a machine with neither cannot run the engine at all. Everything else here
+    # is a FAIL, because it means the prerequisites WERE there and the rig did
+    # not come up.
+    printf 'SKIP  %-46s no engine image\n' "netinstall+encrypt cases"
+    printf 'SKIP  %-46s no engine image\n' "the encrypted staging fallback"
 else
     bad "netinstall+encrypt cases could not run" \
         "engine=$ENGINE_RUNNABLE nohelper=$nohelper_made loops='$LOOP_BIG' '$LOOP_SMALL'"
@@ -758,7 +766,12 @@ stage_probe() {
 if ! grep -q '^stage_setup()' "$STAGE_FNS"; then
     bad "the staging functions could not be read out of the engine" "$ENGINE"
 elif ! sudo -n true 2>/dev/null || ! command -v mkfs.xfs >/dev/null 2>&1; then
-    bad "staging could not be measured here" "needs passwordless sudo and mkfs.xfs"
+    # A FAIL and not a SKIP, deliberately. mkfs.xfs is not incidental to this
+    # measurement — it is what stage_setup runs, and xfsprogs is one apt line
+    # away (pr-validation.yml installs it for this suite). Skipping here would
+    # hide the only runtime proof that the staging store is a real filesystem
+    # on a real loop device, which is the thing this section exists for.
+    bad "staging could not be measured here" "needs passwordless sudo and mkfs.xfs (xfsprogs)"
 else
     STAGE_OUT="$WORK/stage-real.txt"
     stage_probe "$STAGE_FNS" "$STAGE_OUT"
