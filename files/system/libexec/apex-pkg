@@ -58,6 +58,41 @@
 # repeating the command with --allow-unsigned, which records the decision against
 # that file's exact bytes so `apex pkg list` and `apex pkg verify` keep telling
 # the truth about where the software came from.
+#
+# AND A LOCAL .deb FILE, FOR THE SOFTWARE THAT SHIPS AS NOTHING ELSE
+# Anthropic publishes Claude Desktop for Linux only as a .deb — five rpm/yum
+# prefixes under downloads.claude.ai all answer 404 — and it is not alone:
+# Electron applications are packaged for apt and for nothing else all the time.
+# Until now the answer on this machine was to hand-unpack it into /usr/local and
+# run a per-app update timer, which this repository's own CLAUDE.md calls the
+# wrong model in as many words. So `apex install ./thing.deb` goes through the
+# SAME extension, the same cache, the same requested list and the same rollback
+# as everything else.
+#
+# What a .deb does NOT get is a second package manager. Specifically:
+#
+#   * its maintainer scripts are NEVER executed. They assume dpkg, apt and a
+#     Debian filesystem; Claude Desktop's postinst writes an apt source, which
+#     on this machine would be a second update channel the product decision
+#     explicitly forbids. A package whose entry point exists only because its
+#     postinst creates it is REFUSED rather than half-installed — the same
+#     lesson `apex install wine` taught with rpm scriptlets, where twelve
+#     /usr/bin entries shipped as dangling symlinks and the install reported
+#     success.
+#   * its Debian dependencies are NEVER resolved. `libgtk-3-0` is not a Fedora
+#     package name and no mapping between the two is honest. They are printed,
+#     recorded in state.json, and left to the user.
+#   * its payload may only land in /usr and /opt, and a shared library that
+#     would sit in a linker search path or a Debian multiarch directory is
+#     refused. See deb_layout_ok for why translating /usr/lib/x86_64-linux-gnu
+#     to /usr/lib64 is the worst of the three options.
+#   * it is never verified. Debian signs the apt INDEX, not the package file,
+#     so a .deb on disk is only as trustworthy as where it came from, and every
+#     one of them needs --allow-unsigned.
+#
+# There is no apt-repository client here: APEX fetches no .deb, resolves no
+# Debian dependency graph and tracks no Debian release. A .deb is installed
+# from a file the user already has, and that is the whole of it.
 # ─────────────────────────────────────────────────────────────────────────────
 set -euo pipefail
 
@@ -78,6 +113,12 @@ readonly STATE="${PKG_ROOT}/state.json"
 # NEVRA cannot be split back into a name unambiguously (is `foo-bar-1.0-1` the
 # package `foo-bar` or `foo`?), and the EVR is in the RPM header anyway.
 readonly LOCAL_DIR="${PKG_ROOT}/local"
+# Local .deb files, cached by package NAME under a directory of their own.
+# NOT merged into LOCAL_DIR: every function that touches that directory globs
+# `*.rpm`, reads an RPM header out of what it finds, and stores the result as
+# `local:<NAME>`. A second archive format sharing that namespace would make
+# `local:chrome` ambiguous the first time someone had both.
+readonly DEB_DIR="${PKG_ROOT}/deb"
 readonly ETC_SAVE="${PKG_ROOT}/etc"
 readonly ETC_LIST="${PKG_ROOT}/etc.list"
 readonly VAR_LIST="${PKG_ROOT}/var.list"
@@ -116,6 +157,12 @@ readonly LOCK="${PKG_ROOT}/.lock"
 #           September. Nothing else in that state.json moves across the image
 #           build that carries the fix, so this number is what makes the
 #           machine rebuild.
+#   3 -> NOT BUMPED for .deb support, deliberately. The level exists to force a
+#           rebuild when an existing extension's CONTENTS would come out
+#           different, and a machine running level 3 has no `deb:` entry in its
+#           requested list — there is no such thing as an extension built
+#           before this that holds a .deb. Bumping would re-download every rpm
+#           on every machine in the fleet to rebuild a byte-identical image.
 readonly PKG_COMPAT_LEVEL=3
 
 # Packages that must never come from an extension. The first group needs an
@@ -192,11 +239,60 @@ local_cache()  { printf '%s/%s.rpm'   "$LOCAL_DIR" "$(local_name "$1")"; }
 local_marker() { printf '%s/%s.trust' "$LOCAL_DIR" "$(local_name "$1")"; }
 
 # Does requested-list entry $1 name the same package the user typed as $2?
-# `apex remove chrome` has to match the entry `local:chrome`, because the user
-# installed it by path and a path is not what ends up in the list.
+# `apex remove chrome` has to match the entry `local:chrome` (a local .rpm) or
+# `deb:chrome` (a local .deb), because the user installed it by path and a path
+# is not what ends up in the list.
 requested_matches() {
-    [ "$1" = "$2" ] || [ "$1" = "local:${2}" ]
+    [ "$1" = "$2" ] || [ "$1" = "local:${2}" ] || [ "$1" = "deb:${2}" ]
 }
+
+# ── local .deb files ─────────────────────────────────────────────────────────
+# A .deb is an `ar` archive of three members: `debian-binary` (the format
+# version, "2.0"), `control.tar.*` (metadata and the maintainer scripts) and
+# `data.tar.*` (the payload). Some vendors append a fourth, `_gpgorigin` — a
+# debsigs signature. Cisco's Packet Tracer .deb on this developer's machine
+# carries one; see deb_trust_refusal for why APEX does not treat it as
+# verification.
+#
+# `dpkg-deb` is not in the image and is not wanted: it would bring dpkg's
+# database with it, and there is no world in which APEX maintains a second
+# package database. `ar` and `tar` are enough, and `ar` is already in the image
+# — Containerfile.core's 5a-aiapps stage unpacks the Claude Desktop .deb with it
+# and FATALs if binutils is absent, which is the same assertion made here.
+deb_magic_ok() {
+    local magic
+    magic="$(head -c8 -- "$1" 2>/dev/null | od -An -tx1 | tr -d ' \n')"
+    [ "$magic" = 213c617263683e0a ]   # !<arch>\n
+}
+
+# Is this argument meant to be a local .deb file? Same three narrow rules as
+# is_local_rpm_arg, and it MUST be asked first: is_local_rpm_arg answers true
+# for any argument containing a slash, so `apex install ./claude.deb` would
+# otherwise be refused as "not an RPM package".
+is_local_deb_arg() {
+    case "$1" in
+        *.deb) return 0 ;;   # named as a file, whether or not it exists yet
+        */*)   [ -f "$1" ] && deb_magic_ok "$1" ;;
+        *)     return 1 ;;
+    esac
+}
+
+# Debian policy says a package name is lowercase. Real vendor .debs are not:
+# Cisco ships `Package: PacketTracer`. Refusing those would be pedantry, so the
+# rule enforced here is the one that matters — the name out of an untrusted
+# archive becomes a path under DEB_DIR in a script running as root, so no
+# slash, no traversal, no leading dash, nothing a shell would reinterpret.
+valid_deb_name() {
+    [[ "$1" =~ ^[A-Za-z0-9][A-Za-z0-9+._-]*$ ]]
+}
+
+deb_id()         { printf 'deb:%s' "$1"; }
+is_deb_id()      { case "$1" in deb:?*) return 0 ;; esac; return 1; }
+deb_name()       { printf '%s' "${1#deb:}"; }
+deb_cache()      { printf '%s/%s.deb'   "$DEB_DIR" "$(deb_name "$1")"; }
+deb_marker()     { printf '%s/%s.trust' "$DEB_DIR" "$(deb_name "$1")"; }
+deb_entry_file() { printf '%s/%s.entry' "$DEB_DIR" "$(deb_name "$1")"; }
+deb_manifest()   { printf '%s/%s.files' "$DEB_DIR" "$(deb_name "$1")"; }
 
 have_flatpak() { command -v flatpak >/dev/null 2>&1; }
 
@@ -354,6 +450,282 @@ cache_local_rpm() {
         # A file that verifies now must not inherit an old trust decision.
         rm -f "$marker"
     fi
+}
+
+# ── .deb: reading the archive ────────────────────────────────────────────────
+
+# The member names, one per line. `ar` is asserted rather than probed for
+# because a missing one has to be a refusal, not a silent non-unpack.
+deb_members() {
+    command -v ar >/dev/null 2>&1 \
+        || die "installing a .deb needs 'ar' (from binutils), which this system does not have"
+    ar t -- "$1" 2>/dev/null
+}
+
+# Print one member on stdout. `ar p` exits 0 and prints NOTHING for a member
+# that is not in the archive (measured), so every caller checks the name
+# against deb_members first — otherwise a .deb with no control.tar would read
+# as one whose control file is empty, and every field would come back blank
+# instead of the file being refused.
+deb_member() {
+    ar p -- "$1" "$2" 2>/dev/null
+}
+
+# Run tar over a compressed member, streamed straight out of the ar archive.
+#
+# The decompressor is chosen from the member's NAME rather than left to tar,
+# because `tar -xf -` does not autodetect compression on a pipe: measured on
+# GNU tar 1.35, `ar p x.deb control.tar.xz | tar -tf -` answers "Archive is
+# compressed. Use -J option" and exits 2. dpkg names the member after the
+# compression it used, so the suffix is the declaration; a .deb whose suffix
+# lies simply fails to unpack, which is a refusal either way.
+deb_tar() {
+    local deb="$1" member="$2"; shift 2
+    local -a pre=()
+    case "$member" in
+        *.tar)      ;;
+        *.tar.gz)   pre=(-z) ;;
+        *.tar.xz)   pre=(-J) ;;
+        *.tar.bz2)  pre=(-j) ;;
+        *.tar.zst)  pre=(--zstd) ;;
+        *.tar.lzma) pre=(--lzma) ;;
+        *) die "the .deb member '${member}' uses a compression APEX cannot read" ;;
+    esac
+    ar p -- "$deb" "$member" | tar ${pre[@]+"${pre[@]}"} "$@"
+}
+
+# One field out of a Debian control file, with RFC822 continuation lines folded
+# onto it. `Depends:coreutils,libc-bin` — no space after the colon — is what
+# Cisco's Packet Tracer .deb actually ships, so the split is on the colon, not
+# on whitespace.
+deb_control_field() {
+    awk -v want="$2" '
+        BEGIN { want = tolower(want) ":"; out = ""; on = 0 }
+        /^[ \t]/ { if (on) { line = $0; sub(/^[ \t]+/, "", line); out = out " " line } ; next }
+        {
+            i = index($0, ":")
+            if (i > 0 && tolower(substr($0, 1, i)) == want) {
+                on = 1
+                out = substr($0, i + 1)
+                sub(/^[ \t]+/, "", out)
+            } else { on = 0 }
+        }
+        END { sub(/[ \t]+$/, "", out); print out }
+    ' "$1"
+}
+
+# Just the package name, for `apex remove ./thing.deb`. Deliberately NOT
+# inspect_local_deb: remove must work for a package the image has since started
+# shipping, and inspect_local_deb refuses exactly that case.
+deb_name_of() {
+    local deb="$1" members ctl name
+    members="$(deb_members "$deb")" || return 1
+    local cm
+    cm="$(grep -m1 -E '^control\.tar(\.[a-z0-9]+)?$' <<<"$members")" || return 1
+    ctl="$(mktemp -d "${TMPDIR:-/tmp}/apex-deb.XXXXXX")" || return 1
+    if deb_tar "$deb" "$cm" -xf - -C "$ctl" >/dev/null 2>&1 && [ -f "${ctl}/control" ]; then
+        name="$(deb_control_field "${ctl}/control" Package)"
+    fi
+    rm -rf "$ctl"
+    [ -n "${name:-}" ] || return 1
+    printf '%s' "$name"
+}
+
+# `<name>-<version>.<arch>`, the .deb answer to an rpm's NEVRA. Used for the
+# resolved set, so a state file says what is installed in one readable line.
+deb_identity() {
+    local deb="$1" members cm ctl out=""
+    members="$(deb_members "$deb")" || return 1
+    cm="$(grep -m1 -E '^control\.tar(\.[a-z0-9]+)?$' <<<"$members")" || return 1
+    ctl="$(mktemp -d "${TMPDIR:-/tmp}/apex-deb.XXXXXX")" || return 1
+    if deb_tar "$deb" "$cm" -xf - -C "$ctl" >/dev/null 2>&1 && [ -f "${ctl}/control" ]; then
+        out="$(deb_control_field "${ctl}/control" Package)"
+        out="${out}-$(deb_control_field "${ctl}/control" Version)"
+        out="${out}.$(deb_control_field "${ctl}/control" Architecture)"
+    fi
+    rm -rf "$ctl"
+    case "$out" in ''|-.) return 1 ;; esac
+    printf '%s' "$out"
+}
+
+# The exact package set this transaction would install: one NEVRA per rpm, one
+# identity per .deb, sorted. ext_up_to_date compares it and write_state records
+# it, so the decision to skip a rebuild and the record of what was built can
+# never disagree about the same machine.
+#
+# A .deb's line carries twelve hex of its sha256 as well as its version, and
+# that is not decoration: a vendor reissuing a download without moving the
+# version string is ordinary, and on the version alone `apex update` would
+# compare two different files and conclude nothing had changed.
+resolved_set() {
+    local destdir="$1"; shift
+    {
+        local f d id sum
+        for f in "$destdir"/*.rpm; do
+            [ -e "$f" ] || continue
+            rpm -qp --nosignature --qf '%{NAME}-%{EVR}.%{ARCH}\n' "$f" 2>/dev/null
+        done
+        for d in "$@"; do
+            [ -e "$d" ] || continue
+            id="$(deb_identity "$d")" || id="${d##*/}"
+            sum="$(sha "$d")"
+            printf 'deb:%s+%s\n' "$id" "${sum:0:12}"
+        done
+    } | LC_ALL=C sort
+}
+
+# Does a Debian architecture describe this machine? `all` is Debian's noarch.
+# i386 is deliberately NOT accepted on x86_64: the multilib machinery in this
+# engine is rpm's, a 32-bit Debian application would need a 32-bit Debian
+# userspace, and half-installing one is worse than refusing it.
+deb_arch_matches() {
+    local a="$1" host; host="$(uname -m)"
+    case "$a" in
+        all)     return 0 ;;
+        amd64)   [ "$host" = x86_64 ] ;;
+        arm64)   [ "$host" = aarch64 ] ;;
+        armhf)   [ "$host" = armv7l ] ;;
+        ppc64el) [ "$host" = ppc64le ] ;;
+        s390x|riscv64) [ "$host" = "$a" ] ;;
+        *) return 1 ;;
+    esac
+}
+
+# Everything that can be wrong with a .deb the user pointed at, decided here,
+# once, BEFORE anything is copied or extracted. Sets LD_PATH, LD_NAME,
+# LD_VERSION, LD_ARCH, LD_DEPENDS, LD_SCRIPTS and LD_DATA_MEMBER; dies
+# otherwise. Globals rather than a printed value for the same reason
+# inspect_local_rpm uses them: `die` inside a command substitution kills only
+# the subshell, and the caller would carry on with an empty value.
+inspect_local_deb() {
+    local arg="$1" members cm ctl fmt installed
+    [ -e "$arg" ] || die "no such file: ${arg}"
+    [ -f "$arg" ] || die "not a regular file: ${arg}"
+    [ -r "$arg" ] || die "cannot read ${arg} (permission denied)"
+    LD_PATH="$(readlink -f -- "$arg")" || die "cannot resolve the path ${arg}"
+    [ -f "$LD_PATH" ] || die "not a regular file: ${arg}"
+    deb_magic_ok "$LD_PATH" \
+        || die "${arg} is not a Debian package (it does not begin with the ar archive magic '!<arch>')"
+
+    members="$(deb_members "$LD_PATH")"
+    grep -qx 'debian-binary' <<<"$members" \
+        || die "${arg} has no debian-binary member — it is an ar archive, but not a .deb"
+    fmt="$(deb_member "$LD_PATH" debian-binary)"
+    fmt="${fmt%%$'\n'*}"
+    [ "$fmt" = "2.0" ] \
+        || die "${arg} declares .deb format '${fmt:-(empty)}'; APEX reads format 2.0"
+
+    cm="$(grep -m1 -E '^control\.tar(\.[a-z0-9]+)?$' <<<"$members")" \
+        || die "${arg} has no control archive"
+    LD_DATA_MEMBER="$(grep -m1 -E '^data\.tar(\.[a-z0-9]+)?$' <<<"$members")" \
+        || die "${arg} has no data archive — there is nothing in it to install"
+
+    ctl="$(mktemp -d "${TMPDIR:-/tmp}/apex-deb.XXXXXX")" || die "cannot create a temporary directory"
+    deb_tar "$LD_PATH" "$cm" -xf - -C "$ctl" >/dev/null 2>&1 \
+        || { rm -rf "$ctl"; die "cannot read the control archive of ${arg}"; }
+    if [ ! -f "${ctl}/control" ]; then
+        rm -rf "$ctl"
+        die "${arg} has no control file, so nothing states what package it is"
+    fi
+    LD_NAME="$(deb_control_field "${ctl}/control" Package)"
+    LD_VERSION="$(deb_control_field "${ctl}/control" Version)"
+    LD_ARCH="$(deb_control_field "${ctl}/control" Architecture)"
+    LD_DEPENDS="$(deb_control_field "${ctl}/control" Depends)"
+    local pre; pre="$(deb_control_field "${ctl}/control" Pre-Depends)"
+    if [ -n "$pre" ]; then
+        LD_DEPENDS="${pre}${LD_DEPENDS:+, }${LD_DEPENDS}"
+    fi
+    # Which maintainer scripts exist. Recorded so the refusal and the warning
+    # can NAME them; not one of them is ever executed.
+    LD_SCRIPTS=""
+    local s
+    for s in preinst postinst prerm postrm config; do
+        [ -f "${ctl}/${s}" ] && LD_SCRIPTS="${LD_SCRIPTS}${LD_SCRIPTS:+ }${s}"
+    done
+    rm -rf "$ctl"
+
+    [ -n "$LD_NAME" ] && [ -n "$LD_VERSION" ] && [ -n "$LD_ARCH" ] \
+        || die "the control file of ${arg} has no name/version/architecture"
+    valid_deb_name "$LD_NAME" \
+        || die "refusing ${arg}: its package name '${LD_NAME}' is not a name APEX will turn into a path"
+    deb_arch_matches "$LD_ARCH" \
+        || die "refusing ${arg}: it is built for Debian architecture '${LD_ARCH}', this machine is $(uname -m)"
+
+    if [[ "$LD_NAME" =~ $REFUSE_RE ]]; then
+        die "refusing ${arg}: '${LD_NAME}' is a kernel or core-system package, which must ship in the APEX image, not an extension"
+    fi
+    if installed="$(rpm -q --qf '%{EVR}' -- "$LD_NAME" 2>/dev/null)"; then
+        die "refusing ${arg}: APEX-OS already ships ${LD_NAME}-${installed}. Replacing an image package from an extension is an OS update, not a package install"
+    fi
+}
+
+# ── .deb: trust ──────────────────────────────────────────────────────────────
+# There is no such thing as a verified local .deb, and pretending otherwise
+# would be a weaker rule than the RPM path's rather than the same one.
+#
+# Debian's trust model signs the apt INDEX a package is fetched through, not
+# the package file: `Release`/`InRelease` is signed, it names the `Packages`
+# index by hash, and `Packages` names each .deb by sha256. Detach the file from
+# that chain — download it from a website, copy it off a USB stick — and every
+# link is gone. Containerfile.core's 5a-aiapps stage reconstructs the whole
+# chain for the image build, key fingerprint pinned in this repository, and it
+# takes twenty lines and a network fetch to do it.
+#
+# `_gpgorigin` (debsigs) is not treated as verification either. APEX carries no
+# deb keyring and no policy file saying which keys may sign what, and a
+# signature checked against a key taken from the thing it signs proves nothing
+# — the same reasoning that made the image PIN both vendors' fingerprints.
+#
+# So every local .deb needs --allow-unsigned, and the acceptance is recorded
+# against that file's exact bytes under DEB_DIR, exactly as it is for an RPM.
+deb_trust_refusal() {
+    local file="$1" name="$2" depends="$3"
+    {
+        printf 'apex-pkg: error: %s\n' \
+            "cannot verify ${file}" \
+            "" \
+            "A .deb carries no signature APEX can check. Debian signs the apt" \
+            "INDEX a package is downloaded through, not the package file, so a" \
+            ".deb sitting on disk is worth exactly as much as wherever you got" \
+            "it from. APEX has no deb keyring and does not accept a '_gpgorigin'" \
+            "member as proof of anything." \
+            ""
+        if [ -n "$depends" ]; then
+            printf 'apex-pkg: error: %s\n' \
+                "APEX also resolves NONE of its dependencies. Debian package" \
+                "names do not exist on Fedora, and '${name}' declares these:"
+            printf '%s\n' "$depends" | tr ',' '\n' | sed 's/^[[:space:]]*/apex-pkg: error:     /'
+            printf 'apex-pkg: error: %s\n' \
+                "Anything in that list APEX-OS does not already provide under" \
+                "some other name is yours to install." \
+                ""
+        fi
+        printf 'apex-pkg: error: %s\n' \
+            "If the vendor's own site is where it came from and you accept both:" \
+            "  sudo apex install --allow-unsigned ${file}"
+    } >&2
+    exit 1
+}
+
+# Has the user accepted THIS .deb, and are these still the bytes they accepted?
+trusted_deb() {
+    local marker; marker="$(deb_marker "$1")"
+    [ -f "$marker" ] || return 1
+    [ "$(cat "$marker" 2>/dev/null)" = "$(sha "$2")" ]
+}
+
+# Copy the .deb into PKG_ROOT so every later rebuild has it, the same contract
+# cache_local_rpm keeps: `apex update` and the post-OS-upgrade rebuild must
+# still work when the download is long deleted.
+cache_local_deb() {
+    local src="$1" name="$2" dest marker
+    install -d -m0700 "$DEB_DIR"
+    dest="$(deb_cache "$name")"
+    marker="$(deb_marker "$name")"
+    cp -f -- "$src" "${dest}.tmp"
+    mv -f "${dest}.tmp" "$dest"
+    sha "$dest" > "${marker}.tmp"
+    mv -f "${marker}.tmp" "$marker"
 }
 
 # ── build ────────────────────────────────────────────────────────────────────
@@ -808,6 +1180,391 @@ extract_rpms() {
         rm -rf "$scratch"
     fi
     rm -rf "${root}/usr/share/rpm" "${root}/var/lib/rpm" "${root}/usr/lib/sysimage/rpm"
+}
+
+# ── .deb: where the image really is ──────────────────────────────────────────
+# NOT `/usr`. While an extension is merged, /usr is an overlay whose upper
+# layers ARE the extension this function is deciding about, so asking the
+# running /usr would report every path the previous build placed as belonging
+# to the image, and `apex update` would then refuse to rebuild what it built
+# itself. Measured on this machine: /usr is mounted `overlay sysext ...
+# lowerdir=/run/systemd/sysext/meta/usr:/run/systemd/sysext/extensions/apex-user/usr:/usr`.
+#
+# NOT the rpmdb either, which is what image_owns() asks for RPM paths. The
+# rpmdb is BLIND to the one application this whole route exists for:
+# Containerfile.core's 5a-aiapps stage puts Claude Desktop into
+# /usr/lib/claude-desktop with `cp -a` (Anthropic publishes no rpm — five
+# rpm/yum prefixes under downloads.claude.ai all 404), so no package owns a
+# single one of its 1,190 files and `rpm -qf` answers "not owned" for every
+# one. A guard built on the rpmdb would wave a .deb straight over the image's
+# own copy of the app.
+#
+# The booted ostree deployment is the pristine image, files and all, and the
+# kernel command line says which one it is. Failing CLOSED here is the same
+# choice merge_multilib makes and the opposite of image_owns(): "I cannot tell
+# what the image has" must stop a .deb from shadowing /usr, because an empty
+# answer reads as "the image owns nothing".
+image_hierarchy_root() {
+    if [ ! -e /run/ostree-booted ]; then
+        # Not an image-based system at all — a container, a CI runner, a test
+        # fixture. There is no extension overlaying anything there, so the live
+        # root IS the image.
+        printf '/'
+        return 0
+    fi
+    local param dir
+    param="$(awk '{for (i = 1; i <= NF; i++) if ($i ~ /^ostree=/) { print substr($i, 8); exit }}' /proc/cmdline)"
+    [ -n "$param" ] \
+        || die "cannot tell which deployment is booted (no ostree= on the kernel command line) — refusing to decide what the image owns"
+    dir="$(readlink -f -- "$param" 2>/dev/null)" || dir=""
+    { [ -n "$dir" ] && [ -d "${dir}/usr" ]; } \
+        || die "the booted deployment '${param}' has no /usr — refusing to decide what the image owns blind"
+    printf '%s' "$dir"
+}
+
+# ── .deb: the payload ────────────────────────────────────────────────────────
+
+# Collapse `.` and `..` out of a path without touching the filesystem. Used on
+# symlink targets, which may legitimately be relative: claude-desktop's own
+# /usr/bin/claude-desktop is `../lib/claude-desktop/claude-desktop`, so a blunt
+# "no .. in a link target" rule would refuse the driver package for this route.
+deb_norm_path() {
+    local rest="${1}/" out="" seg
+    while [ -n "$rest" ]; do
+        seg="${rest%%/*}"
+        rest="${rest#*/}"
+        case "$seg" in
+            ''|.) ;;
+            ..)   out="${out%/*}" ;;
+            *)    out="${out}/${seg}" ;;
+        esac
+    done
+    printf '%s' "${out:-/}"
+}
+
+# Every member name in the data archive, checked BEFORE a byte is written.
+#
+# GNU tar 1.35 does defend itself against the classic symlink escape — measured
+# here with an archive holding `usr/evil -> ../../outside` followed by
+# `usr/evil/victim`: it refuses with "Cannot open: Not a directory", exits 2,
+# and the file outside the extraction root is untouched. This pass is the layer
+# that does not depend on that: an absolute member name or a `..` component is
+# refused outright, and so is a name carrying an escape sequence, because the
+# walk that judges the extracted tree reads one path per line and a name
+# containing a newline would split into two.
+deb_names_ok() {
+    local deb="$1" member="$2" name="$3"
+    local names n bad=0
+    names="$(deb_tar "$deb" "$member" --quoting-style=escape -tf -)" \
+        || die "cannot list the contents of ${name}'s data archive"
+    [ -n "$names" ] || die "refusing '${name}': its data archive is empty"
+    while IFS= read -r n; do
+        [ -n "$n" ] || continue
+        case "$n" in
+            /*)   warn "refusing '${name}': it ships an absolute path '${n}'"; bad=1 ;;
+            *\\*) warn "refusing '${name}': the member name '${n}' contains an escape sequence"; bad=1 ;;
+        esac
+        case "/${n}/" in
+            */../*) warn "refusing '${name}': the member name '${n}' climbs out of the package"; bad=1 ;;
+        esac
+    done <<<"$names"
+    [ "$bad" = 0 ] || die "refusing '${name}': its data archive names paths outside itself"
+}
+
+# type, path and (for a symlink) its target, one entry per line, for a tree the
+# .deb has been unpacked into.
+deb_walk() {
+    ( cd "$1" && find . -mindepth 1 -printf '%y\t/%P\t%l\n' )
+}
+
+# Is this the Debian multiarch directory (x86_64-linux-gnu, arm-linux-gnueabihf)?
+deb_is_multiarch_dir() {
+    [[ "$1" =~ ^[a-z0-9_]+-linux-(gnu|musl)[a-z0-9]*$ ]]
+}
+
+# WHAT A .deb IS ALLOWED TO PLACE, and the three reasons the list is this short.
+#
+# 1. A system extension merges /usr and /opt, and NOTHING else. rpm's own
+#    extractions get /etc and /var lifted out by split_out_of_image and folded
+#    from /lib and /bin by the same function, because measured cases demanded
+#    it. There is no such case for a .deb and there are two reasons not to
+#    invent one: /etc holds Debian CONFFILES whose whole lifecycle is dpkg's
+#    (and install_etc's removal pass is the one that ate 26 image-owned /etc
+#    files in September), and a Debian package has been merged-usr since
+#    bookworm, so a payload outside /usr and /opt is a package APEX does not
+#    understand rather than one it should silently reshape. All three real
+#    .debs measured while writing this — claude-desktop, opencode, Cisco Packet
+#    Tracer — ship only ./usr and ./opt.
+#
+# 2. DEBIAN LIBRARIES GO WHERE FEDORA DOES NOT LOOK, AND WHERE THEY DO GET
+#    LOOKED AT THEY ARE THE WRONG ONES. Debian puts shared libraries in
+#    /usr/lib/x86_64-linux-gnu; Fedora's dynamic linker searches /usr/lib64.
+#    Translating between them is not an option: a Debian libfoo.so.1 dropped
+#    into /usr/lib64 is found by EVERY program on the machine, and it was built
+#    against a different glibc and a different soname set. That is the
+#    fontconfig.i686 defect over again — /usr/bin/fc-list became a 32-bit
+#    binary, fc-list returned zero fonts and Steam drew no text — except an
+#    extension cannot be un-merged by rebooting. Symlinking the multiarch
+#    directory has the same effect by another route. Leaving it verbatim is
+#    honest but useless: nothing on Fedora reads that path, so the package
+#    installs and then does not work. So a .deb that ships a shared library
+#    into a search path or a multiarch directory is REFUSED, and says why.
+#
+#    A library under the package's OWN directory is a different thing and is
+#    carried: /usr/lib/claude-desktop/libEGL.so is found by claude-desktop's
+#    own RPATH and by nothing else. That is the Electron case, which is most of
+#    what ships as a .deb and nothing else.
+#
+# 3. Kernel modules need an initramfs and a real deployment, which is the same
+#    refusal split_out_of_image makes for an rpm.
+deb_layout_ok() {
+    local scratch="$1" name="$2"
+    local t p l bad=0 tgt d comp rest files=0
+    while IFS=$'\t' read -r t p l; do
+        case "$p" in
+            # /usr/local is a SYMLINK to ../var/usrlocal on an ostree system,
+            # so a payload directory there does not land inside the hierarchy
+            # the extension merges — it lands on top of the symlink itself. The
+            # shadow guard happens to catch it today, but only because that
+            # symlink dangles in the deployment tree, which is an accident of
+            # /var/usrlocal not existing there rather than a rule. Debian
+            # policy forbids a package shipping /usr/local anyway.
+            /usr/local|/usr/local/*)
+                warn "refusing '${name}': it ships '${p}', and /usr/local on APEX is a symlink into /var that an extension cannot merge"
+                bad=1; continue ;;
+            /usr|/opt|/usr/*|/opt/*) ;;
+            *)
+                warn "refusing '${name}': it ships '${p}', and a system extension merges only /usr and /opt"
+                bad=1; continue ;;
+        esac
+        if [ "$t" = l ]; then
+            case "$l" in
+                /*) tgt="$(deb_norm_path "$l")" ;;
+                *)  tgt="$(deb_norm_path "${p%/*}/${l}")" ;;
+            esac
+            case "$tgt" in
+                /usr|/opt|/usr/*|/opt/*) ;;
+                *)
+                    warn "refusing '${name}': the symlink '${p}' points at '${tgt}', outside the hierarchies an extension can merge"
+                    bad=1; continue ;;
+            esac
+        fi
+        case "$p" in
+            /usr/lib/modules/*|/usr/lib/firmware/*)
+                warn "refusing '${name}': it ships '${p}' — kernel modules and firmware need an image build, not an extension"
+                bad=1; continue ;;
+        esac
+        # Directories carry no code; only a file or a link can shadow a library.
+        [ "$t" = d ] && continue
+        files=$((files + 1))
+        d="${p%/*}"
+        # Every path component, without word splitting: a component holding a
+        # glob character would otherwise be expanded against the real
+        # filesystem by `for comp in ${p//\// }`.
+        rest="${p#/}"
+        while [ -n "$rest" ]; do
+            comp="${rest%%/*}"
+            if [ "$rest" = "$comp" ]; then rest=""; else rest="${rest#*/}"; fi
+            if deb_is_multiarch_dir "$comp"; then
+                warn "refusing '${name}': it ships '${p}' into a Debian multiarch directory. Fedora's dynamic linker never looks there, and moving it to /usr/lib64 would put a Debian build of a library in front of the one APEX-OS runs on"
+                bad=1
+                continue 2
+            fi
+        done
+        case "${p##*/}" in
+            *.so|*.so.*)
+                case "$d" in
+                    /lib|/lib64|/usr/lib|/usr/lib64)
+                        warn "refusing '${name}': it ships the shared library '${p}' where the system linker looks. An extension putting a Debian build of a library in front of the image's own is not recoverable without a rollback"
+                        bad=1; continue ;;
+                esac ;;
+        esac
+    done < <(deb_walk "$scratch")
+    # A data archive of nothing but directories installs nothing and reports
+    # success, which is the shape of every defect this engine has had.
+    [ "$files" -gt 0 ] \
+        || die "refusing '${name}': its payload contains no files at all, only directories"
+    [ "$bad" = 0 ] \
+        || die "refusing '${name}': see above. A .deb whose payload cannot be placed is refused rather than half-installed"
+}
+
+# THE PACKAGE MUST BRING ITS OWN WAY IN.
+#
+# A .deb's maintainer scripts are never run, and for a whole class of packages
+# the maintainer script is what creates the program's entry point. This engine
+# already learned that shape from rpm: `apex install wine` extracted with
+# --noscripts produced /usr/bin/wine32 and wine64 as real files, /usr/bin/wine
+# ABSENT, and twelve dangling symlinks pointing at it — and reported success.
+#
+# The rule here is read off the PAYLOAD rather than off the scripts, because a
+# script grep gets this wrong in both directions. opencode's postinst runs
+# `update-alternatives --install /usr/bin/ai.opencode.desktop ...`, which looks
+# exactly like the wine case; but its .desktop entry already says
+# `Exec=/opt/OpenCode/ai.opencode.desktop`, a path the package ships, so it
+# launches from a menu with no script run at all. Cisco's Packet Tracer ships
+# /opt/pt and NOTHING else — no binary on PATH, no .desktop — and is refused,
+# correctly, because without its postinst there is no way to start it.
+#
+# Prints the entry point it found; returns non-zero when there is none.
+deb_entry_point() {
+    local scratch="$1"
+    local p desktop line first
+    for p in "${scratch}/usr/bin"/* "${scratch}/usr/sbin"/*; do
+        { [ -e "$p" ] || [ -L "$p" ]; } || continue
+        [ -d "$p" ] && continue
+        printf '%s' "/${p#"${scratch}/"}"
+        return 0
+    done
+    for desktop in "${scratch}/usr/share/applications"/*.desktop; do
+        [ -f "$desktop" ] || continue
+        line="$(grep -m1 '^Exec=' "$desktop" 2>/dev/null)" || continue
+        first="${line#Exec=}"
+        first="${first%% *}"
+        [ -n "$first" ] || continue
+        case "$first" in
+            /*) { [ -e "${scratch}${first}" ] || [ -L "${scratch}${first}" ]; } || continue
+                printf '%s' "$first"; return 0 ;;
+            *)  { [ -e "${scratch}/usr/bin/${first}" ] || [ -L "${scratch}/usr/bin/${first}" ]; } || continue
+                printf '%s' "/usr/bin/${first}"; return 0 ;;
+        esac
+    done
+    return 1
+}
+
+# Nothing a .deb ships may sit on top of something the image already provides,
+# or on top of a path this same transaction's RPMs have already placed.
+#
+# $3 is the image hierarchy root rather than a constant so the suite can drive
+# this over a fixture tree — the same reason state_kind() takes the state path
+# as a parameter instead of reading an environment override in a script that
+# runs as root.
+deb_shadow_ok() {
+    local scratch="$1" root="$2" imgroot="$3" name="$4"
+    local t p l bad=0 img
+    img="${imgroot%/}"
+    while IFS=$'\t' read -r t p l; do
+        if [ "$t" = d ]; then
+            # Two packages sharing /usr/bin is not a conflict; a package whose
+            # directory lands where the image keeps a file is.
+            if { [ -e "${img}${p}" ] || [ -L "${img}${p}" ]; } && [ ! -d "${img}${p}" ]; then
+                warn "refusing '${name}': it needs '${p}' to be a directory and APEX-OS has a file there"
+                bad=1
+            fi
+            continue
+        fi
+        # -e is false for a dangling symlink, which is a file that exists.
+        if [ -e "${img}${p}" ] || [ -L "${img}${p}" ]; then
+            warn "refusing '${name}': APEX-OS already provides '${p}'. An extension may not shadow the image — that is an OS update, not a package install"
+            bad=1
+            continue
+        fi
+        if [ -e "${root}${p}" ] || [ -L "${root}${p}" ]; then
+            warn "refusing '${name}': '${p}' is also shipped by a package already in this transaction"
+            bad=1
+        fi
+    done < <(deb_walk "$scratch")
+    [ "$bad" = 0 ] || die "refusing '${name}': see above; nothing was changed"
+}
+
+# Has an image update started shipping what this .deb provides? Then the .deb
+# must leave, exactly as rebuild_extension drops an rpm the image has adopted.
+#
+# Fails OPEN — "cannot tell" means keep — which is the opposite direction from
+# deb_shadow_ok above and the same asymmetry image_owns() documents: a package
+# wrongly kept is refused loudly by the shadow guard a moment later, while a
+# package wrongly dropped is software that silently disappears.
+deb_superseded_by_image() {
+    local id="$1" entry imgroot
+    entry="$(cat "$(deb_entry_file "$id")" 2>/dev/null)" || return 1
+    [ -n "$entry" ] || return 1
+    # image_hierarchy_root dies on a machine whose deployment it cannot find;
+    # inside this substitution that ends the subshell and returns non-zero,
+    # which is the fail-open answer this caller wants.
+    imgroot="$(image_hierarchy_root 2>/dev/null)" || return 1
+    [ -n "$imgroot" ] || return 1
+    imgroot="${imgroot%/}"
+    [ -e "${imgroot}${entry}" ] || [ -L "${imgroot}${entry}" ]
+}
+
+# Unpack the cached .deb files into the payload the RPM passes have already
+# built.
+#
+# It runs AFTER extract_rpms and BEFORE fix_caches, and neither is arbitrary.
+# After, so the shadow guard can see every path this transaction's RPMs placed
+# and refuse a collision instead of letting `cp -a` decide it. Before, so the
+# desktop, MIME and GSettings caches are rebuilt over the union of image,
+# RPMs and .debs — which is precisely the `update-desktop-database` and
+# `update-mime-database` work the maintainer script would have done, done by
+# the engine over a tree it understands instead of by vendor code running as
+# root.
+extract_debs() {
+    local root="$1"; shift
+    local imgroot
+    imgroot="$(image_hierarchy_root)" || die "cannot locate the image hierarchy"
+    [ -n "$imgroot" ] || die "cannot locate the image hierarchy"
+
+    local deb name scratch entry
+    for deb in "$@"; do
+        inspect_local_deb "$deb"
+        name="$LD_NAME"
+        msg "unpacking ${name}-${LD_VERSION} (.deb)"
+        scratch="${root}.deb-${name}"
+        rm -rf "$scratch"
+        mkdir -p "$scratch"
+
+        deb_names_ok "$deb" "$LD_DATA_MEMBER" "$name"
+        # --no-same-owner: a .deb records numeric ids, and a member owned by
+        # uid 1000 would otherwise land in /usr owned by whoever happens to
+        # hold that id. -p keeps the modes, which matters for exactly one
+        # thing in practice: claude-desktop ships chrome-sandbox as 4755 and
+        # Chromium refuses to start when it finds that helper present but not
+        # setuid.
+        deb_tar "$deb" "$LD_DATA_MEMBER" -xf - -C "$scratch" --no-same-owner -p \
+            || die "unpacking ${name}'s data archive failed"
+
+        deb_layout_ok "$scratch" "$name"
+        deb_shadow_ok "$scratch" "$root" "$imgroot" "$name"
+        # No program, and a maintainer script that would have created one, is
+        # the refusal this rule exists for. No program and NO maintainer script
+        # is a data package — a font, an icon theme, a set of headers — which
+        # has nothing to start and nothing that was ever going to create one.
+        # Refusing that would be refusing it for a reason that is not true.
+        if entry="$(deb_entry_point "$scratch")"; then
+            :
+        elif [ -n "$LD_SCRIPTS" ]; then
+            die "refusing '${name}': it ships no program APEX can start — no executable in /usr/bin and no desktop entry whose Exec is a path the package ships. Its entry point is created by its maintainer script(s) (${LD_SCRIPTS}), and APEX never runs those: they assume dpkg, apt and a Debian filesystem"
+        else
+            entry=""
+            msg "'${name}': a data package — it ships no program, and no maintainer script that would have created one"
+        fi
+
+        if [ -n "$LD_SCRIPTS" ]; then
+            warn "'${name}': its maintainer script(s) — ${LD_SCRIPTS} — were NOT run. They assume dpkg and a Debian layout; APEX extracts the payload only"
+        fi
+        if [ -n "$LD_DEPENDS" ]; then
+            warn "'${name}': APEX resolved none of its Debian dependencies (${LD_DEPENDS}). Debian package names do not exist on Fedora; anything APEX-OS does not already provide under another name is yours to install"
+        fi
+
+        cp -a "${scratch}/." "${root}/" \
+            || die "merging ${name} into the payload failed"
+
+        # The record of what this .deb contributed. `rpm -qf` can never answer
+        # for these paths, so this file is the equivalent: it is what
+        # `apex pkg verify` reads, and it is what a future pass over /usr has
+        # to consult before deciding a path is unowned.
+        install -d -m0700 "$DEB_DIR"
+        deb_walk "$scratch" | awk -F'\t' '$1 != "d" { print $2 }' | LC_ALL=C sort \
+            > "$(deb_manifest "$name")"
+        # The witness deb_superseded_by_image asks about on every later
+        # rebuild. A data package has no entry point, so the first path it
+        # ships stands in: the question is only ever "has the image started
+        # providing this", and any path the package owns answers it.
+        [ -n "$entry" ] || entry="$(head -1 "$(deb_manifest "$name")")"
+        printf '%s\n' "$entry" > "$(deb_entry_file "$name")"
+        printf '%s\n' "$LD_DEPENDS" > "${DEB_DIR}/${name}.depends"
+        msg "${name}: $(wc -l < "$(deb_manifest "$name")") file(s), entry point ${entry}"
+        rm -rf "$scratch"
+    done
 }
 
 # ── alternatives ─────────────────────────────────────────────────────────────
@@ -1543,38 +2300,58 @@ merged() {
 #
 # Runs only after save_requested has committed a successful build, so a failed
 # install can never take a user's cached RPM with it.
-gc_local_cache() {
-    [ -d "$LOCAL_DIR" ] || return 0
+# One cache directory's worth of retirement: everything under $1 whose package
+# name the requested list no longer carries is moved into the spool $2, so
+# `apex pkg rollback` can put it back. $3 is the requested-list prefix that
+# owns the directory — `local:` for .rpm files, `deb:` for .deb files.
+#
+# The name is the basename minus its LAST extension, which is what lets one
+# package own several side files: chrome.rpm and chrome.trust, or
+# claude-desktop.deb, .trust, .entry and .files.
+gc_cache_dir() {
+    local dir="$1" spool="$2" prefix="$3"
+    [ -d "$dir" ] || return 0
     local -a keep=()
-    mapfile -t keep < <(load_requested | sed -n 's/^local://p')
-    install -d -m0700 "${ROLLBACK_DIR}/local"
-    find "${ROLLBACK_DIR}/local" -mindepth 1 -maxdepth 1 -delete 2>/dev/null || true
+    mapfile -t keep < <(load_requested | sed -n "s/^${prefix}//p")
+    install -d -m0700 "$spool"
+    find "$spool" -mindepth 1 -maxdepth 1 -delete 2>/dev/null || true
     local f base name k found
-    for f in "$LOCAL_DIR"/*.rpm "$LOCAL_DIR"/*.trust; do
+    for f in "$dir"/*; do
         [ -e "$f" ] || continue
         base="${f##*/}"
-        name="${base%.rpm}"; name="${name%.trust}"
+        name="${base%.*}"
         found=0
         for k in "${keep[@]:-}"; do
             [ "$k" = "$name" ] && found=1
         done
         [ "$found" = 1 ] && continue
-        mv -f "$f" "${ROLLBACK_DIR}/local/${base}"
+        mv -f "$f" "${spool}/${base}"
     done
+}
+
+gc_local_cache() {
+    gc_cache_dir "$LOCAL_DIR" "${ROLLBACK_DIR}/local" 'local:'
+    gc_cache_dir "$DEB_DIR"   "${ROLLBACK_DIR}/deb"   'deb:'
 }
 
 # The other half of gc_local_cache, and deliberately NOT part of
 # restore_previous: a failed merge undoes the extension while the requested list
 # and the cache are still untouched, so putting the previous generation back
 # there would resurrect packages nobody asked for.
-restore_local_cache() {
-    [ -d "${ROLLBACK_DIR}/local" ] || return 0
-    install -d -m0700 "$LOCAL_DIR"
+restore_cache_dir() {
+    local spool="$1" dir="$2"
+    [ -d "$spool" ] || return 0
+    install -d -m0700 "$dir"
     local f
-    for f in "${ROLLBACK_DIR}/local"/*; do
+    for f in "$spool"/*; do
         [ -e "$f" ] || continue
-        mv -f "$f" "${LOCAL_DIR}/${f##*/}"
+        mv -f "$f" "${dir}/${f##*/}"
     done
+}
+
+restore_local_cache() {
+    restore_cache_dir "${ROLLBACK_DIR}/local" "$LOCAL_DIR"
+    restore_cache_dir "${ROLLBACK_DIR}/deb"   "$DEB_DIR"
 }
 
 restore_previous() {
@@ -1619,28 +2396,42 @@ activate_payload() {
 }
 
 write_state() {
-    local destdir="$1"
+    local destdir="$1"; shift
     mkdir -p "$PKG_ROOT"
     local resolved requested
-    resolved="$(for f in "$destdir"/*.rpm; do
-                    rpm -qp --nosignature --qf '%{NAME}-%{EVR}.%{ARCH}\n' "$f" 2>/dev/null
-                done | sort | json_string_array)"
+    resolved="$(resolved_set "$destdir" "$@" | json_string_array)"
     requested="$(load_requested | json_string_array)"
     # Provenance, recorded so `apex pkg list` and `apex pkg verify` can say where
     # each package came from instead of presenting a vendor RPM as if a Fedora
     # mirror had signed it.
-    local locals unsigned n
+    local locals unsigned n debfiles debdeps
     locals="$(load_requested | sed -n 's/^local://p' | sort | json_string_array)"
-    unsigned="$(load_requested | sed -n 's/^local://p' | sort | while IFS= read -r n; do
-                    [ -n "$n" ] || continue
-                    [ -f "$(local_marker "$n")" ] && printf '%s\n' "$n"
-                    true
-                done | json_string_array)"
+    debfiles="$(load_requested | sed -n 's/^deb://p' | sort | json_string_array)"
+    # Every .deb is in this list by construction, not by a marker: there is no
+    # such thing as a verified local .deb, so `apex pkg verify` must say so
+    # about all of them. See deb_trust_refusal.
+    unsigned="$( { load_requested | sed -n 's/^local://p' | while IFS= read -r n; do
+                       [ -n "$n" ] || continue
+                       [ -f "$(local_marker "$n")" ] && printf '%s\n' "$n"
+                       true
+                   done
+                   load_requested | sed -n 's/^deb://p'
+                 } | sort | json_string_array)"
+    # What each .deb says it needs, recorded verbatim because APEX resolves none
+    # of it: Debian dependency names are not Fedora package names and guessing a
+    # mapping would be worse than printing the truth.
+    debdeps="$(load_requested | sed -n 's/^deb://p' | sort | while IFS= read -r n; do
+                   [ -n "$n" ] || continue
+                   printf '%s\t%s\n' "$n" "$(cat "${DEB_DIR}/${n}.depends" 2>/dev/null || true)"
+               done | jq -R -s 'split("\n") | map(select(length > 0)) | map(split("\t"))
+                                | map({(.[0]): (.[1] // "")}) | add // {}')"
     local payload; payload="$(current_payload)"
     jq -n \
         --argjson requested "$requested" \
         --argjson resolved "$resolved" \
         --argjson local_files "$locals" \
+        --argjson deb_files "$debfiles" \
+        --argjson deb_depends "$debdeps" \
         --argjson unsigned "$unsigned" \
         --arg os_id "$(os_id)" \
         --arg os_version "$(os_version)" \
@@ -1650,6 +2441,7 @@ write_state() {
         --arg size "$(payload_bytes "$payload")" \
         --argjson compat_level "$PKG_COMPAT_LEVEL" \
         '{requested:$requested, resolved:$resolved, local_files:$local_files,
+          deb_files:$deb_files, deb_depends:$deb_depends,
           unsigned_accepted:$unsigned, os_id:$os_id,
           os_version_id:$os_version, built:$built, image:$image,
           image_sha256:$sha, image_bytes:($size|tonumber),
@@ -1725,7 +2517,15 @@ rebuild_extension() {
     for a in "${want[@]}"; do
         probe="$a"
         is_local_id "$a" && probe="$(local_name "$a")"
+        is_deb_id "$a"   && probe="$(deb_name "$a")"
         if rpm -q -- "$probe" >/dev/null 2>&1; then
+            msg "dropping '$probe' from the extension: now provided by APEX-OS"
+        elif is_deb_id "$a" && deb_superseded_by_image "$a"; then
+            # A .deb's files have no rpm owner, so the query above cannot see an
+            # image that has STARTED shipping the same application — and that is
+            # not hypothetical: Claude Desktop reaches the image as a `cp -a` of
+            # exactly this .deb. Without this arm the next `apex update` would
+            # reach the shadow guard and refuse to rebuild anything at all.
             msg "dropping '$probe' from the extension: now provided by APEX-OS"
         else
             missing+=("$a")
@@ -1756,13 +2556,17 @@ rebuild_extension() {
     # originally typed may have been a USB stick, and this same function runs
     # from `apex update` and from apex-sysext-rebuild.service after an OS
     # upgrade, long after that path stopped existing.
-    local -a specs=() cached=()
+    local -a specs=() cached=() debcached=()
     local cachefile
     for a in "${want[@]}"; do
         if is_local_id "$a"; then
             cachefile="$(local_cache "$a")"
             [ -f "$cachefile" ] || die "the cached copy of local package '$(local_name "$a")' is missing (${cachefile}); reinstall it from the .rpm file, or drop it with: sudo apex remove $(local_name "$a")"
             cached+=("$cachefile")
+        elif is_deb_id "$a"; then
+            cachefile="$(deb_cache "$a")"
+            [ -f "$cachefile" ] || die "the cached copy of local package '$(deb_name "$a")' is missing (${cachefile}); reinstall it from the .deb file, or drop it with: sudo apex remove $(deb_name "$a")"
+            debcached+=("$cachefile")
         else
             specs+=("$a")
         fi
@@ -1787,25 +2591,41 @@ rebuild_extension() {
     if [ "${#cached[@]}" -gt 0 ]; then
         stage_local_rpms "$rpms" "${cached[@]}"
     fi
-    guard_rpms "$rpms"
+    # A request made entirely of .deb files leaves this directory empty, and
+    # then every `for f in "$destdir"/*.rpm` below iterates over the UNMATCHED
+    # glob and asks rpm to read a header out of a path that does not exist —
+    # guard_rpms dies on it and extract_rpms treats it as a foreign-arch
+    # package. So the rpm half of the pipeline runs only when there is one.
+    local have_rpms=0
+    compgen -G "${rpms}/*.rpm" >/dev/null && have_rpms=1
+    if [ "$have_rpms" = 1 ]; then
+        guard_rpms "$rpms"
+    elif [ "${#debcached[@]}" -eq 0 ]; then
+        die "every requested package is already part of APEX-OS — nothing to install"
+    fi
 
     # `apex update` calls this on every run. Rebuilding an identical extension
     # would burn minutes and, worse, re-merge /usr underneath a running desktop
     # for no reason — so an unchanged package set stops here.
     local new_set
-    new_set="$(for f in "$rpms"/*.rpm; do
-                   rpm -qp --nosignature --qf '%{NAME}-%{EVR}.%{ARCH}\n' "$f" 2>/dev/null
-               done | sort)"
+    new_set="$(resolved_set "$rpms" ${debcached[@]+"${debcached[@]}"})"
     if ext_up_to_date "$STATE" "$new_set"; then
         msg "already up to date"
         save_requested "${want[@]}"
         gc_local_cache
-        write_state "$rpms"
+        write_state "$rpms" ${debcached[@]+"${debcached[@]}"}
         return 0
     fi
 
-    extract_rpms "$rpms" "$root"
-    apply_alternatives "$rpms" "$root"
+    if [ "$have_rpms" = 1 ]; then
+        extract_rpms "$rpms" "$root"
+        apply_alternatives "$rpms" "$root"
+    else
+        mkdir -p "$root"
+    fi
+    if [ "${#debcached[@]}" -gt 0 ]; then
+        extract_debs "$root" "${debcached[@]}"
+    fi
     fix_caches "$root"
     split_out_of_image "$root" "$etcroot"
     write_extension_release "$root"
@@ -1819,7 +2639,7 @@ rebuild_extension() {
     # Only now is this set the truth about the machine.
     save_requested "${want[@]}"
     gc_local_cache
-    write_state "$rpms"
+    write_state "$rpms" ${debcached[@]+"${debcached[@]}"}
 
     msg "done — $(jq -r '.resolved | length' "$STATE") package(s), $(numfmt --to=iec "$(jq -r .image_bytes "$STATE")")B extension"
 }
@@ -1870,9 +2690,14 @@ cmd_install() {
     # round trip instead of before one costs the user a second attempt for
     # nothing. Nothing here writes; the root gate still comes before every
     # mutation below.
-    local -a files=() flatpaks=() names=() p
+    local -a files=() debs=() flatpaks=() names=() p
     for p in "$@"; do
-        if is_local_rpm_arg "$p"; then
+        if is_local_deb_arg "$p"; then
+            # BEFORE the RPM test, never after: is_local_rpm_arg answers true
+            # for any argument containing a slash, so `apex install ./x.deb`
+            # would otherwise be refused with "is not an RPM package".
+            debs+=("$p")
+        elif is_local_rpm_arg "$p"; then
             files+=("$p")
         elif is_flatpak_id "$p"; then
             flatpaks+=("$p")
@@ -1889,6 +2714,9 @@ cmd_install() {
     if [ -n "$SOURCE" ]; then
         if [ "${#files[@]}" -gt 0 ] && [ "$SOURCE" != rpm ]; then
             die "--source ${SOURCE} contradicts the local .rpm file you named; a file is always installed as an RPM"
+        fi
+        if [ "${#debs[@]}" -gt 0 ] && [ "$SOURCE" != rpm ]; then
+            die "--source ${SOURCE} contradicts the local .deb file you named; a local package file always goes into the system extension"
         fi
         if [ "${#flatpaks[@]}" -gt 0 ] && [ "$SOURCE" != flatpak ]; then
             die "--source ${SOURCE} contradicts the Flatpak id you named; an application id is always installed as a Flatpak"
@@ -1965,6 +2793,16 @@ cmd_install() {
         msg "local file: ${LR_NAME}-${LR_EVR}.${LR_ARCH} (${LR_PATH})"
     done
 
+    local -a dpath=() dname=() ddeps=()
+    for p in "${debs[@]:-}"; do
+        [ -n "$p" ] || continue
+        inspect_local_deb "$p"
+        dpath+=("$LD_PATH")
+        dname+=("$LD_NAME")
+        ddeps+=("$LD_DEPENDS")
+        msg "local file: ${LD_NAME}-${LD_VERSION}.${LD_ARCH} (.deb, ${LD_PATH})"
+    done
+
     need_root install
 
     if [ "${#flatpaks[@]}" -gt 0 ]; then
@@ -1976,7 +2814,7 @@ cmd_install() {
     fi
     # A Flatpak-only request must not rebuild the extension: that would cost
     # minutes and re-merge /usr to change nothing.
-    [ "${#names[@]}" -gt 0 ] || [ "${#lpath[@]}" -gt 0 ] || return 0
+    [ "${#names[@]}" -gt 0 ] || [ "${#lpath[@]}" -gt 0 ] || [ "${#dpath[@]}" -gt 0 ] || return 0
 
     take_lock
 
@@ -2000,10 +2838,22 @@ cmd_install() {
             unsigned+=(1)
         fi
     done
+    # A .deb has nothing to check. Debian signs the apt index, not the file, so
+    # the answer is the same for every one of them and the opt-in is the same
+    # per-file, byte-exact marker the RPM path uses.
+    for i in "${!dpath[@]}"; do
+        [ "${ALLOW_UNSIGNED:-0}" = 1 ] \
+            || deb_trust_refusal "${dpath[$i]}" "${dname[$i]}" "${ddeps[$i]}"
+        warn "accepting ${dpath[$i]} unverified because you passed --allow-unsigned: a .deb carries no signature APEX can check"
+    done
     for i in "${!lpath[@]}"; do
         f="${lpath[$i]}"; n="${lname[$i]}"
         cache_local_rpm "$f" "$n" "${unsigned[$i]}"
         want+=("$(local_id "$n")")
+    done
+    for i in "${!dpath[@]}"; do
+        cache_local_deb "${dpath[$i]}" "${dname[$i]}"
+        want+=("$(deb_id "${dname[$i]}")")
     done
 
     if [ "${#names[@]}" -gt 0 ]; then
@@ -2020,7 +2870,7 @@ cmd_install() {
     for e in "${existing[@]:-}"; do
         [ -n "$e" ] || continue
         superseded=0
-        for t in "${lname[@]:-}" "${names[@]:-}"; do
+        for t in "${lname[@]:-}" "${dname[@]:-}" "${names[@]:-}"; do
             [ -n "$t" ] || continue
             if requested_matches "$e" "$t"; then
                 superseded=1
@@ -2044,6 +2894,13 @@ cmd_remove() {
     # with `remove` does what it looks like it does.
     local -a rpms=() flatpaks=() q n
     for q in "$@"; do
+        if is_local_deb_arg "$q" && [ -f "$q" ] && deb_magic_ok "$q"; then
+            n="$(deb_name_of "$q")" || n=""
+            if [ -n "$n" ] && valid_deb_name "$n"; then
+                rpms+=("$n")
+                continue
+            fi
+        fi
         if is_local_rpm_arg "$q" && [ -f "$q" ] && rpm_magic_ok "$q"; then
             n="$(rpm -qp --nosignature --qf '%{NAME}' -- "$q" 2>/dev/null)" || n=""
             if [ -n "$n" ] && valid_pkg_name "$n"; then
@@ -2151,6 +3008,9 @@ cmd_list() {
             | if startswith("local:") then
                   ltrimstr("local:") as $n
                   | "  \($n)  [local file" + (if $u[$n] then ", signature not verified]" else "]" end)
+              elif startswith("deb:") then
+                  ltrimstr("deb:") as $n
+                  | "  \($n)  [.deb file, signature not verified, Debian dependencies unresolved]"
               else "  \(.)"
               end' "$STATE"
         printf '  (+%s pulled in as dependencies)\n' \
@@ -2809,14 +3669,23 @@ usage() {
     cat <<'EOF'
 usage: apex-pkg <command> [args]
 
-  install <pkg|file.rpm>...
+  install <pkg|file.rpm|file.deb>...
                        add packages. A reverse-DNS id (org.gimp.GIMP) is a
                        Flatpak; a path or a name ending in .rpm is a local RPM
                        file, which is copied into /var/lib/apex/pkg/local so
                        later rebuilds no longer need the original file. Its
                        dependencies still come from the repositories.
+                       A path or a name ending in .deb is a local Debian
+                       package, cached the same way under
+                       /var/lib/apex/pkg/deb. Its payload is unpacked; its
+                       maintainer scripts are NEVER run and its Debian
+                       dependencies are NEVER resolved, both of which are
+                       reported. APEX does not fetch from apt repositories —
+                       a .deb is installed from a file you already have.
                        --allow-unsigned accepts one local file that no trusted
-                       key covers; the decision is recorded per file.
+                       key covers; the decision is recorded per file. Every
+                       .deb needs it: Debian signs the apt index, not the
+                       package.
                        --source rpm|flatpak|capsule picks the source for a bare
                        name instead of letting APEX rank them; --env NAME says
                        which capsule --source capsule installs into.
