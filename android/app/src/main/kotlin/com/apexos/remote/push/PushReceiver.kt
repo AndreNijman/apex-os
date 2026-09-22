@@ -97,8 +97,8 @@ class PushReceiver : BroadcastReceiver() {
         // going on accepting the same envelope for ever.
         if (body.seq <= registration.lastSeq) return
         storage.updateBlocking { current ->
-            val m = current.find(machine.deviceId) ?: return@update current
-            val seen = m.push ?: return@update current
+            val m = current.find(machine.deviceId) ?: return@updateBlocking current
+            val seen = m.push ?: return@updateBlocking current
             current.with(m.copy(push = seen.copy(lastSeq = maxOf(seen.lastSeq, body.seq))))
         }
 
@@ -132,9 +132,9 @@ class PushReceiver : BroadcastReceiver() {
             acknowledge(context, token, it)
         }
         MachineRepository(context).updateBlocking { store ->
-            val machine = store.machines.firstOrNull { it.push?.token == token } ?: return@update store
-            val was = machine.push ?: return@update store
-            if (was.endpoint == endpoint) return@update store
+            val machine = store.machines.firstOrNull { it.push?.token == token } ?: return@updateBlocking store
+            val was = machine.push ?: return@updateBlocking store
+            if (was.endpoint == endpoint) return@updateBlocking store
             // A new endpoint means a new place; the sequence belongs to the
             // old one and keeping it would make the machine's first envelope
             // to the new endpoint look like a replay if the machine's own
@@ -169,7 +169,7 @@ class PushReceiver : BroadcastReceiver() {
 
     private fun clear(context: Context, token: String) {
         MachineRepository(context).updateBlocking { store ->
-            val machine = store.machines.firstOrNull { it.push?.token == token } ?: return@update store
+            val machine = store.machines.firstOrNull { it.push?.token == token } ?: return@updateBlocking store
             store.with(machine.copy(push = null))
         }
     }
@@ -311,10 +311,10 @@ object PushRegistrar {
         val token = UnifiedPush.newToken()
         var created = false
         storage.updateBlocking { store ->
-            val current = store.find(machine.deviceId) ?: return@update store
+            val current = store.find(machine.deviceId) ?: return@updateBlocking store
             // Somebody registered between the read above and this write. Their
             // token is the live one; ours has been broadcast to nobody.
-            if (current.push != null) return@update store
+            if (current.push != null) return@updateBlocking store
             created = true
             store.with(
                 current.copy(
@@ -369,8 +369,8 @@ object PushRegistrar {
      */
     fun sent(context: Context, machine: PairedMachine, endpoint: String) {
         MachineRepository(context).updateBlocking { store ->
-            val current = store.find(machine.deviceId) ?: return@update store
-            val push = current.push ?: return@update store
+            val current = store.find(machine.deviceId) ?: return@updateBlocking store
+            val push = current.push ?: return@updateBlocking store
             store.with(current.copy(push = push.copy(sentEndpoint = endpoint)))
         }
     }
@@ -395,7 +395,7 @@ object PushRegistrar {
         val token = storage.loadBlocking().find(machine.deviceId)?.push?.token
         val distributor = token?.let { Distributors.forToken(context, it) }
         storage.updateBlocking { store ->
-            val current = store.find(machine.deviceId) ?: return@update store
+            val current = store.find(machine.deviceId) ?: return@updateBlocking store
             store.with(current.copy(push = null))
         }
         if (token == null || distributor == null) return
