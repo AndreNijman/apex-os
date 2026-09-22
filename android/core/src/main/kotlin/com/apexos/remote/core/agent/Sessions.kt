@@ -762,6 +762,38 @@ object Agentd {
     }
 
     /**
+     * Tell the machine where to wake this phone (P1-058).
+     *
+     * ## Not an `apex-agentd` verb, and that is on purpose
+     *
+     * `apex-remoted` answers this one itself, before the line reaches the
+     * daemon. The daemon binds a Unix socket in a 0700 directory and has never
+     * heard of a phone, a relay or a push endpoint; a verb about *how this
+     * connection is reached* belongs to the process that owns the connection.
+     *
+     * The registration is bound to the device id the **handshake** proved, so
+     * this request deliberately names no device: one could only be a way to
+     * redirect somebody else's notifications.
+     *
+     * ## What a machine that is too old does
+     *
+     * It forwards the line to `apex-agentd`, which answers `bad_request` with
+     * serde's "unknown variant". [isTooOld] already recognises exactly that,
+     * so the caller reads it as "this machine cannot wake me; poll while I am
+     * open" rather than as a failure — which is the correct outcome and the
+     * reason the reply shape is the daemon's own.
+     *
+     * @param endpoint the URL the UnifiedPush distributor gave this phone.
+     * @param key base64url of 32 bytes this phone generated. It never leaves
+     *   this channel, which is already authenticated and end to end.
+     */
+    fun pushRegister(endpoint: String, key: String): String =
+        """{"cmd":"push_register","endpoint":"${escape(endpoint)}","key":"${escape(key)}"}"""
+
+    /** Stop this machine pushing to this phone. Idempotent at the far end. */
+    fun pushUnregister(): String = """{"cmd":"push_unregister"}"""
+
+    /**
      * The daemon's scrollback window, and what a phone asks for.
      *
      * 256 KiB is the daemon's own `SCROLLBACK_BYTES` and its default, so this

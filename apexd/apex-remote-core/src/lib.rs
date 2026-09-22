@@ -27,6 +27,9 @@
 //! * [`device`] — which devices are paired, and which are revoked.
 //! * [`pairing`] — the QR code, the one-time token behind it, and the
 //!   handshake that turns them into a paired key.
+//! * [`push`] — the one thing here that does NOT need a live channel: a
+//!   minimised, encrypted envelope that reaches a phone whose app is not
+//!   running, over a push transport that is never trusted with its contents.
 //! * [`session`] — a Noise channel, and the frames inside it.
 //!
 //! and one it deliberately does not: it never sees a credential. `SecretValue`
@@ -39,6 +42,7 @@ pub mod device;
 pub mod identity;
 pub mod noise;
 pub mod pairing;
+pub mod push;
 pub mod relay;
 pub mod rendezvous;
 pub mod tls;

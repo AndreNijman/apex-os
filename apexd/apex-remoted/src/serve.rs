@@ -352,7 +352,15 @@ fn frames(
                 }
             }
             Frame::Control(line) => {
-                let reply = control(agentd, device_id, &line);
+                // Two verbs belong to this service rather than to the daemon:
+                // they are about how this phone is REACHED, which `apex-agentd`
+                // has no concept of. Everything else is forwarded verbatim.
+                // See `crate::push::control` for why this is the seam and not a
+                // new frame tag.
+                let reply = match crate::push::control(state, device_id, &line) {
+                    Some(reply) => reply,
+                    None => control(agentd, device_id, &line),
+                };
                 send(&sealer, Frame::Control(reply))?;
             }
             Frame::Open { channel, request } => {

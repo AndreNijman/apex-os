@@ -203,6 +203,30 @@ class MachineLink(
      */
     fun clipboard(): String = Agentd.readClipboard(request(Agentd.clipboard()))
 
+    // ---- push (P1-058) ---------------------------------------------------
+    //
+    // The only two verbs here that `apex-agentd` never sees: `apex-remoted`
+    // answers them itself, because they are about how THIS connection is
+    // reached and the daemon has no concept of a transport. They travel on
+    // channel zero like everything else, so a machine too old to know them
+    // forwards them and answers `bad_request` — which `Agentd.isTooOld`
+    // already recognises, and which callers must read as "this machine cannot
+    // wake me" rather than as a failure.
+
+    /**
+     * Tell this machine where to wake this phone.
+     *
+     * **Not retried.** A retry can only arrive after the connection dropped,
+     * and the phone will send it again on the next connection anyway — where a
+     * lost reply is a free round trip rather than a registration reported as
+     * failed after it landed. Nothing on a screen is waiting for this.
+     */
+    fun pushRegister(endpoint: String, key: String) =
+        Agentd.readOk(request(Agentd.pushRegister(endpoint, key), retry = false))
+
+    /** Stop this machine pushing to this phone. Idempotent at the far end. */
+    fun pushUnregister() = Agentd.readOk(request(Agentd.pushUnregister(), retry = false))
+
     /**
      * Per-worktree status for every remembered project, or for one slug.
      *

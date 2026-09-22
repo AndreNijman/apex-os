@@ -1,7 +1,10 @@
 package com.apexos.remote
 
 import com.apexos.remote.core.agent.Handoff
+import com.apexos.remote.core.agent.Push
+import com.apexos.remote.core.agent.UnifiedPush
 import org.junit.jupiter.api.Assertions.assertFalse
+import org.junit.jupiter.api.Assertions.assertNull
 import org.junit.jupiter.api.Assertions.assertTrue
 import org.junit.jupiter.api.Test
 import java.io.File
@@ -205,5 +208,125 @@ class ManifestTest {
     fun `backup stays off, so the sealed device key is never copied anywhere`() {
         assertTrue(manifest.contains("""android:allowBackup="false""""))
         assertTrue(manifest.contains("""android:fullBackupContent="false""""))
+    }
+}
+
+/**
+ * The manifest half of push (P1-058), which nothing else here can check.
+ *
+ * A distributor reaches this app through the manifest and through nothing
+ * else. Every failure in this file is **silent on a phone**: a missing action
+ * means that message is never delivered, a missing `<queries>` entry means the
+ * app reports that no distributor is installed on a phone that has one, and an
+ * unexported receiver means the distributor's broadcast is dropped by the
+ * platform without a word to either side.
+ *
+ * None of that is visible to `assembleDebug`, to a JVM test of the rules, or
+ * to a person reading the code — which is why it is asserted against the
+ * manifest text, in the same shape and for the same reason as the permission
+ * assertions above.
+ */
+class PushManifestTest {
+
+    private val manifest: String by lazy {
+        var dir: File? = File("").absoluteFile
+        var found: File? = null
+        while (dir != null && found == null) {
+            val candidate = File(dir, "app/src/main/AndroidManifest.xml")
+            val here = File(dir, "src/main/AndroidManifest.xml")
+            found = when {
+                candidate.isFile -> candidate
+                here.isFile -> here
+                else -> null
+            }
+            dir = dir.parentFile
+        }
+        requireNotNull(found) {
+            "AndroidManifest.xml was not found from ${File("").absolutePath}; this test must " +
+                "fail rather than report that it found nothing."
+        }.readText()
+    }
+
+    @Test
+    fun `the receiver declares every connector action the specification defines`() {
+        // Missing one is silent: the distributor simply never delivers that
+        // message, and nothing on the phone says so. The list comes from
+        // `UnifiedPush.CONNECTOR_ACTIONS` rather than being retyped, so an
+        // action added there without a manifest entry fails here.
+        for (action in UnifiedPush.CONNECTOR_ACTIONS) {
+            assertTrue(
+                manifest.contains("\"$action\""),
+                "the manifest does not declare $action, so that message would never arrive",
+            )
+        }
+        assertTrue(
+            manifest.contains("\".push.PushReceiver\""),
+            "the receiver class is not declared",
+        )
+    }
+
+    @Test
+    fun `the receiver is exported, because a distributor is another app`() {
+        val receiver = manifest.substringAfter("\".push.PushReceiver\"").substringBefore("</receiver>")
+        assertTrue(
+            receiver.contains("android:exported=\"true\""),
+            "an unexported receiver is one the platform drops the distributor's broadcast for, " +
+                "silently",
+        )
+        // And what makes that safe is not the manifest: a message is acted on
+        // only if it decrypts under a key one paired machine holds. Asserted
+        // here as a comment would be worthless, so it is asserted as a fact
+        // about the code that exists — `Push.open` returns null for anything
+        // that does not authenticate.
+        assertNull(
+            Push.open(ByteArray(Push.KEY_LEN) { 1 }, ByteArray(Push.ENVELOPE_LEN) { 1 }),
+            "a broadcast from a hostile app must reach no notification",
+        )
+    }
+
+    @Test
+    fun `distributors can be found at all`() {
+        // Package visibility on API 30+ filters `queryBroadcastReceivers`.
+        // Without this entry the app reports "no distributor installed" on a
+        // phone that has one — refusal and absence confused in the direction
+        // that makes a working feature look broken.
+        assertTrue(
+            manifest.contains("\"${UnifiedPush.ACTION_REGISTER}\""),
+            "no <queries> entry for the distributor register action",
+        )
+        val queries = manifest.substringAfter("<queries>").substringBefore("</queries>")
+        assertTrue(
+            queries.contains(UnifiedPush.ACTION_REGISTER),
+            "the register action is named outside <queries>, where it does not grant visibility",
+        )
+    }
+
+    @Test
+    fun `push adds no permission to this app`() {
+        // The whole design's cost, stated as a check. A UnifiedPush client
+        // needs no permission at all — no FOREGROUND_SERVICE, no WAKE_LOCK, no
+        // RECEIVE_BOOT_COMPLETED, and nothing from Google Play services. The
+        // distributor is the app that holds a connection open, and it is the
+        // one the user chose to install for that.
+        for (permission in listOf(
+            "android.permission.FOREGROUND_SERVICE",
+            "android.permission.WAKE_LOCK",
+            "android.permission.RECEIVE_BOOT_COMPLETED",
+            "android.permission.REQUEST_IGNORE_BATTERY_OPTIMIZATIONS",
+            "com.google.android.c2dm.permission.RECEIVE",
+        )) {
+            assertFalse(
+                manifest.contains("\"$permission\""),
+                "push was implemented in a way that needs $permission",
+            )
+        }
+        // No Firebase or Play services component either. The app is built to
+        // run on a phone that has neither.
+        for (word in listOf("firebase", "com.google.android.gms", "FirebaseMessaging")) {
+            assertFalse(
+                manifest.lowercase().contains(word.lowercase()),
+                "the manifest names $word",
+            )
+        }
     }
 }

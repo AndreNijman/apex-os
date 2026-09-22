@@ -3,26 +3,30 @@ package com.apexos.remote.core.agent
 /**
  * What is worth telling the user about, and once.
  *
- * ## There is no push transport, and this file does not pretend there is
+ * ## There are now TWO ways an alert arrives, and this file is one of them
  *
- * Measured, not assumed. There is no FCM, Firebase, UnifiedPush or ntfy
- * reference anywhere in this repository, `android/` included. There is no
- * subscribe, watch or follow verb on `apex-agentd`'s socket — the full
- * vocabulary is 28 verbs and `attach` is the only long-lived one, and it
- * streams raw PTY bytes rather than typed state. The relay is a stateless
- * byte-copier that has never been deployed (`relay/README.md:11`), both ends
- * dial out to it, and `apex-remote-core`'s `Frame` enum has no notification
- * tag. `apex-agentd` holds nothing open towards a phone and has nothing to
- * hold it open with.
+ * This class turns **polls of a connection the phone opened** into alerts, and
+ * that path works only while the app is running. The other is push: since
+ * P1-058 the desktop runs the same rules itself, in
+ * `apexd/apex-remoted/src/push.rs`, and posts an opaque envelope to a
+ * UnifiedPush distributor — which reaches this phone with the app closed, the
+ * screen off and the network suspended in Doze. See [Push] for the envelope
+ * and `docs/remote.md` for what the user has to install.
  *
- * So an alert here is derived from **polling a connection the phone opened**,
- * and that is the honest description of it. The consequence for P1-058's
- * "notification content is encrypted/minimized so push infrastructure does not
- * receive sensitive prompt/code content" is worth stating plainly rather than
- * dressing up: **no push infrastructure receives anything, because there is
- * none.** What reaches the phone is what already reaches it — the `list` reply
- * inside the Noise session. [Alert] still carries the minimum, so that the day
- * a wake channel exists there is no payload here that must not cross it.
+ * The two paths raise the *same* alerts, and that is deliberate rather than
+ * redundant: push needs a distributor the user may not have, and the poll
+ * needs an app that may not be running. What stops the overlap showing up as
+ * two notifications is [NotificationContent.idFor] — the id is derived from
+ * (machine, session, kind), so a pushed alert and a polled alert for one
+ * moment REPLACE each other in the shade instead of stacking.
+ *
+ * **The earlier text here said there was no push transport anywhere in APEX,
+ * and that the relay had never been deployed. Both were true when written and
+ * neither is now**: the relay is serving at `apex-relay.andrenijman.com`, and
+ * the push path above exists. The relay is still not what carries a push, and
+ * the reason is worth keeping — it is a rendezvous that both ends dial into at
+ * the same time, which is precisely the situation push exists to handle the
+ * absence of.
  *
  * ## What must never be in an alert
  *
@@ -100,6 +104,33 @@ data class Alert(
          * cause.
          */
         APPROVAL("Approval needed", "A privileged operation is waiting at the machine."),
+
+        /**
+         * A deployment finished, and it worked.
+         *
+         * P1-058's first criterion asks for deployment notifications, and the
+         * previous round recorded — correctly at the time — that nothing on
+         * this socket could raise one. The source now named is real and was
+         * already on the wire: a `PrivilegeRequest` for one of the five verbs
+         * that change what the machine boots or what is installed on it —
+         * `update`, `rollback`, `pin`, `pkg_rebuild`, `pkg_rollback` — acquires
+         * an `executed_ms` when the operation ran, and an `exit_code` saying
+         * how it went.
+         *
+         * `install` and `remove` deliberately do NOT raise one. Their
+         * notification is the [APPROVAL], and a second on completion would
+         * double every package operation.
+         *
+         * What this does not cover, stated so nobody reads more into it: an
+         * agent deploying somebody else's software by running a command in a
+         * terminal. Nothing on this socket can see that — it is a Bash tool
+         * call, and the only record of it is `SessionInfo.detail`, which is
+         * the field this whole design exists to keep off a push server.
+         */
+        DEPLOYED("Deployed", "A deployment on the machine finished."),
+
+        /** A deployment finished with a non-zero exit code. */
+        DEPLOY_FAILED("Deployment failed", "A deployment on the machine did not complete."),
     }
 
     /**

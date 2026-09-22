@@ -79,6 +79,15 @@ data class PairedMachine(
     /** The relay to fall back to, or `null` for a LAN-only pairing. */
     val relay: String? = null,
     @SerialName("paired_ms") val pairedMs: Long,
+    /**
+     * How this machine wakes this phone, when it can (P1-058).
+     *
+     * `null` until a UnifiedPush distributor has given this app an endpoint
+     * for this machine and the machine has accepted it. A machine that is too
+     * old to know the verb stays `null` for ever, and the app falls back to
+     * polling while it is open — which is what it did before push existed.
+     */
+    val push: PushRegistration? = null,
 ) {
     /** The rendezvous this machine is reachable at through a relay. */
     fun rendezvousId(): String = Rendezvous.idFor(Device.checkKey(desktopKey))
@@ -91,6 +100,101 @@ data class PairedMachine(
      */
     override fun toString(): String =
         "PairedMachine(machine=$machine, deviceId=$deviceId, sealed=<${sealed.length} chars>)"
+}
+
+
+/**
+ * What this phone told one machine about how to wake it.
+ *
+ * ## This holds a key in ordinary app storage, and that is a decision
+ *
+ * Every other secret in this app is sealed: the device identity key is wrapped
+ * by a keystore key created with `setUserAuthenticationRequired(true)`, and
+ * `InsecureStorageTest` walks the whole storage directory hunting for its raw
+ * bytes. [key] is deliberately **not** treated that way, and the reason is
+ * that it could not be.
+ *
+ * A push arrives at a `BroadcastReceiver` woken by a distributor, in a process
+ * that was not running, on a phone that is very likely locked. A key behind a
+ * per-use biometric gate is unreachable there — the prompt has nobody to show
+ * itself to — so a sealed push key would mean no notification ever arrives on
+ * exactly the phones whose owner asked for more protection, silently.
+ *
+ * What the weaker protection costs is bounded and worth stating in full.
+ * Somebody who can read this file can forge a notification that this phone
+ * would show, and can decrypt the 22-byte bodies this machine sends: a kind, an
+ * adapter code, a session number, a start time and a counter. They cannot
+ * connect to the machine, cannot type at an agent, cannot read a prompt, a
+ * path or any output, and cannot approve anything — all of that needs the
+ * identity key, which is still sealed. Android's own file-based encryption
+ * still applies, so the file is unreadable before the phone's first unlock
+ * after a boot.
+ *
+ * Rotating it costs one re-registration, which happens on the next connection.
+ */
+@Serializable
+data class PushRegistration(
+    /**
+     * The UnifiedPush instance token for this machine.
+     *
+     * One instance per machine, which is what lets the envelope carry no
+     * machine identifier at all: this token comes back on every message and
+     * never leaves the phone.
+     */
+    val token: String,
+    /**
+     * The endpoint the distributor last gave for this machine.
+     *
+     * Empty between asking a distributor to register and its answer arriving —
+     * which is a real state a phone sits in, and is distinguishable from
+     * "never asked", which is a `null` [PairedMachine.push].
+     */
+    val endpoint: String,
+    /** The registration key, base64url of 32 bytes. See the class note. */
+    val key: String,
+    /**
+     * The highest sequence number seen from this machine.
+     *
+     * Persisted so that a process restart does not accept a replay of
+     * everything the phone has already shown.
+     */
+    @SerialName("last_seq") val lastSeq: Long = 0,
+    /**
+     * The endpoint this machine has actually been told about.
+     *
+     * Separate from [endpoint] because the two are written by different things
+     * at different times: a distributor rotates [endpoint] by broadcasting to
+     * a receiver that cannot reach the machine — the Noise channel needs the
+     * device key, which is behind a biometric gate a woken receiver cannot
+     * satisfy — so the telling happens on the next connection.
+     *
+     * Empty means "nothing has been sent yet". Comparing the two is what makes
+     * the send idempotent: a phone that reconnects twenty times a day must not
+     * spend a round trip re-registering an endpoint the machine already has,
+     * and a phone whose distributor rotated its endpoint must send exactly
+     * once. Inferring it from [endpoint] alone cannot express either.
+     */
+    @SerialName("sent_endpoint") val sentEndpoint: String = "",
+    /**
+     * The package name of the distributor that carries this registration.
+     *
+     * Remembered rather than re-resolved, and only because of acknowledgements.
+     * A message must be acknowledged to the distributor that delivered it, and
+     * Android does not say which app sent a broadcast — so on a phone with two
+     * distributors installed the only way to answer the right one is to
+     * remember which one was asked. An acknowledgement that goes to the wrong
+     * app is not an error anybody sees: the message is redelivered, and after
+     * thirty seconds the endpoint itself may be dropped.
+     *
+     * Empty for a registration made before this field existed, which resolves
+     * to the same guess as before.
+     */
+    @SerialName("distributor") val distributor: String = "",
+) {
+    /** Redacted, for the same reason [PairedMachine.toString] is. */
+    override fun toString(): String =
+        "PushRegistration(endpoint=$endpoint, key=<${key.length} chars>, lastSeq=$lastSeq, " +
+            "sent=${sentEndpoint.isNotEmpty()}, distributor=$distributor)"
 }
 
 /**

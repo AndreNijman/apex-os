@@ -10,17 +10,23 @@ package com.apexos.remote.core.agent
  * enforced only inside an Android class is a privacy rule with no gate in
  * front of it.
  *
- * ## The criterion this file is the answer to, stated honestly
+ * ## The criterion this file is the answer to, and the half it is not
  *
  * P1-058 asks that "notification content is encrypted/minimized so push
- * infrastructure does not receive sensitive prompt/code content". **No push
- * infrastructure receives anything, because there is none** — see the head of
- * `Alerts.kt` for the measurement. What is left of the criterion, and the part
- * that is real, is *minimized*: the words on the lock screen. A phone on a
- * table shows its notifications to whoever is in the room, and that is a
- * disclosure channel whether or not a server was involved.
+ * infrastructure does not receive sensitive prompt/code content". Since the
+ * push path landed there IS push infrastructure, and the *encrypted* half of
+ * the criterion is answered somewhere else entirely: [Push] seals a fixed
+ * 22-byte body under a key the push server never has, so what crosses it is 51
+ * bytes of which nothing is a string. Nothing in this file ever reaches a
+ * server.
  *
- * So the rule is the one the criterion would want if the transport existed:
+ * What this file answers is *minimized*: the words on the lock screen. A phone
+ * on a table shows its notifications to whoever is in the room, and that is a
+ * disclosure channel whether or not a server was involved — and it is the one
+ * the encryption does nothing about, because by then the words have been
+ * rendered on the phone.
+ *
+ * So the rule is:
  * **an alert renders from fixed strings, a machine name and an adapter name,
  * and from nothing else.** In particular `SessionInfo.detail` never reaches
  * here. It is built by `hook::detail_for` (`hook.rs:437`) and copies verbatim,

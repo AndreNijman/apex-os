@@ -173,3 +173,89 @@ The exception that exists is a different verb with a different shape.
 agent key add`, over a nonce the daemon issued and bound to that one session,
 grant kind and window. Remote approval of a root operation, if it is ever
 built, has to be that shape and not a relaxed origin check.
+
+## Notifications when the app is closed
+
+An agent that needs you at two in the morning has to be able to reach a phone
+whose screen is off and whose app Android killed hours ago. Until P1-058 it
+could not: alerts were derived from a poll loop inside the app, so the app had
+to be running for one to exist.
+
+Two paths now raise the same alerts. The poll loop still does it while the app
+is open. When it is not, `apex-remoted` watches the runtime itself and posts an
+**encrypted 51-byte envelope** to a push server, which a UnifiedPush
+distributor on the phone turns into a notification.
+
+### What you have to do, and it is only one thing
+
+**Install a UnifiedPush distributor on the phone.** [ntfy][ntfy] is the usual
+choice, is free, and needs no account: install it, and APEX Remote finds it on
+the next connection to a machine.
+
+Nothing else. Specifically:
+
+* **nothing to stand up, deploy or configure on the desktop.** `apex-remoted`
+  already runs; the watcher is part of it.
+* **no account anywhere** — not with Google, not with Anthropic, not with
+  ntfy. `ntfy.sh` accepts anonymous subscriptions.
+* **no Firebase, no Google Play services, and no Google dependency** in the
+  image or in the app. The APK asks for no permission to do this: not
+  `FOREGROUND_SERVICE`, not `WAKE_LOCK`, not
+  `REQUEST_IGNORE_BATTERY_OPTIMIZATIONS`.
+* **no `relay/` deployment is involved.** The relay is a rendezvous both ends
+  dial into at the same time, which is the situation push exists to handle the
+  absence of.
+
+If you run your own push server, point the distributor at it — the desktop
+treats the endpoint as opaque and accepts a private-network address. It refuses
+only `http://`, because the endpoint URL *is* the capability to notify the
+phone.
+
+**With more than one distributor installed, APEX Remote uses the first by
+package name and does not ask.** There is no chooser in the app. Every
+distributor sees the same thing — the timing of an alert and nothing else — so
+the choice is a small one; if it is the wrong one for you, uninstall the
+distributor you do not want and reconnect.
+
+**Without a distributor installed, nothing breaks and nothing changes**: the
+app behaves exactly as it did before, with alerts while it is open and none
+while it is closed.
+
+### What the push server can see
+
+The envelope is sealed with ChaCha20-Poly1305 under a key the phone generated
+and handed to one machine inside the already-authenticated Noise channel. The
+push server and the distributor never have it.
+
+The plaintext is 22 bytes and is **five fixed-width integers** — a kind, an
+adapter code, a session number, that session's start time and a sequence
+number. There is no string field in it, so there is nothing a future change
+could put a prompt, a path, a command line or a file name into without changing
+the format and every committed test vector.
+
+What the operator of a push server does learn, stated rather than glossed:
+that an endpoint received something, when, and that it was 51 bytes. The size
+is identical for every kind, so the length does not disclose which one it was.
+They do not learn the machine, the project, the adapter, or what the agent was
+doing. No `User-Agent`, no `Topic` and nothing naming the machine is sent with
+the request.
+
+The notification *text* is rendered on the phone from fixed strings plus the
+machine name you chose at pairing and the adapter name — never from the
+session's `detail`, which is where APEX records command lines, paths, grep
+patterns and task descriptions.
+
+### What stops a hostile app faking one
+
+The receiver is exported, because a distributor is a separate app and must be
+able to broadcast to it. What protects it is not the manifest: a message is
+acted on only if it **decrypts** under the key one paired machine holds, and
+only if its sequence number is higher than the last one seen. Anything else is
+dropped silently — no notification, no state change, no answer.
+
+Revoking a device on the desktop drops its push registration as well as its
+pairing, so a revoked phone stops being woken even though push needs no
+connection. Forgetting a machine on the phone unregisters with the distributor,
+so the push server stops holding a subscription nobody reads.
+
+[ntfy]: https://ntfy.sh

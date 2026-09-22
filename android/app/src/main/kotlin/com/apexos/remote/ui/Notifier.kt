@@ -28,21 +28,21 @@ import com.apexos.remote.core.agent.NotificationContent
  * privacy rule written here would be a privacy rule with no gate in front of
  * it. This file is the plumbing and only the plumbing.
  *
- * ## There is no push transport, and none of this pretends otherwise
+ * ## Two callers, and that is the point
  *
- * Measured: no FCM, Firebase, UnifiedPush or ntfy anywhere in this repository;
- * no subscribe, watch or follow verb on `apex-agentd`'s socket; the relay is a
- * stateless byte-copier that has never been deployed, both ends dial out to
- * it, and the wire has no notification frame. So these notifications come from
- * **polling a connection this phone opened**, and the consequence is the one
- * honest limit on the whole feature: they arrive only while the poll loop is
- * alive. The loop runs in `viewModelScope`, which survives the app going to
- * the background but not the process being killed, and the poll itself only
- * runs while a machine is connected.
+ * `RemoteViewModel`'s poll loop calls [post] while the app is running, and
+ * `PushReceiver` calls it when a UnifiedPush distributor wakes the process
+ * with the app closed. Both go through [NotificationContent], so both produce
+ * the same id for the same (machine, session, kind) and a moment that reaches
+ * this phone twice occupies one line in the shade rather than two. That is
+ * P1-058's fourth criterion, and it is resolved by the id rather than by any
+ * bookkeeping either caller does.
  *
- * Stated here rather than left to be discovered, because "I did not get a
- * notification" has a cause and the user is entitled to know it is this one
- * and not a lost message.
+ * **An earlier version of this note said there was no push transport
+ * anywhere.** That was true when it was written. The poll path is still the
+ * only one that works with no distributor installed, and it still runs in
+ * `viewModelScope` — which survives the app going to the background but not
+ * the process being killed.
  */
 class Notifier(private val context: Context) {
 
