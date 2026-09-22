@@ -2524,6 +2524,48 @@ elif [ "$ENCRYPT" = yes ]; then
       rc=73; echo "the new encrypted volume would not open with the passphrase just set" | tee -a "$LOG"
     fi
   fi
+  if [ "${rc:-0}" = 0 ]; then
+    mkfs.btrfs -f -L apex-root "/dev/mapper/$LUKS_MAPPER" >>"$LOG" 2>&1 \
+      || { rc=76; echo "mkfs.btrfs failed inside the encrypted volume" | tee -a "$LOG"; }
+  fi
+  if [ "${rc:-0}" = 0 ]; then
+    mkdir -p "$TROOT"
+    mount "/dev/mapper/$LUKS_MAPPER" "$TROOT" >>"$LOG" 2>&1 \
+      || { rc=77; echo "mounting the encrypted root failed" | tee -a "$LOG"; }
+  fi
+  if [ "${rc:-0}" = 0 ]; then
+    mkdir -p "$TROOT/boot"
+    mount "$BOOT_PART" "$TROOT/boot" >>"$LOG" 2>&1 \
+      || { rc=77; echo "mounting the boot partition failed" | tee -a "$LOG"; }
+  fi
+  if [ "${rc:-0}" = 0 ]; then
+    mkdir -p "$TROOT/boot/efi"
+    mount "$ESP_PART" "$TROOT/boot/efi" >>"$LOG" 2>&1 \
+      || { rc=77; echo "mounting the EFI partition failed" | tee -a "$LOG"; }
+  fi
+  # ── Nowhere else to stage: the download goes inside the encrypted root ────
+  # Every staged byte is encrypted on the way in, which is slower and correct.
+  # This is the first point on this path at which a filesystem with room exists.
+  # It is also, deliberately, the step BEFORE enrolment: the helper that makes
+  # the recovery key lives in the image, and on this path the image is not on
+  # this machine yet. See the enrolment block immediately below.
+  if [ "${rc:-0}" = 0 ] && [ "${STAGE_ON_TARGET:-0}" = 1 ]; then
+    if stage_setup "$TROOT"; then
+      netinstall_fetch_into "$STAGE_MNT"
+      # The check that could not run before the wipe, run at the first instant
+      # the image exists — and still before bootc writes anything, so the
+      # encrypted volume holds no data and nothing is locked away. rc=74's
+      # message already describes exactly this state.
+      if [ "$luks_helper_checked" = 0 ] && ! luks_helper_ok; then
+        rc=74
+        echo "the downloaded APEX-OS image does not contain $LUKS_ENROLL_PATH" | tee -a "$LOG"
+      else
+        luks_helper_checked=1
+      fi
+    else
+      rc=79
+    fi
+  fi
   # ── enrolment: the recovery key (always) and a TPM slot (only where safe) ──
   # Policy is NOT decided here. /usr/libexec/apex-luks-enroll, in the image being
   # installed, owns it; this engine's job is to call it, to check that a
@@ -2531,6 +2573,33 @@ elif [ "$ENCRYPT" = yes ]; then
   # The existing passphrase is offered both as $PASSWORD (systemd-cryptenroll's
   # own documented environment variable) and on stdin, because adding a keyslot
   # requires unlocking the volume key with a key that already exists.
+  #
+  # ── WHY THIS RUNS HERE, AFTER THE STAGING FETCH, NOT BEFORE mkfs.btrfs ────
+  # The helper is INSIDE the image. On the encrypted whole-disk staging
+  # fallback — nothing qualified as scratch, so the download goes onto the
+  # target itself — $IMAGE is the REGISTRY ref and PODMAN_STORE is still empty
+  # until netinstall_fetch_into sets it. Run before that download, this
+  # `podman run` made podman pull ~15 GB into the DEFAULT containers-storage:
+  # on a live ISO that is the RAM overlay the entire staging design exists to
+  # avoid, on exactly the single-internal-disk USB-boot laptop the fallback was
+  # added for. The deferred luks_helper_ok check above had already been moved
+  # past the download for that reason; the enrolment call it defers FOR had not.
+  #
+  # ONE order for every encrypted path, not a second one behind a
+  # STAGE_ON_TARGET guard. A second call site for a privileged container on a
+  # disk-erasing path is the worse trade, and on the path that does have
+  # scratch everything this moved past is mkfs.btrfs and three mounts — seconds,
+  # no download.
+  #
+  # THE TRADE, STATED RATHER THAN BURIED: on the staging fallback the recovery
+  # key is now created and shown AFTER the download instead of before it. That
+  # is accepted because for the whole of that window the volume holds nothing
+  # but blobs that can be downloaded again, the passphrase the owner just typed
+  # has already been PROVEN to open the volume (the `cryptsetup open` above
+  # succeeded with it, which is what a keyslot test is), and the key still
+  # reaches them before bootc writes the first byte of the system. Nothing of
+  # theirs is locked away at any point in it. Before this change that path
+  # could not complete at all.
   if [ "${rc:-0}" = 0 ]; then
     note "Creating the recovery key …"
     mkdir -p /run/apex-luks 2>>"$LOG" || true
@@ -2554,10 +2623,12 @@ elif [ "$ENCRYPT" = yes ]; then
   if [ "${rc:-0}" = 0 ] && [ ! -s "$RECOVERY_FILE" ]; then
     rc=74; echo "the enrolment helper produced no recovery key" | tee -a "$LOG"
   fi
-  # ── prove both keys open it, BEFORE the ten-minute install ────────────────
+  # ── prove both keys open it, BEFORE the install writes anything ──────────
   # This is the acceptance criterion in two commands. A recovery key that was
   # printed but does not open the volume is worse than none, and finding that
   # out after the install would mean finding it out on the user's machine.
+  # "Before the install" is bootc, not the download: on the staging fallback
+  # the download is already behind this point, and every byte of it is ours.
   # `grep`-free and `luksDump`-free: --test-passphrase asks the header itself.
   if [ "${rc:-0}" = 0 ]; then
     RECOVERY_KEY=$(tr -d '\r\n' < "$RECOVERY_FILE" 2>>"$LOG" || true)
@@ -2585,49 +2656,12 @@ elif [ "$ENCRYPT" = yes ]; then
     _dump=""
   fi
   # The key exists and is proven. Get it to the user NOW, not after the install:
-  # a failure in the next ten minutes must not be what loses it.
+  # a failure in the next ten minutes must not be what loses it. On the staging
+  # fallback the download has already happened by the time we get here — see the
+  # enrolment block — and this is still ahead of every byte bootc writes.
   if [ "${rc:-0}" = 0 ]; then
     surface_recovery_key "$RECOVERY_KEY"
     shred -u "$RECOVERY_FILE" 2>/dev/null || rm -f "$RECOVERY_FILE" 2>/dev/null || true
-  fi
-  if [ "${rc:-0}" = 0 ]; then
-    mkfs.btrfs -f -L apex-root "/dev/mapper/$LUKS_MAPPER" >>"$LOG" 2>&1 \
-      || { rc=76; echo "mkfs.btrfs failed inside the encrypted volume" | tee -a "$LOG"; }
-  fi
-  if [ "${rc:-0}" = 0 ]; then
-    mkdir -p "$TROOT"
-    mount "/dev/mapper/$LUKS_MAPPER" "$TROOT" >>"$LOG" 2>&1 \
-      || { rc=77; echo "mounting the encrypted root failed" | tee -a "$LOG"; }
-  fi
-  if [ "${rc:-0}" = 0 ]; then
-    mkdir -p "$TROOT/boot"
-    mount "$BOOT_PART" "$TROOT/boot" >>"$LOG" 2>&1 \
-      || { rc=77; echo "mounting the boot partition failed" | tee -a "$LOG"; }
-  fi
-  if [ "${rc:-0}" = 0 ]; then
-    mkdir -p "$TROOT/boot/efi"
-    mount "$ESP_PART" "$TROOT/boot/efi" >>"$LOG" 2>&1 \
-      || { rc=77; echo "mounting the EFI partition failed" | tee -a "$LOG"; }
-  fi
-  # ── Nowhere else to stage: the download goes inside the encrypted root ────
-  # Every staged byte is encrypted on the way in, which is slower and correct.
-  # This is the first point on this path at which a filesystem with room exists.
-  if [ "${rc:-0}" = 0 ] && [ "${STAGE_ON_TARGET:-0}" = 1 ]; then
-    if stage_setup "$TROOT"; then
-      netinstall_fetch_into "$STAGE_MNT"
-      # The check that could not run before the wipe, run at the first instant
-      # the image exists — and still before bootc writes anything, so the
-      # encrypted volume holds no data and nothing is locked away. rc=74's
-      # message already describes exactly this state.
-      if [ "$luks_helper_checked" = 0 ] && ! luks_helper_ok; then
-        rc=74
-        echo "the downloaded APEX-OS image does not contain $LUKS_ENROLL_PATH" | tee -a "$LOG"
-      else
-        luks_helper_checked=1
-      fi
-    else
-      rc=79
-    fi
   fi
   if [ "${rc:-0}" = 0 ]; then
     # ── the kernel arguments that make the machine unlockable ──────────────
