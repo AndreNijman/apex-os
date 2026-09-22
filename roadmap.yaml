@@ -183,7 +183,21 @@ tasks:
     and multilib, where apex install steam could not work at all because the guard deleted every i686 library,
     REFUSE_RE rejected the rest, resolution never asked for the 32-bit closure, /lib content never reached a
     sysext, install died on relative /etc symlinks, and extracting both arches through one pass let a 32-bit
-    binary shadow 53 of the image's own.
+    binary shadow 53 of the image's own. || ROUND 41 2026-09-22 -- a SEVENTH defect class in the same engine,
+    landed as merge 00682b08 of task/pkg-alternatives (77e51d27). apex-pkg extracts RPM payloads and never runs
+    %post, so every package that publishes its binaries through `alternatives` installed BROKEN into the
+    extension: the scriptlet that would create /etc/alternatives and the /usr/bin link never ran, and the
+    payload's own symlinks were left pointing at a link that does not exist. Measured on katana as 12 dangling
+    symlinks, all wine's, and invisible to `command -v` and `--version` -- which is why six rounds of package work
+    did not see it. 0 dangling under /etc/alternatives on the same machine, because the IMAGE runs its scriptlets
+    and only the overlay does not. Fixed by replaying the declarations between extract_rpms and fix_caches
+    (alternatives_record / _replay / _candidates / _place, apply_alternatives), with the scriptlets run
+    unprivileged and confined -- both confinement legs are asserted, including that a scriptlet's `rm -f
+    /usr/bin/apex-alt-canary` by bare name AND by absolute path deletes nothing.
+    tests/test-apex-pkg-alternatives.sh 15 passed / 0 failed, re-run on the merged tip. It is mutation-tested in
+    BOTH directions rather than merely green: delete the apply_alternatives call site and it is 14/1; delete the
+    image_owns refusal from alternatives_place and the refusal leg goes red at 14/1 too. Evidence
+    ROADMAP/evidence/pkg-alternatives-20260922.md.
 - id: BASE-007
   title: Preserve declarative Blueprint and sync
   priority: P0
@@ -525,7 +539,18 @@ tasks:
     out of the human line because it is an efivarfs path plus an OS error, one token past the 96-column budget the
     rendered report is measured against. cargo test -p apex 412 passed / 0 failed with 4 new tests;
     test-apex-recover.sh --with-binary 201/0 (194 before), including a CHECKED seal - the suite walks mode 000 as
-    root first, so it proves the refusal is real before asserting through it.
+    root first, so it proves the refusal is real before asserting through it. || ROUND 41 2026-09-22 -- the
+    MIGRATION half, landed as merge 99e9180b of task/sdboot-migrate-3 (814c3459). sdboot-image's 'no in-place
+    converter, must reinstall' conclusion is WRONG and is now retired by demonstration: a real APEX btrfs guest
+    migrates and boots. Two engine defects were found by running it rather than by reading it -- join_state joined
+    the DEPLOYMENT's /var symlink instead of the stateroot's real var, and a re-run over a half-finished composefs
+    deployment was promised safe when it is not; both are fixed and guarded (8 new tests,
+    tests/test-boot-migrate.sh 91 passed / 0 failed, re-run on the merged tip rather than taken on the branch's
+    word). A 512 MiB ESP guest is REFUSED, which is the precheck doing its job on hardware-shaped input. Also
+    measured: bootc installs no loader and still exits 0, caught by incomplete-stage. NOT LANDED, and
+    deliberately: the +3-0 boot-counter rename. systemd-bless-boot fails 'Read-only file system' because bootc
+    hardcodes /boot:...:ro, so the fix is a Containerfile boot_mount_spec dropin and not an engine change --
+    seeded as unit sdboot-bless-boot-mount-spec. Evidence ROADMAP/evidence/sdboot-migrate-3-20260922-lab.md.
 - id: P0-001
   title: Qualify current integrated image on real hardware
   priority: P0

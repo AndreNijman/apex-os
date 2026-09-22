@@ -142,6 +142,17 @@ import sys, json
 q = json.load(open(sys.argv[1]))
 try: agents = json.load(open(sys.argv[2]))['agents']
 except Exception: agents = []
+# Round 40 wrote its queue units with `id`/`note` and no `items`/`title`, and
+# this block died with KeyError: 'items' -- which took the whole READY list off
+# the report for two rounds without saying so. A unit is allowed to own no
+# roadmap item (`sdboot-migrate-3` is a design-doc unit; `mux-layouts-flake` is
+# a CI red); the schema, not the unit, was wrong. Normalise rather than refuse:
+# a missing `items` means "no roadmap item", which `finished()` already reads
+# correctly as "not auto-finished, only `closed` closes it".
+for u in q['units']:
+    u.setdefault('items', [])
+    u.setdefault('title', (u.get('note') or '').split('. ')[0][:80] or u['id'])
+
 live = {a['slug'] for a in agents}
 # A unit whose work is already in someone's hands must not be offered again.
 # The agent slug and the queue id are allowed to differ (followups-integrate-3
