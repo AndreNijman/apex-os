@@ -938,7 +938,10 @@ mod tests {
         assert_eq!(ENVELOPE_LEN, 51);
         // And the whole thing fits the UnifiedPush cleartext bound with three
         // orders of magnitude to spare, so no distributor will ever truncate.
-        assert!(ENVELOPE_LEN < 3993);
+        // A const assertion rather than a runtime one: the comparison is
+        // decided at compile time, so a change that broke it would otherwise
+        // be a test somebody has to run.
+        const _: () = assert!(ENVELOPE_LEN < 3993);
     }
 
     #[test]

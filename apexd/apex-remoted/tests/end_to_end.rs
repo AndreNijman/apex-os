@@ -1245,11 +1245,17 @@ fn a_push_endpoint_the_machine_cannot_use_is_refused_and_nothing_is_stored() {
     ] {
         let reply = session.call(bad);
         assert_eq!(reply["reply"], "error", "{bad} was accepted: {reply}");
-        // And the sentence says which of the two was wrong, because the user
-        // reading it has to know whether to change a distributor or re-pair.
+        // And it is refused for the RIGHT reason. Without this the test passes
+        // on a build where the seam in `serve.rs` is missing entirely: the line
+        // reaches `apex-agentd`, which does not know the verb and also answers
+        // `error` — the same shape for "your endpoint is wrong" and "this
+        // machine cannot push at all", which are opposite facts.
+        let message = reply["message"].as_str().unwrap_or_default();
+        assert!(!message.is_empty(), "{reply}");
         assert!(
-            reply["message"].as_str().is_some_and(|m| !m.is_empty()),
-            "{reply}"
+            !message.contains("unknown variant"),
+            "the verb never reached apex-remoted; this is a machine that cannot push, \
+             not an endpoint it refused: {reply}"
         );
     }
     let (_, push) = stores(&h);

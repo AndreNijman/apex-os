@@ -251,7 +251,7 @@ fn session_id(id: u32) -> i32 {
 
 /// The state word, as the wire spells it.
 fn state_word(s: &SessionInfo) -> String {
-    serde_json::to_value(&s.state)
+    serde_json::to_value(s.state)
         .ok()
         .and_then(|v| v.as_str().map(str::to_string))
         .unwrap_or_default()
