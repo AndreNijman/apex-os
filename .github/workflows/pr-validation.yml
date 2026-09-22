@@ -3825,8 +3825,12 @@ jobs:
           # out of `core/build/test-results/test/*.xml`, not by counting `@Test`
           # annotations — a test that does not RUN is exactly what this floor
           # exists to catch, and counting the source would count it anyway.
-          test "$total" -ge 526 \
-            || { echo "::error::only $total protocol tests ran; expected at least 526"; exit 1; }
+          #
+          # 526 -> 542 with P1-055's AnnounceTest (16): what a screen reader is
+          # given for a frame, and what the live region is allowed to interrupt
+          # somebody with. Measured the same way, on 2026-09-22.
+          test "$total" -ge 542 \
+            || { echo "::error::only $total protocol tests ran; expected at least 542"; exit 1; }
 
       # The rule InsecureStorageTest rests on. That test walks a directory and
       # accounts for every byte in it, which is evidence about app storage only
@@ -3872,8 +3876,15 @@ jobs:
           # 33 -> 53, measured on 2026-09-20 from this module's own results
           # XML after android-release added the install-status receiver
           # assertion and `roadmap/v2.2` brought the rest.
-          test "$total" -ge 53 \
-            || { echo "::error::only $total app tests ran; expected at least 53"; exit 1; }
+          #
+          # 53 -> 74 with P1-055's TerminalFramesTest (9) and
+          # TerminalSemanticsTest (12) — the repaint loop driven a frame at a
+          # time against a `BroadcastFrameClock`, and the terminal's semantics
+          # read back off a fake `SemanticsPropertyReceiver`. Both are Compose
+          # behaviour tested with no device, which this module had none of
+          # before. Measured on 2026-09-22.
+          test "$total" -ge 74 \
+            || { echo "::error::only $total app tests ran; expected at least 74"; exit 1; }
 
       # The guide's prose, under the same stop-slop checker the desktop's help
       # passes. It reports NOT CHECKED and exits 0 when the skill is absent,

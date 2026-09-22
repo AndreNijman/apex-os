@@ -25,8 +25,10 @@ import com.apexos.remote.ui.agent.WorktreesScreen
  * What is NOT here is [com.apexos.remote.ui.term.TerminalScreen], and it is
  * left out rather than stubbed: it is driven by a `TerminalController` that
  * owns a PTY attachment, and half a controller would make the checks below
- * assert something no user ever sees. It is covered instead by `:core`'s
- * terminal suite and by `LanEndToEndTest`'s round trip.
+ * assert something no user ever sees. It has its own walks instead —
+ * `TerminalHarnessOnDeviceTest` for the semantics tree and the accessibility
+ * framework, `TerminalOnDeviceTest` for a real PTY over Wi-Fi — because both
+ * need a controller that is whole.
  */
 object Screens {
 

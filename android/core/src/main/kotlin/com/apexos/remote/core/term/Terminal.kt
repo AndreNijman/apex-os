@@ -163,6 +163,29 @@ class Terminal(
     var revision: Long = 0L
         private set
 
+    /**
+     * Called after every change to the grid, on whichever thread made it.
+     *
+     * The counter above says a renderer "that redrew on a timer would burn a
+     * phone's battery on an idle terminal", and that is exactly what a
+     * renderer polling [revision] once per displayed frame does: `withFrameNanos`
+     * asks the Choreographer for another frame, so a loop that looks every
+     * frame keeps the display pipeline running at sixty hertz over a terminal
+     * where nothing is happening. It also keeps Compose's `Recomposer`
+     * permanently busy, which is what made this screen impossible to host in
+     * the standard Compose test harness.
+     *
+     * So the pump says when something moved and the renderer sleeps otherwise.
+     * Called with [lock] released: the listener reaches a coroutine and a
+     * channel, the pump is blocked behind it, and back-pressure onto a
+     * terminal is the one thing this class is careful not to add.
+     *
+     * `@Volatile` because the pump thread reads it and the main thread writes
+     * it, once, when the screen is built.
+     */
+    @Volatile
+    var onChanged: (() -> Unit)? = null
+
     // ---- parser state -------------------------------------------------
 
     private enum class St { GROUND, ESC, ESC_INT, CSI_ENTRY, CSI_PARAM, CSI_INT, CSI_IGNORE, OSC, DCS, DCS_PASS, STRING }
@@ -221,6 +244,7 @@ class Terminal(
             }
             revision++
         }
+        onChanged?.invoke()
     }
 
     /**
@@ -327,7 +351,12 @@ class Terminal(
             'E'.code -> { index(); cursorCol = 0; pendingWrap = false; state = St.GROUND }
             'M'.code -> { reverseIndex(); state = St.GROUND }
             'H'.code -> { if (cursorCol in tabs.indices) tabs[cursorCol] = true; state = St.GROUND }
-            'c'.code -> { reset(); state = St.GROUND }
+            // RIS, and the LOCKED form deliberately: this runs inside `feed`,
+            // which already holds the lock and already tells the renderer when
+            // it is finished. Calling the public `reset` here would deliver a
+            // change notification with the lock held, from inside the parser,
+            // to a listener that is entitled to look at the screen.
+            'c'.code -> { resetLocked(); state = St.GROUND }
             '='.code, '>'.code -> state = St.GROUND // keypad modes; nothing here depends on them
             '\\'.code -> state = St.GROUND // a stray ST
             else -> state = St.GROUND
@@ -979,7 +1008,12 @@ class Terminal(
      * program is a terminal whose next repaint is the wrong shape. The two
      * are separate because only one of them can fail.
      */
-    fun resize(newCols: Int, newRows: Int) = synchronized(lock) {
+    fun resize(newCols: Int, newRows: Int) {
+        resizeLocked(newCols, newRows)
+        onChanged?.invoke()
+    }
+
+    private fun resizeLocked(newCols: Int, newRows: Int) = synchronized(lock) {
         if (newCols <= 0 || newRows <= 0) return@synchronized
         if (newCols == cols && newRows == rows) return@synchronized
         normal.resize(newCols, newRows, bg)
@@ -1001,7 +1035,12 @@ class Terminal(
      * so a terminal that still held the previous attachment's screen would
      * show the last few hundred lines twice.
      */
-    fun reset() = synchronized(lock) {
+    fun reset() {
+        resetLocked()
+        onChanged?.invoke()
+    }
+
+    private fun resetLocked() = synchronized(lock) {
         normal.clearGrid(Colour.DEFAULT)
         normal.clearScrollback()
         alternate.clearGrid(Colour.DEFAULT)
