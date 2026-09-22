@@ -10,6 +10,16 @@ marked as not built. The distinction is kept in every section, because a design
 document that reads as a feature list is how a roadmap item gets recorded as
 done twice.
 
+One thing that used to be in this document has left it, and that is the most
+useful thing to know before reading the rest. The staged-rollout pointer — the
+percentage that has to change between builds — was going to be a fleet endpoint,
+because an OCI label is baked once and a fleet is the obvious thing that could
+serve a number. It is now a signed document in the registry that **every**
+machine reads, enrolled or not, and it ships. Designing it as a fleet feature
+would have made a personal machine's update path worse in order to give a
+managed one something, which is the failure mode the rule below exists to
+prevent, arrived at by accident rather than on purpose.
+
 ## The rule that comes before the architecture
 
 > Enterprise/fleet support remains optional and does not turn personal APEX
@@ -45,7 +55,7 @@ that a fleet is a distribution problem on top of it rather than a new agent.
 | --- | --- | --- |
 | declarative state | `apex blueprint diff/apply`, idempotent, secrets never in the bundle | `apexd-core/src/blueprint.rs`, BASE-007 |
 | update rings | `edge`/`beta`/`candidate`/`stable`, promotion gated in CI on a cosign signature | `apex channel`, P1-046 |
-| staged rollout | a stable slot 0–99 per machine, derived from `/etc/machine-id` | `apex channel status`, P1-046 |
+| staged rollout | a stable slot 0–99 per machine, and a signed rollout document in the registry that says how far the ramp has got | `apex channel rollout`, P1-046 |
 | a health verdict | four rows that count, measured by the same probes as recovery | `ops::update`'s rollout stop |
 | inventory facts | channel, tag, digest, healthy, reasons | `apex channel report` |
 | device identity | a long-lived key, and paired devices | `apex-remote-core::identity`, `apex remote` |
@@ -241,32 +251,64 @@ ships (`apex channel set`, promotion gated in CI on a cosign signature from this
 repository's `main` workflow). The slot half ships (`0–99`, stable across
 reboots, derived from `/etc/machine-id`).
 
-What does not ship is the pointer. `docs/update-channels.md` says it plainly:
+The pointer did not ship when this section was first written, and
+`docs/update-channels.md` said why:
 
 > nothing publishes a percentage yet. The gate reads it from an image label and
 > treats an image without one as reaching everybody… A ramp — 1%, then 5%, then
 > 25% — needs the number to change between builds, and a label is baked once.
 
-**A fleet is the natural home for that pointer**, and that is the single most
-useful thing this design contributes. An OCI label is baked once per build; a
-fleet endpoint can serve a number that changes. So:
+**That quotation has since been superseded, and the way it was resolved matters
+more than the resolution.** The obvious conclusion from "a label is baked once" was
+"so a staged rollout needs a fleet endpoint", and that conclusion would have
+made the ramp a feature only managed machines get — which is precisely the
+shape the rule at the top of this document exists to refuse.
+
+The pointer went somewhere else: a **signed rollout document**, published at
+`…:rollout` in the same registry as the image and re-published whenever the
+number moves. It is mutable, it needs no server, and a personal machine reads it
+with the cosign verification it already performs on the image. It ships;
+`docs/update-channels.md` describes it and `apexd_core::channel::decide_rollout`
+is the whole of what a machine does with one.
+
+So the ring is:
 
 ```
-ring := { channel, max_slot, min_digest_age, halt }
+ring := { channel, max_slot, halt }
 ```
 
-An enrolled machine asks its fleet for its ring's current ceiling before
-updating, and compares it against the slot it already computes locally. An
-unenrolled machine keeps today's behaviour exactly — no label, reaches
-everybody — which is what makes this an addition rather than a change.
+— and **the fleet's half of it is now only the ceiling**, because the other two
+are served to everybody:
 
-`halt` is the fleet-wide form of the rollout stop that already exists per
-machine. The per-machine stop refuses an update when *this* machine came back
-unhealthy from the last one; the fleet-wide one refuses when enough machines
-did. Same verdict vocabulary, counted across a cohort. The threshold is a
-number an operator sets and an operator can be wrong about, so the machine's own
-stop stays authoritative for the machine: a fleet may halt a rollout, and may
-not force one past a local refusal.
+| part | who serves it | to whom |
+| --- | --- | --- |
+| channel | the tag in the machine's bootc origin | everybody; `apex channel set` |
+| the ramp | the signed rollout document | everybody, per channel |
+| `halt` | the same document | everybody, per channel |
+| `max_slot` | a fleet | its enrolled machines only |
+
+What a fleet adds is therefore narrow and worth stating exactly: **it can hold
+its own machines further back than the publisher's ramp, and it can never push
+them ahead of it.** That is not a promise in this document — it is a parameter
+of the decision function, `RolloutQuery::fleet_ceiling`, which only ever lowers
+the percentage, with a test that fails if a ceiling above the ramp raises it.
+Every machine passes `None` today, because no fleet client exists.
+
+`halt` moved out of the fleet's hands for the same reason the ramp did, and
+there are now three stops rather than one. The per-machine stop that already
+ships refuses an update when *this* machine came back unhealthy from the last
+one. The publisher's halt, in the rollout document, stops a digest reaching
+anybody. The third — the one that fires when enough machines in a cohort came
+back unhealthy — is the one this design does not have, and its absence is not a
+transport problem: counting a cohort needs machines to report health to their
+fleet, which is the section below, which is opt-in, and which nothing receives.
+So the halt that ships is a person's judgement, dispatched after reading
+evidence that came from somewhere else. The automatic one stays on the not-built
+list rather than being written up as though the wiring were all that was
+missing.
+
+Whichever of the three fires, the machine's own stop stays authoritative for the
+machine: a fleet may hold a rollout, and may not force one past a local refusal.
 
 ## Managed secrets and certificates
 
@@ -447,17 +489,55 @@ list is the one that gets built wrong.
   What is still open is the delegation format — whether the chain from the root
   key reuses `apex trust`'s cosign machinery verbatim or only its shape — and
   that cannot be settled without a server to try it against.
-* **Nothing here has been deployed or written.** The two sections above are
-  decisions with their reasoning, which is what a design item delivers; they
-  are not a client, a server, or a line of code. `relay/`'s own README says
-  `src/index.js` has never been executed, and the fleet path now does not use
-  it at all.
-* **What a ring ceiling costs to serve.** `docs/update-cost.md` records that
-  core rebuilds cost the fleet about 5 GB each. A ramp changes when machines
-  pull, not how much, but the interaction has not been worked out.
-* **Whether the fleet-assigned machine id can be rotated**, and what breaks when
-  it is.
-* **The evidence standard for compliance.** A row from `apex doctor --json` is a
-  claim by the machine about itself. A fleet that treats it as proof has
-  outsourced its trust to the device it is checking. Attestation is the real
-  answer and it depends on L-001's TPM work, which is `partial`.
+* **`relay/` is not in the fleet path**, and its own README says
+  `src/index.js` has never been executed.
+* ~~**What a ring ceiling costs to serve.**~~ **Worked out, and it is not the
+  number anybody expected to be looking at.** `docs/update-cost.md` records that
+  a `core` rebuild costs each machine about 5 GB, and a ramp does not change
+  that: the same machines pull the same layers, later. What a ramp changes is
+  the *shape* of the pull — a 5% ring spreads the same 5 GB over the days the
+  ramp takes rather than the hours a tag move takes, which is a saving for the
+  site and nothing at all for the registry. Serving the ceiling itself is
+  negligible in a way worth writing down so nobody re-derives it: the rollout
+  document is a few hundred bytes, fetched once per `apex update` alongside a
+  manifest the machine was fetching anyway — four or five orders of magnitude
+  under the image pull it gates. **The cost that is real is the opposite one:**
+  a ramp makes a bad build take *longer* to reach everybody and therefore longer
+  to be noticed, so the fleet's own reporting has to be at least as fast as the
+  ramp or the ramp is buying nothing. That is a constraint on the reporting
+  interval, and it is not settled because the interval is not.
+* ~~**Whether the fleet-assigned machine id can be rotated.**~~ **Settled, by
+  separating two things that get conflated.** There are two identifiers and only
+  one of them is the fleet's:
+  * The **rollout slot** is 0–99, derived locally from `/etc/machine-id`, never
+    transmitted, and belongs to the machine. Regenerating `/etc/machine-id`
+    reassigns it — a machine mid-ramp jumps into or out of the current cohort,
+    once, and nothing else breaks. That is acceptable and is stated here because
+    it is surprising: the slot is not stable across a `systemd-firstboot
+    --setup-machine-id`, a cloned disk, or a re-install.
+  * The **fleet identity** is the enrolment record's key, and it rotates the way
+    every other long-lived key in this system rotates: by re-enrolling, which is
+    an act at the keyboard. It is deliberately NOT derived from
+    `/etc/machine-id`, because an identity a fleet assigns must not change
+    because a user reset an unrelated file, and an identity the machine derives
+    cannot be revoked by the fleet.
+  * What breaks if they are the same value: rotating the identity would silently
+    re-roll the machine's rollout slot, so revoking a device's fleet access
+    would move it in the ramp — two unrelated operations wired together, and
+    nobody would find that by reading either one.
+* **The evidence standard for compliance.** Still open, and the reason has not
+  changed. A row from `apex doctor --json` is a claim by the machine about
+  itself; a fleet that treats it as proof has outsourced its trust to the device
+  it is checking. Attestation is the real answer and depends on L-001's TPM
+  work, which is `partial`. What *can* be said now is which rows would become
+  attestable and which never will: Secure Boot state, the booted digest and the
+  measured boot path are TPM-quotable; "is the disk encrypted" is quotable
+  through the PCR policy that unsealed it; "is the firewall on", "is this app
+  installed" and every user-space row are not, and a fleet that reports them as
+  verified is reporting a self-assessment with a certificate stapled to it.
+* **Nothing here has been deployed or written.** The decisions above are
+  decisions with their reasoning, which is what a design item delivers; they are
+  not a client, a server, or a line of code. The one exception is the rollout
+  document, which is no longer part of this design because it is not part of a
+  fleet: it ships, for everybody, and is described in
+  `docs/update-channels.md`.

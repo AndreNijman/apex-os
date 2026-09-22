@@ -1321,6 +1321,40 @@ jobs:
               exit 1
           fi
 
+      # §26's staged rollout. A second crypto suite for the same reason the
+      # trust one is separate: every assertion needs a minted certificate
+      # authority and a real ECDSA signature, so it is slower than the static
+      # job and belongs beside the other crypto.
+      #
+      # It also runs the PUBLISHER. The fixture lifts the python out of
+      # .github/workflows/promote-channel.yml and executes it, so the document a
+      # machine parses is the document that workflow writes rather than a copy
+      # of it — that workflow has never been run and this is the only thing
+      # holding the two halves together.
+      - name: §26 rollout — the ramp, the halt, and the signature under them
+        if: ${{ !cancelled() }}
+        working-directory: ${{ github.workspace }}
+        env:
+          APEX: ${{ github.workspace }}/apexd/target/debug/apex
+        run: |
+          set -euo pipefail
+          cargo build -p apex --locked --manifest-path apexd/Cargo.toml
+          test -x "$APEX"
+          rc=0; out="$(./tests/test-apex-rollout.sh 2>&1)" || rc=$?
+          printf '%s\n' "$out"
+          [ "$rc" = 0 ] || { echo "::error::the rollout suite exited $rc; it exits 1 before asserting anything if openssl or python3 is missing"; exit 1; }
+          summary="$(printf '%s\n' "$out" | grep -E '^[0-9]+ passed, [0-9]+ failed$' || true)"
+          [ -n "$summary" ] || { echo "::error::the rollout suite printed no summary line"; exit 1; }
+          [ "$(printf '%s\n' "$summary" | wc -l)" = 1 ] || { echo "::error::more than one line looked like the summary"; exit 1; }
+          passed="$(printf '%s' "$summary" | awk '{print $1}')"
+          failed="$(printf '%s' "$summary" | awk '{print $3}')"
+          echo "measured: passed=$passed failed=$failed"
+          [ "$failed" = 0 ] || { echo "::error::$failed rollout assertions failed"; exit 1; }
+          # 42 ran on 2026-09-22. A suite that mints fewer certificates than it
+          # means to asserts less and still prints green, which is the failure
+          # this floor exists for.
+          [ "$passed" -ge 42 ] || { echo "::error::only $passed rollout assertions ran; 42 ran on 2026-09-22, so some no longer execute"; exit 1; }
+
       # P0-002's first criterion has two halves, and only one of them was ever
       # measured anywhere. The PATH half — the store is /var/lib/apex-secretd
       # and not $HOME — is a unit test and has been true since the crate landed.

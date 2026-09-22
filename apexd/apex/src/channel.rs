@@ -18,11 +18,14 @@
 //! user sets themselves — and with nothing configured the answer is that
 //! nothing leaves the machine.
 //!
-//! Nor is there a fleet-wide rollout ramp. `apexd_core::channel::admits` and
-//! the machine's bucket are real and tested, and the percentage is read from
-//! the image's own label; but a label is baked once per build, so the ramp
-//! needs a mutable pointer that does not exist. The gate stops a rollout on
-//! this machine, which is the half that can be true without a server.
+//! The staged rollout ramp does exist, and `apex channel rollout` is the verb
+//! that reads it. The percentage lives in a signed document published under the
+//! `rollout` tag in the same registry as the image — not in an OCI label, which
+//! is baked once per build and so cannot hold a number that has to move between
+//! them. `fetch_rollout` below resolves it, verifies its signature under a
+//! DIFFERENT Sigstore identity from the image's, and only then reads the bytes;
+//! `apexd_core::channel::decide_rollout` decides. Still no server: the document
+//! is an object in a registry the machine already contacts.
 //!
 //! ## The stop is a refusal, not a notification
 //!
@@ -37,7 +40,8 @@ use std::path::PathBuf;
 use std::process::Command;
 
 use apexd_core::channel::{
-    self, Channel, Direction, LastUpdate, Tracking, Verdict, LAST_UPDATE_SCHEMA,
+    self, Channel, Direction, LastUpdate, Rollout, RolloutAnswer, RolloutDoc, Tracking, Verdict,
+    LAST_UPDATE_SCHEMA,
 };
 use clap::Subcommand;
 use serde_json::{json, Value};
@@ -103,6 +107,9 @@ pub enum ChannelCmd {
         /// Print what would run and change nothing.
         #[arg(long)]
         dry_run: bool,
+        /// Switch even though the target tag does not resolve in the registry.
+        #[arg(long)]
+        force: bool,
     },
     /// The health report, and whether anything would be sent.
     ///
@@ -112,6 +119,20 @@ pub enum ChannelCmd {
         /// Emit machine-readable JSON instead of a report.
         #[arg(long)]
         json: bool,
+    },
+    /// Whether a staged rollout is holding this machine back, and why.
+    ///
+    /// This is the one verb here that contacts the registry: it resolves the
+    /// channel tag and fetches the signed rollout document. `--offline` decides
+    /// on the last document this machine accepted instead, which is what
+    /// `apex channel status` does.
+    Rollout {
+        /// Emit machine-readable JSON instead of a report.
+        #[arg(long)]
+        json: bool,
+        /// Decide on the cached document; contact nothing.
+        #[arg(long)]
+        offline: bool,
     },
 }
 
@@ -158,8 +179,14 @@ fn machine_bucket() -> Result<u8, String> {
     // /etc/machine-id is world-readable by design; systemd documents it as a
     // public identifier, which is exactly why the bucket derived from it is
     // still never transmitted.
-    let id = std::fs::read_to_string("/etc/machine-id")
-        .map_err(|e| format!("/etc/machine-id: {e}"))?;
+    //
+    // Through `Roots`, like everything else the rollout gate reads. It was a
+    // bare `/etc/machine-id`, and the cost was precise: the slot is the input
+    // that decides whether a ramp holds this machine, so a suite that could not
+    // set it could only assert against whatever slot the machine running the
+    // test happened to be in — which is a gate nobody has watched refuse.
+    let path = roots().path("/etc/machine-id");
+    let id = std::fs::read_to_string(&path).map_err(|e| format!("{}: {e}", path.display()))?;
     Ok(channel::bucket(&id))
 }
 
@@ -379,6 +406,363 @@ fn stamp(unix: u64) -> String {
     format!("unix {unix}")
 }
 
+
+// ── the staged rollout: fetching the pointer, and deciding with it ───────────
+
+/// The last rollout document this machine accepted.
+///
+/// Cached for one reason that is not speed: without it, blocking the `rollout`
+/// tag would defeat a halt. The fetch fails, no document applies, the machine
+/// takes the release the publisher stopped — a halt anybody can undo with a
+/// firewall rule is not a halt. With the cache, an unreachable registry leaves
+/// the last instruction in force until it expires on its own.
+///
+/// It is also where the serial lives, and the serial is what makes a replay
+/// detectable at all.
+const ROLLOUT_CACHE: &str = "/var/lib/apex/channel/rollout.json";
+
+fn rollout_cache_path() -> PathBuf {
+    roots().path(ROLLOUT_CACHE)
+}
+
+#[derive(serde::Serialize, serde::Deserialize)]
+struct CachedRollout {
+    /// Unix seconds this machine accepted it.
+    accepted_at: u64,
+    document: RolloutDoc,
+}
+
+fn now() -> u64 {
+    std::time::SystemTime::now()
+        .duration_since(std::time::UNIX_EPOCH)
+        .map(|d| d.as_secs())
+        .unwrap_or(0)
+}
+
+fn read_cached_rollout() -> Result<Option<CachedRollout>, String> {
+    let path = rollout_cache_path();
+    let text = match std::fs::read_to_string(&path) {
+        Ok(t) => t,
+        Err(e) if e.kind() == std::io::ErrorKind::NotFound => return Ok(None),
+        Err(e) => return Err(format!("{}: {e}", path.display())),
+    };
+    serde_json::from_str(&text)
+        .map(Some)
+        .map_err(|e| format!("{}: {e}", path.display()))
+}
+
+/// Keep a document this machine has accepted.
+///
+/// Best effort and never fatal: a machine that cannot write the cache still
+/// decides correctly this time, and loses only its memory of the serial. Said
+/// rather than swallowed, because losing the serial is what makes a replay
+/// undetectable next time.
+fn write_cached_rollout(doc: &RolloutDoc) -> Result<(), String> {
+    let path = rollout_cache_path();
+    if let Some(dir) = path.parent() {
+        std::fs::create_dir_all(dir).map_err(|e| format!("{}: {e}", dir.display()))?;
+    }
+    let text = serde_json::to_string_pretty(&CachedRollout {
+        accepted_at: now(),
+        document: doc.clone(),
+    })
+    .map_err(|e| e.to_string())?
+        + "\n";
+    // Same write-and-rename as `record_update`, and for the same reason: a
+    // half-written document here is not a lost cache, it is a cache that reads
+    // as a different instruction from the one that was signed.
+    let tmp = path.with_extension(format!("json.tmp.{}", std::process::id()));
+    if let Err(e) = std::fs::write(&tmp, &text) {
+        let _ = std::fs::remove_file(&tmp);
+        return Err(format!("{}: {e}", tmp.display()));
+    }
+    std::fs::rename(&tmp, &path).map_err(|e| {
+        let _ = std::fs::remove_file(&tmp);
+        format!("{}: {e}", path.display())
+    })
+}
+
+/// Where the document this machine is deciding with came from.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+enum DocOrigin {
+    Registry,
+    Cache,
+    None,
+}
+
+/// Fetch the rollout document and verify it, or say why not.
+///
+/// Three steps, in this order and no other: resolve the tag, verify the
+/// signature over that digest, and only then read the bytes. Reading first and
+/// verifying afterwards would mean the parser had already seen whatever the
+/// registry served, and a document whose signature does not verify is not a
+/// document with a problem — it is not a document.
+fn fetch_rollout(repo: &str) -> Result<RolloutDoc, String> {
+    let r = roots();
+    let reference = format!("{repo}:{}", channel::ROLLOUT_TAG);
+    let digest = crate::verify::resolve(&r, &reference)?;
+    let want = crate::verify::rollout_expectations(&r);
+    match crate::verify::verify_signature_as(&r, repo, &digest, &want) {
+        crate::verify::Verdict::Verified { .. } => {}
+        crate::verify::Verdict::Absent(why) => {
+            return Err(format!("{reference} is not signed ({why}), so it was not read"))
+        }
+        crate::verify::Verdict::Failed(why) => {
+            return Err(format!("{reference}'s signature did not verify ({why}), so it was not read"))
+        }
+        crate::verify::Verdict::CouldNotRun(why) => {
+            return Err(format!("{reference}'s signature could not be checked ({why}), so it was not read"))
+        }
+    }
+    // `&digest`, not just the tag: the signature above is over that digest, and
+    // reading whatever the tag happens to serve on a second round trip would
+    // put a signature over one object behind the bytes of another.
+    let bytes = crate::verify::artifact_layer_at(
+        &r,
+        repo,
+        channel::ROLLOUT_TAG,
+        &digest,
+        channel::ROLLOUT_MEDIA_TYPE,
+    )?;
+    serde_json::from_slice(&bytes).map_err(|e| format!("{reference} is not a rollout document: {e}"))
+}
+
+/// Everything this machine knows about the rollout it is in.
+struct RolloutState {
+    repository: String,
+    channel: Option<Channel>,
+    tag: String,
+    slot: Result<u8, String>,
+    target: Result<String, String>,
+    origin: DocOrigin,
+    document: Option<RolloutDoc>,
+    /// Why the registry copy was not used, when it was not.
+    fetch_error: Option<String>,
+    /// Why the cache was not used, when it could not be read.
+    cache_error: Option<String>,
+    answer: RolloutAnswer,
+}
+
+/// Measure the machine and the registry, then decide.
+///
+/// `offline` skips the registry entirely and decides on the cache, which is
+/// what `apex channel status` wants: a readout that answers without a password
+/// must also answer without a network.
+fn rollout_state(offline: bool) -> Result<RolloutState, String> {
+    let reference = booted_reference()?;
+    let t = channel::from_tag(&reference);
+    let repo = repository(&reference).to_string();
+    let slot = machine_bucket();
+
+    let cached = read_cached_rollout();
+    let cache_error = cached.as_ref().err().cloned();
+    let cached = cached.ok().flatten();
+
+    let mut fetch_error = None;
+    let (document, origin) = if offline {
+        (cached.as_ref().map(|c| c.document.clone()), DocOrigin::Cache)
+    } else {
+        match fetch_rollout(&repo) {
+            Ok(d) => (Some(d), DocOrigin::Registry),
+            Err(e) => {
+                fetch_error = Some(e);
+                (cached.as_ref().map(|c| c.document.clone()), DocOrigin::Cache)
+            }
+        }
+    };
+    let origin = if document.is_none() { DocOrigin::None } else { origin };
+
+    // The channel's tag, not the rollout tag: what this machine is about to
+    // pull is what an entry has to be about.
+    let target = if offline {
+        Err("the registry was not asked".to_string())
+    } else {
+        crate::verify::resolve(&roots(), &reference)
+    };
+
+    // A document from the registry that is NEWER than the cache updates the
+    // cache; one that is older is a replay and `decide_rollout` refuses it, so
+    // it must not be written over the newer one.
+    let seen_serial = cached.as_ref().map(|c| c.document.serial);
+    if origin == DocOrigin::Registry {
+        if let Some(d) = &document {
+            if seen_serial.map(|s| d.serial >= s).unwrap_or(true) {
+                if let Err(e) = write_cached_rollout(d) {
+                    eprintln!("apex: the rollout document was not cached ({e}); a replay would not be detected next time");
+                }
+            }
+        }
+    }
+
+    let answer = channel::decide_rollout(&channel::RolloutQuery {
+        now: now(),
+        slot: slot.clone().unwrap_or(0),
+        // A machine on a tag that is not a channel is on nobody's ramp. Edge is
+        // the answer for the four legacy aliases, which is every machine today.
+        channel: t.channel.unwrap_or(Channel::Edge),
+        repository: &repo,
+        target_digest: target.as_deref().ok(),
+        document: document.as_ref(),
+        seen_serial,
+        // No machine is enrolled: `docs/fleet.md` is a design and there is no
+        // fleet client. Passing `None` here is what makes that true in the code
+        // rather than in the document.
+        fleet_ceiling: None,
+    });
+
+    Ok(RolloutState {
+        repository: repo,
+        channel: t.channel,
+        tag: t.tag,
+        slot,
+        target,
+        origin,
+        document,
+        fetch_error,
+        cache_error,
+        answer,
+    })
+}
+
+/// §26's staged rollout, from the update path's point of view.
+///
+/// `None` means take it. Anything else is printed and the OS image is left
+/// alone — while packages, flatpaks and firmware still update, because a
+/// staged rollout is about the image and nothing else.
+///
+/// A machine whose slot is outside the ramp is not broken and has nothing to
+/// fix, so this is not an error and `apex update` does not exit non-zero for
+/// it. The same is true of a halt: the user did nothing wrong and can do
+/// nothing about it except wait or `--force`.
+pub fn rollout_hold() -> Option<String> {
+    let state = match rollout_state(false) {
+        Ok(s) => s,
+        // Every failure to measure takes the update, which is this file's rule
+        // everywhere else and costs nothing here: a machine that could not
+        // resolve its own tag could not pull the image either.
+        Err(_) => return None,
+    };
+    match &state.answer.rollout {
+        Rollout::Admitted { .. } => None,
+        Rollout::Held { slot, percent } => Some(format!(
+            "apex: this release is being rolled out gradually and has reached {percent}% of\n\
+             apex: machines. This one is slot {slot} of 100, so it is not its turn yet — nothing\n\
+             apex: is wrong with it. Try again later, or `sudo apex update --force` to take it now.\n"
+        )),
+        Rollout::Halted { reason } => Some(format!(
+            "apex: the publisher has stopped this release, so it is not being installed.\n\
+             apex:   {reason}\n\
+             apex: A later build will supersede it. `sudo apex update --force` takes it anyway.\n"
+        )),
+    }
+}
+
+fn describe_rollout(s: &RolloutState) {
+    println!("Staged rollout");
+    match s.channel {
+        Some(c) => println!("  channel      : {}", c.as_str()),
+        None => println!("  channel      : {} — not one of the channels", s.tag),
+    }
+    match &s.target {
+        Ok(d) => println!("  resolves to  : {}", short(d)),
+        Err(e) => println!("  resolves to  : unavailable — {e}"),
+    }
+    match &s.slot {
+        Ok(b) => println!("  rollout slot : {b} of 100"),
+        Err(e) => println!("  rollout slot : unavailable — {e}"),
+    }
+    match (&s.document, s.origin) {
+        (Some(d), origin) => {
+            println!(
+                "  document     : serial {}, issued unix {}, expires unix {} ({})",
+                d.serial,
+                d.issued,
+                d.expires,
+                match origin {
+                    DocOrigin::Registry => "fetched and verified just now",
+                    DocOrigin::Cache => "the last one this machine accepted",
+                    DocOrigin::None => "unreachable",
+                }
+            );
+        }
+        (None, _) => println!("  document     : none — no rollout is staged for this repository"),
+    }
+    if let Some(e) = &s.fetch_error {
+        println!("  note         : {e}");
+    }
+    if let Some(e) = &s.cache_error {
+        println!("  note         : {e}");
+    }
+    for n in &s.answer.notes {
+        println!("  note         : {n}");
+    }
+    match &s.answer.rollout {
+        Rollout::Admitted { percent, source } => {
+            println!("  verdict      : this machine takes the release");
+            println!("  reached      : {percent}% of machines, from {}", source.as_str());
+        }
+        Rollout::Held { slot, percent } => {
+            println!("  verdict      : held — the ramp is at {percent}% and this machine is slot {slot}");
+            println!("  what to do   : nothing. It is not its turn. `sudo apex update --force` takes it now.");
+        }
+        Rollout::Halted { reason } => {
+            println!("  verdict      : halted by the publisher");
+            println!("  reason       : {reason}");
+        }
+    }
+    println!(
+        "\nThe ramp is a signed document at {}:{}, re-published when the number moves.",
+        s.repository,
+        channel::ROLLOUT_TAG
+    );
+    println!("APEX runs no server for this; see docs/update-channels.md.");
+}
+
+fn rollout_json(s: &RolloutState) -> Value {
+    let (verdict, percent, reason) = match &s.answer.rollout {
+        Rollout::Admitted { percent, .. } => ("admitted", Some(*percent), None),
+        Rollout::Held { percent, .. } => ("held", Some(*percent), None),
+        Rollout::Halted { reason } => ("halted", None, Some(reason.clone())),
+    };
+    json!({
+        "repository": s.repository,
+        "channel": s.channel.map(|c| c.as_str()),
+        "tag": s.tag,
+        "slot": s.slot.as_ref().ok(),
+        "slotError": s.slot.as_ref().err(),
+        "targetDigest": s.target.as_ref().ok(),
+        "targetDigestError": s.target.as_ref().err(),
+        "document": s.document,
+        "documentFrom": match s.origin {
+            DocOrigin::Registry => "registry",
+            DocOrigin::Cache => "cache",
+            DocOrigin::None => "none",
+        },
+        "fetchError": s.fetch_error,
+        "cacheError": s.cache_error,
+        "notes": s.answer.notes,
+        "verdict": verdict,
+        "percent": percent,
+        "haltReason": reason,
+    })
+}
+
+fn rollout(as_json: bool, offline: bool) -> i32 {
+    let s = match rollout_state(offline) {
+        Ok(s) => s,
+        Err(e) => {
+            eprintln!("apex: cannot tell which image this machine follows: {e}");
+            return 1;
+        }
+    };
+    if as_json {
+        println!("{}", serde_json::to_string_pretty(&rollout_json(&s)).unwrap_or_default());
+    } else {
+        describe_rollout(&s);
+    }
+    0
+}
+
 // ── the opt-in ───────────────────────────────────────────────────────────────
 
 /// What the user has agreed to, if anything.
@@ -583,7 +967,7 @@ fn list() -> i32 {
     0
 }
 
-fn set(want: Channel, dry_run: bool) -> i32 {
+fn set(want: Channel, dry_run: bool, force: bool) -> i32 {
     let reference = match booted_reference() {
         Ok(r) => r,
         Err(e) => {
@@ -603,6 +987,47 @@ fn set(want: Channel, dry_run: bool) -> i32 {
         .channel
         .map(|from| channel::direction(from, want) == Direction::Behind)
         .unwrap_or(false);
+
+    // MEASURED 2026-09-22, against the live registry: `ghcr.io/andrenijman/
+    // apex-os:stable`, `:candidate`, `:beta` and `:edge` all answer "manifest
+    // unknown". Only `apex`, `daily`, `gaming-mesa` and `gaming-nvidia` exist,
+    // and they are one digest. The workflow that creates the channel tags is on
+    // `roadmap/v2.2` and has never run on `main`, which is what publishes.
+    //
+    // So a switch to a channel tag today writes an origin that resolves to
+    // nothing, and the failure surfaces later as `bootc upgrade` saying there
+    // is no update — indistinguishable, on the screen, from being up to date.
+    // A machine that quietly stops receiving updates is the exact failure this
+    // file's header says the legacy tags must never be allowed to have.
+    //
+    // Checked before the switch, not after. A registry that cannot be reached
+    // does not block the switch — it is a fact about the network, and the
+    // program does not refuse on those.
+    match crate::verify::resolve(&roots(), &target) {
+        Ok(d) => println!("apex: {target} resolves to {}", short(&d)),
+        Err(e) if force => {
+            println!("apex: {target} does not resolve ({e}); switching anyway because --force");
+        }
+        // The registry answered, and it holds no such tag. Refuse.
+        Err(e) if crate::verify::tag_is_absent(&e) => {
+            eprintln!("apex: {target} does not resolve: {e}");
+            eprintln!("apex: switching to a tag the registry does not serve would leave this machine");
+            eprintln!("apex: with nothing to update to, and `bootc upgrade` would report that as");
+            eprintln!("apex: \"no update available\" forever. Not switching.");
+            eprintln!("apex: `apex channel list` shows the channels; `--force` overrides this.");
+            return 1;
+        }
+        // The registry did not answer. That is a fact about the network and not
+        // about the tag, and this program does not refuse a configuration
+        // change because a laptop is offline. Said out loud, because the switch
+        // is then unchecked and the user should know which of the two happened.
+        Err(e) => {
+            println!("apex: {target} could not be checked ({e}); switching anyway.");
+            println!("apex: that is the network, not the tag. If the channel turns out not to");
+            println!("apex: exist, `apex channel status` will say so and `apex channel set` can");
+            println!("apex: put this machine back.");
+        }
+    }
 
     println!("apex: {reference} -> {target}");
     if backwards {
@@ -715,8 +1140,9 @@ pub fn main(cmd: ChannelCmd) -> i32 {
     match cmd {
         ChannelCmd::Status { json } => status(json),
         ChannelCmd::List => list(),
-        ChannelCmd::Set { channel, dry_run } => set(channel, dry_run),
+        ChannelCmd::Set { channel, dry_run, force } => set(channel, dry_run, force),
         ChannelCmd::Report { json } => report(json),
+        ChannelCmd::Rollout { json, offline } => rollout(json, offline),
     }
 }
 
@@ -818,8 +1244,9 @@ mod tests {
 
     #[test]
     fn the_default_rollout_is_everybody() {
-        // Every image published so far carries no rollout label, and that has
-        // to mean "reaches every machine" rather than "reaches none".
+        // A machine with no usable rollout document has to mean "reaches every
+        // machine" rather than "reaches none": failing closed here would stop
+        // every APEX machine updating the first time the registry hiccuped.
         for b in 0..100u8 {
             assert!(channel::admits(b, channel::FULL_ROLLOUT));
         }

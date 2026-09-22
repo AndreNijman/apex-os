@@ -118,7 +118,7 @@ half:
   is a fact about the reader, not about the machine, so it is reported —
   "so this verdict is partial" — without failing the gate.
 
-## Staged rollout, and the part that is not built
+## Staged rollout
 
 Every machine has a rollout slot, 0 to 99, derived from `/etc/machine-id`:
 
@@ -132,11 +132,167 @@ It is stable across reboots on purpose. A machine that re-rolled on every check
 would drift into a 1% cohort it was never part of, which defeats the point of
 staging.
 
-What is **not** built: nothing publishes a percentage yet. The gate reads it
-from an image label and treats an image without one as reaching everybody, which
-is what every APEX image published so far is. A ramp — 1%, then 5%, then 25% —
-needs the number to change between builds, and a label is baked once. That
-pointer does not exist, so the ramp does not either.
+### Where the percentage lives, and why it is not a label
+
+A ramp — 1%, then 5%, then 25% — needs a number that changes **between** builds.
+An OCI label is baked once per image, so a label cannot be it. That observation
+held this item open for a while, and the conclusion drawn from it ("so a staged
+rollout needs a server") was the wrong one.
+
+The number lives in a **signed rollout document**: one small JSON object
+published at `ghcr.io/andrenijman/apex-os:rollout`, in the same repository as
+the image, re-published by `promote-channel.yml` every time the number moves.
+
+```json
+{
+  "schema": 1,
+  "serial": 12,
+  "issued": 1790000000,
+  "expires": 1791209600,
+  "repository": "ghcr.io/andrenijman/apex-os",
+  "channels": [
+    { "channel": "candidate", "digest": "sha256:daf8c8eb…", "percent": 25 },
+    { "channel": "beta", "digest": "sha256:1f09ab…", "percent": 100,
+      "halt": true, "reason": "gpu-driver fails to bind on RTX 30-series" }
+  ]
+}
+```
+
+```bash
+apex channel rollout          # fetch it, verify it, and say what it means here
+apex channel rollout --offline  # decide on the last one this machine accepted
+```
+
+**Why a registry object rather than an endpoint.** Three things were on the
+table: a fleet endpoint APEX would run, a separately-updatable object in the
+registry, and a signed JSON on a static host. The registry object was chosen
+and the reasons are worth writing down because they are what makes this
+optional:
+
+- **No server.** There is nothing to run, nothing to keep up, and nothing whose
+  outage stops machines updating. A first-party endpoint would make APEX
+  operate a service for the first time, and the first version of that service
+  would be a single point of failure for every machine's update path.
+- **No new name to trust.** The machine already contacts this registry on every
+  update and already verifies cosign signatures from it, with a Fulcio root
+  pinned in the image. The document reuses that verification whole — see
+  `apexd/apex/src/verify.rs`, which is the same code that checks the image.
+- **No new fact about the machine.** An endpoint learns which machines asked and
+  when, which is a liveness map of everybody who installed APEX. A registry pull
+  the machine was making anyway reveals nothing the update did not already.
+- **One number of infrastructure, and it is zero.** Publishing is a
+  `workflow_dispatch`, and the object is about 400 bytes.
+
+**What it costs, stated rather than buried:**
+
+- **A document in a registry is a broadcast.** A ramp is per-channel and never
+  per-machine. There is no way to say "these fifty machines first" without
+  something that knows which machine is asking — which is a fleet, which is
+  `docs/fleet.md`, which is optional and which nobody is enrolled in.
+- **There is no back channel.** Nobody learns how the rollout is going except
+  from the opt-in health report below, which is off by default and which APEX
+  operates no endpoint for. A ramp published here is a decision made on
+  evidence from somewhere else.
+- **A halt takes effect at the machine's next `apex update`.** A machine that is
+  off takes nothing and hears nothing.
+- **Latency is the registry's.** A moved tag is visible when the registry serves
+  it, which is immediately, and read when the user next updates, which is not.
+
+### What the client does with it
+
+In this order, and no other:
+
+1. Resolve `…:rollout` to a digest.
+2. Verify the cosign signature over that digest, under the **rollout identity** —
+   `…/promote-channel.yml@refs/heads/main`, derived from the image signer by
+   swapping the workflow filename. The image's own identity is deliberately not
+   accepted: the document has to be publishable between builds, so it cannot
+   carry the build's signature.
+3. Only then read the bytes — and read the object whose signature was checked,
+   not whatever the tag answers on the second round trip. The manifest fetched
+   has to hash to the digest step 1 resolved, or nothing is read. Without that,
+   the sequence would be "verify one object, read another", and a tag that moved
+   in between would put a signature over one document behind the bytes of a
+   different one. A document whose signature does not verify is not a document
+   with a problem — it is not a document, and nothing in it reaches the
+   decision.
+
+Then the entry for this machine's channel is applied, if it is usable. Each of
+these makes it unusable, and each one is said out loud rather than swallowed:
+
+| what | why it is refused |
+|---|---|
+| its `digest` is not what this channel resolves to now | the entry is about a build that has been superseded; without this a 5% entry for one build silently gates the next one |
+| `expires` has passed | a publisher who stops publishing must not pin every machine to a last instruction forever |
+| `issued` is more than 30 days ago | the same bound, enforced by the client, so that an expiry ten years out is still an expiry |
+| `issued` is more than an hour in the future | a machine with a wrong clock, or a document minted for a date nobody has reached |
+| `serial` is lower than one this machine already accepted | an old validly-signed "everybody takes this", re-served after a halt, is a downgrade attack that needs no key at all |
+| `repository` is not this machine's | a document lifted from one repository and served from another |
+| `schema` is higher than this build reads | read whole or not at all; half a policy is not a policy |
+
+Everything else admits. A machine that cannot reach the registry, cannot resolve
+its tag, or is on a tag that is not a channel updates exactly as it does today —
+and that costs nothing, because a machine that could not resolve the tag could
+not pull the image either.
+
+The last accepted document is cached at `/var/lib/apex/channel/rollout.json`.
+That is not for speed: without it, blocking the `rollout` tag would defeat a
+halt — the fetch fails, no document applies, and the machine takes the release
+the publisher stopped. A halt anybody can undo with a firewall rule is not a
+halt.
+
+### What a hold looks like
+
+```
+apex: this release is being rolled out gradually and has reached 25% of
+apex: machines. This one is slot 60 of 100, so it is not its turn yet — nothing
+apex: is wrong with it. Try again later, or `sudo apex update --force` to take it now.
+```
+
+`apex update` exits **0** for this, and goes on to update packages, flatpaks and
+firmware. A machine outside a ramp is not broken and has nothing to fix; a
+staged rollout is about the OS image and nothing else.
+
+A halt reads differently, because the cause is different:
+
+```
+apex: the publisher has stopped this release, so it is not being installed.
+apex:   gpu-driver fails to bind on RTX 30-series
+apex: A later build will supersede it. `sudo apex update --force` takes it anyway.
+```
+
+### What is still not built
+
+- **Nothing has published a rollout document yet.** `promote-channel.yml` has
+  the steps and has never been run; the client half is exercised end to end
+  against real cryptography by `tests/test-apex-rollout.sh`, which builds its
+  fixture by *running the workflow's own python* rather than copying it.
+- **The halt is a publisher decision, not an automatic one.** Nothing counts
+  health reports and halts a release by itself, because nothing receives health
+  reports — see the next section. The loop is closed by a person reading
+  evidence and dispatching a halt.
+- **The four channel tags do not exist in the registry.** Measured 2026-09-22:
+  `:stable`, `:candidate`, `:beta` and `:edge` all answer `manifest unknown`.
+  Only `apex`, `daily`, `gaming-mesa` and `gaming-nvidia` resolve, to one digest
+  whose `org.opencontainers.image.revision` is `57f593ad` — `main`'s tip from
+  2026-09-05. The workflow step that creates `edge` and the promotion workflow
+  are both on `roadmap/v2.2` and have never run on `main`, which is what
+  publishes. Until a build of `main` carries them, `apex channel set beta` would
+  point a machine at a tag the registry does not serve, so `set` resolves the
+  target first and refuses:
+
+  ```
+  apex: ghcr.io/andrenijman/apex-os:beta does not resolve: manifest unknown
+  apex: switching to a tag the registry does not serve would leave this machine
+  apex: with nothing to update to, and `bootc upgrade` would report that as
+  apex: "no update available" forever. Not switching.
+  ```
+
+  `--force` overrides it. A registry that cannot be reached at all does not
+  block the switch: that is a fact about the network, not about the tag, and the
+  two are told apart by what the registry said rather than by whether it
+  answered. A machine that switches unchecked is told so, in those words, so the
+  user knows which of the two happened.
 
 ## What is sent, and to whom
 

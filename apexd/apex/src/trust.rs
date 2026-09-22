@@ -79,6 +79,18 @@ pub const EXPECTED_ISSUER: &str = "https://token.actions.githubusercontent.com";
 /// making a file.
 const SIGNER_OVERRIDE: &str = "/usr/share/apex-os/trust/expected-signer";
 
+/// The workflow file in [`EXPECTED_SIGNER`], and the one that replaces it for a
+/// rollout document.
+///
+/// The document has to be publishable BETWEEN image builds — that is the whole
+/// reason it is not a label — so it cannot be signed by the build workflow, and
+/// it is signed by the workflow that already moves channel tags.
+const BUILD_WORKFLOW: &str = "build-image.yml";
+const ROLLOUT_WORKFLOW: &str = "promote-channel.yml";
+
+/// An image-owned file that replaces the derived rollout identity.
+const ROLLOUT_SIGNER_OVERRIDE: &str = "/usr/share/apex-os/trust/expected-rollout-signer";
+
 /// Where the containers signature policy lives, and what `bootc upgrade` reads.
 const POLICY_PATH: &str = "/etc/containers/policy.json";
 
@@ -548,6 +560,35 @@ pub(crate) fn expected_signer(roots: &Roots) -> String {
             }
         }
         Err(_) => EXPECTED_SIGNER.to_string(),
+    }
+}
+
+/// The identity this machine expects on a rollout document.
+///
+/// Derived from [`expected_signer`] by swapping the workflow file, rather than
+/// being a second constant. The two identities are the same repository and the
+/// same ref and differ only in which workflow signs; a downstream that
+/// overrides one and forgets the other would get a rollout document that never
+/// verifies, which fails silently as "no rollout is staged" — the ramp stops
+/// happening and nothing says so. One file to set is the whole argument.
+///
+/// [`ROLLOUT_SIGNER_OVERRIDE`] exists anyway for the case the derivation cannot
+/// cover: a downstream that signs its documents from a differently NAMED
+/// workflow.
+pub(crate) fn expected_rollout_signer(roots: &Roots) -> String {
+    if let Ok(s) = roots.read(ROLLOUT_SIGNER_OVERRIDE) {
+        let t = s.trim().to_string();
+        if !t.is_empty() {
+            return t;
+        }
+    }
+    let image = expected_signer(roots);
+    // Only when the base identity really does name the build workflow. An
+    // override that names something else entirely is left alone rather than
+    // rewritten into a path nobody publishes under.
+    match image.rfind(BUILD_WORKFLOW) {
+        Some(at) => format!("{}{ROLLOUT_WORKFLOW}{}", &image[..at], &image[at + BUILD_WORKFLOW.len()..]),
+        None => image,
     }
 }
 
@@ -1157,6 +1198,48 @@ mod tests {
                 note: None,
             }),
         }
+    }
+
+    #[test]
+    fn the_rollout_identity_is_the_image_identity_with_the_workflow_swapped() {
+        // The document has to be publishable between builds, so it cannot carry
+        // the build's signature. Deriving rather than declaring means a fork
+        // that overrides the image signer gets a consistent rollout signer for
+        // free — and forgetting the second file would not break loudly, it
+        // would make every rollout document fail to verify, which a machine
+        // reports as "no rollout is staged".
+        let none = Roots { fixture: Some(PathBuf::from("/nonexistent-fixture-root")) };
+        assert_eq!(
+            expected_rollout_signer(&none),
+            "https://github.com/AndreNijman/apex-os/.github/workflows/promote-channel.yml@refs/heads/main"
+        );
+        // And it is NOT the image identity, which is the mistake worth failing
+        // on: both live in the same repository and are signed by the same
+        // account, so "same signer" is the plausible wrong answer.
+        assert_ne!(expected_rollout_signer(&none), expected_signer(&none));
+
+        // A downstream that overrides the image signer is followed.
+        let dir = std::env::temp_dir().join(format!("apex-rollout-signer-{}", std::process::id()));
+        let trust = dir.join("usr/share/apex-os/trust");
+        std::fs::create_dir_all(&trust).unwrap();
+        std::fs::write(
+            trust.join("expected-signer"),
+            "https://github.com/acme/apex-os/.github/workflows/build-image.yml@refs/heads/release\n",
+        )
+        .unwrap();
+        let forked = Roots { fixture: Some(dir.clone()) };
+        assert_eq!(
+            expected_rollout_signer(&forked),
+            "https://github.com/acme/apex-os/.github/workflows/promote-channel.yml@refs/heads/release"
+        );
+        // An override that names something else entirely is left alone rather
+        // than rewritten into a path nobody publishes under.
+        std::fs::write(trust.join("expected-signer"), "https://example.invalid/whoever\n").unwrap();
+        assert_eq!(expected_rollout_signer(&forked), "https://example.invalid/whoever");
+        // And the explicit override wins over the derivation.
+        std::fs::write(trust.join("expected-rollout-signer"), "https://example.invalid/ramp\n").unwrap();
+        assert_eq!(expected_rollout_signer(&forked), "https://example.invalid/ramp");
+        let _ = std::fs::remove_dir_all(&dir);
     }
 
     #[test]
