@@ -38,22 +38,27 @@ import org.junit.runner.RunWith
  * ## Why this file does not use the Compose test rule, which every other
  * ## on-device test here does
  *
- * **Because this screen never goes idle, and `createAndroidComposeRule` cannot
- * host a screen that never goes idle.** `TerminalScreen` runs a
- * `withFrameNanos` loop for the life of the composition — that loop is what
- * keeps a fast `cat` inside one repaint per displayed frame instead of one per
- * `feed` — so the Recomposer always has pending work. `ComposeTestRule.
- * setContent` ends by waiting for idleness, and on this screen that wait never
- * returns: measured on the Pixel 7a, all three tests below failed inside
- * `setContent` with `IdlingResourceTimeoutException: Wait for [Compose-Espresso
- * link] to become idle timed out … hadRecomposerChanges = true`.
+ * **Historically because it could not**, and that has changed: what follows is
+ * kept because it is the record of a defect, not a standing claim.
  *
- * That is not a defect in the screen, and switching the screen to a push model
- * to satisfy a test rule would be the tail wagging the dog. So the composition
- * is hosted the way `MainActivity` hosts it — `ComponentActivity.setContent` —
- * and every wait below polls a condition this test can state, with its own
- * deadline. Nothing here asks Espresso whether Compose is finished, because on
- * this screen the honest answer is no, forever.
+ * `TerminalScreen` used to run a `withFrameNanos` loop for the life of the
+ * composition, so the Recomposer always had pending work; `ComposeTestRule.
+ * setContent` ends by waiting for idleness, and on this screen that wait never
+ * returned. Measured on the Pixel 7a: all three tests below failed inside
+ * `setContent` with `IdlingResourceTimeoutException: Wait for [Compose-Espresso
+ * link] to become idle timed out … hadRecomposerChanges = true`. That reads
+ * as a limit of the harness and it was not — an idle terminal asking the
+ * Choreographer for sixty frames a second is a battery defect on a phone
+ * whether or not anything is testing it. It is fixed in `TerminalFrames`,
+ * together with a second perpetual animation nobody had noticed: the hidden
+ * field's transparent cursor, which foundation blinks for ever because a
+ * transparent brush is a *specified* one. `TerminalHarnessOnDeviceTest` is the
+ * on-device assertion that the standard rule can now host this screen.
+ *
+ * This file keeps its own host anyway, and for a better reason than it had
+ * before: it drives a real PTY across a real network, so every wait here is on
+ * a condition about the MACHINE — attached, echoed, resized — with its own
+ * deadline. Espresso's idleness would answer a different question.
  *
  * ## What it closes, and in whose words
  *
@@ -73,11 +78,12 @@ import org.junit.runner.RunWith
  *
  * ## What it does NOT claim
  *
- * That a screen reader can read a terminal. `TerminalView` is a bare `Canvas`
- * — the grid is painted, not composed — so no glyph reaches the semantics tree
- * and TalkBack has nothing to announce on this screen. That is a real gap in
- * P1-060 C2 and it is written down rather than papered over with an assertion
- * that would pass.
+ * Anything about a screen reader. `TerminalView` is still a bare `Canvas` and
+ * still composes not one glyph, so what TalkBack reads is what
+ * `TerminalReading` puts in the tree beside it — asserted on the values in
+ * `TerminalSemanticsTest`, and on a phone in `TerminalHarnessOnDeviceTest`,
+ * neither of which needs a machine at the other end. Nothing below looks at
+ * the semantics tree at all.
  */
 @RunWith(AndroidJUnit4::class)
 @LargeTest
@@ -183,9 +189,9 @@ class TerminalOnDeviceTest {
     private fun awaitOnScreen(term: TerminalController, text: String): String {
         var painted = ""
         // `viewport.snapshot()` is exactly what the repaint loop hands
-        // `TerminalView`, so asserting on it is asserting on the frame. The
-        // `Canvas` itself carries no semantics, so there is no node to read the
-        // glyphs back out of — see the class note.
+        // `TerminalView`, so asserting on it is asserting on the frame — and
+        // on the same bytes the semantics node is built from, one layer below
+        // the string a reader would be handed.
         runCatching {
             await("nothing arrived", ECHO_TIMEOUT_MS) {
                 painted = term.viewport.snapshot().text()

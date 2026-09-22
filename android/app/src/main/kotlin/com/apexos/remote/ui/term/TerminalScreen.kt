@@ -38,7 +38,6 @@ import androidx.compose.runtime.getValue
 import androidx.compose.runtime.mutableStateOf
 import androidx.compose.runtime.remember
 import androidx.compose.runtime.setValue
-import androidx.compose.runtime.withFrameNanos
 import androidx.compose.ui.Alignment
 import androidx.compose.ui.Modifier
 import androidx.compose.ui.draw.clip
@@ -59,6 +58,8 @@ import androidx.compose.ui.input.pointer.pointerInput
 import androidx.compose.ui.layout.onSizeChanged
 import androidx.compose.ui.platform.LocalClipboardManager
 import androidx.compose.ui.platform.LocalSoftwareKeyboardController
+import androidx.compose.ui.semantics.CustomAccessibilityAction
+import androidx.compose.ui.semantics.semantics
 import androidx.compose.ui.text.AnnotatedString
 import androidx.compose.ui.text.TextStyle
 import androidx.compose.ui.text.input.ImeAction
@@ -74,16 +75,20 @@ import com.apexos.remote.core.term.Keys
 import com.apexos.remote.core.term.Mods
 import com.apexos.remote.core.term.Pos
 import com.apexos.remote.core.term.Snapshot
+import com.apexos.remote.core.term.TerminalAnnouncer
+import com.apexos.remote.core.term.TerminalReading
 import com.apexos.remote.ui.theme.ApexPalette
 
 /**
  * A terminal, on a phone.
  *
- * Everything in here that is a rule rather than a layout lives in `:core`:
+ * Everything in here that is a rule rather than a layout lives outside it:
  * scrolling, searching, selecting and what a selection copies are `Viewport`'s;
- * what a key sends is `Keys`'; what a cell looks like is `Palette`'s. This
- * file is the part that cannot be tested on a machine with no phone, and it is
- * deliberately only that part.
+ * what a key sends is `Keys`'; what a cell looks like is `Palette`'s; what a
+ * screen reader hears is `TerminalReading`'s and `TerminalAnnouncer`'s; when a
+ * frame is painted is [TerminalFrames]'. All of those are tested on a machine
+ * with no phone. What is left here is the wiring, and it is deliberately only
+ * that.
  */
 @OptIn(ExperimentalMaterial3Api::class)
 // `LocalClipboardManager` is deprecated in favour of `LocalClipboard`, whose
@@ -107,28 +112,28 @@ fun TerminalScreen(
     val (measurer, metrics) = rememberCellMetrics(settings.terminalTextSp)
 
     var snapshot by remember { mutableStateOf<Snapshot?>(null) }
-    var generation by remember { mutableStateOf(0L) }
     var searching by remember { mutableStateOf(false) }
     var query by remember { mutableStateOf("") }
     var armed by remember { mutableStateOf(Mods.NONE) }
     var grid by remember { mutableStateOf(80 to 24) }
 
-    // The repaint loop. It runs once per displayed frame and does nothing at
-    // all unless something changed — which is what stops a fast `cat` from
-    // spending the whole frame budget in layout. `generation` is bumped by
-    // everything that changes the view without changing the terminal:
-    // scrolling, searching, selecting.
+    // What a screen reader is told when output arrives, as opposed to what it
+    // reads when the user explores the grid. `TerminalAnnouncer` argues which
+    // is which; the empty string is "nothing has happened yet", and a live
+    // region says nothing until its description changes.
+    var announcement by remember { mutableStateOf("") }
+    val announcer = remember(controller) { TerminalAnnouncer() }
+
+    // The repaint loop. It paints once per displayed frame, and only after
+    // something has said that there is anything to paint — which is what stops
+    // a fast `cat` from spending the whole frame budget in layout, and what
+    // stops an idle terminal from running the display pipeline at sixty hertz
+    // over a screen nobody is changing. `TerminalFrames` carries the argument
+    // and the tests.
     LaunchedEffect(controller, metrics) {
-        var lastRevision = -1L
-        var lastGeneration = -1L
-        while (true) {
-            withFrameNanos { }
-            val revision = terminal.revision
-            if (revision != lastRevision || generation != lastGeneration) {
-                lastRevision = revision
-                lastGeneration = generation
-                snapshot = viewport.snapshot()
-            }
+        controller.frames.run { frame ->
+            snapshot = frame
+            announcer.onFrame(frame)?.let { announcement = it }
         }
     }
 
@@ -148,7 +153,7 @@ fun TerminalScreen(
                         searching = !searching
                         if (!searching) {
                             viewport.clearSearch()
-                            generation++
+                            controller.invalidate()
                         }
                     }) { Text(if (searching) "Close" else "Find") }
                 },
@@ -174,15 +179,15 @@ fun TerminalScreen(
                     onQuery = {
                         query = it
                         viewport.find(it)
-                        generation++
+                        controller.invalidate()
                     },
                     onNext = {
                         viewport.findNext()
-                        generation++
+                        controller.invalidate()
                     },
                     onPrevious = {
                         viewport.findPrevious()
-                        generation++
+                        controller.invalidate()
                     },
                 )
             }
@@ -202,7 +207,7 @@ fun TerminalScreen(
                         if (cols to rows != grid) {
                             grid = cols to rows
                             controller.resize(cols, rows)
-                            generation++
+                            controller.invalidate()
                         }
                     }
                     .pointerInputForSelection(
@@ -210,28 +215,96 @@ fun TerminalScreen(
                         snapshot = snapshot,
                         onTap = {
                             viewport.clearSelection()
-                            generation++
+                            controller.invalidate()
                             focus.requestFocus()
                             keyboard?.show()
                         },
                         onWord = { pos ->
                             viewport.selectWord(pos)
-                            generation++
+                            controller.invalidate()
                         },
                         onDragStart = { pos ->
                             viewport.selectFrom(pos)
-                            generation++
+                            controller.invalidate()
                         },
                         onDrag = { pos ->
                             viewport.selectTo(pos)
-                            generation++
+                            controller.invalidate()
                         },
                     )
                     .pointerInputForScroll(metrics) { lines ->
                         viewport.scrollBy(lines)
-                        generation++
+                        controller.invalidate()
                     },
             ) {
+                // The node a screen reader reads, and it is a node of its own
+                // rather than a property of the Canvas above.
+                //
+                // `TerminalView` paints the grid with `drawText`, so none of
+                // it is composed and none of it is in the semantics tree; and
+                // this Box is deliberately not `mergeDescendants`, because the
+                // hidden text field and the "Latest" button are its siblings
+                // and a merge would swallow the button's own label. Empty, so
+                // it draws nothing and costs a layout node.
+                //
+                // `TerminalReading.of` is called INSIDE the semantics lambda
+                // and not in the frame loop: building a forty-line string is
+                // wasted on the overwhelming majority of frames, where nothing
+                // is reading the tree at all. The lambda is rebuilt by the
+                // recomposition each new snapshot causes, so what it reads is
+                // never stale.
+                Box(
+                    Modifier
+                        .fillMaxSize()
+                        .semantics {
+                            terminalSemantics(
+                                reading = snapshot?.let(TerminalReading::of) ?: TerminalReading.EMPTY,
+                                onActivate = {
+                                    focus.requestFocus()
+                                    keyboard?.show()
+                                    true
+                                },
+                                actions = listOfNotNull(
+                                    // Only when it would do something. An
+                                    // action list that always holds "back to
+                                    // the live output" makes a reader offer it
+                                    // on a terminal that is already live.
+                                    if (snapshot?.following == false) {
+                                        CustomAccessibilityAction("Back to the live output") {
+                                            viewport.toBottom()
+                                            controller.invalidate()
+                                            true
+                                        }
+                                    } else {
+                                        null
+                                    },
+                                    CustomAccessibilityAction("Copy what is on screen") {
+                                        val text = snapshot?.text().orEmpty()
+                                        if (text.isBlank()) {
+                                            false
+                                        } else {
+                                            clipboard.setText(AnnotatedString(text))
+                                            true
+                                        }
+                                    },
+                                ),
+                            )
+                        },
+                )
+
+                // What a reader is TOLD, as opposed to what it can read. One
+                // dp and no drawing: a live region is announced by its
+                // description changing, and this is the smallest thing that
+                // can hold a description. Its own note is on
+                // `terminalAnnouncement`.
+                if (announcement.isNotEmpty()) {
+                    Box(
+                        Modifier
+                            .size(1.dp)
+                            .semantics { terminalAnnouncement(announcement) },
+                    )
+                }
+
                 snapshot?.let {
                     TerminalView(
                         snapshot = it,
@@ -257,7 +330,7 @@ fun TerminalScreen(
                         if (value.text.isNotEmpty()) {
                             controller.sendText(value.text.replace("\n", "\r"), armed)
                             armed = Mods.NONE
-                            generation++
+                            controller.invalidate()
                         }
                     },
                     modifier = Modifier
@@ -273,7 +346,22 @@ fun TerminalScreen(
                         imeAction = ImeAction.None,
                     ),
                     textStyle = TextStyle(color = Color.Transparent),
-                    cursorBrush = androidx.compose.ui.graphics.SolidColor(Color.Transparent),
+                    // `Unspecified`, not `Transparent`, and the difference is
+                    // not cosmetic — an invisible cursor drawn every frame is
+                    // the SECOND thing that kept this screen out of the
+                    // standard Compose test harness.
+                    //
+                    // Read out of `foundation`'s own bytecode rather than
+                    // remembered: `TextFieldCursorKt.cursor` computes
+                    // `isBrushSpecified` as `brush !is SolidColor || brush.value
+                    // != Color.Unspecified`, and that flag gates the
+                    // `LaunchedEffect` running `CursorAnimationState`'s blink.
+                    // A transparent cursor is a SPECIFIED one, so the blink ran
+                    // — an infinite animation on a focused field, which is a
+                    // `Recomposer` that is never idle, for a cursor whose alpha
+                    // is zero in every frame of it. Checked in both
+                    // foundation 1.11.4 and 1.12.1.
+                    cursorBrush = androidx.compose.ui.graphics.SolidColor(Color.Unspecified),
                 )
 
                 if (snapshot?.following == false) {
@@ -281,7 +369,7 @@ fun TerminalScreen(
                         Modifier.align(Alignment.BottomEnd),
                         onClick = {
                             viewport.toBottom()
-                            generation++
+                            controller.invalidate()
                         },
                     )
                 }
@@ -292,16 +380,16 @@ fun TerminalScreen(
                     onCopy = {
                         viewport.selectedText()?.let { clipboard.setText(AnnotatedString(it)) }
                         viewport.clearSelection()
-                        generation++
+                        controller.invalidate()
                     },
                     onPaste = {
                         clipboard.getText()?.text?.let { controller.paste(it) }
                         viewport.clearSelection()
-                        generation++
+                        controller.invalidate()
                     },
                     onCancel = {
                         viewport.clearSelection()
-                        generation++
+                        controller.invalidate()
                     },
                 )
             }
@@ -327,11 +415,11 @@ fun TerminalScreen(
                             armed = Mods.NONE
                         }
                     }
-                    generation++
+                    controller.invalidate()
                 },
                 onPaste = {
                     clipboard.getText()?.text?.let { controller.paste(it) }
-                    generation++
+                    controller.invalidate()
                 },
             )
         }

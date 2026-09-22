@@ -216,6 +216,58 @@ entry drops support for machines that have not updated, and belongs in the
 release notes, because to the owner of such a machine it is indistinguishable
 from the app breaking.
 
+## The terminal: when it repaints, and what a screen reader hears
+
+Two things about the terminal screen were true until 2026-09-22 and are worth
+writing down because both read as limits of the tooling and neither was.
+
+**It repainted for ever.** The screen ran `withFrameNanos { }` in a loop for the
+life of the composition and compared `Terminal.revision` on each pass. That
+coalesced a fast `cat` into one repaint per displayed frame, which is right, but
+`withFrameNanos` is a *request* for the next frame: with nothing happening, the
+loop asked the Choreographer for sixty frames a second over a terminal where
+nothing had changed. It also meant Compose's `Recomposer` was never idle, and
+every harness built on `ComposeTestRule` waits for idleness before `setContent`
+returns — so "this screen cannot be tested by the standard harness" was a true
+observation with a false cause. The loop now waits for a change before it asks
+for a frame; `Terminal.onChanged` is the signal for bytes, and
+`TerminalController.invalidate()` for everything the user does to the view. The
+rules are in `TerminalFrames`, and they are asserted on a JVM against
+`BroadcastFrameClock` — the same question the `Recomposer` asks itself, not a
+proxy for it.
+
+`foundation`'s bytecode holds a second perpetual animation nobody had noticed,
+and reading it beats remembering the documentation: the hidden input field set
+`cursorBrush = SolidColor(Color.Transparent)`, and `TextFieldCursorKt.cursor`
+skips the blink only for `SolidColor(Color.Unspecified)`. A transparent cursor is
+a *specified* one, so that field blinked an invisible cursor for as long as it
+held focus.
+
+**Nothing on it reached a screen reader.** `TerminalView` paints the grid with
+`drawText`, so not one glyph is composed and the semantics tree under that
+screen was empty — TalkBack had nothing to announce on a terminal full of
+output. It now carries two nodes, and they are two because the requirements
+conflict:
+
+* the grid's node holds the visible buffer as `text`, so TalkBack can move
+  through it line by line at the granularity the user chose, with a
+  `stateDescription` naming the cursor position and whether the view is live or
+  scrolled back, a labelled click action, and custom actions for "back to the
+  live output" and "copy what is on screen" — the two things that are otherwise
+  a target on a grid nobody can see;
+* a separate one-dp node is the polite live region. Announcements are what
+  `TerminalAnnouncer` decides: only lines the cursor has moved past, only while
+  the view is following, one utterance per burst with a count of what it left
+  out, never the same words twice running, and nothing at all for the replay a
+  reconnect starts with. A live region on the grid node instead would re-read
+  the whole screen on every byte, and the user would hear the first two words of
+  forty interruptions.
+
+A full-screen TUI repainting its own grid gets one announcement and then
+silence. That limit is chosen, not overlooked: the buffer stays there to read,
+and an announcer that read out each repaint of Claude Code's interface would
+make the app unusable with TalkBack on.
+
 ## What has NOT been proved here
 
 No device is attached to this project, so nothing below the download is executed
@@ -229,6 +281,12 @@ by any test:
 * No release has ever been cut. The workflow has been exercised as far as a
   machine with no signing secrets can go; `dry_run` exists so the rest can be
   proved without publishing.
+* The terminal's semantics are asserted on the values handed to Android — a
+  `SemanticsPropertyReceiver` is one method, so a JVM test implements it and
+  reads back what was set — and not on what TalkBack says with them.
+  `TerminalHarnessOnDeviceTest` asserts that the standard Compose harness can
+  host the screen and that the grid reaches the tree on a real phone. Nobody has
+  run it: no device, and the emulator on this machine has never booted.
 
 ## The signing key
 

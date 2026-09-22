@@ -47,9 +47,10 @@ sealed class TerminalStatus {
  * `Terminal.feed` runs on the pump thread and can be called hundreds of times
  * a second under a fast `cat`. A terminal that recomposed per feed would spend
  * the whole budget in layout and show fewer frames than one that recomposed
- * sixty times a second. So the pump does nothing but advance
- * `Terminal.revision`, and the screen's `withFrameNanos` loop takes a snapshot
- * only when that number — or something about the viewport — has changed.
+ * sixty times a second. So the pump does nothing but say that something moved,
+ * and [frames] takes a snapshot once per displayed frame — and only after
+ * something has said so. [TerminalFrames] is where that is argued and where it
+ * is tested.
  */
 class TerminalController(
     val sessionId: Int,
@@ -60,6 +61,33 @@ class TerminalController(
 ) : Closeable {
     val terminal: Terminal = Terminal(cols, rows)
     val viewport: Viewport = Viewport(terminal, rows)
+
+    /**
+     * The repaint loop, owned here rather than by the composable.
+     *
+     * Here because the thing that drives it — bytes arriving on the pump
+     * thread — is owned here, and because a loop rebuilt on every rotation
+     * would lose the frame it was in the middle of.
+     */
+    val frames: TerminalFrames = TerminalFrames(viewport)
+
+    init {
+        // The pump's only job towards the screen. Without this line nothing
+        // repaints when output arrives, which is the failure the frame loop's
+        // own test forces by removing it.
+        terminal.onChanged = { frames.invalidate() }
+    }
+
+    /**
+     * Something changed that the terminal itself does not know about.
+     *
+     * Scrolling, searching, selecting: all of them change what is painted
+     * without changing a single cell, so [Terminal.onChanged] never fires and
+     * the loop would sleep through them.
+     */
+    fun invalidate() {
+        frames.invalidate()
+    }
 
     /** What to show about the connection. Read from the composition. */
     var status: TerminalStatus by mutableStateOf(TerminalStatus.Connecting(1))
@@ -171,8 +199,12 @@ class TerminalController(
             submit { if (!attachment.send(bytes)) droppedInput = true }
         }
         // In memory, so it stays inline: typing is the strongest possible
-        // signal that the user wants to see what happens next.
+        // signal that the user wants to see what happens next. The repaint has
+        // to be asked for, because nothing in the terminal changed — a person
+        // typing while scrolled back would otherwise stay looking at the
+        // history until the far end echoed something.
         viewport.toBottom()
+        invalidate()
         return attached
     }
 
@@ -214,6 +246,10 @@ class TerminalController(
      * the crash.
      */
     override fun close() {
+        // Dropped first. The pump may still be draining a frame it had already
+        // read, and a listener that outlived the screen would wake a loop that
+        // no longer has anything to paint into.
+        terminal.onChanged = null
         submit { attachment.stop() }
         io.shutdown()
     }
