@@ -1,0 +1,39 @@
+# APEX-OS — a login screen on a spare VT, for fast user switching (P2-016).
+#
+# %i is the VT number. The unit is started by /usr/libexec/apex-switch-greeter
+# and by nothing else: it has NO [Install] SECTION, deliberately, so it cannot
+# be enabled, cannot be pulled in by a target, and cannot become
+# display-manager.service. The machine's real login path is greetd.service on
+# VT 1 and this must never be able to displace it.
+#
+# ConditionPathExists is the second half of that fence. The config it names is
+# written by the helper, which refuses any VT at or below logind's autovt/
+# reserved floor — so `systemctl start apex-switch-greeter@1` does nothing at
+# all rather than starting a second greetd on greetd's own VT. ExecStopPost
+# removes the config again, so a stopped instance stays stopped until the
+# helper decides otherwise.
+#
+# Conflicts covers the other user of a VT: logind spawns autovt@ttyN (an alias
+# of getty@ttyN) when a VT it manages is activated. The helper picks a VT above
+# NAutoVTs so that should never fire, and this is the belt to that braces.
+
+[Unit]
+Description=APEX fast-user-switch login screen on VT %i
+Documentation=man:greetd(1) file:/usr/share/doc/apex/multi-user.md
+After=systemd-user-sessions.service
+After=getty@tty%i.service
+Conflicts=getty@tty%i.service
+ConditionPathExists=/run/apex-switch-greeter/%i.toml
+
+[Service]
+Type=simple
+ExecStart=/usr/bin/greetd --config /run/apex-switch-greeter/%i.toml --socket-path /run/apex-switch-greeter/%i.sock
+ExecStopPost=-/usr/bin/rm -f /run/apex-switch-greeter/%i.toml /run/apex-switch-greeter/%i.run /run/apex-switch-greeter/%i.sock
+IgnoreSIGPIPE=no
+SendSIGHUP=yes
+TimeoutStopSec=30s
+KeyringMode=shared
+# Deliberately NOT Restart=always, which greetd.service has. That instance is
+# the machine's only way in and must come back; this one is transient. A
+# greeter that respawned for ever would hold a VT nobody asked it to hold.
+Restart=no

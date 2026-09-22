@@ -1,0 +1,481 @@
+#!/usr/bin/env bash
+# ─────────────────────────────────────────────────────────────────────────────
+#  apex-switch-user — fast user switching on a shared APEX machine.
+#
+#  P2-016's first criterion asks for "standard vs administrator accounts, fast
+#  switching, per-user agents/secrets/profiles, and session isolation". Two
+#  rounds measured the isolation half on a real second account and closed it.
+#  The switching half had NO SURFACE AT ALL: zero hits for any switch-user
+#  string in either repository, APEX Shell's power menu offering Shutdown,
+#  Reboot, Windows, Gaming, Log Out, Lock and Suspend and nothing else, and
+#  greetd running one session on one VT. Switching users meant logging out.
+#
+#  This is the surface. It has two paths and they are genuinely different
+#  operations, which is why `--list` names which one a target would take:
+#
+#    1. THE TARGET IS ALREADY LOGGED IN.  Their session is sitting on another
+#       VT of this seat, with its processes running and its agents alive. The
+#       switch is `loginctl activate` and it is instant — this is the "fast" in
+#       fast switching, and it is the only path that deserves the word.
+#
+#    2. THE TARGET IS NOT LOGGED IN.  There is nothing to activate, so a LOGIN
+#       SCREEN has to appear somewhere that is not this user's VT. greetd has
+#       no notion of a second seat and its VT is fixed at startup ("The
+#       specific VT is evaluated at startup, and does not change during the
+#       execution of greetd" — greetd(5)), so the answer is a SECOND greetd
+#       instance on a spare VT. greetd supports exactly this: `--config` and
+#       `--socket-path` are command-line options, the socket is already
+#       per-instance (/run/greetd-<pid>.sock on this machine), and the runfile
+#       is `general.runfile` in the config. Starting it needs root, so it is
+#       done by /usr/libexec/apex-switch-greeter through one NOPASSWD sudoers
+#       rule with no arguments at all — see that file for what it refuses.
+#
+#  ── The session being left is LOCKED FIRST, and that is not a nicety ────────
+#
+#  A session that is switched away from is `inactive` to logind, which is the
+#  half round 1 already had: polkit's admin rules on the APEX agent actions are
+#  `allow_inactive=no`, so an inactive session cannot approve a privilege
+#  request. But inactive is not locked. Anyone who reaches this seat can switch
+#  back to an unlocked desktop, and on a machine with two accounts the person
+#  who switched is by definition not the person now at the keyboard.
+#
+#  So: lock, WAIT FOR THE LOCK TO TAKE, and only then activate. The wait is the
+#  point. `loginctl lock-session` sends a request; what makes it true is the
+#  session's own locker setting logind's LockedHint, and this repository has a
+#  standing record of that hint answering "no" on a session that was locked
+#  (apex-shell's LockedHintService and tests/run-locked-hint-test.sh exist
+#  because of it). A switch that fired before the screen went black would hand
+#  the next person an unlocked desktop, which is the exact failure this is
+#  supposed to prevent. If the hint never flips this REFUSES and says so;
+#  `--no-lock` is the explicit override, for a machine where the user has no
+#  locker and knows it.
+#
+#  ── What it refuses, and why each one ───────────────────────────────────────
+#
+#  * A session with no seat. A remote or non-graphical session has no VT to
+#    switch away from and nothing to switch to.
+#  * A target session on a DIFFERENT seat. Activating is a seat-local
+#    operation; logind would refuse, and refusing here says why.
+#  * Yourself.
+#  * A system account, an account with a nologin shell, or one that is not an
+#    account at all.
+#  * A KIOSK MACHINE. This is the one that matters for criterion 3: a kiosk
+#    account that can summon a login screen has escaped the kiosk. "Kiosk" is
+#    read off the live greetd config rather than assumed — a `[default_session]`
+#    whose `user` is a real account (uid >= UID_MIN) instead of the greeter
+#    system user IS the kiosk recipe in files/system/shared-machine, and a
+#    `[initial_session]` is an auto-login machine. Either way this refuses.
+#
+#  ── Overrides, for the test suite ───────────────────────────────────────────
+#
+#      APEX_SWITCH_TOOLS       a directory of stand-ins for loginctl and sudo.
+#      APEX_SWITCH_SESSION     this session's logind id; default $XDG_SESSION_ID
+#      APEX_SWITCH_PASSWD      a passwd(5)-format file; default: getent passwd
+#      APEX_SWITCH_LOGIN_DEFS  default /etc/login.defs (UID_MIN/UID_MAX)
+#      APEX_SWITCH_GREETD_CONFIG  default /etc/greetd/config.toml
+#      APEX_SWITCH_HELPER      default /usr/libexec/apex-switch-greeter
+#      APEX_SWITCH_LOCK_TRIES  how many times to re-read LockedHint (default 40)
+#      APEX_SWITCH_LOCK_SLEEP  seconds between those reads (default 0.25)
+#
+#  `APEX_SWITCH_TOOLS` is refused when this is running as root, exactly as
+#  apex-user refuses APEX_USER_TOOLS there: with every tool replaced there is
+#  nothing left that needs privilege, and as root there is.
+#
+#  The stand-ins have to answer four shapes:
+#
+#      loginctl list-sessions --no-legend   session id in the first column
+#      loginctl show-session <id> -p …      Key=Value lines
+#      loginctl lock-session <id>           a mutation
+#      loginctl activate <id>               a mutation
+#      sudo <helper>                        prints the VT it opened
+# ─────────────────────────────────────────────────────────────────────────────
+set -uo pipefail
+
+PROG="${0##*/}"
+GREETD_CONFIG="${APEX_SWITCH_GREETD_CONFIG:-/etc/greetd/config.toml}"
+LOGIN_DEFS="${APEX_SWITCH_LOGIN_DEFS:-/etc/login.defs}"
+HELPER="${APEX_SWITCH_HELPER:-/usr/libexec/apex-switch-greeter}"
+LOCK_TRIES="${APEX_SWITCH_LOCK_TRIES:-40}"
+LOCK_SLEEP="${APEX_SWITCH_LOCK_SLEEP:-0.25}"
+
+log()  { printf '%s: %s\n' "$PROG" "$*" >&2; }
+# Exit 2 is "I would not", exit 1 is "I could not" — the same split apex-user
+# and apex-guest-wipe use, so a caller can tell a refusal from a failure.
+deny() { log "refusing: $*"; exit 2; }
+die()  { log "$*"; exit 1; }
+
+usage() {
+    cat >&2 <<USAGE
+usage: $PROG list [--json]
+       $PROG to <name> [--no-lock] [--plan]
+       $PROG greeter [--no-lock] [--plan]
+
+Switching to an account that is already logged in activates its session and is
+instant. Switching to one that is not opens a login screen on a spare VT; that
+account's session then lives alongside this one. Either way this session is
+locked first, and stays running.
+USAGE
+    exit 2
+}
+
+PLAN=0
+NOLOCK=0
+
+# Every mutation goes through here so --plan can print exactly what a run would
+# do, and so the suite can capture the same argv without touching a seat.
+tool() {
+    local name=$1; shift
+    local path="$name"
+    [ -n "${APEX_SWITCH_TOOLS:-}" ] && path="$APEX_SWITCH_TOOLS/$name"
+    if [ "$PLAN" = 1 ]; then
+        printf 'would run: %s' "$path"
+        printf ' %q' "$@"
+        printf '\n'
+        return 0
+    fi
+    "$path" "$@"
+}
+
+# Reads run even under --plan: they change nothing, and a plan that could not
+# read the machine could not say what it would do.
+read_tool() {
+    local name=$1; shift
+    local path="$name"
+    [ -n "${APEX_SWITCH_TOOLS:-}" ] && path="$APEX_SWITCH_TOOLS/$name"
+    "$path" "$@"
+}
+
+if [ -n "${APEX_SWITCH_TOOLS:-}" ] && [ "$(id -u)" -eq 0 ]; then
+    deny "APEX_SWITCH_TOOLS is set and this is running as root; it is a test override and not a way to redirect a privileged run"
+fi
+
+# ── reading the machine ──────────────────────────────────────────────────────
+
+passwd_lines() {
+    if [ -n "${APEX_SWITCH_PASSWD:-}" ]; then cat -- "$APEX_SWITCH_PASSWD"
+    else getent passwd; fi
+}
+passwd_entry() { passwd_lines | awk -F: -v u="$1" '$1 == u { print; exit }'; }
+passwd_name_for_uid() { passwd_lines | awk -F: -v u="$1" '$3 == u { print $1; exit }'; }
+
+uid_min() {
+    local v=""
+    [ -f "$LOGIN_DEFS" ] && v="$(awk '$1 == "UID_MIN" { print $2; exit }' "$LOGIN_DEFS")"
+    case "$v" in ''|*[!0-9]*) echo 1000 ;; *) echo "$v" ;; esac
+}
+uid_max() {
+    local v=""
+    [ -f "$LOGIN_DEFS" ] && v="$(awk '$1 == "UID_MAX" { print $2; exit }' "$LOGIN_DEFS")"
+    case "$v" in ''|*[!0-9]*) echo 60000 ;; *) echo "$v" ;; esac
+}
+
+# ── logind ───────────────────────────────────────────────────────────────────
+#
+# Session ids come from the first column of `list-sessions`, and everything
+# else from `show-session -p Key`, which prints Key=Value. The columns of
+# `list-sessions` have changed shape between systemd releases and the property
+# names have not, so only the first column is ever read positionally.
+
+session_ids() {
+    read_tool loginctl list-sessions --no-legend 2>/dev/null | awk 'NF { print $1 }'
+}
+
+session_blob() {  # $1 = id
+    read_tool loginctl show-session "$1" \
+        -p Id -p Name -p User -p Seat -p VTNr -p Class -p State -p Active \
+        -p LockedHint 2>/dev/null
+}
+
+prop() {  # $1 = blob, $2 = key
+    printf '%s\n' "$1" | awk -F= -v k="$2" '$1 == k { sub(/^[^=]*=/, ""); print; exit }'
+}
+
+my_session_id() {
+    if [ -n "${APEX_SWITCH_SESSION:-}" ]; then printf '%s\n' "$APEX_SWITCH_SESSION"; return 0; fi
+    if [ -n "${XDG_SESSION_ID:-}" ]; then printf '%s\n' "$XDG_SESSION_ID"; return 0; fi
+    # `self` is a session id logind understands. It is the fallback rather than
+    # the first choice because a process in another user's cgroup — a dispatched
+    # agent, a systemd job — resolves it to something that is not this desktop.
+    read_tool loginctl show-session self -p Id --value 2>/dev/null
+}
+
+# ── is this machine a kiosk? ─────────────────────────────────────────────────
+#
+# Read off the live greetd config, not off a flag somebody has to remember to
+# set. Two shapes mean "this machine logs somebody in without asking":
+#
+#   [initial_session]                     greetd's auto-login stanza
+#   [default_session] user = <a person>   the kiosk recipe in
+#                                         files/system/shared-machine
+#
+# The second is the one the kiosk recipe uses, deliberately — greetd(5) says
+# the initial session runs only once per boot, so a kiosk built on it drops to
+# a greeter the first time its app exits. `user` on the ordinary login config
+# is the greeter system account (uid below UID_MIN); on a kiosk it is a real
+# account. That difference is the test.
+
+greetd_section_user() {  # $1 = section name
+    [ -f "$GREETD_CONFIG" ] || return 0
+    awk -v want="$1" '
+        /^[ \t]*\[/ {
+            sec = $0
+            gsub(/^[ \t]*\[|\][ \t]*$/, "", sec)
+            next
+        }
+        sec == want && /^[ \t]*user[ \t]*=/ {
+            line = $0
+            sub(/^[^=]*=[ \t]*/, "", line)
+            gsub(/^"|"[ \t]*$|^'"'"'|'"'"'[ \t]*$/, "", line)
+            gsub(/[ \t]+$/, "", line)
+            print line
+            exit
+        }
+    ' "$GREETD_CONFIG"
+}
+
+greetd_has_section() {  # $1 = section name
+    [ -f "$GREETD_CONFIG" ] || return 1
+    grep -qE "^[[:space:]]*\[$1\][[:space:]]*$" "$GREETD_CONFIG"
+}
+
+kiosk_reason() {
+    local u uid lo
+    if greetd_has_section initial_session; then
+        printf 'the login config %s has an [initial_session] stanza, which logs an account in without asking\n' "$GREETD_CONFIG"
+        return 0
+    fi
+    u="$(greetd_section_user default_session)"
+    [ -n "$u" ] || return 1
+    uid="$(printf '%s' "$(passwd_entry "$u")" | cut -d: -f3)"
+    case "$uid" in ''|*[!0-9]*) return 1 ;; esac
+    lo="$(uid_min)"
+    if [ "$uid" -ge "$lo" ]; then
+        printf "the login config %s runs its default session as '%s' (uid %s), a real account rather than the greeter — this machine is a kiosk\n" \
+            "$GREETD_CONFIG" "$u" "$uid"
+        return 0
+    fi
+    return 1
+}
+
+# ── the two moves ────────────────────────────────────────────────────────────
+
+lock_my_session() {  # $1 = my session id
+    local id=$1 i=0 hint
+    if [ "$NOLOCK" = 1 ]; then
+        log "--no-lock: leaving this session unlocked. Anyone who switches back reaches this desktop."
+        return 0
+    fi
+    tool loginctl lock-session "$id" || die "could not ask logind to lock session $id"
+    [ "$PLAN" = 1 ] && { printf 'would wait for LockedHint=yes on session %s\n' "$id"; return 0; }
+
+    while [ "$i" -lt "$LOCK_TRIES" ]; do
+        hint="$(prop "$(session_blob "$id")" LockedHint)"
+        [ "$hint" = yes ] && { log "session $id is locked"; return 0; }
+        i=$((i + 1))
+        sleep "$LOCK_SLEEP" 2>/dev/null || true
+    done
+    deny "session $id did not lock — logind's LockedHint is still '${hint:-unset}' after $LOCK_TRIES reads. Switching away now would leave this desktop reachable by whoever switches back. Lock it yourself, or pass --no-lock if this session has no locker."
+}
+
+activate_session() {  # $1 = target session id, $2 = a sentence for the log
+    tool loginctl activate "$1" || die "could not activate session $1"
+    [ "$PLAN" = 1 ] || log "$2"
+}
+
+open_greeter() {
+    # The helper takes NO arguments — that is the whole sudoers grant, and the
+    # reason it takes none is that an argument is a thing a caller chooses. It
+    # picks the VT itself, reuses a greeter that is already up, and refuses on
+    # a kiosk machine. It prints the VT.
+    local out rc
+    if [ "$PLAN" = 1 ]; then
+        # The plan line IS the output here, so it is printed rather than
+        # captured and thrown away.
+        tool sudo -n "$HELPER"
+        return 0
+    fi
+    out="$(tool sudo -n "$HELPER")"
+    rc=$?
+    [ "$rc" -eq 0 ] || die "could not open a login screen (${HELPER##*/} exited $rc)"
+    printf '%s\n' "$out"
+    log "a login screen is open. This session is still running and still logged in; switch back to it from the greeter's session list or with: loginctl activate <id>"
+}
+
+# ── verbs ────────────────────────────────────────────────────────────────────
+
+cmd_list() {
+    local json=0
+    case "${1:-}" in --json) json=1 ;; '') : ;; *) usage ;; esac
+
+    local me blob seat id name cls state vt uid lo hi
+    me="$(my_session_id)"
+    [ -n "$me" ] || die "this process is not in a logind session, so there is nothing to switch away from"
+    blob="$(session_blob "$me")"
+    seat="$(prop "$blob" Seat)"
+
+    lo="$(uid_min)"; hi="$(uid_max)"
+
+    # Sessions first: these are the targets a switch is INSTANT for.
+    local rows="" seen=""
+    for id in $(session_ids); do
+        blob="$(session_blob "$id")"
+        [ "$(prop "$blob" Seat)" = "$seat" ] || continue
+        cls="$(prop "$blob" Class)"
+        case "$cls" in
+            manager|manager-early) continue ;;
+            # The KIND column is what a switch to that row WOULD DO, not
+            # logind's class: `session` is an activate and is instant,
+            # `greeter` is a login screen that is already open, `account` is a
+            # login screen that has to be started. A column repeating
+            # Class=user would tell the reader nothing they can act on.
+            user) cls=session ;;
+        esac
+        name="$(prop "$blob" Name)"
+        state="$(prop "$blob" State)"
+        vt="$(prop "$blob" VTNr)"
+        [ "$id" = "$me" ] && name="$name (this session)"
+        rows="$rows$name|$cls|$id|${vt:--}|$state"$'\n'
+        seen="$seen $(prop "$blob" Name) "
+    done
+
+    # Then accounts with no session at all: switching to one of these opens a
+    # login screen, which is a different operation and is labelled as one.
+    local entry aname auid ashell
+    while IFS= read -r entry; do
+        aname="$(printf '%s' "$entry" | cut -d: -f1)"
+        auid="$(printf '%s' "$entry" | cut -d: -f3)"
+        ashell="$(printf '%s' "$entry" | cut -d: -f7)"
+        case "$auid" in ''|*[!0-9]*) continue ;; esac
+        [ "$auid" -ge "$lo" ] && [ "$auid" -le "$hi" ] || continue
+        case "$ashell" in */nologin|*/false) continue ;; esac
+        case "$seen" in *" $aname "*) continue ;; esac
+        rows="$rows$aname|account|-|-|no session"$'\n'
+    done <<EOF
+$(passwd_lines)
+EOF
+
+    if [ "$json" = 1 ]; then
+        printf '%s' "$rows" | awk -F'|' '
+            BEGIN { printf "[" ; first = 1 }
+            NF == 5 {
+                if (!first) printf ","
+                first = 0
+                printf "{\"name\":\"%s\",\"kind\":\"%s\",\"session\":\"%s\",\"vt\":\"%s\",\"state\":\"%s\"}", $1, $2, $3, $4, $5
+            }
+            END { printf "]\n" }'
+    else
+        { printf 'NAME|KIND|SESSION|VT|STATE\n'; printf '%s' "$rows"; } \
+            | awk -F'|' '{ printf "%-24s %-8s %-8s %-4s %s\n", $1, $2, $3, $4, $5 }'
+    fi
+}
+
+# Everything both switching paths check before either of them moves.
+prepare_switch() {  # sets ME, MY_SEAT, MY_NAME
+    local reason
+    ME="$(my_session_id)"
+    [ -n "$ME" ] || die "this process is not in a logind session, so there is nothing to switch away from"
+    local blob; blob="$(session_blob "$ME")"
+    MY_SEAT="$(prop "$blob" Seat)"
+    MY_NAME="$(prop "$blob" Name)"
+    [ -n "$MY_SEAT" ] \
+        || deny "session $ME has no seat — a remote or non-graphical session has no VT to switch away from"
+
+    if reason="$(kiosk_reason)"; then
+        deny "$reason. A kiosk account that can reach a login screen has escaped the kiosk."
+    fi
+}
+
+cmd_to() {
+    local name="${1:-}"; shift 2>/dev/null || true
+    [ -n "$name" ] || usage
+    while [ "$#" -gt 0 ]; do
+        case "$1" in
+            --plan) PLAN=1 ;;
+            --no-lock) NOLOCK=1 ;;
+            *) usage ;;
+        esac
+        shift
+    done
+
+    prepare_switch
+
+    local entry uid shell lo hi
+    entry="$(passwd_entry "$name")"
+    [ -n "$entry" ] || deny "'$name' is not an account on this machine"
+    uid="$(printf '%s' "$entry" | cut -d: -f3)"
+    shell="$(printf '%s' "$entry" | cut -d: -f7)"
+    lo="$(uid_min)"; hi="$(uid_max)"
+    case "$uid" in ''|*[!0-9]*) deny "'$name' has an unreadable uid" ;; esac
+    [ "$uid" -ne 0 ] || deny "'$name' is uid 0; root does not get a desktop session here"
+    { [ "$uid" -ge "$lo" ] && [ "$uid" -le "$hi" ]; } \
+        || deny "'$name' is a system account (uid $uid outside $lo..$hi), not a person"
+    case "$shell" in
+        */nologin|*/false) deny "'$name' has login shell '$shell' and cannot start a session" ;;
+    esac
+    [ "$name" != "$MY_NAME" ] \
+        || deny "'$name' is the account this session belongs to; you are already here"
+
+    # Is the target already logged in on this seat? That is the fast path.
+    local id blob tvt tseat other_seat=""
+    for id in $(session_ids); do
+        blob="$(session_blob "$id")"
+        [ "$(prop "$blob" Name)" = "$name" ] || continue
+        case "$(prop "$blob" Class)" in manager|manager-early) continue ;; esac
+        tseat="$(prop "$blob" Seat)"
+        if [ "$tseat" != "$MY_SEAT" ]; then other_seat="${tseat:-none}"; continue; fi
+        tvt="$(prop "$blob" VTNr)"
+        lock_my_session "$ME"
+        activate_session "$id" "switched to '$name' — session $id on VT ${tvt:-?}. This session ($ME) is still running, locked, and one switch away."
+        return 0
+    done
+
+    [ -z "$other_seat" ] \
+        || deny "'$name' has a session on seat '$other_seat' and this session is on '$MY_SEAT'; activating is seat-local"
+
+    log "'$name' has no session on seat $MY_SEAT — opening a login screen instead of activating one"
+    lock_my_session "$ME"
+    open_greeter
+}
+
+cmd_greeter() {
+    while [ "$#" -gt 0 ]; do
+        case "$1" in
+            --plan) PLAN=1 ;;
+            --no-lock) NOLOCK=1 ;;
+            *) usage ;;
+        esac
+        shift
+    done
+
+    prepare_switch
+
+    # A greeter that is already up is activated rather than joined by a second
+    # one. greetd loops its default_session, so after somebody logs out on the
+    # switch VT a greeter is sitting there — starting another greetd for it
+    # would take a third VT and leave two login screens on one machine.
+    local id blob
+    for id in $(session_ids); do
+        blob="$(session_blob "$id")"
+        [ "$(prop "$blob" Class)" = greeter ] || continue
+        [ "$(prop "$blob" Seat)" = "$MY_SEAT" ] || continue
+        [ "$id" != "$ME" ] || continue
+        lock_my_session "$ME"
+        activate_session "$id" "switched to the login screen already open on VT $(prop "$blob" VTNr) (session $id). This session ($ME) is still running and locked."
+        return 0
+    done
+
+    lock_my_session "$ME"
+    open_greeter
+}
+
+# ── dispatch ─────────────────────────────────────────────────────────────────
+
+verb="${1:-}"
+shift 2>/dev/null || true
+case "$verb" in
+    list)    cmd_list "$@" ;;
+    to)      cmd_to "$@" ;;
+    greeter) cmd_greeter "$@" ;;
+    ''|-h|--help|help) usage ;;
+    *) log "unknown verb '$verb'"; usage ;;
+esac
