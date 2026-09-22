@@ -120,7 +120,13 @@ impl Harness {
     esac
     prev="$i"
   done
-}} > "{report}" 2>&1
+}} > "{report}.partial" 2>&1
+# Renamed, never written in place: the test polls this file and returns on the
+# first read that holds "ARGV:", which a loaded CI runner can land between the
+# ARGV line and the `cat` of the handed configuration — leaving CONFIG-BEGIN
+# with nothing under it and a failure that names the wrong cause. rename(2) is
+# atomic, so the reader sees the whole report or no report.
+mv -f "{report}.partial" "{report}"
 exit 0
 "#,
                 report = report.display()
