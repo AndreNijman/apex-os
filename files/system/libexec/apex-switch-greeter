@@ -1,0 +1,302 @@
+#!/usr/bin/env bash
+# ─────────────────────────────────────────────────────────────────────────────
+#  apex-switch-greeter — open a login screen on a spare VT, as root.
+#
+#  The privileged half of fast user switching (P2-016 criterion 1). The
+#  unprivileged half is /usr/libexec/apex-switch-user, which decides whether a
+#  switch is an `loginctl activate` (the target is already logged in) or a new
+#  login screen (they are not). This file is only the second case.
+#
+#  ── Why a second greetd instance ────────────────────────────────────────────
+#
+#  greetd has no notion of a second seat and its VT is fixed at startup —
+#  greetd(5): "The specific VT is evaluated at startup, and does not change
+#  during the execution of greetd." The running instance is on VT 1 with the
+#  owner's session on it. So a login screen that is not on the owner's VT means
+#  a SECOND greetd, and greetd already supports being one:
+#
+#    * `--config` and `--socket-path` are command-line options (greetd --help);
+#    * the IPC socket is per-instance anyway (/run/greetd-<pid>.sock);
+#    * the runfile — the file that stops an [initial_session] running twice —
+#      is `general.runfile` in the config, so the two instances do not share it.
+#
+#  The session config is DERIVED FROM THE LIVE ONE rather than written from
+#  scratch: the `command` and `user` of [default_session] are copied out of
+#  /etc/greetd/config.toml, so a machine whose greeter was customised gets the
+#  same greeter on the switch VT as it gets at boot. Only [terminal] and
+#  [general] are ours.
+#
+#  ── The sudoers grant, and why it takes no arguments ────────────────────────
+#
+#      ALL ALL=(root) NOPASSWD: /usr/libexec/apex-switch-greeter ""
+#
+#  A standard account has to be able to switch users — that is the criterion —
+#  and `systemctl start` from an unprivileged session is a polkit prompt. So
+#  this runs through sudo with NOPASSWD, like apex-greet-wallpaper, and like it
+#  the trailing "" means "with no arguments at all": without it sudoers grants
+#  the command with ANY arguments. An argument is a thing the caller chooses,
+#  so this file chooses everything itself — which VT, which config, which unit.
+#
+#  ── What it refuses ─────────────────────────────────────────────────────────
+#
+#  1. A caller who is not the session currently at the seat. `SUDO_UID` must
+#     own seat0's ActiveSession. Without this fence any local account — one
+#     logged in over ssh, one sitting on another VT — could yank the screen
+#     away from whoever is at the keyboard, and the lock that apex-switch-user
+#     takes first would not have happened. Invoked directly as root with no
+#     SUDO_UID this is allowed: root can chvt by hand and is not the threat.
+#  2. A kiosk or auto-login machine, read off the live config: an
+#     [initial_session] stanza, or a [default_session] whose `user` is a real
+#     account rather than the greeter system user. Summoning a login screen on
+#     a kiosk is escaping the kiosk.
+#  3. VT 1..(NAutoVTs, ReserveVT, 6 — whichever is highest). VT 1 is greetd's
+#     own and 2..6 are where logind spawns gettys on demand; a greeter there
+#     races autovt@ttyN for the VT. The floor is read off logind's
+#     configuration rather than assumed.
+#
+#  And it does not start a second greeter when one is already up: the greeter
+#  session on the seat, or a running apex-switch-greeter@N.service, is printed
+#  and reused. greetd loops its default_session, so after a user logs out on
+#  the switch VT there is a greeter sitting there to go back to.
+#
+#  ── Overrides, for the test suite ───────────────────────────────────────────
+#
+#      APEX_SWITCH_GREETER_TOOLS   stand-ins for loginctl and systemctl
+#      APEX_SWITCH_GREETER_RUNDIR  default /run/apex-switch-greeter
+#      APEX_SWITCH_GREETER_DEVDIR  where ttyN are looked for; default /dev
+#      APEX_SWITCH_GREETD_CONFIG   default /etc/greetd/config.toml
+#      APEX_SWITCH_LOGIND_CONF     default /etc/systemd/logind.conf
+#      APEX_SWITCH_PASSWD          a passwd(5)-format file
+#      APEX_SWITCH_LOGIN_DEFS      default /etc/login.defs
+#      APEX_SWITCH_GREETER_VT_MAX  highest VT to try; default 12
+#
+#  APEX_SWITCH_GREETER_TOOLS is refused when running as root, for the reason
+#  apex-user refuses APEX_USER_TOOLS there: with every tool replaced nothing
+#  privileged is left, and as root there is.
+# ─────────────────────────────────────────────────────────────────────────────
+set -uo pipefail
+
+PROG="${0##*/}"
+RUNDIR="${APEX_SWITCH_GREETER_RUNDIR:-/run/apex-switch-greeter}"
+DEVDIR="${APEX_SWITCH_GREETER_DEVDIR:-/dev}"
+GREETD_CONFIG="${APEX_SWITCH_GREETD_CONFIG:-/etc/greetd/config.toml}"
+LOGIND_CONF="${APEX_SWITCH_LOGIND_CONF:-/etc/systemd/logind.conf}"
+LOGIN_DEFS="${APEX_SWITCH_LOGIN_DEFS:-/etc/login.defs}"
+VT_MAX="${APEX_SWITCH_GREETER_VT_MAX:-12}"
+SEAT=seat0   # greetd hardcodes XDG_SEAT=seat0; a second instance is seat0's too
+
+log()  { printf '%s: %s\n' "$PROG" "$*" >&2; }
+deny() { log "refusing: $*"; exit 2; }
+die()  { log "$*"; exit 1; }
+
+[ "$#" -eq 0 ] || { log "takes no arguments (the sudoers grant is argument-free on purpose)"; exit 2; }
+
+if [ -n "${APEX_SWITCH_GREETER_TOOLS:-}" ] && [ "$(id -u)" -eq 0 ]; then
+    deny "APEX_SWITCH_GREETER_TOOLS is set and this is running as root; it is a test override and not a way to redirect a privileged run"
+fi
+if [ -z "${APEX_SWITCH_GREETER_TOOLS:-}" ] && [ "$(id -u)" -ne 0 ]; then
+    deny "this needs root — it is meant to be reached as: sudo -n $PROG"
+fi
+
+run_tool() {
+    local name=$1; shift
+    local path="$name"
+    [ -n "${APEX_SWITCH_GREETER_TOOLS:-}" ] && path="$APEX_SWITCH_GREETER_TOOLS/$name"
+    "$path" "$@"
+}
+
+passwd_lines() {
+    if [ -n "${APEX_SWITCH_PASSWD:-}" ]; then cat -- "$APEX_SWITCH_PASSWD"
+    else getent passwd; fi
+}
+uid_min() {
+    local v=""
+    [ -f "$LOGIN_DEFS" ] && v="$(awk '$1 == "UID_MIN" { print $2; exit }' "$LOGIN_DEFS")"
+    case "$v" in ''|*[!0-9]*) echo 1000 ;; *) echo "$v" ;; esac
+}
+
+# ── the live greetd config ───────────────────────────────────────────────────
+
+greetd_value() {  # $1 = section, $2 = key
+    [ -f "$GREETD_CONFIG" ] || return 0
+    awk -v want="$1" -v key="$2" '
+        /^[ \t]*\[/ { sec = $0; gsub(/^[ \t]*\[|\][ \t]*$/, "", sec); next }
+        sec == want {
+            line = $0
+            gsub(/^[ \t]+/, "", line)
+            if (index(line, "#") == 1) next
+            split(line, kv, "=")
+            k = kv[1]; gsub(/[ \t]+$/, "", k)
+            if (k != key) next
+            sub(/^[^=]*=[ \t]*/, "", line)
+            gsub(/[ \t]+$/, "", line)
+            if (substr(line, 1, 1) == "\"") { sub(/^"/, "", line); sub(/"$/, "", line) }
+            print line
+            exit
+        }
+    ' "$GREETD_CONFIG"
+}
+
+greetd_has_section() {
+    [ -f "$GREETD_CONFIG" ] || return 1
+    grep -qE "^[[:space:]]*\[$1\][[:space:]]*$" "$GREETD_CONFIG"
+}
+
+# ── logind ───────────────────────────────────────────────────────────────────
+
+session_ids() { run_tool loginctl list-sessions --no-legend 2>/dev/null | awk 'NF { print $1 }'; }
+session_blob() {
+    run_tool loginctl show-session "$1" -p Id -p Name -p User -p Seat -p VTNr -p Class -p State 2>/dev/null
+}
+prop() { printf '%s\n' "$1" | awk -F= -v k="$2" '$1 == k { sub(/^[^=]*=/, ""); print; exit }'; }
+
+active_session_uid() {
+    local id blob
+    id="$(run_tool loginctl show-seat "$SEAT" -p ActiveSession --value 2>/dev/null)"
+    [ -n "$id" ] || return 1
+    blob="$(session_blob "$id")"
+    prop "$blob" User
+}
+
+# ── the VT floor, read rather than assumed ───────────────────────────────────
+#
+# logind spawns autovt@ttyN for N up to NAutoVTs when a VT is switched to, and
+# keeps ReserveVT for a getty permanently. A greeter below that floor races the
+# getty for the VT. Both default to 6, and both are commented out in the shipped
+# logind.conf, so an unset value means the default and not zero.
+
+logind_num() {  # $1 = key, $2 = default
+    local v=""
+    if [ -f "$LOGIND_CONF" ]; then
+        v="$(awk -F= -v k="$1" '
+            /^[ \t]*#/ { next }
+            { key = $1; gsub(/[ \t]/, "", key); if (key == k) { val = $2; gsub(/[ \t]/, "", val); print val; exit } }
+        ' "$LOGIND_CONF")"
+    fi
+    case "$v" in ''|*[!0-9]*) printf '%s\n' "$2" ;; *) printf '%s\n' "$v" ;; esac
+}
+
+vt_floor() {
+    local a r f
+    a="$(logind_num NAutoVTs 6)"
+    r="$(logind_num ReserveVT 6)"
+    f=6
+    [ "$a" -gt "$f" ] && f="$a"
+    [ "$r" -gt "$f" ] && f="$r"
+    printf '%s\n' "$((f + 1))"
+}
+
+# ── is a greeter already up? ─────────────────────────────────────────────────
+
+existing_greeter_vt() {
+    local id blob unit vt
+    for id in $(session_ids); do
+        blob="$(session_blob "$id")"
+        [ "$(prop "$blob" Class)" = greeter ] || continue
+        [ "$(prop "$blob" Seat)" = "$SEAT" ] || continue
+        vt="$(prop "$blob" VTNr)"
+        # VT 1 is the boot greeter's. Reusing THAT would switch the user to the
+        # login screen they are sitting on top of, so it is not a switch target
+        # — only a greeter this mechanism opened on a spare VT is.
+        [ -n "$vt" ] && [ "$vt" -ge "$(vt_floor)" ] || continue
+        printf '%s\n' "$vt"
+        return 0
+    done
+    # A unit that is up but whose greeter has not registered a session yet.
+    unit="$(run_tool systemctl list-units --no-legend --plain --state=active \
+                'apex-switch-greeter@*.service' 2>/dev/null | awk 'NF { print $1; exit }')"
+    if [ -n "$unit" ]; then
+        vt="${unit#apex-switch-greeter@}"; vt="${vt%.service}"
+        case "$vt" in ''|*[!0-9]*) return 1 ;; esac
+        printf '%s\n' "$vt"
+        return 0
+    fi
+    return 1
+}
+
+# ─────────────────────────────────────────────────────────────────────────────
+#  fences
+# ─────────────────────────────────────────────────────────────────────────────
+
+if greetd_has_section initial_session; then
+    deny "$GREETD_CONFIG has an [initial_session] stanza — this machine logs an account in without asking, and a login screen on another VT is not what it wants"
+fi
+ds_user="$(greetd_value default_session user)"
+if [ -n "$ds_user" ]; then
+    ds_uid="$(passwd_lines | awk -F: -v u="$ds_user" '$1 == u { print $3; exit }')"
+    case "$ds_uid" in
+        ''|*[!0-9]*) : ;;
+        *) [ "$ds_uid" -lt "$(uid_min)" ] || deny \
+             "$GREETD_CONFIG runs its default session as '$ds_user' (uid $ds_uid), a real account rather than the greeter — this machine is a kiosk, and a kiosk that can reach a login screen is not one" ;;
+    esac
+fi
+
+if [ -n "${SUDO_UID:-}" ]; then
+    seat_uid="$(active_session_uid)" || deny "seat $SEAT has no active session to check the caller against"
+    [ "$seat_uid" = "$SUDO_UID" ] \
+        || deny "uid $SUDO_UID is not the session at seat $SEAT (that is uid ${seat_uid:-none}); only the session currently at the keyboard may open a login screen"
+fi
+
+# ─────────────────────────────────────────────────────────────────────────────
+#  reuse, or pick a VT and start one
+# ─────────────────────────────────────────────────────────────────────────────
+
+if vt="$(existing_greeter_vt)"; then
+    log "a login screen is already open on VT $vt; reusing it"
+    printf 'vt=%s\n' "$vt"
+    exit 0
+fi
+
+floor="$(vt_floor)"
+[ "$VT_MAX" -ge "$floor" ] || die "no VT is available: the floor is $floor and the ceiling is $VT_MAX"
+
+taken=""
+for id in $(session_ids); do
+    v="$(prop "$(session_blob "$id")" VTNr)"
+    [ -n "$v" ] && taken="$taken $v "
+done
+
+vt=""
+n="$floor"
+while [ "$n" -le "$VT_MAX" ]; do
+    case "$taken" in *" $n "*) n=$((n + 1)); continue ;; esac
+    [ -c "$DEVDIR/tty$n" ] || { n=$((n + 1)); continue; }
+    vt="$n"
+    break
+done
+[ -n "$vt" ] || die "no free VT between $floor and $VT_MAX — every one of them already has a session"
+
+command_line="$(greetd_value default_session command)"
+[ -n "$command_line" ] || command_line="/usr/libexec/apex-greet-session sway --unsupported-gpu -c /usr/share/apex-greet/sway-greet.conf"
+greeter_user="$ds_user"
+[ -n "$greeter_user" ] || greeter_user=greetd
+
+mkdir -p "$RUNDIR" 2>/dev/null || die "could not make $RUNDIR"
+chmod 0755 "$RUNDIR" 2>/dev/null
+
+conf="$RUNDIR/$vt.toml"
+cat >"$conf" <<CONF || die "could not write $conf"
+# Generated by $PROG for fast user switching (P2-016). Not a shipped file, not
+# /etc/greetd/config.toml, and removed with /run at every boot.
+#
+# command and user are copied verbatim from $GREETD_CONFIG so this is the SAME
+# greeter the machine boots. vt, switch and runfile are this instance's own.
+
+[terminal]
+vt = $vt
+switch = true
+
+[general]
+runfile = "$RUNDIR/$vt.run"
+
+[default_session]
+command = "$command_line"
+user = "$greeter_user"
+CONF
+chmod 0644 "$conf" 2>/dev/null
+
+run_tool systemctl start "apex-switch-greeter@$vt.service" \
+    || die "could not start apex-switch-greeter@$vt.service"
+
+log "login screen starting on VT $vt (apex-switch-greeter@$vt.service)"
+printf 'vt=%s\n' "$vt"

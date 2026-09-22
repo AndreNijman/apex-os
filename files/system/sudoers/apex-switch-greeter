@@ -1,0 +1,25 @@
+# APEX-OS — let a desktop user open a login screen on a spare VT.
+#
+# Fast user switching (P2-016 criterion 1). The switch to an account that is
+# already logged in is `loginctl activate` and needs nothing: polkit's
+# org.freedesktop.login1.chvt is allow_active=yes, read off this machine's own
+# policy file. The switch to an account that is NOT logged in needs a second
+# greetd instance on a spare VT, and starting a system unit from an
+# unprivileged session is a polkit prompt — on a login path, from a compositor,
+# with nobody able to answer it for a standard account.
+#
+# ALL, not %wheel. A standard account being able to switch users IS the
+# criterion; restricting this to wheel would mean only administrators can share
+# the machine, which is the opposite of what P2-016 asks for.
+#
+# The empty string after the command means "with no arguments at all". Without
+# it sudoers grants the command with ANY arguments. Here that is not a
+# tightening of a wide grant but the shape of the helper: it takes no arguments
+# because an argument is a thing the caller chooses, and this helper chooses
+# the VT, the config and the unit itself.
+#
+# What the grant is worth to a caller who is not meant to have it: nothing.
+# The helper refuses unless SUDO_UID owns the ACTIVE session on seat0 — only
+# the person at the keyboard can make the screen change — and refuses outright
+# on a kiosk or auto-login machine. See its header.
+ALL ALL=(root) NOPASSWD: /usr/libexec/apex-switch-greeter ""

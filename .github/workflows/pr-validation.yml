@@ -2262,6 +2262,24 @@ jobs:
         if: ${{ !cancelled() }}
         run: ./tests/test-apex-user.sh
 
+      # P2-016 criterion 1's other half: fast user switching, which had no
+      # surface at all until this suite's engines existed. A switch takes the
+      # seat, so the CI runner has none and the developer's machine has one
+      # with a desktop on it -- `loginctl`, `systemctl` and `sudo` are
+      # stand-ins in a directory and the assertions are about the argv the
+      # engine produced and the ORDER it produced it in.
+      #
+      # The one this suite exists for: `loginctl lock-session` is a REQUEST,
+      # and what makes a session locked is its own locker setting logind's
+      # LockedHint. A fake whose hint never flips must produce a refusal and no
+      # activate, because a switch that ran first would hand the next person at
+      # the keyboard an unlocked desktop and look perfect from the outside.
+      #
+      # It starts no compositor, opens no window and changes no seat.
+      - name: Run fast-user-switching assertions
+        if: ${{ !cancelled() }}
+        run: ./tests/test-apex-switch-user.sh
+
       # What a screen reader and a keyboard-only user get from the login
       # screen. P2-003's "accessible login" and P2-004's "keyboard layout
       # before password" both land on the same surface, so they are measured
