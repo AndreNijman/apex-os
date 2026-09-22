@@ -110,9 +110,15 @@ ESP_OVERRIDE="${APEX_MIGRATE_ESP:-}"
 DRYRUN="${APEX_MIGRATE_DRYRUN:-0}"
 LOADER_PATH='\EFI\systemd\systemd-bootx64.efi'
 ENTRY_LABEL='APEX-OS'
-# Two deployments' worth of kernel+initramfs, plus the loader and slack. An ESP
-# that cannot hold this cannot hold an update, and a machine that discovers
-# that halfway through is the failure this whole script exists to avoid.
+# Slack on top of THREE deployments' worth of kernel+initramfs — booted plus
+# rollback plus the one an update stages alongside them. The number is applied
+# at the esp-too-small check below (`per * 3 + ESP_SLACK_MIB`), whose own
+# comment spells the reasoning out. This header used to say "two", which is
+# what the check was sized for before it was corrected and is not what it
+# computes; a reader who trusted it got 1173 MiB from 2 x 375 + 48 and a wrong
+# answer. An ESP that cannot hold all three cannot take its first update, and a
+# machine that discovers that halfway through is the failure this whole script
+# exists to avoid.
 ESP_SLACK_MIB=48
 # Slack on top of the doubled repo estimate for the ROOT filesystem check
 # below: filesystem overhead (btrfs metadata, ext4 reserved blocks), and the
@@ -483,6 +489,59 @@ cmd_precheck() {
             "This machine is already on the composefs + systemd-boot path."
     else
         verdict OK "on-ostree" "booted store is ostreeContainer, so there is something to migrate"
+    fi
+
+    # ── the remains of an attempt that died mid-install ─────────────────────
+    #
+    # `bootc install to-existing-root --composefs-backend` is NOT idempotent.
+    # Measured 2026-09-22 on the real image: a migration whose install SUCCEEDED
+    # and whose `join_state` then failed left $SYSROOT/state and
+    # $SYSROOT/composefs behind, and the next attempt died inside bootc rather
+    # than in this script —
+    #
+    #     error: Installing to filesystem: Setting up composefs boot:
+    #            Writing composefs state: Failed to create symlink for /var:
+    #            File exists (os error 17)
+    #
+    # — while this script's own `install-failed` message was telling the user
+    # "Re-running is safe." It was not: every later run failed identically, and
+    # no verb here clears it. `retry` only re-arms a migration that reached
+    # `committed`; `abort` removes the phase file and says the files left
+    # behind are "inert", which is true of BOOTING and false of re-installing.
+    #
+    # This refuses instead of deleting, deliberately. Removing $SYSROOT/state
+    # and $SYSROOT/composefs is the obvious repair and it is NOT safe to do
+    # automatically: on a machine that migrated, was confirmed, and is now
+    # sitting on its GRUB fallback with the state directory gone, those two
+    # paths are the deployment it normally boots — and every signal this
+    # function has (booted store, booted loader) reads exactly the same in both
+    # cases. Which deployment is authoritative is the same open decision as
+    # "Reclaiming the old deployment" in ROADMAP/state/agents/sdboot-migrate.md,
+    # and it is not one a precheck should take on its own at 3 a.m.
+    #
+    # Only fires when NO phase is recorded. A `staged`, `committed` or
+    # `confirmed` phase means the deployment is about to be booted or is the
+    # recovery path, and this says nothing about it.
+    local partial=""
+    if [ -z "$(cat "$STATE/phase" 2>/dev/null || true)" ]; then
+        [ -e "$SYSROOT/composefs" ] && partial="$partial $SYSROOT/composefs"
+        [ -e "$SYSROOT/state" ]     && partial="$partial $SYSROOT/state"
+    fi
+    if [ -n "$partial" ]; then
+        refuse "partial-install" \
+            "A previous migration attempt left an incomplete composefs" \
+            "deployment on this machine and recorded no phase for it:" \
+            "${partial# }." \
+            "bootc will not install over one — it fails with 'Setting up" \
+            "composefs boot: Writing composefs state: Failed to create symlink" \
+            "for /var: File exists' — so re-running cannot get past it." \
+            "This machine is on GRUB and working, and nothing here changes" \
+            "that. Removing those two paths is what unblocks it." \
+            "Do it by hand, and only after checking that this machine has no" \
+            "confirmed migration to fall back to — if it has, those paths are" \
+            "the deployment it normally boots, not leftovers."
+    else
+        verdict OK "no-partial-install" "no half-finished composefs deployment is in the way"
     fi
 
     if [ "$(staged_present)" != yes ]; then
@@ -1003,7 +1062,13 @@ print(((b.get("image") or {}).get("imageDigest")) or "")')"
         release_esp
         fail "install-failed" \
             "bootc install to-existing-root failed. Nothing committed; this" \
-            "machine still boots the way it did. Re-running is safe."
+            "machine still boots the way it did." \
+            "Re-running is safe for the BOOT PATH — nothing in BootOrder was" \
+            "touched — but it is not automatically safe for the install: if" \
+            "bootc got as far as writing the composefs state before it failed," \
+            "the next attempt refuses with 'partial-install' rather than dying" \
+            "inside bootc with 'File exists'. Run 'apex-boot-migrate precheck" \
+            "--explain' to see which of the two happened."
     fi
 
     # If bootc ever starts writing the loader into /target/boot instead of
@@ -1137,9 +1202,27 @@ print(((b.get("image") or {}).get("imageDigest")) or "")')"
 # the migration deploys the digest the machine is already running.
 join_state() {
     local newvar oldvar newetc oldetc
-    newvar="$(find "$SYSROOT/state" -mindepth 3 -maxdepth 3 -name var 2>/dev/null | head -1)"
+    # `-type d` is load-bearing, and it is the difference between a migration
+    # that completes and one that stops here. bootc's composefs layout puts
+    # TWO things called `var` exactly three levels under $SYSROOT/state:
+    #
+    #     state/os/<stateroot>/var            the real directory
+    #     state/deploy/<digest>/var  ->  ../../os/<stateroot>/var
+    #
+    # `find` walks in readdir order, not sorted, so `| head -1` returns
+    # whichever the filesystem hands back first. Measured 2026-09-22 on the
+    # real APEX image on btrfs: it returned the SYMLINK, `[ ! -L "$newvar" ]`
+    # was then false, and the whole migration failed `state-join` after a
+    # completely successful install. The predecessor's ext4 fedora-bootc guest
+    # got the directory first and the bug was invisible —
+    # ROADMAP/evidence/sdboot-migrate-3-20260922-lab.md section 4.
+    #
+    # `find` does not follow symlinks unless asked, so `-type d` alone selects
+    # the real directory. The `etc` lookup thirty lines down has always had it;
+    # this one did not.
+    newvar="$(find "$SYSROOT/state" -mindepth 3 -maxdepth 3 -type d -name var 2>/dev/null | head -1)"
     oldvar="$SYSROOT/ostree/deploy/default/var"
-    [ -n "$newvar" ] || { log "no new stateroot var found under $SYSROOT/state"; return 1; }
+    [ -n "$newvar" ] || { log "no new stateroot var directory found under $SYSROOT/state"; return 1; }
 
     if [ -L "$oldvar" ]; then
         log "/var is already joined"
@@ -1167,7 +1250,14 @@ join_state() {
         log "joined /var: moved the machine's var into the composefs stateroot,"
         log "             left $oldvar -> $rel for the GRUB path"
     else
-        log "cannot join /var: $oldvar is not a directory and not a symlink"
+        # Say WHICH path failed the test. This branch used to blame $oldvar
+        # unconditionally, and when the real cause was $newvar being a symlink
+        # the message sent the reader to the wrong filesystem entirely.
+        if [ ! -d "$oldvar" ]; then
+            log "cannot join /var: $oldvar is neither a directory nor a symlink"
+        else
+            log "cannot join /var: $newvar is a symlink, not the stateroot's real var directory"
+        fi
         return 1
     fi
 

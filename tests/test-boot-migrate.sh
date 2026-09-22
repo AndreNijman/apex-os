@@ -524,6 +524,55 @@ if grep -q 'root_need=$(( repo_kib \* 2' "$CODE"; then
 else
     bad "the root check does not size for both the temporary and permanent copy"
 fi
+# 4c. The stateroot's var must be the DIRECTORY, never the symlink beside it.
+#
+# bootc's composefs layout puts TWO things called `var` exactly three levels
+# under $SYSROOT/state:
+#
+#     state/os/<stateroot>/var            the real directory
+#     state/deploy/<digest>/var  ->  ../../os/<stateroot>/var
+#
+# `find` walks in readdir order, not sorted, so a lookup without `-type d`
+# returns whichever the filesystem hands back first. Measured on the real APEX
+# image on btrfs, 2026-09-22: it returned the SYMLINK, join_state's
+# `[ ! -L "$newvar" ]` was false, and the migration failed `state-join` AFTER a
+# completely successful install. The predecessor's ext4 fedora-bootc guest got
+# the directory first, so the bug was invisible for two rounds.
+# ROADMAP/evidence/sdboot-migrate-3-20260922-lab.md, section 4.
+#
+# This is behavioural, and the expression under test is EXTRACTED FROM THE
+# SOURCE rather than copied here — a copy would keep passing after the source
+# drifted, which is the failure mode this suite exists to catch.
+jt="$(mktemp -d)"
+mkdir -p "$jt/state/os/default/var" "$jt/state/deploy/abc123"
+ln -s ../../os/default/var "$jt/state/deploy/abc123/var"
+jt_expr="$(sed -n 's/^[[:space:]]*newvar="\$(\(.*\))"$/\1/p' "$CODE" | head -1)"
+if [[ -z "$jt_expr" ]]; then
+    bad "could not extract join_state's newvar lookup from the source — this test is inspecting nothing"
+else
+    jt_got="$(SYSROOT="$jt" bash -c "$jt_expr" 2>/dev/null)"
+    if [[ -n "$jt_got" && -d "$jt_got" && ! -L "$jt_got" ]]; then
+        ok "join_state's var lookup returns a real directory, not a symlink"
+    else
+        bad "join_state's var lookup returned '$jt_got' — a symlink or nothing, so the /var join fails after a successful install"
+    fi
+    if [[ "$jt_got" == "$jt/state/os/default/var" ]]; then
+        ok "join_state's var lookup picks the stateroot's own var, not the deployment's link to it"
+    else
+        bad "join_state's var lookup picked '$jt_got', not \$SYSROOT/state/os/default/var"
+    fi
+fi
+# And prove the hazard is real rather than hypothetical: with the type filter
+# removed, the candidate set genuinely does contain a symlink, so `head -1`
+# has something wrong to pick. If this ever stops holding, the assertions
+# above are guarding a layout that no longer exists and should be revisited.
+if [[ -n "$(find "$jt/state" -mindepth 3 -maxdepth 3 -name var -type l 2>/dev/null)" ]]; then
+    ok "the layout really does offer a symlink candidate at the same depth"
+else
+    bad "the fixture has no symlink candidate — this test would pass without -type d"
+fi
+rm -rf "$jt"
+
 if grep -qE 'df -Pk "\$SYSROOT"' "$CODE"; then
     ok "the root check reads free space on \$SYSROOT, not the ESP"
 else
@@ -640,6 +689,73 @@ if grep -q 'overridden' "$CODE"; then
     bad "a verdict still calls APEX_MIGRATE_ESP an override of the write — it only moves the measurement"
 else
     ok "nothing claims APEX_MIGRATE_ESP steers where bootc writes"
+fi
+
+# ═════════════════════════════════════════════════════════════════════════════
+sec "A half-finished composefs deployment is refused — behavioural, both ways"
+# `bootc install to-existing-root --composefs-backend` is not idempotent.
+# Measured 2026-09-22 on the real image: an attempt whose install succeeded and
+# whose join_state then failed left $SYSROOT/state and $SYSROOT/composefs
+# behind, and every later attempt died INSIDE bootc with
+#   "Setting up composefs boot: Writing composefs state:
+#    Failed to create symlink for /var: File exists (os error 17)"
+# while this engine's own message said "Re-running is safe".
+# ROADMAP/evidence/sdboot-migrate-3-20260922-lab.md, section 5.
+#
+# Three fixtures, differing only in what is on the fake sysroot and what phase
+# is recorded, so the refusal cannot pass by being unconditional and cannot
+# pass by being deleted.
+explain_with_root() {   # $1 = fixture sysroot, $2 = fixture state dir
+    APEX_MIGRATE_STATE="$2" \
+    APEX_MIGRATE_ROOT="$1" \
+    APEX_MIGRATE_ESP="$TMP/esp-own" \
+    APEX_MIGRATE_FAKEROOT="$TMP/fakeroot" \
+    APEX_MIGRATE_STORE=ostreeContainer \
+        bash "$MIG" precheck --explain 2>&1
+}
+mkdir -p "$TMP/sr-clean" "$TMP/st-clean" \
+         "$TMP/sr-partial/composefs" "$TMP/sr-partial/state" "$TMP/st-partial" \
+         "$TMP/st-staged"
+echo staged > "$TMP/st-staged/phase"
+pi_clean="$(explain_with_root "$TMP/sr-clean"   "$TMP/st-clean"  || true)"
+pi_part="$( explain_with_root "$TMP/sr-partial" "$TMP/st-partial" || true)"
+pi_staged="$(explain_with_root "$TMP/sr-partial" "$TMP/st-staged" || true)"
+
+if grep -qE '^REFUSE +partial-install' <<<"$pi_part"; then
+    ok "a leftover composefs deployment with no phase recorded is REFUSED (partial-install)"
+else
+    bad "a half-finished composefs deployment is allowed through — the next run dies inside bootc with 'File exists'"
+fi
+# `^REFUSE +partial-install`, anchored, not a bare substring: the passing
+# verdict is named `no-partial-install` and a loose grep matches that too —
+# which it did, on the first run of this assertion.
+if grep -qE '^REFUSE +partial-install' <<<"$pi_clean"; then
+    bad "partial-install fires on a sysroot with no leftovers — it is unconditional, so it proves nothing"
+else
+    ok "a sysroot with no leftovers raises no partial-install verdict"
+fi
+# The phase guard is the part that makes this safe to ship: a STAGED migration
+# has a composefs deployment on purpose, and refusing there would break the
+# one case the predecessor built the state machine for — a power cut between
+# the stage and the commit.
+if grep -qE '^REFUSE +partial-install' <<<"$pi_staged"; then
+    bad "partial-install fires on a STAGED migration — it would refuse the machine its own completed stage"
+else
+    ok "partial-install ignores a staged migration's composefs deployment"
+fi
+# A refusal nobody can act on strands the machine, which is the whole complaint
+# against the message this replaces.
+if grep -A 20 'refuse "partial-install"' "$CODE" | grep -q 'by hand'; then
+    ok "the partial-install refusal says what to do about it"
+else
+    bad "partial-install states no remedy, so a user is stuck exactly as before"
+fi
+# And the message it replaces must be gone: "Re-running is safe" full stop was
+# false, and a reader who believed it re-ran forever.
+if grep -q 'machine still boots the way it did. Re-running is safe."' "$CODE"; then
+    bad "install-failed still promises 'Re-running is safe' without qualification — measured false"
+else
+    ok "install-failed no longer promises an unqualified 'Re-running is safe'"
 fi
 
 printf '\n%d passed, %d failed\n' "$PASS" "$FAIL"
