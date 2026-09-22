@@ -1969,6 +1969,20 @@ RUN set -eux; \
     grep -qx 'signature=enforce'  /usr/share/apex-os/trust/enforcement.conf; \
     grep -qx 'provenance=warn'    /usr/share/apex-os/trust/enforcement.conf
 
+# squashfs-tools, explicitly, for the AppImage route below.
+#
+# It is already in this image — as a WEAK dependency of dracut-squash, which is
+# an accident rather than a decision, and the same accident the mksquashfs note
+# in the next stanza has been recording since the engine was written. Naming it
+# here marks it user-installed, so an autoremove or a change in dracut's weak
+# dependencies cannot take unsquashfs away and turn `apex install ./x.AppImage`
+# into a runtime refusal on the user's machine.
+#
+# Cost, stated rather than buried: nothing measurable. The package is already
+# resolved into every APEX image today, ~1.2 MB installed, and this line changes
+# only whether its presence is deliberate.
+RUN dnf5 -y install squashfs-tools && dnf5 clean all && rm -rf /var/cache/libdnf5
+
 COPY --chmod=0755 files/system/libexec/apex-pkg /usr/libexec/apex-pkg
 COPY files/system/units/apex-sysext-rebuild.service \
      /usr/lib/systemd/system/apex-sysext-rebuild.service
@@ -1981,6 +1995,15 @@ RUN set -eux; \
              systemd-sysusers systemd-tmpfiles ldconfig od readlink sha256sum; do \
         command -v "$t" >/dev/null || { echo "FATAL: apex-pkg needs $t"; exit 1; }; \
     done; \
+    # unsquashfs is how `apex install ./Thing.AppImage` reads the payload out
+    # of an AppImage, and the whole reason that route needs no FUSE: this image
+    # has fusermount3 but NO libfuse.so.2, no fusermount and no squashfuse, so
+    # the classic AppImage runtime cannot mount itself here at all. It is
+    # asserted rather than assumed because squashfs-tools reaches this image
+    # only as a WEAK dependency of dracut-squash — the same accident the
+    # mksquashfs note below records, and one dnf5 could drop without warning.
+    command -v unsquashfs >/dev/null \
+        || { echo "FATAL: apex-pkg needs unsquashfs (squashfs-tools) to install an AppImage"; exit 1; }; \
     dnf5 copr --help >/dev/null; \
     # Installing a local .rpm resolves its dependencies by asking libdnf5 which
     # requirements the running image already satisfies. That subcommand is a hard
@@ -2003,6 +2026,7 @@ RUN set -eux; \
         'd /var/lib/apex 0755 root root -' \
         'd /var/lib/apex/pkg 0700 root root -' \
         'd /var/lib/apex/pkg/local 0700 root root -' \
+        'd /var/lib/apex/appimage 0755 root root -' \
         > /usr/lib/tmpfiles.d/apex-pkg.conf; \
     # systemd-sysext.service is what merges the extension at boot. It is enabled
     # by preset today, which is exactly the kind of upstream default that can

@@ -147,6 +147,161 @@ program is installed under `/opt` with a working `.desktop` entry, but the short
 command name may be missing from `PATH`. Check with `apex pkg info` what was
 installed and call the real path, or use the Flatpak if the vendor ships one.
 
+## Installing an AppImage
+
+```bash
+sudo apex install --allow-unsigned ./Thing.AppImage
+```
+
+An AppImage is one executable file with a whole filesystem glued to its back.
+APEX unpacks it once, at install time, and installs the application inside it —
+launcher entry, icon and command. **The AppImage is never run**, not at install
+time and not afterwards.
+
+### Why it is never run, and why that is the point
+
+The classic AppImage runtime mounts its own payload with FUSE, and on APEX that
+cannot work. Measured on the image: `fusermount3` is present, but
+**`libfuse.so.2` is not, `fusermount` (the libfuse2 helper) is not, and
+`squashfuse` is not.** Double-click a type-2 AppImage on a stock APEX machine
+and you get the error everyone knows:
+
+```
+dlopen(): error loading libfuse.so.2
+```
+
+There were three ways to answer that, and the one APEX took costs the least:
+
+| | What it means | Why not |
+|---|---|---|
+| Ship a fuse2 compatibility package | `libfuse.so.2` in the image | A deprecated ABI on every machine in the fleet, whether or not it ever sees an AppImage, so that a format APEX does not control can mount itself |
+| Run each launch with `--appimage-extract-and-run` | Unpack on every start | Hundreds of megabytes of I/O before an Electron app's splash screen — and it does it by **executing the vendor's binary**, which this engine refuses to do for a `.deb`'s maintainer scripts and sandboxes for an RPM's `%post` |
+| **Unpack once at install time** | `unsquashfs` into `/usr/local` | **Chosen.** No FUSE at install or at run time, no kernel mount, and nothing from the download is ever executed as root |
+
+The payload's offset inside the file is `e_shoff + e_shentsize × e_shnum`, read
+straight out of the ELF header with `od` — the same number `--appimage-offset`
+prints, computed without asking the file about itself. `unsquashfs -o` does the
+rest.
+
+That also fits the OS better than the alternative would. RPM packages have to
+become a systemd system extension because `/usr` is read-only composefs; an
+AppImage does not, because it is self-contained and `/var` is writable. **An
+installed AppImage is not part of `apex-user.raw` and appears in no requested
+list**, so it survives an OS upgrade, a `bootc rollback`, an extension rebuild
+and `apex remove` of every RPM on the machine.
+
+### Where it goes
+
+| Path | Holds |
+|---|---|
+| `/usr/local/lib/apex-appimage/NAME/` | the unpacked payload (`AppRun` and everything under it) |
+| `/usr/local/bin/NAME` | a generated launcher |
+| `/usr/local/share/applications/ID.desktop` | the launcher entry, rewritten to point at it |
+| `/usr/local/share/icons/hicolor/**/apps/` | the icon named by the entry's `Icon=` key, and only that one |
+| `/var/lib/apex/appimage/NAME.AppImage` | the accepted bytes, kept |
+| `/var/lib/apex/appimage/NAME.{trust,files,json}` | the checksum you accepted, what was installed where, and the record |
+
+`/usr/local` and not `/var` directly: on APEX `/usr/local` is a symlink to
+`../var/usrlocal`, so it is writable; `/usr/local/bin` is already on `PATH` and
+`/usr/local/share` is already in `XDG_DATA_DIRS`, so nothing needs a wrapper or
+an `environment.d` drop-in; and SELinux's `/var/usrlocal → /usr/local`
+substitution labels the tree `bin_t`/`lib_t` rather than `var_lib_t`, which is
+what lets the desktop session execute it.
+
+The launcher reconstructs the four variables the AppImage runtime would have
+set — `APPDIR`, `APPIMAGE`, `ARGV0` and `OWD` — because `AppRun` scripts read
+them.
+
+### `apex update` does nothing to an AppImage. It is pinned.
+
+This is the honest cost of the format, and it is written down here rather than
+left for you to discover. An installed AppImage stays at the version you
+installed. `sudo apex update` does not move it — and it tells you so, by name,
+on every run. (`apex update`'s package pass used to return early on a machine
+with no system extension, which is exactly a machine whose only user software
+is an AppImage; it now also runs when `/var/lib/apex/appimage` holds a record,
+so the line below is one you actually see rather than one this page claims.)
+
+```
+apex-pkg: AppImages are pinned and not updated by this command: obsidian
+apex-pkg: to move one, run: sudo apex install --allow-unsigned /path/to/the/newer.AppImage
+```
+
+**APEX does not write an updater for AppImages.** This document says two
+sections down that Zen Browser is a Flatpak because a tarball or an AppImage
+"would need APEX to write and maintain its own updater to keep 'always the
+latest stable' true". That is still true, and this feature does not pay that
+cost — it declines it. A vendor's zsync channel (`X-AppImage-UpdateInformation`,
+what AppImageUpdate follows) is **reported at install time and never followed**:
+
+```
+apex-pkg: it advertises the update channel 'zsync|https://…'; APEX does not follow it — this AppImage is pinned
+```
+
+So: if the software has an RPM, a COPR or a Flatpak, use that instead — those
+track upstream through the update path that already exists. Reach for an
+AppImage when there is nothing else, and expect to update it by hand.
+
+Self-updating is not merely forbidden, it is **impossible**. The application
+runs out of a root-owned `0755` tree and `$APPIMAGE` points at a root-owned
+`0644` file, so an AppImage that tries to rewrite itself gets `EACCES` rather
+than becoming a second update channel beside `apex update`.
+
+### Signatures: the same rule as an RPM, not a weaker one
+
+**Every AppImage needs `--allow-unsigned`.** Some embed a signature in a
+`.sha256_sig` ELF section with the signing key in `.sig_key` — a key taken from
+the file it signs proves nothing, so APEX does not accept it as verification,
+the same conclusion the `.deb` route reached about `debsigs` and the same reason
+the image *pins* both AI vendors' key fingerprints. Your acceptance is recorded
+against that file's exact bytes under `/var/lib/apex/appimage`, so `apex pkg
+list` and `apex pkg verify` keep telling the truth about where the software came
+from, and swapping the file for different content revokes the decision instead
+of inheriting it.
+
+### What it refuses
+
+| Refused | Why |
+|---|---|
+| A **type-1** AppImage (ISO 9660 payload) | Superseded in 2016. APEX unpacks only type 2 (squashfs) |
+| A foreign architecture, or a 32-bit runtime | Read from the ELF header. It would never run |
+| A payload with **no** `.desktop` file at its root, or more than one | The format allows exactly one. Zero means nothing says what the application is; several means APEX would be choosing on the vendor's behalf |
+| A payload with no `AppRun` | That is the entry point every AppImage is required to provide |
+| A name that would **shadow** something the OS provides | `/usr/local/bin` comes before `/usr/bin` on `PATH` and `/usr/local/share` before `/usr/share` in `XDG_DATA_DIRS`, so `./firefox.AppImage` would take over the browser for every user on the machine. `apex-pkg` decides image ownership by asking the rpmdb, which has no answer for an AppImage — so the question is asked about the path the install would *hide* |
+| Overwriting any file APEX did not itself install | Under `/usr/local` as much as anywhere else |
+| A `.desktop` or icon that resolves **outside** the payload | `.DirIcon` is conventionally a symlink, which is the obvious way to make a root process copy `/etc/shadow` somewhere world-readable |
+
+Two things are taken away from every payload as it is unpacked: **setuid and
+setgid bits**, and **ownership**. A FUSE-mounted AppImage is mounted `nosuid`,
+so preserving a `4755` helper out of a download would grant strictly *more* than
+running the AppImage normally ever does; and a squashfs built on the packager's
+laptop records uid 1000, which is the desktop user on nearly every APEX machine.
+Everything lands `root:root` with no group or other write.
+
+`apex pkg verify` re-checks all of this later, including the one question only
+time can answer: whether an RPM installed since has put the same command in
+`/usr/bin`, where the AppImage's launcher now sits in front of it.
+
+### Removing one
+
+```bash
+sudo apex remove NAME                    # the command name it installed
+sudo apex remove ./Thing.AppImage        # or the file it came from
+```
+
+Either works: the file is matched by checksum, so the same download in a
+different directory still resolves. Removal deletes exactly what the manifest
+records and nothing outside `/usr/local`.
+
+### The cost, stated rather than buried
+
+An installed AppImage occupies roughly **two to three times** what the file
+does: the unpacked tree (the payload uncompressed, so larger than the file it
+came in) plus the original, which is kept because the trust marker is a checksum
+*of those bytes* and because `$APPIMAGE` has to point at a file that exists. A
+1 GB AppImage is therefore 2–3 GB of `/var`. It is all machine-local — none of
+it touches the image, so it costs the fleet nothing.
+
 ## OS upgrades
 
 An extension records the OS version it was built for, and systemd refuses to
@@ -226,7 +381,8 @@ image — open an issue.
 |---|---|
 | `apex install PKG…` | add packages (`--no-weak-deps`, `--enable-repo=REPO`) |
 | `apex install FILE.rpm` | add a local RPM file (`--allow-unsigned` if no trusted key covers it) |
-| `apex remove PKG…` | remove packages (a local one by its package name) |
+| `apex install FILE.AppImage` | unpack an AppImage into `/usr/local` (`--allow-unsigned` always). Pinned: `apex update` never moves it |
+| `apex remove PKG…` | remove packages (a local one by its package name, an AppImage by its command name or its file) |
 | `apex search TERM…` | search the repositories |
 | `apex repo list` | list enabled and disabled RPM repositories |
 | `apex repo enable-copr OWNER/PROJECT` | opt into a Fedora COPR for search/install/upgrade |
@@ -236,7 +392,7 @@ image — open an issue.
 | `apex pkg upgrade` | re-resolve everything against the repositories |
 | `apex pkg rebuild [--if-needed]` | rebuild for the running OS version |
 | `apex pkg rollback` | restore the previous extension |
-| `apex pkg verify` | check the extension against its recorded checksum |
+| `apex pkg verify` | check the extension against its recorded checksum, and each AppImage against the bytes you accepted |
 | `apex pkg adopt` | convert rpm-ostree layers into APEX packages |
 
 Read-only verbs work as an ordinary user; anything that writes needs `sudo`.
@@ -319,6 +475,11 @@ without the check an image could silently change every user's default browser.
 Zen is not in Fedora's repositories and ships no Fedora RPM. The alternatives
 are a tarball in `/opt` or an AppImage, and both would need APEX to write and
 maintain its own updater to keep "always the latest stable" true.
+
+`apex install ./Thing.AppImage` exists now, and it does **not** change that
+answer. It declines the updater rather than writing one: an installed AppImage
+is pinned to the bytes that were installed, which is exactly the property Zen
+must not have. Zen stays a Flatpak. See *Installing an AppImage* above.
 
 As a Flatpak it needs none: `apex update` already runs
 `flatpak update --system` (`cmd_flatpak_upgrade` in `apex-pkg`), so Zen tracks

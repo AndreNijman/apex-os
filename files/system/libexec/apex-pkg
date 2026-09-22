@@ -58,6 +58,14 @@
 # repeating the command with --allow-unsigned, which records the decision against
 # that file's exact bytes so `apex pkg list` and `apex pkg verify` keep telling
 # the truth about where the software came from.
+#
+# AND AN APPIMAGE, WHICH IS NOT A PACKAGE AT ALL
+# `apex install ./Thing.AppImage` unpacks that file once and installs the
+# application it contains — launcher entry, icon and command — WITHOUT ever
+# running it and without any part of the extension machinery. See the AppImage
+# section below for why libfuse.so.2 (absent from this image) never comes into
+# it, and for what `apex update` does with one, which is nothing: an installed
+# AppImage is pinned to the bytes that were installed.
 # ─────────────────────────────────────────────────────────────────────────────
 set -euo pipefail
 
@@ -84,6 +92,21 @@ readonly VAR_LIST="${PKG_ROOT}/var.list"
 readonly ROLLBACK_DIR="${PKG_ROOT}/rollback"
 readonly COPR_KEY_DB="${PKG_ROOT}/copr-keyring"
 readonly COPR_KEYS="${PKG_ROOT}/copr-keys"
+# AppImages. NOT under PKG_ROOT, which is 0700 root: `apex pkg list` and
+# `apex pkg verify` run unprivileged, and an AppImage's metadata is not a
+# secret — the unpacked application is world-readable by construction.
+#
+# The registry holds the accepted bytes plus one manifest, one trust marker and
+# one record per application; the unpacked payloads live under /usr/local,
+# which is a symlink to ../var/usrlocal on this OS and therefore writable. That
+# location is not a convenience: /usr/local/bin is already on PATH,
+# /usr/local/share is already in XDG_DATA_DIRS, and SELinux's
+# `/var/usrlocal -> /usr/local` substitution gives the tree bin_t/lib_t instead
+# of var_lib_t, which is what lets the desktop session execute it.
+readonly APPIMAGE_REG=/var/lib/apex/appimage
+readonly APPIMAGE_PREFIX=/usr/local
+readonly APPIMAGE_APPS="${APPIMAGE_PREFIX}/lib/apex-appimage"
+
 # Staging lives under /var/lib, NOT /var/tmp: rpm cannot take its transaction
 # lock inside a tmp-labelled tree under SELinux, and the resulting "can't create
 # transaction lock" error would be printed on every single install.
@@ -210,10 +233,21 @@ need_root() {
 
 # Serialise every mutation. A second `apex install` racing a rebuild would
 # publish an image built from a half-written requested list.
+#
+# Idempotent since 2026-09-22, and that is not a tidy-up: `apex install
+# ./a.AppImage htop` and `apex remove hello htop` both take the lock for the
+# AppImage half and then reach the rpm half, which takes it again. A second
+# `exec 9>"$LOCK"` CLOSES the first descriptor — releasing the flock — before
+# reopening it, so the engine would drop its own lock mid-transaction and could
+# then fail to get it back.
 take_lock() {
+    if [ "${LOCK_HELD:-0}" = 1 ]; then
+        return 0
+    fi
     mkdir -p "$PKG_ROOT"
     exec 9>"$LOCK"
     flock -n 9 || die "another apex package operation is in progress"
+    LOCK_HELD=1
 }
 
 os_id()      { . /usr/lib/os-release; printf '%s' "$ID"; }
@@ -1861,18 +1895,754 @@ cmd_flatpak_upgrade() {
     fi
 }
 
+# ── AppImages ────────────────────────────────────────────────────────────────
+# An AppImage is a single executable file with a filesystem glued to its back:
+# an ELF "runtime" first, then a squashfs image starting at the byte after the
+# ELF's section headers. Run it and the runtime FUSE-mounts that squashfs on a
+# temporary directory and execs `AppRun` inside it.
+#
+# THAT LAST SENTENCE IS THE PROBLEM, AND IT IS WHY NOTHING HERE EVER RUNS THE
+# APPIMAGE. Measured on the APEX image: `fusermount3` is present, `fusermount`
+# (the libfuse2 helper) is ABSENT, `libfuse.so.2` is ABSENT and `squashfuse` is
+# absent. The classic AppImage runtime dlopens libfuse.so.2, so a type-2
+# AppImage started as-is on this OS dies with
+#
+#   dlopen(): error loading libfuse.so.2
+#
+# There were three ways out and only one of them is honest on a bootc system:
+#
+#   1. ship a fuse2 compatibility package. Rejected: it puts a deprecated,
+#      unmaintained ABI into /usr for every APEX machine in the fleet — whether
+#      or not that machine will ever see an AppImage — so that a format APEX
+#      does not control can mount itself. The engine also refuses to let an
+#      extension shadow an image library, so libfuse.so.2 would have to be
+#      baked into the image, which is the most expensive place to put it.
+#   2. run every launch with `--appimage-extract-and-run`. Rejected twice over:
+#      it unpacks the entire payload to a temporary directory on EVERY start
+#      (hundreds of megabytes for an Electron app, before the splash screen),
+#      and it does it by EXECUTING the vendor's runtime. This engine refuses to
+#      run a .deb's maintainer scripts and runs an rpm's %post as `nobody` under
+#      a timeout; handing a downloaded binary a root shell at install time to
+#      save writing thirty lines of arithmetic would be the weakest rule in the
+#      file.
+#   3. UNPACK IT ONCE, AT INSTALL TIME, AND RUN THE UNPACKED TREE. Chosen.
+#      The squashfs offset is `e_shoff + e_shentsize * e_shnum` read straight
+#      out of the ELF header — the same number `--appimage-offset` prints, but
+#      computed with `od` and shell arithmetic instead of by asking the file
+#      about itself. `unsquashfs -o <offset>` then does the rest. FUSE is never
+#      involved, at install time or at run time; the machine needs no
+#      libfuse.so.2, no fusermount, no squashfuse and no kernel mount at all.
+#
+# It also happens to fit the OS. /usr is read-only composefs, so RPM packages
+# have to become a systemd system extension; an AppImage does not, because it
+# is self-contained and /var is writable. So an AppImage is NOT part of
+# apex-user.raw and appears nowhere in the requested list, state.json or the
+# resolved set. It survives an OS upgrade, a `bootc rollback`, a sysext rebuild
+# and `apex remove` of every rpm on the machine, because none of those touch it.
+#
+# WHERE IT LANDS
+#   /var/lib/apex/appimage/<name>.AppImage   the accepted bytes, kept
+#   /var/lib/apex/appimage/<name>.{trust,files,json}
+#   /usr/local/lib/apex-appimage/<name>/     the unpacked payload (AppRun & co)
+#   /usr/local/bin/<name>                    a generated launcher
+#   /usr/local/share/applications/<id>.desktop
+#   /usr/local/share/icons/hicolor/**/apps/<icon>.*
+#
+# /usr/local, not /var directly: on this OS /usr/local is a symlink to
+# ../var/usrlocal (Containerfile.core), so it is writable; it is already on
+# PATH and already in XDG_DATA_DIRS, so the launcher and the desktop entry need
+# no PATH games and no environment.d drop-in; and SELinux's
+# `/var/usrlocal -> /usr/local` substitution gives the tree bin_t/lib_t rather
+# than var_lib_t, which is what lets the desktop session execute it. Claude
+# Desktop has been installed at /usr/local/lib/claude-desktop on the author's
+# machine since September and is the standing proof.
+#
+# WHAT `apex update` DOES WITH AN APPIMAGE: NOTHING. It is pinned to the bytes
+# that were installed, and `apex pkg list`, `apex pkg upgrade` and the docs all
+# say so rather than leaving the user to work it out. There is no repository to
+# ask for a newer one — an AppImage comes from a download page — and the
+# alternative is the thing docs/packages.md:320 already named as the reason Zen
+# Browser is a Flatpak: "both would need APEX to write and maintain its own
+# updater". This design does not pay that cost, it declines it, in writing.
+#
+# Self-update is not merely forbidden, it is impossible: the app runs out of a
+# root-owned 0755 tree and $APPIMAGE points at a root-owned 0644 file in
+# /var/lib/apex/appimage, so an AppImage that tries to rewrite itself gets
+# EACCES instead of a second update channel beside `apex update`.
+#
+# TRUST. An AppImage is never verified, so every one of them needs
+# --allow-unsigned. Some embed a signature in a `.sha256_sig` ELF section with
+# the signing key in `.sig_key` — a key taken from the thing it signs proves
+# nothing, which is the same conclusion the .deb path reached about debsigs and
+# the same reason the image PINS both AI vendors' fingerprints. The acceptance
+# is recorded against the file's exact bytes, exactly as it is for an rpm.
+
+# Little-endian unsigned integer of $3 bytes at offset $2 of file $1.
+# Assembled a byte at a time rather than with `od -tu8` so the answer does not
+# depend on the endianness of the machine doing the reading, and so a short
+# read (an offset past EOF) is a failure instead of a zero.
+le_int() {
+    local file=$1 off=$2 n=$3 b v=0 s=0 c=0
+    for b in $(od -An -v -tu1 -j "$off" -N "$n" -- "$file" 2>/dev/null); do
+        v=$(( v + (b << s) )); s=$(( s + 8 )); c=$(( c + 1 ))
+    done
+    [ "$c" = "$n" ] || return 1
+    printf '%s' "$v"
+}
+
+# Which kind of AppImage $1 is: prints 2 (squashfs), 1 (ISO 9660) or 0 and
+# fails. The type magic is three bytes at offset 8, inside the ELF's e_ident
+# padding: 0x41 0x49 ('A' 'I') then the type. An ELF without it is some other
+# ELF, and APEX will not guess — guessing is how `apex install ./setup.sh`
+# would become an install.
+appimage_type() {
+    local m
+    m="$(od -An -v -tx1 -j0 -N4 -- "$1" 2>/dev/null | tr -d ' \n')"
+    if [ "$m" != 7f454c46 ]; then printf '0'; return 1; fi
+    m="$(od -An -v -tx1 -j8 -N3 -- "$1" 2>/dev/null | tr -d ' \n')"
+    case "$m" in
+        414901) printf '1'; return 0 ;;
+        414902) printf '2'; return 0 ;;
+    esac
+    printf '0'; return 1
+}
+
+# Is this argument meant to be a local AppImage file?
+#
+# Deliberately narrower than is_local_rpm_arg, which answers true for ANY
+# argument containing a slash: a bare word is never an AppImage here, so
+# `apex install code` installs the repository package even in a directory that
+# happens to contain a file called `code`. Name it `./code` and it is a file.
+#
+# It MUST be asked before is_local_rpm_arg for the same reason the .deb test
+# must: the rpm test would claim `./Foo.AppImage` and refuse it as "not an RPM
+# package", and before is_flatpak_id because that regex matches
+# `org.foo.Bar.AppImage`.
+is_appimage_arg() {
+    case "$1" in
+        *.AppImage|*.appimage) return 0 ;;
+        */*) [ -f "$1" ] && appimage_type "$1" >/dev/null ;;
+        *) return 1 ;;
+    esac
+}
+
+appimage_machine_name() {
+    case "$1" in
+        3) printf 'i386' ;; 40) printf 'arm' ;; 62) printf 'x86_64' ;;
+        183) printf 'aarch64' ;; 243) printf 'riscv64' ;;
+        *) printf 'ELF machine %s' "$1" ;;
+    esac
+}
+
+# Does ELF e_machine $1 describe this machine? Refusing a mismatch is the same
+# call inspect_local_rpm makes about %{ARCH}: the file will never run, and
+# saying so before unpacking half a gigabyte is the whole point of a guard.
+appimage_machine_matches() {
+    local want
+    case "$(uname -m)" in
+        x86_64)  want=62 ;;
+        aarch64) want=183 ;;
+        riscv64) want=243 ;;
+        armv7l)  want=40 ;;
+        *) return 1 ;;
+    esac
+    [ "$1" = "$want" ]
+}
+
+# Is $2 inside $1, after resolving every symlink on both?
+#
+# This is the guard on everything read OUT of an untrusted payload. `.DirIcon`
+# is conventionally a symlink and the .desktop file may be one; a payload whose
+# .DirIcon points at ../../../../etc/shadow would otherwise have a root process
+# copy that file into /usr/local/share/icons, where every user can read it.
+path_within() {
+    local root target
+    root="$(readlink -f -- "$1")" || return 1
+    target="$(readlink -f -- "$2")" || return 1
+    case "$target" in
+        "$root") return 0 ;;
+        "$root"/*) return 0 ;;
+    esac
+    return 1
+}
+
+# One key out of the [Desktop Entry] group of a .desktop file. Anchored at the
+# start of the line so `Name[de]=` never answers for `Name`, and group-aware so
+# a `[Desktop Action new-window]` Exec cannot be mistaken for the main one.
+desktop_key() {
+    awk -v k="$2" '
+        /^\[/ { ing = ($0 == "[Desktop Entry]"); next }
+        ing && index($0, k "=") == 1 { print substr($0, length(k) + 2); exit }
+    ' "$1"
+}
+
+# Everything that can be wrong with an AppImage the user pointed at, decided
+# BEFORE anything is copied or unpacked. Sets AI_PATH, AI_OFFSET and AI_SIZE;
+# dies otherwise. Globals for the same reason inspect_local_rpm uses them: a
+# `die` inside a command substitution kills only the subshell.
+inspect_appimage() {
+    local arg=$1 t machine shoff shentsize shnum
+    [ -e "$arg" ] || die "no such file: ${arg}"
+    [ -f "$arg" ] || die "not a regular file: ${arg}"
+    [ -r "$arg" ] || die "cannot read ${arg} (permission denied)"
+    AI_PATH="$(readlink -f -- "$arg")" || die "cannot resolve the path ${arg}"
+    [ -f "$AI_PATH" ] || die "not a regular file: ${arg}"
+
+    t="$(appimage_type "$AI_PATH")" \
+        || die "${arg} is not an AppImage (no ELF header, or no 'AI' type magic at offset 8)"
+    if [ "$t" = 1 ]; then
+        die "refusing ${arg}: it is a type-1 AppImage, whose payload is an ISO 9660 image. Type 1 was superseded in 2016 and APEX unpacks only the type-2 (squashfs) format. Ask the vendor for a current build"
+    fi
+
+    [ "$(le_int "$AI_PATH" 4 1)" = 2 ] \
+        || die "refusing ${arg}: its runtime is a 32-bit ELF, which APEX does not unpack"
+    [ "$(le_int "$AI_PATH" 5 1)" = 1 ] \
+        || die "refusing ${arg}: its runtime is a big-endian ELF, which APEX does not unpack"
+    machine="$(le_int "$AI_PATH" 18 2)" || die "cannot read the ELF header of ${arg}"
+    appimage_machine_matches "$machine" \
+        || die "refusing ${arg}: it is built for $(appimage_machine_name "$machine"), this machine is $(uname -m)"
+
+    # The squashfs begins immediately after the ELF section header table. This
+    # is the arithmetic `--appimage-offset` performs, done here so the file
+    # never has to be executed to answer a question about itself.
+    shoff="$(le_int "$AI_PATH" 40 8)"      || die "cannot read the ELF header of ${arg}"
+    shentsize="$(le_int "$AI_PATH" 58 2)"  || die "cannot read the ELF header of ${arg}"
+    shnum="$(le_int "$AI_PATH" 60 2)"      || die "cannot read the ELF header of ${arg}"
+    AI_OFFSET=$(( shoff + shentsize * shnum ))
+    AI_SIZE="$(stat -c %s -- "$AI_PATH")" || die "cannot size ${arg}"
+    { [ "$AI_OFFSET" -gt 0 ] && [ "$AI_OFFSET" -lt "$AI_SIZE" ]; } \
+        || die "refusing ${arg}: its payload offset (${AI_OFFSET}) is not inside the file (${AI_SIZE} bytes)"
+    # Checked here so a malformed file is reported as one, rather than as an
+    # unsquashfs error the user has no way to act on.
+    [ "$(od -An -v -tx1 -j "$AI_OFFSET" -N4 -- "$AI_PATH" 2>/dev/null | tr -d ' \n')" = 68737173 ] \
+        || die "refusing ${arg}: there is no squashfs filesystem at offset ${AI_OFFSET}, where its ELF header says the payload starts"
+}
+
+# The zsync update channel an AppImage advertises, out of its `.upd_info` ELF
+# section. Best effort, and NEVER a decision: printed once at install time so
+# the user knows the vendor expected AppImageUpdate to keep this file current
+# and that APEX will not run it. Empty when the section is absent or readelf is
+# not installed.
+appimage_update_info() {
+    command -v readelf >/dev/null 2>&1 || return 0
+    local out
+    out="$(readelf -p .upd_info "$1" 2>/dev/null || true)"
+    printf '%s' "$(printf '%s\n' "$out" \
+        | sed -n 's/^[[:space:]]*\[[[:space:]]*[0-9a-fx]*\][[:space:]]*//p' \
+        | sed -n '1p')"
+}
+
+# Take away everything an untrusted squashfs may claim about ownership and
+# privilege. Both halves are load-bearing:
+#
+#   * setuid/setgid. A FUSE-mounted AppImage is mounted `nosuid`, so the format
+#     as designed never grants either — preserving a 4755 chrome-sandbox out of
+#     a downloaded archive into a root-owned tree would hand it strictly MORE
+#     than running the AppImage normally ever does. Electron on Fedora 43 uses
+#     the user-namespace sandbox and does not need the helper.
+#   * ownership. A squashfs records uids, and unsquashfs run as root restores
+#     them. A payload built on the packager's laptop records uid 1000 — which
+#     is the desktop user on almost every APEX machine — and that user could
+#     then rewrite the application under itself. Forcing root:root with no
+#     group or other write is what makes "an AppImage cannot self-update" a
+#     property of the filesystem rather than a promise.
+#
+# `go+rX` is the other half of that second point and is NOT tidiness. A FUSE
+# mount by the user enforces none of the recorded modes — squashfuse does not
+# ask, and the mount carries no `default_permissions` — so a file recorded 0600
+# runs perfectly well inside a normally-launched AppImage. Give that file to
+# root without also opening it, and the application that worked as an AppImage
+# stops working the moment APEX installs it. Directories and already-executable
+# files get `x` with it; nothing else does.
+appimage_harden() {
+    local dest=$1
+    if [ "$(id -u)" = 0 ]; then
+        chown -R --no-dereference root:root -- "$dest" || return 1
+    fi
+    chmod -R u-s,g-s,go-w,go+rX -- "$dest" || return 1
+}
+
+# Unpack the squashfs payload of $1, which starts at offset $2, into $3.
+#
+# -no-xattrs: the payload carries whatever extended attributes the packager's
+# machine had, `security.selinux` among them. Restoring a foreign label into a
+# tree the desktop session has to execute is how an application becomes
+# unlaunchable with no AVC anyone thinks to look for.
+appimage_extract() {
+    local file=$1 off=$2 dest=$3
+    command -v unsquashfs >/dev/null 2>&1 \
+        || die "installing an AppImage needs 'unsquashfs' (from squashfs-tools), which this system does not have"
+    rm -rf -- "$dest"
+    mkdir -p -- "$(dirname -- "$dest")" || return 1
+    unsquashfs -no-xattrs -f -d "$dest" -o "$off" "$file" >/dev/null 2>&1 || { rm -rf -- "$dest"; return 1; }
+    [ -d "$dest" ] || { rm -rf -- "$dest"; return 1; }
+    appimage_harden "$dest"
+}
+
+# Read the identity of an unpacked AppImage out of its payload. Sets AI_DESKTOP,
+# AI_ID, AI_CMD and AI_ICON; dies otherwise. $2 is the name to blame in a
+# refusal.
+#
+# The AppImage specification puts exactly ONE .desktop file at the root of the
+# payload. Zero means nothing states what the application is called or how it is
+# launched, and several means APEX would be choosing on the vendor's behalf —
+# both are refusals rather than a guess, because the answer becomes a root-owned
+# path and a launcher entry the user will click.
+inspect_appdir() {
+    local appdir=$1 blame=$2 execval first
+    local -a desktops=()
+    mapfile -t desktops < <(find "$appdir" -maxdepth 1 -name '*.desktop' 2>/dev/null | LC_ALL=C sort)
+    if [ "${#desktops[@]}" -eq 0 ]; then
+        die "refusing ${blame}: there is no .desktop file at the root of its payload, so nothing says what application it is. APEX installs AppImages into the launcher, and one with no desktop entry would appear nowhere"
+    fi
+    if [ "${#desktops[@]}" -gt 1 ]; then
+        die "refusing ${blame}: its payload has ${#desktops[@]} .desktop files at the root (the format allows exactly one), so which application this is would be APEX's guess: $(printf '%s ' "${desktops[@]##*/}")"
+    fi
+    AI_DESKTOP="${desktops[0]}"
+    path_within "$appdir" "$AI_DESKTOP" \
+        || die "refusing ${blame}: its .desktop file resolves to a path outside the AppImage"
+    [ -f "$AI_DESKTOP" ] \
+        || die "refusing ${blame}: its .desktop file is not a regular file"
+
+    AI_ID="${AI_DESKTOP##*/}"; AI_ID="${AI_ID%.desktop}"
+    # Same check, same reason, as the RPM path's: this becomes a file name under
+    # /usr/local/share/applications in a script running as root.
+    valid_pkg_name "$AI_ID" \
+        || die "refusing ${blame}: its desktop entry is named '${AI_ID}.desktop', which is not a name APEX will turn into a path"
+
+    # The command name the launcher gets. `Exec=AppRun --no-sandbox %U` is what
+    # every Electron AppImage ships, and AppRun is the format's entry point
+    # rather than the application's name — so that case falls back to the last
+    # segment of the desktop id, which is the convention Flatpak and the
+    # desktop-entry spec both settled on.
+    execval="$(desktop_key "$AI_DESKTOP" Exec)"
+    first="${execval%% *}"
+    first="${first#\"}"; first="${first%\"}"
+    first="${first##*/}"
+    case "$first" in
+        ''|AppRun|AppRun.wrapped) AI_CMD="${AI_ID##*.}"; AI_CMD="${AI_CMD,,}" ;;
+        *) AI_CMD="$first" ;;
+    esac
+    valid_pkg_name "$AI_CMD" \
+        || die "refusing ${blame}: the command name read out of its desktop entry ('${AI_CMD}') is not a name APEX will turn into a path"
+
+    AI_ICON="$(desktop_key "$AI_DESKTOP" Icon)"
+    case "$AI_ICON" in
+        */*|'') AI_ICON="" ;;   # a path is not an icon NAME; the theme cannot use it
+    esac
+}
+
+# ── AppImages: integration ───────────────────────────────────────────────────
+
+# Does any AppImage APEX installed claim $2? Reads the manifests, which are the
+# only record of what this engine put under /usr/local.
+appimage_registry_owns() {
+    local reg=$1 path=$2 f
+    [ -d "$reg" ] || return 1
+    for f in "$reg"/*.files; do
+        [ -e "$f" ] || continue
+        grep -qxF -- "$path" "$f" && return 0
+    done
+    return 1
+}
+
+# Refuse before unpacking anything if this AppImage would hide something the OS
+# already provides.
+#
+# apex-pkg decides image ownership by asking the rpmdb, and an AppImage's files
+# have no rpm owner — so the question is asked the other way round, about the
+# PATH THIS INSTALL WOULD SHADOW. /usr/local/bin comes before /usr/bin on PATH
+# and /usr/local/share before /usr/share in XDG_DATA_DIRS, so an AppImage
+# called `firefox` would silently take over the browser for every user on the
+# machine. Anything already at the /usr path is refused whether it belongs to
+# the image or to the user's own extension: both are wrong to shadow, and
+# `rpm -qf` is asked only to NAME the owner in the message.
+#
+# $1 command, $2 desktop id, $3 install prefix, $4 system root, $5 registry.
+# The last two are parameters so the whole decision can be driven over a
+# fixture tree without root — the same reason state_kind takes its path.
+appimage_shadow_check() {
+    local cmd=$1 id=$2 prefix=$3 sysroot=$4 reg=$5 p owner sr="${4%/}"
+    for p in "${sr}/usr/bin/${cmd}" "${sr}/usr/sbin/${cmd}"; do
+        if [ -e "$p" ] || [ -L "$p" ]; then
+            owner=""
+            if [ "$sysroot" = / ]; then
+                owner="$(rpm -qf --qf '%{NAME}' -- "$p" 2>/dev/null)" || owner=""
+            fi
+            die "refusing this AppImage: it would install ${prefix}/bin/${cmd}, which comes before ${p} on PATH and would shadow ${owner:-a program APEX-OS already provides}. Software the OS ships is updated by \`sudo apex update\`; replacing it with a downloaded file is not something APEX will do behind your back"
+        fi
+    done
+    p="${sr}/usr/share/applications/${id}.desktop"
+    if [ -e "$p" ] || [ -L "$p" ]; then
+        owner=""
+        if [ "$sysroot" = / ]; then
+            owner="$(rpm -qf --qf '%{NAME}' -- "$p" 2>/dev/null)" || owner=""
+        fi
+        die "refusing this AppImage: its desktop entry is '${id}.desktop', and ${p} already exists${owner:+ (from ${owner})}. ${prefix}/share comes first in XDG_DATA_DIRS, so installing it would replace that launcher entry for every user"
+    fi
+    for p in "${prefix}/bin/${cmd}" "${prefix}/share/applications/${id}.desktop"; do
+        if { [ -e "$p" ] || [ -L "$p" ]; } && ! appimage_registry_owns "$reg" "$p"; then
+            die "refusing this AppImage: ${p} already exists and no AppImage APEX installed owns it. Move it aside first — APEX does not overwrite files it did not put there"
+        fi
+    done
+}
+
+# Copy one file into place and record it. Refuses rather than overwriting
+# anything not already recorded in THIS install's manifest, so a payload that
+# names two icons the same thing cannot quietly clobber the first.
+appimage_place() {
+    local src=$1 dest=$2 mode=$3 manifest=$4
+    if [ -e "$dest" ] || [ -L "$dest" ]; then
+        grep -qxF -- "$dest" "$manifest" 2>/dev/null \
+            || die "refusing to overwrite ${dest}, which this AppImage did not install"
+    fi
+    install -D -m "$mode" -- "$src" "$dest" || return 1
+    printf '%s\n' "$dest" >> "$manifest"
+}
+
+# The launcher. It reconstructs the four environment variables the AppImage
+# runtime would have set — APPDIR, APPIMAGE, ARGV0 and OWD — because AppRun
+# scripts read them, and a tree unpacked by someone else is exactly the case
+# where they are not already right. APPIMAGE deliberately points at the
+# root-owned copy under /var/lib/apex/appimage: an application that tries to
+# update itself in place finds a file it cannot write.
+appimage_wrapper() {
+    local cmd=$1 appdir=$2 imagefile=$3 dest=$4 manifest=$5 tmp
+    tmp="$(mktemp "${TMPDIR:-/tmp}/apex-appimage.XXXXXX")" || return 1
+    {
+        printf '%s\n' '#!/bin/sh'
+        printf '%s\n' "# Generated by apex-pkg for the AppImage '${cmd}'. Do not edit:"
+        printf '%s\n' '# `sudo apex remove` and a reinstall both rewrite this file.'
+        printf '%s\n' "APPDIR='${appdir}'" \
+                      "APPIMAGE='${imagefile}'" \
+                      'ARGV0="$0"' \
+                      'OWD="$(pwd)"' \
+                      'export APPDIR APPIMAGE ARGV0 OWD' \
+                      'exec "$APPDIR/AppRun" "$@"'
+    } > "$tmp" || { rm -f "$tmp"; return 1; }
+    local rc=0
+    appimage_place "$tmp" "$dest" 0755 "$manifest" || rc=$?
+    rm -f "$tmp"
+    return "$rc"
+}
+
+# The desktop entry, rewritten to point at the launcher.
+#
+# Exec is rewritten in EVERY group, not just [Desktop Entry]: an application
+# that ships desktop actions ("New Window", "New Private Window") has one Exec
+# per action, and leaving those pointing at AppRun gives the user right-click
+# entries that do nothing. Only the first word is replaced — Electron ships
+# `Exec=AppRun --no-sandbox %U` and dropping the tail would drop the flag the
+# application needs to start.
+#
+# DBusActivatable is deleted. It promises a D-Bus service file that is not
+# installed, and GIO honours the promise: the launch attempt goes to a name
+# nothing owns and the user sees nothing happen.
+appimage_rewrite_desktop() {
+    local src=$1 dest=$2 cmd=$3 prefix=$4 icon=$5 manifest=$6 tmp rc
+    tmp="$(mktemp "${TMPDIR:-/tmp}/apex-appimage.XXXXXX")" || return 1
+    awk -v exe="${prefix}/bin/${cmd}" -v icon="$icon" '
+        index($0, "Exec=") == 1 {
+            rest = substr($0, 6)
+            sub(/^[ \t]+/, "", rest)
+            tail = ""
+            if (match(rest, /[ \t]/)) tail = substr(rest, RSTART)
+            print "Exec=" exe tail
+            next
+        }
+        index($0, "TryExec=") == 1 { print "TryExec=" exe; next }
+        index($0, "DBusActivatable=") == 1 { next }
+        index($0, "Icon=") == 1 { if (icon != "") print "Icon=" icon; next }
+        { print }
+    ' "$src" > "$tmp" || { rm -f "$tmp"; return 1; }
+    rc=0
+    appimage_place "$tmp" "$dest" 0644 "$manifest" || rc=$?
+    rm -f "$tmp"
+    return "$rc"
+}
+
+# The icons, and ONLY the ones named by the Icon= key.
+#
+# Copying the payload's whole icon theme would let an AppImage drop an
+# index.theme and any other application's icon into /usr/local/share/icons,
+# where they outrank /usr/share for every user on the machine. So the search is
+# restricted to `**/apps/<icon>.{png,svg,svgz,xpm}` inside the payload's own
+# hicolor tree, with the root-level `<icon>.png` and `.DirIcon` conventions as
+# fallbacks. Every candidate is resolved and required to stay inside the
+# payload first, because `.DirIcon` is conventionally a symlink.
+appimage_install_icons() {
+    local appdir=$1 prefix=$2 icon=$3 manifest=$4 f base rel dest found=0
+    [ -n "$icon" ] || return 0
+    if [ -d "${appdir}/usr/share/icons/hicolor" ]; then
+        while IFS= read -r f; do
+            base="${f##*/}"
+            case "$base" in
+                "${icon}.png"|"${icon}.svg"|"${icon}.svgz"|"${icon}.xpm") ;;
+                *) continue ;;
+            esac
+            case "$f" in */apps/*) ;; *) continue ;; esac
+            path_within "$appdir" "$f" || continue
+            [ -f "$f" ] || continue
+            rel="${f#"${appdir}"/usr/share/icons/}"
+            dest="${prefix}/share/icons/${rel}"
+            appimage_place "$f" "$dest" 0644 "$manifest" || return 1
+            found=1
+        done < <(find "${appdir}/usr/share/icons/hicolor" \( -type f -o -type l \) 2>/dev/null)
+    fi
+    [ "$found" = 0 ] || return 0
+    for f in "${appdir}/${icon}.svg" "${appdir}/${icon}.png" "${appdir}/${icon}.xpm" "${appdir}/.DirIcon"; do
+        [ -e "$f" ] || continue
+        path_within "$appdir" "$f" || continue
+        [ -f "$f" ] || continue
+        case "$f" in
+            *.svg) dest="${prefix}/share/icons/hicolor/scalable/apps/${icon}.svg" ;;
+            *.xpm) dest="${prefix}/share/icons/hicolor/48x48/apps/${icon}.xpm" ;;
+            *)     dest="${prefix}/share/icons/hicolor/256x256/apps/${icon}.png" ;;
+        esac
+        # .DirIcon has no extension of its own; ask the bytes rather than the
+        # name, because a PNG written to a path ending in .svg renders nothing.
+        if [ "${f##*/}" = .DirIcon ]; then
+            if [ "$(od -An -v -tx1 -j0 -N4 -- "$f" 2>/dev/null | tr -d ' \n')" = 89504e47 ]; then
+                dest="${prefix}/share/icons/hicolor/256x256/apps/${icon}.png"
+            else
+                dest="${prefix}/share/icons/hicolor/scalable/apps/${icon}.svg"
+            fi
+        fi
+        appimage_place "$f" "$dest" 0644 "$manifest" || return 1
+        found=1
+        break
+    done
+    [ "$found" = 1 ] || warn "this AppImage ships no icon named '${icon}'; its launcher entry will use the fallback icon"
+    return 0
+}
+
+# Everything that lands outside the unpacked tree, in one call, recording each
+# path as it goes. Parameterised end to end so the suite can run it into a
+# throwaway prefix as an ordinary user.
+appimage_integrate() {
+    local appdir=$1 prefix=$2 cmd=$3 icon=$4 imagefile=$5 desktop=$6 dest_id=$7 manifest=$8
+    : > "$manifest"
+    appimage_wrapper "$cmd" "$appdir" "$imagefile" "${prefix}/bin/${cmd}" "$manifest" || return 1
+    appimage_rewrite_desktop "$desktop" "${prefix}/share/applications/${dest_id}.desktop" \
+        "$cmd" "$prefix" "$icon" "$manifest" || return 1
+    appimage_install_icons "$appdir" "$prefix" "$icon" "$manifest" || return 1
+}
+
+# ── AppImages: the registry ──────────────────────────────────────────────────
+
+appimage_image()    { printf '%s/%s.AppImage' "$APPIMAGE_REG" "$1"; }
+appimage_marker()   { printf '%s/%s.trust'    "$APPIMAGE_REG" "$1"; }
+appimage_manifest() { printf '%s/%s.files'    "$APPIMAGE_REG" "$1"; }
+appimage_record()   { printf '%s/%s.json'     "$APPIMAGE_REG" "$1"; }
+appimage_appdir()   { printf '%s/%s'          "$APPIMAGE_APPS" "$1"; }
+
+# Every AppImage APEX installed, one name per line. Reads the registry rather
+# than the requested list, which is the rpm extension's and holds none of these.
+appimage_installed() {
+    local reg="${1:-$APPIMAGE_REG}" f n
+    [ -d "$reg" ] || return 0
+    for f in "$reg"/*.json; do
+        [ -e "$f" ] || continue
+        n="${f##*/}"
+        printf '%s\n' "${n%.json}"
+    done
+}
+
+# Which installed AppImage the user means by $2: a bare name, or the path to
+# the very file they installed (matched by checksum, so the same download in a
+# different directory still resolves).
+appimage_lookup() {
+    local reg=$1 arg=$2 n sum
+    if [ -f "${reg}/${arg}.json" ]; then printf '%s' "$arg"; return 0; fi
+    if [ -f "$arg" ]; then
+        sum="$(sha "$arg")"
+        while IFS= read -r n; do
+            [ -n "$n" ] || continue
+            [ "$(sha "${reg}/${n}.AppImage" 2>/dev/null)" = "$sum" ] || continue
+            printf '%s' "$n"; return 0
+        done < <(appimage_installed "$reg")
+    fi
+    return 1
+}
+
+# Undo one install. The manifest is the record of what was placed, and nothing
+# outside the install prefix is ever removed from it — the file is root-owned
+# under a 0755 directory, but a wrong line in it must not become `rm /etc/passwd`.
+appimage_uninstall() {
+    local name=$1 reg=$2 prefix=$3 apps=$4 p
+    [ -n "$name" ] || return 1
+    if [ -f "${reg}/${name}.files" ]; then
+        while IFS= read -r p; do
+            [ -n "$p" ] || continue
+            case "$p" in "${prefix%/}/"*) ;; *) warn "not removing ${p}: it is outside ${prefix}"; continue ;; esac
+            rm -f -- "$p"
+        done < "${reg}/${name}.files"
+    fi
+    rm -rf -- "${apps:?}/${name:?}"
+    rm -f -- "${reg}/${name}.files" "${reg}/${name}.AppImage" \
+             "${reg}/${name}.trust" "${reg}/${name}.json"
+}
+
+# The refusal a user sees for an AppImage, which is every AppImage. Same shape
+# as refuse_unsigned: name the file, say what is and is not known about it, and
+# give the exact command that proceeds.
+refuse_unsigned_appimage() {
+    local file=$1 upd; upd="$(appimage_update_info "$file")"
+    {
+        printf 'apex-pkg: error: %s\n' \
+            "cannot verify ${file}" \
+            "" \
+            "An AppImage carries no signature APEX can check. Some embed one in" \
+            "a '.sha256_sig' section together with the signing key in '.sig_key'" \
+            "— a key taken from the file it signs proves nothing, so APEX does" \
+            "not accept it as verification. There is no AppImage keyring and no" \
+            "repository index vouching for this file: it is worth exactly as" \
+            "much as wherever you downloaded it from."
+        if [ -n "$upd" ]; then
+            printf 'apex-pkg: error: %s\n' \
+                "" \
+                "This one also advertises its own update channel:" \
+                "  ${upd}" \
+                "APEX will not follow it. An installed AppImage is PINNED — see" \
+                "below."
+        fi
+        printf 'apex-pkg: error: %s\n' \
+            "" \
+            "Once installed it is pinned to these bytes. 'sudo apex update' does" \
+            "not change it, and it cannot update itself: it runs from a" \
+            "root-owned tree. A newer version means running this command again" \
+            "with the newer file." \
+            "" \
+            "If the vendor's own site is where it came from and you accept that:" \
+            "  sudo apex install --allow-unsigned ${file}"
+    } >&2
+    exit 1
+}
+
+# What turns "the files are present" into "the launcher shows it". Deliberately
+# NOT post_merge: that runs ldconfig, sysusers, tmpfiles and a udev reload for
+# an extension merged onto /usr, and an AppImage changes none of those.
+appimage_refresh_caches() {
+    local prefix=$1
+    if command -v update-desktop-database >/dev/null 2>&1; then
+        update-desktop-database "${prefix}/share/applications" >/dev/null 2>&1 || true
+    fi
+    if command -v gtk-update-icon-cache >/dev/null 2>&1; then
+        gtk-update-icon-cache -qtf "${prefix}/share/icons/hicolor" >/dev/null 2>&1 || true
+    fi
+    return 0
+}
+
+# Install one AppImage. Root only; every caller has been through need_root.
+appimage_install_one() {
+    local arg=$1 appdir upd sum
+    inspect_appimage "$arg"
+    install -d -m0755 "$APPIMAGE_REG" "$APPIMAGE_APPS"
+
+    # A refusal below exits the process outright, so the RETURN trap never
+    # fires and a staging tree can be left behind. Sweep before making a new one.
+    find "$APPIMAGE_APPS" -maxdepth 1 -name '.staging.*' -exec rm -rf {} + 2>/dev/null || true
+    # Global rather than local, like rebuild_extension's WORK and for the same
+    # reason: bash runs a RETURN trap after the function's locals are gone, so
+    # `trap 'rm -rf "$stage"' RETURN` on a local dies with "unbound variable"
+    # under `set -u` — measured, not assumed.
+    AI_STAGE="$(mktemp -d "${APPIMAGE_APPS}/.staging.XXXXXX")" || die "cannot create a staging directory under ${APPIMAGE_APPS}"
+    # RETURN rather than EXIT: this function is called once per file and the
+    # next one needs its own staging directory cleaned up on the way out.
+    trap 'rm -rf "$AI_STAGE"' RETURN
+
+    msg "unpacking ${AI_PATH} (squashfs payload at offset ${AI_OFFSET}, no FUSE involved)"
+    appimage_extract "$AI_PATH" "$AI_OFFSET" "${AI_STAGE}/payload" \
+        || die "cannot unpack the squashfs payload of ${arg}"
+    inspect_appdir "${AI_STAGE}/payload" "$arg"
+    [ -e "${AI_STAGE}/payload/AppRun" ] \
+        || die "refusing ${arg}: its payload has no AppRun, which is the entry point every AppImage is required to provide"
+    chmod 0755 "${AI_STAGE}/payload/AppRun" 2>/dev/null || true
+
+    appimage_shadow_check "$AI_CMD" "$AI_ID" "$APPIMAGE_PREFIX" / "$APPIMAGE_REG"
+
+    if [ -f "$(appimage_record "$AI_CMD")" ]; then
+        msg "replacing the installed AppImage '${AI_CMD}'"
+        appimage_uninstall "$AI_CMD" "$APPIMAGE_REG" "$APPIMAGE_PREFIX" "$APPIMAGE_APPS"
+    fi
+
+    appdir="$(appimage_appdir "$AI_CMD")"
+    rm -rf -- "$appdir"
+    mv -f -- "${AI_STAGE}/payload" "$appdir"
+
+    # The accepted bytes, kept: the trust marker is a checksum OF THEM, so
+    # `apex pkg verify` can still tell the truth months later, and $APPIMAGE
+    # has to point at a file that exists.
+    cp -f -- "$AI_PATH" "$(appimage_image "$AI_CMD").tmp"
+    mv -f -- "$(appimage_image "$AI_CMD").tmp" "$(appimage_image "$AI_CMD")"
+    chmod 0644 "$(appimage_image "$AI_CMD")"
+    sum="$(sha "$(appimage_image "$AI_CMD")")"
+    printf '%s\n' "$sum" > "$(appimage_marker "$AI_CMD")"
+
+    appimage_integrate "$appdir" "$APPIMAGE_PREFIX" "$AI_CMD" "$AI_ICON" \
+        "$(appimage_image "$AI_CMD")" "${appdir}/${AI_DESKTOP##*/}" "$AI_ID" \
+        "$(appimage_manifest "$AI_CMD")" \
+        || die "could not integrate ${arg} into the desktop"
+
+    upd="$(appimage_update_info "$AI_PATH")"
+    jq -n --arg name "$AI_CMD" --arg id "$AI_ID" --arg icon "$AI_ICON" \
+          --arg appdir "$appdir" --arg image "$(appimage_image "$AI_CMD")" \
+          --arg sha "$sum" --arg bytes "$AI_SIZE" --arg upd "$upd" \
+          --arg built "$(date -u +%Y-%m-%dT%H:%M:%SZ)" \
+          --argjson files "$(json_string_array < "$(appimage_manifest "$AI_CMD")")" \
+        '{name:$name, desktop_id:$id, icon:$icon, appdir:$appdir, image:$image,
+          image_sha256:$sha, image_bytes:($bytes|tonumber), installed:$built,
+          update_information:$upd, signature_verified:false, pinned:true,
+          files:$files}' > "$(appimage_record "$AI_CMD").tmp"
+    mv -f -- "$(appimage_record "$AI_CMD").tmp" "$(appimage_record "$AI_CMD")"
+
+    if command -v restorecon >/dev/null 2>&1; then
+        restorecon -RF "$appdir" "${APPIMAGE_PREFIX}/bin/${AI_CMD}" \
+                       "${APPIMAGE_PREFIX}/share/applications/${AI_ID}.desktop" >/dev/null 2>&1 \
+            || warn "could not relabel the installed AppImage for SELinux"
+    fi
+    appimage_refresh_caches "$APPIMAGE_PREFIX"
+
+    msg "installed AppImage '${AI_CMD}' -> ${APPIMAGE_PREFIX}/bin/${AI_CMD} (${AI_ID}.desktop)"
+    if [ -n "$upd" ]; then
+        msg "it advertises the update channel '${upd}'; APEX does not follow it — this AppImage is pinned"
+    else
+        msg "it is pinned: 'apex update' will not change it. Install a newer file to move it"
+    fi
+}
+
+# Every file is judged BEFORE any of them is unpacked, for the same reason the
+# rpm path decides every signature first: refusing the second of two must not
+# leave the first one installed.
+appimage_install_all() {
+    local f
+    for f in "$@"; do
+        [ "${ALLOW_UNSIGNED:-0}" = 1 ] || refuse_unsigned_appimage "$f"
+    done
+    for f in "$@"; do
+        warn "accepting ${f} unverified because you passed --allow-unsigned"
+        appimage_install_one "$f"
+    done
+}
+
 # ── verbs ────────────────────────────────────────────────────────────────────
 cmd_install() {
-    [ "$#" -gt 0 ] || die "usage: apex install <package|/path/to/file.rpm>..."
+    [ "$#" -gt 0 ] || die "usage: apex install <package|/path/to/file.rpm|/path/to/App.AppImage>..."
 
     # Route first, then validate every named file — both BEFORE the root check.
     # A mistyped path is not a privileged question, and answering it after a sudo
     # round trip instead of before one costs the user a second attempt for
     # nothing. Nothing here writes; the root gate still comes before every
     # mutation below.
-    local -a files=() flatpaks=() names=() p
+    local -a appimages=() files=() flatpaks=() names=() p
     for p in "$@"; do
-        if is_local_rpm_arg "$p"; then
+        # AppImage FIRST: is_local_rpm_arg answers true for any argument with a
+        # slash in it, so `apex install ./Thing.AppImage` would otherwise be
+        # refused as "not an RPM package", and is_flatpak_id matches
+        # `org.foo.Bar.AppImage`.
+        if is_appimage_arg "$p"; then
+            appimages+=("$p")
+        elif is_local_rpm_arg "$p"; then
             files+=("$p")
         elif is_flatpak_id "$p"; then
             flatpaks+=("$p")
@@ -1892,6 +2662,14 @@ cmd_install() {
         fi
         if [ "${#flatpaks[@]}" -gt 0 ] && [ "$SOURCE" != flatpak ]; then
             die "--source ${SOURCE} contradicts the Flatpak id you named; an application id is always installed as a Flatpak"
+        fi
+        # There is deliberately no `--source appimage`, and `apex resolve` has
+        # no AppImage route either. --source ranks the ways a BARE NAME could be
+        # satisfied, and there is no AppImage index to rank: an AppImage is a
+        # file the user already downloaded. Naming one and a source at the same
+        # time is therefore always a contradiction, never a preference.
+        if [ "${#appimages[@]}" -gt 0 ]; then
+            die "--source ${SOURCE} contradicts the AppImage you named; an AppImage is always installed from the file, and there is no source to choose"
         fi
     fi
 
@@ -1956,6 +2734,16 @@ cmd_install() {
         esac
     fi
 
+    # Validated here, beside the .rpm files and BEFORE the root gate, so a
+    # mistyped path or a type-1 AppImage is answered without a sudo round trip.
+    local -a aipath=()
+    for p in "${appimages[@]:-}"; do
+        [ -n "$p" ] || continue
+        inspect_appimage "$p"
+        aipath+=("$AI_PATH")
+        msg "AppImage: ${AI_PATH} (type 2, squashfs payload at offset ${AI_OFFSET})"
+    done
+
     local -a lpath=() lname=()
     for p in "${files[@]:-}"; do
         [ -n "$p" ] || continue
@@ -1974,8 +2762,16 @@ cmd_install() {
         # cannot answer from the install log otherwise.
         msg "provenance: $(provenance flatpak)"
     fi
-    # A Flatpak-only request must not rebuild the extension: that would cost
-    # minutes and re-merge /usr to change nothing.
+    # An AppImage touches neither the extension nor the requested list: it is
+    # self-contained, /var is writable, and nothing about it needs rebuilding.
+    # It is therefore installed here and is done.
+    if [ "${#aipath[@]}" -gt 0 ]; then
+        take_lock
+        appimage_install_all "${aipath[@]}"
+    fi
+
+    # A Flatpak-only or AppImage-only request must not rebuild the extension:
+    # that would cost minutes and re-merge /usr to change nothing.
     [ "${#names[@]}" -gt 0 ] || [ "${#lpath[@]}" -gt 0 ] || return 0
 
     take_lock
@@ -2042,7 +2838,36 @@ cmd_remove() {
     # `apex remove ./chrome.rpm` is accepted too and means the same thing — the
     # name is read back out of the file — so that re-running the install line
     # with `remove` does what it looks like it does.
-    local -a rpms=() flatpaks=() q n
+    #
+    # An AppImage is removed by the command name it installed, or by the path
+    # to the very file it was installed from — matched by checksum, so the same
+    # download in a different directory still resolves. Asked first: these
+    # names are in no requested list, so the rpm path below would answer "not
+    # installed by apex" for something the machine plainly has.
+    local -a appimages=() rest=()
+    local a n
+    for a in "$@"; do
+        if n="$(appimage_lookup "$APPIMAGE_REG" "$a")"; then
+            appimages+=("$n")
+        else
+            rest+=("$a")
+        fi
+    done
+    if [ "${#appimages[@]}" -gt 0 ]; then
+        take_lock
+        for a in "${appimages[@]}"; do
+            appimage_uninstall "$a" "$APPIMAGE_REG" "$APPIMAGE_PREFIX" "$APPIMAGE_APPS"
+            msg "removed the AppImage '${a}'"
+        done
+        appimage_refresh_caches "$APPIMAGE_PREFIX"
+    fi
+    if [ "${#rest[@]}" -eq 0 ]; then
+        return 0
+    fi
+    set -- "${rest[@]}"
+
+    local -a rpms=() flatpaks=()
+    local q
     for q in "$@"; do
         if is_local_rpm_arg "$q" && [ -f "$q" ] && rpm_magic_ok "$q"; then
             n="$(rpm -qp --nosignature --qf '%{NAME}' -- "$q" 2>/dev/null)" || n=""
@@ -2086,6 +2911,18 @@ cmd_remove() {
 cmd_upgrade() {
     need_root upgrade
     take_lock
+    # `apex update` funnels here. An AppImage is PINNED: there is no repository
+    # to ask for a newer one, it is not allowed to fetch its own, and APEX does
+    # not write an updater for a format that ships one file per vendor. Saying
+    # so on every run is the point — the alternative is a user who believes
+    # `apex update` covers everything on the machine and finds out otherwise
+    # from a security advisory.
+    local pinned
+    pinned="$(appimage_installed | tr '\n' ' ')"
+    if [ -n "${pinned// /}" ]; then
+        msg "AppImages are pinned and not updated by this command: ${pinned% }"
+        msg "to move one, run: sudo apex install --allow-unsigned /path/to/the/newer.AppImage"
+    fi
     local -a want=()
     mapfile -t want < <(load_requested)
     if [ "${#want[@]}" -eq 0 ]; then
@@ -2161,6 +2998,26 @@ cmd_list() {
     else
         echo "packages (system extension): none"
     fi
+    local ai
+    ai="$(appimage_installed)"
+    if [ -n "$ai" ]; then
+        echo
+        echo "appimages (pinned — 'apex update' does not change these):"
+        local n rec
+        while IFS= read -r n; do
+            [ -n "$n" ] || continue
+            rec="$(appimage_record "$n")"
+            if [ -r "$rec" ]; then
+                printf '  %s  [AppImage %s, signature not verified, installed %s]\n' \
+                    "$n" \
+                    "$(jq -r '.desktop_id // "?"' "$rec" 2>/dev/null)" \
+                    "$(jq -r '.installed // "?"' "$rec" 2>/dev/null)"
+            else
+                printf '  %s  [AppImage, signature not verified]\n' "$n"
+            fi
+        done <<<"$ai"
+    fi
+
     if have_flatpak; then
         local apps
         apps="$(flatpak list --app --columns=application 2>/dev/null || true)"
@@ -2266,12 +3123,65 @@ cmd_status() {
     systemd-sysext status 2>/dev/null || true
 }
 
+# `verify` for the AppImage registry: are the accepted bytes still the accepted
+# bytes, is everything the manifest claims still there, and has anything come
+# to shadow — or be shadowed by — what was installed since? The last question
+# is the one only time can answer: an AppImage refused at install time because
+# /usr/bin already had that name is one thing, but a LATER `apex install` of the
+# rpm puts the same name on PATH behind /usr/local/bin, and nothing would say so.
+#
+# Prints its own findings and returns non-zero if any of them is a problem.
+#
+# Takes its registry, prefix and system root as parameters — like state_kind,
+# and for the same reason: it is the only way the suite can drive the decision
+# over a fixture tree instead of over /var/lib/apex. cmd_verify below is the
+# caller that takes all three defaults.
+# shellcheck disable=SC2120  # the callers that pass arguments are in
+# tests/test-apex-appimage.sh, which sources this file; shellcheck only sees
+# the one in-file caller and reads the parameters as dead. They are not.
+appimage_verify() {
+    local reg="${1:-$APPIMAGE_REG}" prefix="${2:-$APPIMAGE_PREFIX}" sr="${3:-/}"
+    local n rc=0 rec want have p
+    sr="${sr%/}"
+    while IFS= read -r n; do
+        [ -n "$n" ] || continue
+        rec="${reg}/${n}.json"
+        [ -r "$rec" ] || { warn "AppImage ${n}: its record ${rec} cannot be read"; rc=1; continue; }
+        want="$(jq -r '.image_sha256 // empty' "$rec" 2>/dev/null)"
+        have="$(sha "${reg}/${n}.AppImage" 2>/dev/null)"
+        if [ -z "$have" ]; then
+            warn "AppImage ${n}: the accepted file ${reg}/${n}.AppImage is gone"
+            rc=1
+        elif [ "$want" != "$have" ]; then
+            warn "AppImage ${n}: the accepted file no longer has the bytes that were accepted"
+            rc=1
+        fi
+        if [ -r "${reg}/${n}.files" ]; then
+            while IFS= read -r p; do
+                [ -n "$p" ] || continue
+                [ -e "$p" ] || { warn "AppImage ${n}: ${p} is missing"; rc=1; }
+            done < "${reg}/${n}.files"
+        else
+            warn "AppImage ${n}: its file manifest ${reg}/${n}.files cannot be read"
+            rc=1
+        fi
+        if [ -e "${sr}/usr/bin/${n}" ] || [ -L "${sr}/usr/bin/${n}" ]; then
+            warn "AppImage ${n}: ${prefix}/bin/${n} now SHADOWS ${sr}/usr/bin/${n}, which arrived after it was installed. Remove one of them: sudo apex remove ${n}"
+            rc=1
+        fi
+        warn "AppImage ${n}: its signature was never verified (no AppImage is), and it is pinned to the version installed"
+    done < <(appimage_installed "$reg")
+    return "$rc"
+}
+
 cmd_verify() {
     # A refused read must not exit 0 here. `verify` answers "is this what APEX
     # built", and exiting 0 without looking answers "yes" to a question nobody
     # checked.
+    local ai_rc=0
+    appimage_verify || ai_rc=$?
     case "$(state_kind)" in
-        absent) echo "no packages installed"; return 0 ;;
+        absent) echo "no packages installed"; return "$ai_rc" ;;
         unreadable) state_unreadable_notice verify; return 1 ;;
     esac
     local payload want have
@@ -2292,6 +3202,7 @@ cmd_verify() {
         printf '%s\n' "$unverified" | sed 's/^/  /' >&2
     fi
     msg "extension intact"
+    return "$ai_rc"
 }
 
 cmd_rollback() {
@@ -2809,9 +3720,12 @@ usage() {
     cat <<'EOF'
 usage: apex-pkg <command> [args]
 
-  install <pkg|file.rpm>...
+  install <pkg|file.rpm|App.AppImage>...
                        add packages. A reverse-DNS id (org.gimp.GIMP) is a
-                       Flatpak; a path or a name ending in .rpm is a local RPM
+                       Flatpak; a path ending in .AppImage is an AppImage,
+                       unpacked once into /usr/local and PINNED — `apex update`
+                       never moves it, and it cannot move itself; a path or a
+                       name ending in .rpm is a local RPM
                        file, which is copied into /var/lib/apex/pkg/local so
                        later rebuilds no longer need the original file. Its
                        dependencies still come from the repositories.
