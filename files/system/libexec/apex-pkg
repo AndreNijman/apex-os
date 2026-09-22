@@ -123,6 +123,13 @@ readonly PKG_COMPAT_LEVEL=3
 # any of it with a second copy on an overlay is unrecoverable without a rollback.
 readonly REFUSE_RE='^(kernel|kernel-core|kernel-modules(-.*)?|kernel-devel(-.*)?|kernel-cachyos.*|kmod-.*|akmod-.*|.*-kmod|glibc|glibc-common|systemd|systemd-libs|systemd-udev|rpm|rpm-libs|librpm.*|dnf5?|libdnf5.*|bootc|ostree|libostree.*|rpm-ostree|filesystem|setup|shadow-utils|bash|coreutils|selinux-policy.*|grub2-.*|shim.*|dracut.*|plymouth.*)$'
 
+# The account a package scriptlet is dropped to before it is allowed to run, and
+# how long it may run for. See alternatives_record() for what is executed and
+# why. root is not an option here: nothing in this engine runs package code with
+# privileges.
+readonly ALT_SCRIPTLET_USER=nobody
+readonly ALT_SCRIPTLET_TIMEOUT=30
+
 # Progress goes to stderr, never stdout: stdout is reserved for data (paths,
 # listings) and functions like build_payload return their result through it.
 # ── argument routing ────────────────────────────────────────────────────────
@@ -803,6 +810,339 @@ extract_rpms() {
     rm -rf "${root}/usr/share/rpm" "${root}/var/lib/rpm" "${root}/usr/lib/sysimage/rpm"
 }
 
+# ── alternatives ─────────────────────────────────────────────────────────────
+# extract_rpms runs rpm with --noscripts, and a package that publishes its
+# binaries through `alternatives` creates them IN ITS SCRIPTLETS. Nothing else
+# in the payload creates them, so they are simply absent, and every symlink the
+# package ships that points at one of them dangles.
+#
+# Measured on katana on 2026-09-22 (ROADMAP/evidence/katana-p1038-apps-20260922.md):
+# `apex install wine` produced a payload with /usr/bin/wine32, wine64,
+# wineserver32 and wineserver64 as real files, /usr/bin/wine and
+# /usr/bin/wineserver ABSENT, and twelve /usr/bin entries — msidb, msiexec,
+# notepad, regedit, regsvr32, wineboot, winecfg, wineconsole, winedbg, winefile,
+# winemine, winepath — as dangling symlinks to `wine`. The install reported
+# success. `command -v` answered, `wine64 --version` printed a version, and only
+# actually running a program failed. Wine is the example, not the bug: java,
+# the iptables/nftables compatibility wrappers, `nc`, editors and compilers all
+# publish through the same mechanism.
+#
+# ── Why the scriptlet is EXECUTED rather than read ──────────────────────────
+# The declaration we need is the argv of `alternatives --install`, and the
+# scriptlet is the only place the package states it. Three ways to get it were
+# on the table; the other two are rejected on measurements, not taste.
+#
+#   * PARSE the scriptlet text. Dies on the real corpus. iptables-nft builds
+#     every one of its three invocations out of shell variables —
+#     `pfx=/usr/bin/iptables … update-alternatives --install $pfx iptables
+#     $pfx-nft 10 --follower $pfx6 …` — so the tokens a parser would read are
+#     `$pfx`, not paths. A text parser cannot resolve them without being a
+#     shell.
+#
+#   * RUN the real `alternatives` against the payload. It cannot be relocated.
+#     `alternatives --altdir "$root"/etc/alternatives --install "$root"/usr/bin/wine
+#     wine /usr/bin/wine64 20` writes `"$root"/usr/bin/wine -> "$root"/etc/alternatives/wine`
+#     and records the prefixed link path in the admin file: the build-time root
+#     baked into a runtime symlink. Measured, not assumed.
+#
+#   * REPRODUCE the full alternatives triangle by hand — link -> /etc/alternatives/<name>
+#     -> target, plus a state file in /etc/alternatives-admindir. That state
+#     file is a candidate LIST the image may already have an entry in, in an
+#     undocumented format, and it would have to reach the real /etc through
+#     install_etc — the pass that once deleted 26 image-owned /etc files. The
+#     cost of not doing it is that `alternatives --display`/`--config` do not
+#     know about extension-provided links and the user cannot switch them. That
+#     is stated in docs rather than hidden; it is not worse than a link that
+#     does not exist.
+#
+# So: the scriptlet's own shell is executed, and the ONLY thing that can come
+# back out of it is the argv of `alternatives`.
+#
+# ── What we are willing to run, exactly ─────────────────────────────────────
+# The scriptlet body, with `/bin/sh -c`, and nothing else:
+#
+#   * as `nobody`, never as root, via setpriv with --no-new-privs, an empty
+#     inheritable set and an empty bounding set — so `/usr/bin/su` or a setuid
+#     binary invoked by absolute path cannot climb back. If privileges cannot be
+#     dropped, THE SCRIPTLET IS NOT RUN AT ALL and the pass says so. There is no
+#     path through this function that executes package code as root.
+#   * with PATH containing one directory that holds one program: the recorder.
+#     `rm`, `systemctl`, `useradd`, `ldconfig` are not found. An absolute path
+#     to a real binary still resolves, which is why the privilege drop above is
+#     the load-bearing half and the PATH is only the cheap half.
+#   * with the environment emptied (`env -i`), stdin on /dev/null so nothing can
+#     block on a read, and a hard timeout.
+#   * WITHOUT `-e`. rpm does not run scriptlets with errexit either, and the
+#     first `rm: not found` must not abort the shell before the alternatives
+#     line is reached.
+#
+# Interception is by two means together, because one is not enough: PATH gets
+# the bare `alternatives` / `update-alternatives` form that iptables-nft uses,
+# and a rewrite of `(/usr)?/s?bin/(update-)?alternatives` inside the body gets
+# the absolute form that wine-core, nmap-ncat and java-latest-openjdk-headless
+# use. The rewrite points at the recorder's own absolute path rather than at a
+# bare word, so a scriptlet that guards itself with `[ -x /usr/bin/alternatives ]`
+# still finds something executable there.
+#
+# Only `%post` and `%posttrans` are read. wine-core's are in `%posttrans`;
+# nmap-ncat's and iptables-nft's in `%post`. A `<lua>` scriptlet is skipped —
+# wine-core has one, and all it does is `--remove`.
+alternatives_record() {
+    local destdir="$1" out="$2"
+    : > "$out"
+
+    local setpriv timeout_bin
+    setpriv="$(command -v setpriv 2>/dev/null)" || setpriv=""
+    timeout_bin="$(command -v timeout 2>/dev/null)" || timeout_bin=""
+    if [ -z "$setpriv" ] || [ -z "$timeout_bin" ]; then
+        warn "setpriv or timeout is missing, so package scriptlets cannot be confined — not reading any 'alternatives' declaration. Packages that publish binaries through alternatives will install with those binaries absent"
+        return 0
+    fi
+    if ! id -u "$ALT_SCRIPTLET_USER" >/dev/null 2>&1; then
+        warn "the '${ALT_SCRIPTLET_USER}' account does not exist, so package scriptlets cannot be dropped to it — not reading any 'alternatives' declaration"
+        return 0
+    fi
+
+    # 0755 on the sandbox and 0666 on the record: the scriptlet runs as nobody
+    # and has to traverse into one and append to the other. mktemp -d makes 0700.
+    local sandbox rec
+    sandbox="$(mktemp -d)" || { warn "cannot make a scriptlet sandbox"; return 0; }
+    chmod 0755 "$sandbox"
+    rec="${sandbox}/record"
+    : > "$rec"; chmod 0666 "$rec"
+
+    # The record path is baked into the recorder rather than passed in the
+    # environment, so a scriptlet that unsets or rewrites variables cannot make
+    # the recorder silently write nowhere. Arguments are NUL-separated and an
+    # empty field ends an invocation, because an argument may contain anything
+    # except NUL.
+    local prog
+    for prog in alternatives update-alternatives; do
+        cat > "${sandbox}/${prog}" <<EOF
+#!/bin/sh
+for a in "\$@"; do printf '%s\0' "\$a"; done >> '${rec}'
+printf '\0' >> '${rec}'
+exit 0
+EOF
+        chmod 0755 "${sandbox}/${prog}"
+    done
+
+    local rpmfile name tag prog_tag body
+    for rpmfile in "$destdir"/*.rpm; do
+        [ -e "$rpmfile" ] || continue
+        name="$(rpm -qp --nosignature --qf '%{NAME}' -- "$rpmfile" 2>/dev/null)" || continue
+        for tag in POSTIN POSTTRANS; do
+            body="$(rpm -qp --nosignature --qf "%{${tag}}" -- "$rpmfile" 2>/dev/null)"
+            [ -n "$body" ] && [ "$body" != "(none)" ] || continue
+            case "$body" in *alternatives*) ;; *) continue ;; esac
+            prog_tag="$(rpm -qp --nosignature --qf "%{${tag}PROG}" -- "$rpmfile" 2>/dev/null)"
+            case "$prog_tag" in
+                */sh|*/sh\ *|*/bash|*/bash\ *) ;;
+                *)  warn "'${name}' declares alternatives in a ${tag} scriptlet run by '${prog_tag}', which is not a shell — not read"
+                    continue ;;
+            esac
+            body="$(printf '%s' "$body" \
+                | sed -E "s#(/usr)?/s?bin/(update-)?alternatives#${sandbox}/\2alternatives#g")"
+            env -i PATH="$sandbox" HOME=/nonexistent SHELL=/bin/sh \
+                "$setpriv" --reuid="$ALT_SCRIPTLET_USER" --regid="$ALT_SCRIPTLET_USER" \
+                    --clear-groups --no-new-privs --inh-caps=-all --bounding-set=-all \
+                "$timeout_bin" "$ALT_SCRIPTLET_TIMEOUT" /bin/sh -c "$body" "$name" 1 \
+                </dev/null >/dev/null 2>&1 || true
+        done
+    done
+
+    cp -f "$rec" "$out" 2>/dev/null || : > "$out"
+    rm -rf "$sandbox"
+    return 0
+}
+
+# Follow a symlink the way the MERGED system will see it, which is neither what
+# `find -xtype l` nor `readlink -e` does. A system extension's /usr is overlaid
+# on the image's, so an absolute target may be satisfied by the payload OR by
+# the image, and during the build the payload is not mounted anywhere — an
+# absolute target has to be tried against $root first and the live filesystem
+# second. `find -xtype l` resolves it against the live root only, and calls
+# every correct link in a payload built inside a container dangling.
+payload_link_resolves() {
+    local root="$1" cur="$2" hops=0 t dir
+    while [ -L "$cur" ] && [ "$hops" -lt 16 ]; do
+        t="$(readlink "$cur")" || return 1
+        case "$t" in
+            /*) if [ -e "${root}${t}" ] || [ -L "${root}${t}" ]; then
+                    cur="${root}${t}"
+                elif [ -e "$t" ] || [ -L "$t" ]; then
+                    cur="$t"
+                else
+                    return 1
+                fi ;;
+            *)  dir="${cur%/*}"; cur="${dir}/${t}" ;;
+        esac
+        hops=$((hops + 1))
+    done
+    [ -e "$cur" ]
+}
+
+# Every symlink in the payload that will still be dangling once the extension is
+# merged, printed as the path it will have at runtime. Used by the pass below to
+# warn, and by tests/test-apex-pkg-alternatives.sh to measure — deliberately the
+# same code, so the suite cannot pass against a checker production does not use.
+dangling_links() {
+    local root="$1" l
+    while IFS= read -r l; do
+        payload_link_resolves "$root" "$l" || printf '%s\n' "${l#"$root"}"
+    done < <(find "$root" -type l 2>/dev/null)
+}
+
+# Replay the recorded declarations into the payload.
+#
+# `alternatives --install <link> <name> <path> <priority>` is turned into
+# `<link> -> <path>`, a direct symlink in the payload's own /usr, and each
+# `--slave`/`--follower <link> <name> <path>` into another one at the parent's
+# priority. The option walk is driven by each flag's real arity — --slave and
+# --follower take three arguments, --initscript, --family, --altdir and
+# --admindir take one, the rest take none — because counting positionals
+# happens to work on wine's invocations and would silently mis-read the next
+# package's.
+#
+# Three refusals, and each one is a defect this engine has already shipped once
+# in some other form:
+#
+#   * a link the IMAGE owns is never created. Asked of the rpmdb with
+#     `rpm -qf`, not of the filesystem: after this fix ships, /usr/bin/wine
+#     exists on a live machine BECAUSE the extension put it there, and a
+#     filesystem test would refuse to build it again on the next rebuild. The
+#     rpmdb is the only thing that knows what belongs to the OS — same oracle
+#     merge_multilib and install_etc's removal pass use.
+#   * a target that is in neither the payload nor the image is not linked to.
+#     That is what keeps a scriptlet's conditional branch, taken for a
+#     situation that does not apply here, from creating a NEW dangling link.
+#   * nothing outside /usr and /opt is touched. A system extension merges those
+#     two and nothing else, and an alternatives link under /etc would have to go
+#     through install_etc to reach the machine at all.
+#
+# When two packages in the set claim the same link, the higher priority wins,
+# which is what alternatives itself would do. It falls out of applying the
+# candidates in descending priority order and never replacing a link that
+# already resolves.
+alternatives_replay() {
+    local rec="$1" root="$2"
+    [ -s "$rec" ] || { msg "alternatives: no package in this set declares one"; return 0; }
+
+    local cand="${rec}.candidates"
+    : > "$cand"
+
+    local -a argv=()
+    local tok
+    while IFS= read -r -d '' tok; do
+        if [ -z "$tok" ]; then
+            alternatives_candidates "$cand" "${argv[@]}"
+            argv=()
+        else
+            argv+=("$tok")
+        fi
+    done < "$rec"
+    [ ${#argv[@]} -eq 0 ] || alternatives_candidates "$cand" "${argv[@]}"
+
+    local declared placed=0 skipped=0
+    declared=$(wc -l < "$cand")
+    [ "$declared" -gt 0 ] || { msg "alternatives: no --install declaration in this set"; rm -f "$cand"; return 0; }
+
+    local prio link target
+    while IFS=$'\t' read -r prio link target; do
+        if alternatives_place "$root" "$link" "$target"; then
+            placed=$((placed + 1))
+        else
+            skipped=$((skipped + 1))
+        fi
+    done < <(LC_ALL=C sort -t"$(printf '\t')" -k1,1nr -s "$cand")
+
+    msg "alternatives: ${placed} of ${declared} declared link(s) created, ${skipped} skipped"
+    rm -f "$cand"
+
+    local still
+    still="$(dangling_links "$root" | wc -l)"
+    [ "$still" -eq 0 ] \
+        || warn "${still} symlink(s) in this payload still point at something neither it nor the image provides; 'apex verify' lists them"
+    return 0
+}
+
+# One recorded invocation -> zero or more "priority<TAB>link<TAB>target" lines.
+alternatives_candidates() {
+    local out="$1"; shift
+    local -a a=("$@")
+    local n=${#a[@]} i=0
+    [ "$n" -gt 0 ] || return 0
+
+    # --test asks alternatives to decide and change nothing. Honour it by
+    # dropping the whole invocation rather than by half-applying it.
+    for ((i = 0; i < n; i++)); do
+        [ "${a[i]}" = "--test" ] && return 0
+    done
+
+    local prio="" have=0
+    i=0
+    while [ "$i" -lt "$n" ]; do
+        case "${a[i]}" in
+            --install)
+                [ $((i + 4)) -lt "$n" ] || return 0
+                prio="${a[i+4]}"
+                case "$prio" in ''|*[!0-9]*) return 0 ;; esac
+                printf '%s\t%s\t%s\n' "$prio" "${a[i+1]}" "${a[i+3]}" >> "$out"
+                have=1
+                i=$((i + 5)) ;;
+            --slave|--follower)
+                [ "$have" = 1 ] || { i=$((i + 4)); continue; }
+                [ $((i + 3)) -lt "$n" ] || return 0
+                printf '%s\t%s\t%s\n' "$prio" "${a[i+1]}" "${a[i+3]}" >> "$out"
+                i=$((i + 4)) ;;
+            --initscript|--family|--altdir|--admindir)
+                i=$((i + 2)) ;;
+            *)
+                i=$((i + 1)) ;;
+        esac
+    done
+    return 0
+}
+
+alternatives_place() {
+    local root="$1" link="$2" target="$3"
+
+    case "$link" in /usr/*|/opt/*) ;; *) warn "alternatives: refusing '${link}' — a system extension merges /usr and /opt only"; return 1 ;; esac
+    case "$target" in /usr/*|/opt/*) ;; *) warn "alternatives: refusing '${link}' — its target '${target}' is outside /usr and /opt"; return 1 ;; esac
+    case "$link$target" in *..*) warn "alternatives: refusing '${link}' — '..' in a path"; return 1 ;; esac
+
+    if image_owns "$link"; then
+        warn "alternatives: not creating '${link}' — APEX-OS already owns it, and the overlay must never shadow the image's copy"
+        return 1
+    fi
+    if [ ! -e "${root}${target}" ] && [ ! -L "${root}${target}" ] && ! image_owns "$target"; then
+        warn "alternatives: not creating '${link}' — '${target}' is in neither this package set nor the image"
+        return 1
+    fi
+    if [ -e "${root}${link}" ] && [ ! -L "${root}${link}" ]; then
+        warn "alternatives: not creating '${link}' — this package set ships a real file there"
+        return 1
+    fi
+    # Already satisfied: either a higher-priority candidate got here first, or
+    # the package shipped a link that works. Leave it.
+    if [ -L "${root}${link}" ] && payload_link_resolves "$root" "${root}${link}"; then
+        return 1
+    fi
+
+    mkdir -p "${root}${link%/*}" || return 1
+    ln -sfn "$target" "${root}${link}" || return 1
+    return 0
+}
+
+# The pass itself.
+apply_alternatives() {
+    local destdir="$1" root="$2"
+    local rec="${root}.alternatives"
+    alternatives_record "$destdir" "$rec"
+    alternatives_replay "$rec" "$root"
+    rm -f "$rec"
+}
+
 # Caches that are a SINGLE file describing a whole directory are the one real
 # hazard of overlaying /usr: the extension's copy hides the image's copy, so a
 # cache built only from extension content makes the image's own applications
@@ -1465,6 +1805,7 @@ rebuild_extension() {
     fi
 
     extract_rpms "$rpms" "$root"
+    apply_alternatives "$rpms" "$root"
     fix_caches "$root"
     split_out_of_image "$root" "$etcroot"
     write_extension_release "$root"
