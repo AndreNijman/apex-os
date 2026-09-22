@@ -82,6 +82,19 @@ bootc's own help points at `to-filesystem` for LUKS.
    (`cryptsetup luksDump` → `systemd-tpm2` token), never taken on trust. Only
    then is `rd.luks.options=<uuid>=tpm2-device=auto` added.
 
+**One path runs step 2 later than you would expect, and it says so here rather
+than only in the code.** On a *network* install of a machine with nowhere to
+stage the download — no second drive, no spare partition, so APEX-OS is
+downloaded onto the target disk as it installs — the enrolment helper lives in
+an image that is not on the machine yet. Steps 2 to 4 therefore happen after
+that download instead of before it: the order is luksFormat, open, mkfs, mount,
+download, then enrol, prove and show. Nothing of the user's is at risk during
+the gap — the volume holds only blobs that can be fetched again, the passphrase
+they just typed has already opened it, and the key still reaches them before
+`bootc` writes the first byte of the system. Running the helper any earlier
+pulled ~15 GB into the live ISO's RAM overlay, on the one machine shape that
+path exists for.
+
 If the helper is missing from the image, fails, produces no recovery key, or
 produces one that does not open the volume, the install **refuses** — with the
 disk carrying no data, so nothing is locked away. An encrypted disk whose only
