@@ -323,6 +323,15 @@ pub const PKG_ENGINE: &str = "/usr/libexec/apex-pkg";
 /// user packages", which is the common case and must cost nothing.
 const PKG_STATE: &str = "/var/lib/apex/pkg/state.json";
 
+/// Where the engine records installed AppImages. Read here for one reason: an
+/// AppImage is NOT part of the system extension and writes no `PKG_STATE`, so
+/// a machine whose only user software is an AppImage has none of that file —
+/// and `packages_pass` below would then never run the engine at all, never
+/// print the line that says AppImages are pinned, and leave the user to find
+/// that out from a security advisory. `docs/packages.md` states the pinning as
+/// something `apex update` tells you; this is what makes that true.
+const PKG_APPIMAGE_DIR: &str = "/var/lib/apex/appimage";
+
 /// The capsule engine behind `apex env` (§8). Same shape as `PKG_ENGINE`: the
 /// policy lives in one shipped program so the CLI, the resolver and anything
 /// the shell drives cannot disagree about what a capsule is.
@@ -580,7 +589,7 @@ pub fn pkg(args: &[String]) -> i32 {
 /// current on install day would quietly turn "the system is up to date" into a
 /// half-truth.
 fn packages_pass() -> i32 {
-    if !Path::new(PKG_STATE).exists() {
+    if !Path::new(PKG_STATE).exists() && !has_appimages() {
         return 0;
     }
     match run(PKG_ENGINE, &["upgrade"]) {
@@ -590,6 +599,23 @@ fn packages_pass() -> i32 {
             0
         }
     }
+}
+
+/// Does this machine have at least one AppImage the engine installed?
+///
+/// One record per application, so a directory containing any `*.json` is the
+/// question. Unreadable or missing answers false, which is the same direction
+/// `PKG_STATE`'s absence answers: an extra engine invocation is cheap, but
+/// refusing to look is not a reason to claim there is nothing there.
+fn has_appimages() -> bool {
+    let Ok(entries) = std::fs::read_dir(PKG_APPIMAGE_DIR) else {
+        return false;
+    };
+    entries.flatten().any(|e| {
+        e.file_name()
+            .to_str()
+            .is_some_and(|n| n.ends_with(".json"))
+    })
 }
 
 /// `apex update` -> pull a newer OS image, then refresh firmware via fwupd.

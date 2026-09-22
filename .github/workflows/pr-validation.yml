@@ -2022,6 +2022,43 @@ jobs:
       - name: Run .deb package assertions
         if: ${{ !cancelled() }}
         run: ./tests/test-apex-deb.sh
+      # squashfs-tools is what unpacks an AppImage's payload, and mksquashfs is
+      # what the suite below BUILDS its fixtures with. Installed explicitly
+      # rather than relied on: without it every extraction, integration and
+      # ownership assertion in that suite would skip, and a suite that skips
+      # its own subject is the gate-that-inspects-nothing this repository keeps
+      # finding. The suite exits 2 rather than skipping if it is absent.
+      - name: Install squashfs-tools for the AppImage suite
+        if: ${{ !cancelled() }}
+        run: |
+          set -euo pipefail
+          sudo apt-get update -qq
+          sudo apt-get install -y -qq squashfs-tools
+          # Leg B of that suite runs the engine as root inside `unshare -rm`,
+          # which needs an unprivileged user namespace. ubuntu-24.04 gates
+          # those behind AppArmor by default — the same knob that breaks
+          # Chrome's sandbox on these runners — so it is turned off here for
+          # the length of the job. `|| true`: the suite treats a missing user
+          # namespace in CI as a FAILURE rather than a skip, so a runner that
+          # refuses this is red and visible instead of quietly uncovered.
+          sudo sysctl -w kernel.apparmor_restrict_unprivileged_userns=0 || true
+          unshare -rm true && echo "unprivileged user namespaces: available"
+
+      # `apex install ./Thing.AppImage`. Leg A is unprivileged and covers the
+      # routing (an AppImage argument must beat BOTH the local-.rpm rule and
+      # the Flatpak one), the ELF arithmetic that finds the squashfs payload
+      # without ever executing the file, the privilege strip, the symlink
+      # containment on everything read out of the payload, the desktop rewrite
+      # and the shadow guard that stops an AppImage hiding a program the image
+      # provides. Leg B re-enters the suite inside `unshare -rm` with tmpfs
+      # over /var/lib/apex and /usr/local and runs the shipped engine as a
+      # PROCESS, end to end — install, list, verify, upgrade, remove — with the
+      # fixture at mode 0644, which is what proves the AppImage is never
+      # executed and that libfuse.so.2 (absent from the APEX image) is never
+      # needed. Nothing escapes that namespace.
+      - name: Run AppImage-install assertions
+        if: ${{ !cancelled() }}
+        run: ./tests/test-apex-appimage.sh
 
       # The per-login provisioner edits files that belong to the user. These
       # extract its self-healing blocks from the shipped script and run them
@@ -3218,6 +3255,7 @@ jobs:
             files/system/libexec/apex-screen-reader \
             tests/test-apex-recover.sh \
             tests/test-apex-pkg.sh tests/test-apex-deb.sh \
+            tests/test-apex-pkg.sh tests/test-apex-appimage.sh \
             tests/test-apex-firstrun.sh \
             tests/test-labwc-keybinds.sh tests/test-apex-env.sh \
             tests/test-apex-resolve.sh tests/test-apex-blueprint.sh \

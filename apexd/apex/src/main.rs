@@ -331,8 +331,8 @@ enum Cmd {
     },
     /// Show the booted image and its changelog labels.
     Changelog,
-    /// Install packages from the enabled repositories, Flathub, a capsule, or
-    /// a local .rpm file. Requires root, except `--source capsule`.
+    /// Install packages from the enabled repositories, Flathub, a capsule, a
+    /// local .rpm file, or an AppImage. Requires root, except `--source capsule`.
     ///
     /// Each argument is a package name from Fedora/RPM Fusion/an enabled COPR, a
     /// reverse-DNS Flatpak id (org.gimp.GIMP), or a path to an .rpm file. A local
@@ -341,8 +341,16 @@ enum Cmd {
     ///
     /// Packages go into a systemd system extension, NOT an rpm-ostree layer, so
     /// the OS keeps updating normally and `apex rollback` still works.
+    ///
+    /// An AppImage is different and the difference is worth knowing before you
+    /// install one: it is unpacked once into /usr/local, never executed as a
+    /// file, never part of the extension — and PINNED. `apex update` does not
+    /// move it and it cannot update itself; a newer version means running this
+    /// command again with the newer file. Every AppImage needs
+    /// --allow-unsigned, because none of them carries a signature APEX can
+    /// check. See docs/packages.md.
     Install {
-        #[arg(required = true, value_name = "PACKAGE|FILE.rpm")]
+        #[arg(required = true, value_name = "PACKAGE|FILE.rpm|FILE.AppImage")]
         packages: Vec<String>,
         /// Skip weak dependencies (smaller install, fewer optional features).
         #[arg(long)]
@@ -350,10 +358,11 @@ enum Cmd {
         /// Also consider a repository that is disabled by default.
         #[arg(long, value_name = "REPO")]
         enable_repo: Vec<String>,
-        /// Install a local .rpm file that no trusted key covers. Applies only to
-        /// the files named on this command line, never to repository packages,
-        /// and the decision is recorded per file so `apex pkg list` and
-        /// `apex pkg verify` keep reporting it.
+        /// Install a local .rpm file that no trusted key covers, or an
+        /// AppImage (no AppImage is ever verifiable, so all of them need it).
+        /// Applies only to the files named on this command line, never to
+        /// repository packages, and the decision is recorded per file so
+        /// `apex pkg list` and `apex pkg verify` keep reporting it.
         #[arg(long)]
         allow_unsigned: bool,
         /// Pick the source yourself instead of letting APEX rank them:
@@ -381,8 +390,13 @@ enum Cmd {
         name: String,
     },
     /// Remove packages installed with `apex install`. Requires root.
+    ///
+    /// A package installed from a local .rpm is removed by its package name;
+    /// an AppImage by the command name it installed, or by the path to the
+    /// very file it came from — that one is matched by checksum, so the same
+    /// download in a different directory still resolves.
     Remove {
-        #[arg(required = true, value_name = "PACKAGE")]
+        #[arg(required = true, value_name = "PACKAGE|FILE.AppImage")]
         packages: Vec<String>,
     },
     /// Search every package source: the enabled repositories and Flathub.
