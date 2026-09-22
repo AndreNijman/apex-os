@@ -31,6 +31,24 @@ pass=0; fail=0
 ok()  { printf 'PASS  %-46s %s\n' "$1" "${2:-}"; pass=$((pass+1)); }
 bad() { printf 'FAIL  %-46s %s\n' "$1" "${2:-}"; fail=$((fail+1)); }
 
+# `cmp` is NOT in the container this file runs in. MEASURED: inside
+# quay.io/fedora/fedora:43 with kbd, systemd and xkeyboard-config installed,
+# `cmp -s a b` prints "command not found" and exits 127, which reads as "the
+# files differ" — so the guard that catches a mutation matching nothing was
+# inert in exactly the environment CI uses. Compared with the shell instead.
+# Defined here rather than beside its first user because BOTH mutation arms
+# below need it, and the earlier one had no guard at all until 2026-09-22.
+same_file() { [ "$(cat "$1")" = "$(cat "$2")" ]; }
+
+# THIS FILE MEASURES REAL DATA, AND MUST NOT BE REDIRECTABLE.
+# apex-install's console_keymap_for()/keymap_can_type() honour
+# APEX_KBD_KEYMAPS and APEX_KBD_MODEL_MAP so that test-installer-luks.sh can
+# measure the engine's WIRING against a fixture on a machine with no Fedora
+# kbd. The division of labour only holds if this half still reads the real
+# tree, so an ambient value of either — exported by a caller, or left in the
+# environment — is dropped here rather than silently obeyed.
+unset APEX_KBD_KEYMAPS APEX_KBD_MODEL_MAP
+
 MODELMAP=/usr/share/systemd/kbd-model-map
 KEYMAP_TREE=/usr/lib/kbd/keymaps
 XKBRULES=/usr/share/X11/xkb/rules/base.lst
@@ -131,8 +149,20 @@ if [ -s "$FNS" ]; then
     # exist: `bg` has no keymap of its own, so the only honest answer left is
     # the `us` fallback. A function that merely echoed its argument back would
     # say `bg` here, which this distinguishes from both.
+    #
+    # Anchored on the PATH, not on the assignment. The first version of this
+    # matched the literal `mapf=/usr/share/systemd/kbd-model-map`; when the
+    # engine's default became an override-able `${APEX_KBD_MODEL_MAP:-...}`
+    # the sed program matched nothing, the "mutant" was a byte-identical copy
+    # of the function, and it answered `bg_bds-utf8` — a mutation arm that had
+    # quietly stopped mutating. The guard below is why that was caught in one
+    # run instead of becoming a permanently green test of nothing.
+    sed "s|$MODELMAP|/nonexistent/kbd-model-map|g" "$FNS" > "$WORK/keymap-mutant.sh"
+    if same_file "$FNS" "$WORK/keymap-mutant.sh"; then
+        bad "mutant: table removed -> bg falls back to us" \
+            "the sed program matched no line — the mutant is the function unchanged"
+    else
 (
-    sed "s|mapf=$MODELMAP|mapf=/nonexistent/kbd-model-map|" "$FNS" > "$WORK/keymap-mutant.sh"
     # shellcheck disable=SC1090
     . "$WORK/keymap-mutant.sh"
     printf '%s\n' "$(console_keymap_for bg '' '')" > "$WORK/keymap-mut"
@@ -142,6 +172,7 @@ if [ -s "$FNS" ]; then
         ok "mutant: table removed -> bg falls back to us"
     else
         bad "mutant: table removed -> bg falls back to us" "got '$mutgot'"
+    fi
     fi
 fi
 
@@ -161,12 +192,6 @@ echo "── can the owner TYPE their passphrase on the layout they chose? ─�
 #   fa                                 Persian; almost no Latin at all
 #
 # These assertions run the engine's own functions against the real tree.
-# `cmp` is NOT in the container this file runs in. MEASURED: inside
-# quay.io/fedora/fedora:43 with kbd, systemd and xkeyboard-config installed,
-# `cmp -s a b` prints "command not found" and exits 127, which reads as "the
-# files differ" — so the guard that catches a mutation matching nothing was
-# inert in exactly the environment CI uses. Compared with the shell instead.
-same_file() { [ "$(cat "$1")" = "$(cat "$2")" ]; }
 
 TFNS="$WORK/typeable-fns.sh"
 sed -n '/^_keymap_cat()/,/^}/p;/^_keymap_text()/,/^}/p;/^keymap_ascii_set()/,/^}/p;/^keymap_can_type()/,/^}/p' "$ENGINE" > "$TFNS"

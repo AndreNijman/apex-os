@@ -606,11 +606,29 @@ console_keymap_for() {  # $1=xkb layout(s)  $2=xkb variant  $3=deploy dir or ""
   # Prefer the TARGET's data when we have it: the installed machine is the one
   # that has to load this keymap, and the live ISO's kbd package is not
   # necessarily the same build.
-  kdir=/usr/lib/kbd/keymaps
+  # ── where the two data files come from, and why that is overridable ────────
+  # By default the LIVE environment's own copies, which on the ISO are the
+  # Fedora ones this conversion was measured against. APEX_KBD_KEYMAPS and
+  # APEX_KBD_MODEL_MAP redirect them, and exist for exactly one reason:
+  # installer/test-installer-luks.sh has to be able to measure this conversion
+  # somewhere that is NOT a Fedora machine. Without them the suite's end-to-end
+  # keymap assertions read whatever kbd the machine running them happens to
+  # have — which on a GitHub ubuntu-24.04 runner is nothing in this shape, so
+  # every layout resolved to `us` and the suite had never once passed in CI.
+  # Same hook, same purpose, as APEX_IMAGE above ("override with APEX_IMAGE=...
+  # for testing"); nothing the GUI, the answers file or the kernel command line
+  # can reach.
+  #
+  # Read INSIDE this function on purpose, never as a file-level global:
+  # test-installer-luks.sh and test-installer-locale.sh both LIFT this function
+  # out of the engine with sed and run the copy on its own, so a variable
+  # assigned anywhere else in this file would be unset there — and under the
+  # suites' `set -u` that would kill the extracted copy outright.
+  kdir="${APEX_KBD_KEYMAPS:-/usr/lib/kbd/keymaps}"
   if [ -n "$deploy" ] && [ -d "$deploy/usr/lib/kbd/keymaps" ]; then
     kdir="$deploy/usr/lib/kbd/keymaps"
   fi
-  mapf=/usr/share/systemd/kbd-model-map
+  mapf="${APEX_KBD_MODEL_MAP:-/usr/share/systemd/kbd-model-map}"
   if [ -n "$deploy" ] && [ -f "$deploy/usr/share/systemd/kbd-model-map" ]; then
     mapf="$deploy/usr/share/systemd/kbd-model-map"
   fi
@@ -1322,7 +1340,9 @@ case "${1:-}" in
       echo "typeable: yes console=${_cp_console:-us}"
       exit 0
     fi
-    _cp_verdict=$(keymap_can_type "$_cp_pass" /usr/lib/kbd/keymaps "$_cp_console")
+    # Same override as console_keymap_for's, for the same reason: the keymap
+    # TREE has to be redirectable or this check can only be measured on Fedora.
+    _cp_verdict=$(keymap_can_type "$_cp_pass" "${APEX_KBD_KEYMAPS:-/usr/lib/kbd/keymaps}" "$_cp_console")
     case "$_cp_verdict" in
       yes)  echo "typeable: yes console=$_cp_console" ;;
       no:*) echo "typeable: no console=$_cp_console chars=${_cp_verdict#no:}" ;;
@@ -1599,7 +1619,7 @@ fi
 # the operator before anything is erased. See keymap_can_type().
 UNLOCK_KEYMAP="$CONSOLE_KEYMAP"
 if [ "${ENCRYPT:-no}" = yes ] && [ -n "$CONSOLE_KEYMAP" ] && [ "$CONSOLE_KEYMAP" != us ]; then
-  _kmverdict=$(keymap_can_type "$LUKSPASS" /usr/lib/kbd/keymaps "$CONSOLE_KEYMAP")
+  _kmverdict=$(keymap_can_type "$LUKSPASS" "${APEX_KBD_KEYMAPS:-/usr/lib/kbd/keymaps}" "$CONSOLE_KEYMAP")
   case "$_kmverdict" in
     yes)
       log "keyboard: console keymap '$CONSOLE_KEYMAP' can type this passphrase; the unlock prompt will use it" ;;

@@ -97,6 +97,94 @@ fi
 HELPER="$WORK/enroll-stub"
 printf '#!/bin/sh\nexit 0\n' > "$HELPER"; chmod 755 "$HELPER"
 
+# ── the keymap data the engine's conversion reads, AS A FIXTURE ─────────────
+#
+# WHY. The assertions further down run the SHIPPED ENGINE and read back the
+# console keymap it resolved. Until now they read it out of whatever kbd
+# package the machine running this suite happened to have — and a GitHub
+# ubuntu-24.04 runner has no /usr/lib/kbd/keymaps and no
+# /usr/share/systemd/kbd-model-map in the shape the engine expects. So every
+# layout resolved to the `us` fallback, three assertions were red, and this
+# suite had NEVER ONCE PASSED in CI since it landed on 2026-09-20:
+#
+#   FAIL XKB bg resolves to console keymap bg_bds-utf8 (end to end)  KEYMAP=us
+#   FAIL vn + a passphrase containing '1'  out='typeable: yes console=us'
+#
+# That is the same hermeticity defect test-installer-locale.sh was fixed for
+# (25/1 -> 26/0): a suite whose verdict is a property of the tester's machine
+# rather than of the code under test.
+#
+# WHAT MOVES INTO THE FIXTURE AND WHAT DOES NOT. The claim "Fedora's kbd really
+# does ship bg_bds-utf8, and `vn` really has no digit 1 anywhere in its table"
+# is REAL DATA and stays where it belongs: installer/keymap-checks.sh asserts
+# it over all 99 XKB layouts and all 562 keymaps, on a Fedora host or inside
+# quay.io/fedora/fedora:43. What the fixture makes hermetic is the ENGINE
+# WIRING — that an operator's `keymap=` reaches console_keymap_for(), that its
+# answer reaches the install summary and the --check-passphrase verdict, and
+# that an untypeable character is NAMED rather than merely counted. That wiring
+# has to give the same answer on every machine, and now does.
+#
+# The engine reads the fixture through APEX_KBD_KEYMAPS / APEX_KBD_MODEL_MAP,
+# the same shape of testing hook as the APEX_IMAGE the rest of this file
+# already uses. Nothing the GUI, the answers file or the kernel command line
+# can reach sets them.
+#
+# PROVED CONSULTED, NOT ASSUMED. Every fixture-backed assertion below is paired
+# with a control that re-runs the identical call against an EMPTY tree and
+# requires the `us` fallback back — which is the CI red reproduced on purpose.
+# Without that pair a fixture that was silently ignored would look like a pass.
+KBD_TREE="$WORK/kbdfix/keymaps"
+KBD_MODELMAP="$WORK/kbdfix/kbd-model-map"
+KBD_NONE="$WORK/kbdnone"
+mkdir -p "$KBD_TREE/xkb" "$KBD_NONE"
+
+# Shaped like the xkb-converted maps kbd ships: one `keycode N = ...` line per
+# key, with keysym NAMES for the digits and punctuation. The names are not
+# decoration — they are what makes the engine's own name table load-bearing,
+# and a fixture written with bare characters would leave that table untested.
+{
+    printf 'keymaps 0-2,4-5,8,12\n'
+    printf 'keycode %3d = %s %s\n' \
+        16 q Q  17 w W  18 e E  19 r R  20 t T  21 y Y  22 u U  23 i I \
+        24 o O  25 p P  30 a A  31 s S  32 d D  33 f F  34 g G  35 h H \
+        36 j J  37 k K  38 l L  44 z Z  45 x X  46 c C  47 v V  48 b B \
+        49 n N  50 m M
+    printf 'keycode %3d = %s\n' \
+        3 'two at'            4 'three numbersign'  5 'four dollar' \
+        6 'five percent'      7 'six asciicircum'   8 'seven ampersand' \
+        9 'eight asterisk'   10 'nine parenleft'   11 'zero parenright' \
+        57 'space'
+} > "$KBD_TREE/xkb/vn.map"
+# The `1` key is the one thing this map does NOT have — the hole the real `vn`
+# has, and the whole point of the vn case below.
+
+# bg_bds-utf8 is the same map plus the digit 1, and it is GZIPPED: the engine's
+# _keymap_cat() has a zcat branch for exactly the form Fedora ships, and a
+# fixture of plain files would never enter it.
+{ cat "$KBD_TREE/xkb/vn.map"; printf 'keycode %3d = one exclam\n' 2; } \
+    > "$KBD_TREE/xkb/bg_bds-utf8.map"
+gzip -n "$KBD_TREE/xkb/bg_bds-utf8.map" 2>/dev/null || true
+
+# Both real `bg` rows, copied verbatim from /usr/share/systemd/kbd-model-map,
+# in the real file's order. Two rows, not one, and that is deliberate:
+#   * `bg,us` is a LIST, so it only matches through the engine's
+#     `index($2, l ",")==1` clause — the clause whose absence is what sent bg
+#     to `us` with bg_bds-utf8.map.gz sitting unused in the tree;
+#   * bg_pho-utf8 comes FIRST and carries a variant, so an engine that took
+#     the first row for the layout regardless of variant would answer
+#     bg_pho-utf8 — for which this fixture deliberately ships NO keymap file,
+#     so the engine's step-4 "does the table's answer actually exist" check
+#     would then drop it to `us` and the assertion would go red.
+printf '%s\n' \
+    '# fixture — two rows copied from /usr/share/systemd/kbd-model-map' \
+    'bg_pho-utf8\tbg,us\tpc105\t,phonetic\tterminate:ctrl_alt_bksp,grp:shifts_toggle' \
+    'bg_bds-utf8\tbg,us\tpc105\t-\tterminate:ctrl_alt_bksp,grp:shifts_toggle' \
+    | sed 's/\\t/\t/g' > "$KBD_MODELMAP"
+
+for _f in "$KBD_TREE/xkb/vn.map" "$KBD_MODELMAP"; do
+    [ -s "$_f" ] || { echo "FATAL: the keymap fixture was not built: $_f"; exit 1; }
+done
+
 # ── run one answers file against an engine (the real one, or a mutant) ───────
 run_engine() {  # $1=engine path  $2=answers body  [$3..]=extra env assignments
     local eng="$1" body="$2"; shift 2
@@ -210,15 +298,61 @@ if [ -n "$LOOPDEV" ]; then
     printf '%s\n' "mode=disk" "disk=$LOOPDEV" "username=bob" "password=pw" \
         "hostname=apex" "encrypt=yes" "lukspass=correct horse 9" "keymap=bg" > "$ANS"
 
-    out=$(sudo -n APEX_IMAGE="$ENGINE_IMAGE" APEX_DRY_RUN=1 APEX_LUKS_ENROLL_LOCAL="$HELPER" \
-             "$ENGINE" --headless "$ANS" 2>&1 </dev/null)
+    # dry_run <engine> <keymap-tree> <model-map> — the same run three ways.
+    dry_run() {
+        sudo -n APEX_IMAGE="$ENGINE_IMAGE" APEX_DRY_RUN=1 APEX_LUKS_ENROLL_LOCAL="$HELPER" \
+                APEX_KBD_KEYMAPS="$2" APEX_KBD_MODEL_MAP="$3" \
+                "$1" --headless "$ANS" 2>&1 </dev/null
+    }
+    # The summary line's KEYMAP=, or the empty string. Never `grep -q` in a
+    # pipeline here: pipefail turns a match into 141 via SIGPIPE on the writer.
+    dry_keymap() { printf '%s' "$1" | grep -o 'KEYMAP=[a-z0-9_.-]*' | tail -1; }
+
+    out=$(dry_run "$ENGINE" "$KBD_TREE" "$KBD_MODELMAP")
     if [[ "$out" == *"APEX-INSTALL-DRYRUN-OK"* ]]; then ok "encrypt=yes reaches the dry-run stop"
     else bad "encrypt=yes reaches the dry-run stop" "$(printf '%s' "$out" | tail -3 | tr '\n' ' ')"; fi
     if [[ "$out" == *"ENCRYPT=yes"* ]]; then ok "the dry run names the encryption decision"
     else bad "the dry run names the encryption decision" "no ENCRYPT= in the summary"; fi
-    if [[ "$out" == *"KEYMAP=bg_bds-utf8"* ]]; then ok "XKB bg resolves to console keymap bg_bds-utf8 (end to end)"
-    else bad "XKB bg resolves to console keymap bg_bds-utf8 (end to end)" \
-             "$(printf '%s' "$out" | grep -o 'KEYMAP=[a-z0-9_.-]*' | tail -1)"; fi
+    if [ "$(dry_keymap "$out")" = "KEYMAP=bg_bds-utf8" ]; then
+        ok "XKB bg resolves to console keymap bg_bds-utf8 (end to end)"
+    else
+        bad "XKB bg resolves to console keymap bg_bds-utf8 (end to end)" \
+            "$(dry_keymap "$out")"
+    fi
+
+    # CONTROL, and the CI red reproduced deliberately: point the engine at an
+    # EMPTY tree and the same answers file must come back `us`. If this ever
+    # passes AND the line above passes, the engine is reading keymap data this
+    # suite did not put there and the assertion above is measuring the machine.
+    out_none=$(dry_run "$ENGINE" "$KBD_NONE" "$KBD_NONE/absent-model-map")
+    if [ "$(dry_keymap "$out_none")" = "KEYMAP=us" ]; then
+        ok "…and an empty keymap tree falls back to us" "so the line above read the fixture, not this machine"
+    else
+        bad "…and an empty keymap tree falls back to us" \
+            "got '$(dry_keymap "$out_none")' — the fixture is not what the engine consulted"
+    fi
+
+    # MUTATION on the ENGINE, not on the fixture. `bg` is written `bg,us` in
+    # systemd's table; a plain `$2 == layout` test matches no row of that shape,
+    # and that is precisely how bg used to fall through to `us` while
+    # bg_bds-utf8.map.gz sat unused in the keymap tree. Delete the clause that
+    # makes a list match and the identical run must report `us`.
+    KMMUT="$WORK/apex-install.multilayout-mutant"
+    sed 's/index($2, l ",")==1/0/g' "$ENGINE" > "$KMMUT"
+    chmod 755 "$KMMUT"
+    if cmp -s "$ENGINE" "$KMMUT"; then
+        bad "mutant: the multi-layout table row" \
+            "the sed program matched no line — the mutant is the engine unchanged"
+    else
+        mout=$(dry_run "$KMMUT" "$KBD_TREE" "$KBD_MODELMAP")
+        if [ "$(dry_keymap "$mout")" = "KEYMAP=us" ]; then
+            ok "mutant: the multi-layout table row" "clause removed -> bg falls back to us"
+        else
+            bad "mutant: the multi-layout table row" \
+                "got '$(dry_keymap "$mout")' with the clause gone — the assertion above proves nothing"
+        fi
+    fi
+    rm -f "$KMMUT"
     # The dry run stops before the first destructive command, and this is the
     # assertion that says so rather than trusting the name of the flag.
     if [ -z "$(sudo -n blkid -p "$LOOPDEV" 2>/dev/null || true)" ]; then
@@ -449,16 +583,51 @@ fi
 # otherwise run the identical script inside a Fedora container, and FAIL if
 # neither route is available. It never skips.
 KM_OUT="$WORK/keymap-out.txt"
+
+# km_runtime — sets KM_RT to a container runtime that actually STARTS here.
+#
+# ROOT podman first, and not as a formality. On a GitHub runner there is no
+# systemd user session, so rootless podman tries to create its run directory
+# under /run/user/$UID and dies:
+#
+#   cannot open run directory '/run/user/1001/crun': Permission denied
+#   Error: OCI permission denied
+#
+# The container never started, keymap-checks.sh never printed its result line,
+# and the caller's "did they report anything" guard fired as
+# `FAIL the keymap checks reported a result` — the third of this suite's three
+# permanent CI reds. Root podman uses /run/podman and needs no such directory,
+# and this suite has ALREADY proved `sudo -n podman` works in this process: it
+# is how the engine image above was made.
+#
+# Each candidate is PROBED with `info`, not merely found on PATH. `command -v`
+# answering is what made the old chooser pick a podman that could not run a
+# container, and a runtime that cannot start is indistinguishable from one that
+# is absent as far as this measurement is concerned.
+KM_RT=()
+km_runtime() {
+    if command -v podman >/dev/null 2>&1 && sudo -n podman info >/dev/null 2>&1; then
+        KM_RT=(sudo -n podman); return 0
+    fi
+    if command -v podman >/dev/null 2>&1 && podman info >/dev/null 2>&1; then
+        KM_RT=(podman); return 0
+    fi
+    if command -v docker >/dev/null 2>&1 && docker info >/dev/null 2>&1; then
+        KM_RT=(docker); return 0
+    fi
+    return 1
+}
+
 if [ -z "${APEX_KEYMAP_FORCE_CONTAINER:-}" ] \
    && [ -f /usr/share/systemd/kbd-model-map ] && [ -d /usr/lib/kbd/keymaps ] \
    && [ -r /usr/share/X11/xkb/rules/base.lst ]; then
     bash ./keymap-checks.sh "$ENGINE" "$WORK" 2>&1 | tee "$KM_OUT"
-elif CRT=$(command -v podman || command -v docker); then
-    echo "note: no Fedora keymap data on this machine — measuring inside a container ($CRT)"
+elif km_runtime; then
+    echo "note: no Fedora keymap data on this machine — measuring inside a container (${KM_RT[*]})"
     # Fully qualified on purpose: a bare `fedora:43` makes podman ask which
     # registry it meant and makes the step fail for a reason that has nothing
     # to do with keymaps.
-    "$CRT" run --rm -v "$PWD":/w:ro,z -w /w "${APEX_KEYMAP_IMAGE:-quay.io/fedora/fedora:43}" bash -c '
+    "${KM_RT[@]}" run --rm -v "$PWD":/w:ro,z -w /w "${APEX_KEYMAP_IMAGE:-quay.io/fedora/fedora:43}" bash -c '
         dnf -y install --setopt=install_weak_deps=False kbd systemd xkeyboard-config >/dev/null 2>&1 || {
             echo "FAIL  the container could not install kbd, systemd and xkeyboard-config"; exit 1; }
         bash ./keymap-checks.sh ./apex-install /tmp/kmwork' 2>&1 | tee "$KM_OUT"
@@ -492,19 +661,69 @@ echo "── --check-passphrase: the encrypt-page check, run standalone ──�
 # read. `sudo -n true` is asserted directly rather than trusted, since this
 # section has no ENGINE_RUNNABLE guard to fall back on.
 if sudo -n true 2>/dev/null && [ -x "$ENGINE" ]; then
-    out=$(printf '%s' "apexbootproof1" | sudo -n "$ENGINE" --check-passphrase us "" 2>&1); rc=$?
+    # cp_check <engine> <passphrase> <layout> <keymap-tree> — one verdict line.
+    # The fixture tree is passed on every call for the reason given where it is
+    # built: without it these six assertions read the tester's own kbd package
+    # and were red on every CI runner this suite has ever run on.
+    cp_check() {
+        printf '%s' "$2" | sudo -n APEX_KBD_KEYMAPS="$4" APEX_KBD_MODEL_MAP="$KBD_MODELMAP" \
+            "$1" --check-passphrase "$3" "" 2>&1
+    }
+
+    out=$(cp_check "$ENGINE" "apexbootproof1" us "$KBD_TREE"); rc=$?
     if [ "$out" = "typeable: yes console=us" ] && [ "$rc" = 0 ]; then
         ok "us + an all-ASCII passphrase: typeable: yes"
     else bad "us + an all-ASCII passphrase: typeable: yes" "rc=$rc out='$out'"; fi
 
-    # vn is on the record (installer/keymap-checks.sh's own measured table,
-    # also asserted above) as having no digit 1 anywhere in its console
-    # keymap — the same fact the real install path would discover and fall
-    # back to `us` for, just asked for directly instead of via a live install.
-    out=$(printf '%s' "apex1zed" | sudo -n "$ENGINE" --check-passphrase vn "" 2>&1); rc=$?
+    # THE CASE THIS MODE EXISTS FOR. A keymap with no digit `1` anywhere in its
+    # table must come back `no`, naming the character — not a count, not a
+    # shrug. `vn` is that keymap on a real Fedora tree, which
+    # installer/keymap-checks.sh asserts against the real file; the fixture
+    # here reproduces the SHAPE so that the engine's wiring — dispatch ->
+    # console_keymap_for -> keymap_can_type -> this exact output format — is
+    # measured identically on a machine with no Fedora kbd at all.
+    out=$(cp_check "$ENGINE" "apex1zed" vn "$KBD_TREE"); rc=$?
     if [ "$out" = "typeable: no console=vn chars=1" ] && [ "$rc" = 0 ]; then
         ok "vn + a passphrase containing '1': typeable: no, names the character"
     else bad "vn + a passphrase containing '1': typeable: no, names the character" "rc=$rc out='$out'"; fi
+
+    # CONTROL, and the CI red reproduced: with an EMPTY tree the layout cannot
+    # resolve, the engine falls back to `us`, and the verdict is the useless
+    # `typeable: yes console=us` this suite used to report as a pass. If this
+    # and the case above are ever both green, the fixture is being ignored.
+    out=$(cp_check "$ENGINE" "apex1zed" vn "$KBD_NONE"); rc=$?
+    if [ "$out" = "typeable: yes console=us" ] && [ "$rc" = 0 ]; then
+        ok "…and with an empty keymap tree it falls back to us" "so the case above read the fixture"
+    else bad "…and with an empty keymap tree it falls back to us" "rc=$rc out='$out'"; fi
+
+    # THE COUNTER-HALF. A verdict of `no` proves nothing if the check says `no`
+    # to everything. bg reaches its keymap only THROUGH the conversion table's
+    # `bg,us` row, so this one assertion covers both halves at once: the
+    # multi-layout lookup, and a passphrase the resulting keymap can type.
+    out=$(cp_check "$ENGINE" "correct horse 9" bg "$KBD_TREE"); rc=$?
+    if [ "$out" = "typeable: yes console=bg_bds-utf8" ] && [ "$rc" = 0 ]; then
+        ok "bg + a passphrase it can type: typeable: yes, on the converted name"
+    else bad "bg + a passphrase it can type: typeable: yes, on the converted name" "rc=$rc out='$out'"; fi
+
+    # MUTATION: make keymap_can_type() unable to ever report a missing
+    # character. The vn case above must then go green-for-the-wrong-reason,
+    # which is what this arm refuses to let happen silently.
+    KCMUT="$WORK/apex-install.can-type-mutant"
+    sed 's/\[ -n "$missing" \]/[ -z "$missing" ]/' "$ENGINE" > "$KCMUT"
+    chmod 755 "$KCMUT"
+    if cmp -s "$ENGINE" "$KCMUT"; then
+        bad "mutant: keymap_can_type can no longer say no" \
+            "the sed program matched no line — the mutant is the engine unchanged"
+    else
+        mout=$(cp_check "$KCMUT" "apex1zed" vn "$KBD_TREE")
+        if [ "$mout" = "typeable: no console=vn chars=1" ]; then
+            bad "mutant: keymap_can_type can no longer say no" \
+                "it still reported the missing character with the branch removed"
+        else
+            ok "mutant: keymap_can_type can no longer say no" "verdict removed -> '$mout'"
+        fi
+    fi
+    rm -f "$KCMUT"
 
     # No layout at all must not crash the GUI's call — it is asked before the
     # user has necessarily reached the keyboard page in every flow.
@@ -518,7 +737,9 @@ if sudo -n true 2>/dev/null && [ -x "$ENGINE" ]; then
     # into `exit 1` on "no" would make the GUI's subprocess call read a
     # typeable-but-inconvenient passphrase as "the engine crashed" and block an
     # install this same passphrase would succeed at today.
-    printf '%s' "apex1zed" | sudo -n "$ENGINE" --check-passphrase vn "" >/dev/null 2>&1
+    printf '%s' "apex1zed" \
+        | sudo -n APEX_KBD_KEYMAPS="$KBD_TREE" APEX_KBD_MODEL_MAP="$KBD_MODELMAP" \
+            "$ENGINE" --check-passphrase vn "" >/dev/null 2>&1
     _cprc=$?
     if [ "$_cprc" = 0 ]; then ok "a 'no' verdict still exits 0 — advisory, never a gate"
     else bad "a 'no' verdict still exits 0 — advisory, never a gate" "exit $_cprc"; fi
