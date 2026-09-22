@@ -401,14 +401,6 @@ stop_sampler() {
 run_engine() {  # $1 = label  $2 = answers file  $3 = stdout file  rest = env assignments
   local label="$1" ans="$2" out="$3"; shift 3
   local before="$WORK/efi-before-$label.txt" after="$WORK/efi-after-$label.txt"
-  # /var/log/apex-install.log is a FIXED path that the engine APPENDS to, so the
-  # file after this run also contains every earlier run's lines — including the
-  # previous path's. An assertion that greps the whole file would be satisfied
-  # by a line this run never wrote. Record the length first and keep only what
-  # was appended.
-  local logoff
-  logoff=$(sudo -n stat -c %s /var/log/apex-install.log 2>/dev/null || echo 0)
-  case "$logoff" in ''|*[!0-9]*) logoff=0 ;; esac
   # shellcheck disable=SC2024
   sudo -n efibootmgr -v 2>/dev/null > "$before" || echo "(no efibootmgr)" > "$before"
   local start; start=$(date +%s)
@@ -419,7 +411,20 @@ run_engine() {  # $1 = label  $2 = answers file  $3 = stdout file  rest = env as
   ENGINE_SECS=$(( $(date +%s) - start ))
   # shellcheck disable=SC2024
   sudo -n efibootmgr -v 2>/dev/null > "$after" || echo "(no efibootmgr)" > "$after"
-  sudo -n sh -c "tail -c +$((logoff + 1)) /var/log/apex-install.log > '$WORK/engine-log-$label.txt'" 2>/dev/null \
+  # The WHOLE file, deliberately. apex-install:50 is `: > "$LOG"` — the engine
+  # TRUNCATES /var/log/apex-install.log as its second statement, so the file only
+  # ever holds the run that is finishing and there is nothing from an earlier run
+  # to exclude.
+  #
+  # This line was briefly a byte-offset slice, on the assumption that a fixed log
+  # path must accumulate. It does not, and the slice cost a REAL FALSE RED: the
+  # offset recorded before the run was the size of the PREVIOUS run's log, the
+  # engine then truncated, and `tail -c +N` cut the first N bytes off a fresh
+  # file — exactly the early lines, which is where the staging DECISION is
+  # logged. "[disk] the engine logged the fallback decision" went red against an
+  # engine that had logged it perfectly. Verified rather than assumed this time:
+  # `grep -n 'LOG=' installer/apex-install` and the `: > "$LOG"` on the next line.
+  sudo -n cp /var/log/apex-install.log "$WORK/engine-log-$label.txt" 2>/dev/null \
     || sudo -n sh -c ": > '$WORK/engine-log-$label.txt'"
   sudo -n chmod 644 "$WORK/engine-log-$label.txt" "$before" "$after" 2>/dev/null
   if diff -u "$before" "$after" > "$WORK/efi-diff-$label.txt" 2>&1; then
@@ -554,6 +559,14 @@ python3 /w/plain-boot-drive.py --work /w --name '"$1"' \
   verdict=$(grep '^verdict=' "$bootout" | tail -1 | cut -d= -f2-)
   switched=$(grep '^switched-root=' "$bootout" | tail -1 | cut -d= -f2-)
   reached=$(grep '^reached-by=' "$bootout" | tail -1 | cut -d= -f2-)
+  # The weak marker, surfaced HERE so a reader of this log does not have to open
+  # the driver's output to learn what was actually seen. It is deliberately not
+  # an assertion: getty.target with nothing wanting it is reached instantly and
+  # proves nothing about a login (see WEAK_MARKERS in plain-boot-drive.py).
+  local weak
+  weak=$(grep -m1 '^weak-marker=' "$bootout" | cut -d= -f2-)
+  [ -n "$weak" ] && [ "$weak" != none ] \
+    && info "[$1] weak marker seen: $weak (recorded, NOT counted as reaching a login)"
   if [ "$switched" = yes ]; then
     ok "[$1] dracut switched root — the disk this installer wrote BOOTS"
   else
