@@ -373,8 +373,11 @@ fun ApexRemoteApp(
                     machine = state.agents.machine?.machine ?: "",
                     hello = state.agents.hello,
                     knownDirectories = knownDirectories(state.agents.sessions),
+                    picker = state.agents.picker,
                     busy = state.agents.busy,
                     failure = state.agents.failure,
+                    onLoad = { viewModel.loadPickers() },
+                    onProject = { slug -> viewModel.loadPickerWorktrees(slug) },
                     onStart = { agent, cwd, worktree, prompt, checkpoint, args ->
                         viewModel.startAgent(
                             cwd = cwd,
