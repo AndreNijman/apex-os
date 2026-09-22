@@ -226,7 +226,7 @@ echo "── netinstall staging: never RAM, never the disk being wiped ───
 # The functions are sourced out of the shipped engine rather than copied, so
 # this tests what installs, not a paraphrase of it.
 _fns=$(mktemp /tmp/apex-scratch-fns.XXXXXX)
-sed -n '/^scratch_fs_ok()/,/^}/p;/^pick_scratch()/,/^}/p' "$ENGINE" > "$_fns"
+sed -n '/^scratch_fs_ok()/,/^}/p;/^pick_scratch()/,/^}/p;/^stage_budget_kb()/,/^}/p;/^stage_setup()/,/^}/p;/^stage_teardown()/,/^}/p' "$ENGINE" > "$_fns"
 if [ ! -s "$_fns" ]; then
     printf 'FAIL  %-30s could not extract the chooser from %s\n' "scratch chooser" "$ENGINE"
     fail=$((fail+1))
@@ -260,7 +260,80 @@ else
     _ck "override honoured"          "$out" /var/tmp/apex-scratch-ovr
     out=$(APEX_OCI_SCRATCH=/dev/shm/apex-scratch-test pick_scratch || true)
     _ck "override onto tmpfs refused" "${out:-<empty>}" "<empty>"
+
+    # ── The machine this installer will meet most often ────────────────────
+    # A laptop with ONE internal disk, booted from a plain single-partition
+    # USB. Nothing qualifies, by construction: the live session automounts
+    # nothing under /run/media because the stick has no second partition,
+    # /mnt and /media are empty, and /var/tmp IS the RAM overlay. Until the
+    # fallback existed the chooser answered with nothing and the install
+    # aborted, telling the user to get "the full offline ISO" — which has
+    # never been published. The candidate list is substituted here rather
+    # than simulated so the case is the real chooser's answer to the real
+    # shape of that machine.
+    out=$( APEX_SCRATCH_CANDIDATES="/dev/shm/apex-scratch-test /no/such/dir" \
+           pick_scratch || true )
+    _ck "single-disk USB falls back"  "${out:-<empty>}" "@target"
+    # …and the tmpfs in that list was refused on the way past, not chosen:
+    # falling back to RAM is the bug 63857891 fixed and this must not undo.
+    _ck "fallback is not the tmpfs"   "$(printf '%s' "$out" | grep -c '/dev/shm' || true)" 0
+    # A real scratch volume still wins — the fallback is a fallback.
+    out=$( APEX_SCRATCH_CANDIDATES="/dev/shm/apex-scratch-test /var/tmp" \
+           pick_scratch || true )
+    _ck "spare volume still preferred" "${out:-<empty>}" "/var/tmp/apex-install-scratch"
     rmdir /dev/shm/apex-scratch-test /var/tmp/apex-scratch-ovr 2>/dev/null
+
+    # ── How much of the target the download may take ───────────────────────
+    # The only part of staging-on-target that can be exercised without a block
+    # device, and the part that decides whether a disk is erased for nothing.
+    # STAGE_RESERVE_GB is what keeps room for the OS itself: the staged blobs
+    # and the installed system are on the same filesystem at the same time.
+    STAGE_RESERVE_GB=15
+    _gb() { echo $(( $1 * 1024 * 1024 )); }
+    out=$(stage_budget_kb "$(_gb 200)" || echo REFUSED)
+    _ck "200 GB target accepted"      "$out" "$(_gb 185)"
+    out=$(stage_budget_kb "$(_gb 37)" || echo REFUSED)
+    _ck "37 GB target accepted"       "$out" "$(_gb 22)"
+    out=$(stage_budget_kb "$(_gb 36)" || echo REFUSED)
+    _ck "36 GB target refused"        "$out" REFUSED
+    out=$(stage_budget_kb "$(_gb 20)" || echo REFUSED)
+    _ck "20 GB target refused"        "$out" REFUSED
+    out=$(stage_budget_kb "not-a-number" || echo REFUSED)
+    _ck "unreadable free space refused" "$out" REFUSED
+
+    # ── The staging image must leave the target root PRISTINE ──────────────
+    # `bootc install to-filesystem` refuses a target that is not empty — its
+    # own error says "Requiring directory contains only mount points" — so the
+    # backing file is created on the target, handed to a loop device and then
+    # UNLINKED. Nothing here opens a block device: losetup, mkfs.xfs and mount
+    # are stubbed, and the only real work is the sparse file, which the
+    # function under test is supposed to remove. If the unlink is ever
+    # simplified out, every staged install fails on hardware and nothing else
+    # in this suite would notice.
+    _st=$(mktemp -d /var/tmp/apex-stage-probe.XXXXXX)
+    (
+      # shellcheck disable=SC2034  # LOG and STAGE_DIR are read by stage_setup,
+      # which is sourced from the engine above, not defined here.
+      LOG=/dev/null
+      log() { :; }
+      losetup() { echo /dev/loop-probe; }
+      mkfs.xfs() { :; }
+      mount()    { :; }
+      df()       { command df "$@"; }
+      # shellcheck disable=SC2034
+      STAGE_DIR="$_st/mnt"
+      # Bound the sparse ceiling to ~25 GB whatever this machine has free.
+      _avail_gb=$(command df -PBG "$_st" | awk 'NR==2{gsub(/G/,"",$4); print $4+0}')
+      STAGE_RESERVE_GB=$(( _avail_gb - 25 ))
+      [ "$STAGE_RESERVE_GB" -ge 1 ] || STAGE_RESERVE_GB=1
+      mkdir -p "$_st/root"
+      stage_setup "$_st/root" >/dev/null 2>&1 || { echo "SETUP-FAILED"; exit 0; }
+      [ -e "$_st/root/.apex-stage.img" ] && echo "LEFT-BEHIND" && exit 0
+      [ "$STAGE_TMPDIR" = "$_st/mnt/tmp" ] || { echo "TMPDIR=$STAGE_TMPDIR"; exit 0; }
+      printf '%s\n' "${STAGE_BOOTC_ARGS[*]}"
+    ) > "$_st/out" 2>&1
+    _ck "staging image is unlinked"   "$(cat "$_st/out")" "--skip-finalize"
+    rm -rf "$_st"
     echo "$_p $_f" > /tmp/apex-scratch-counts
 )
 read -r _sp _sf < /tmp/apex-scratch-counts 2>/dev/null || { _sp=0; _sf=1; }
@@ -268,17 +341,38 @@ pass=$((pass + _sp)); fail=$((fail + _sf))
 rm -f "$_fns" /tmp/apex-scratch-counts
 fi
 
-# The refusal a machine with nowhere to stage must get. Asserted on the shipped
-# text because the whole point is that the user is told what to do about it —
-# "There is nowhere to put the download" with the offline ISO named as the way
-# out. A silent fallback to RAM is the bug this replaced.
-for _want in "There is nowhere to put the download" \
-             "Nothing has been erased" \
-             "full offline ISO"; do
-    if grep -qF "$_want" "$ENGINE"; then
-        printf 'PASS  %-30s\n' "refusal names: ${_want:0:22}"; pass=$((pass+1))
+# What the engine must and must not say about staging.
+#
+# The refusal these three assertions used to guard — "There is nowhere to put
+# the download", with "the full offline ISO" named as the way out — was a dead
+# end: that ISO has never been published, and on the commonest machine this
+# installer meets there was no other way forward either. It is GONE, and its
+# absence is asserted, because reintroducing it would put the dead end back.
+for _gone in "There is nowhere to put the download" \
+             "Use the full offline ISO. It carries the OS and needs no staging at all."; do
+    if grep -qF "$_gone" "$ENGINE"; then
+        printf 'FAIL  %-30s the dead-end refusal is back in the engine\n' "no dead end: ${_gone:0:18}"; fail=$((fail+1))
     else
-        printf 'FAIL  %-30s missing from the engine\n' "refusal names: ${_want:0:22}"; fail=$((fail+1))
+        printf 'PASS  %-30s\n' "no dead end: ${_gone:0:18}"; pass=$((pass+1))
+    fi
+done
+# And what must be there instead.
+#
+#   * the reassurance the external-scratch path can still honestly give;
+#   * the warning the fallback path must give in its place, because there the
+#     download and the destruction are the same step;
+#   * the reachability probe that is the last free check before the wipe;
+#   * --skip-finalize, without which a completely successful staged install
+#     reports as a failure (the loop device holds a writable fd, so bootc's
+#     closing remount-read-only fails with EBUSY).
+for _want in "Nothing has been erased" \
+             "downloads onto it as it goes" \
+             "skopeo inspect --raw" \
+             "--skip-finalize"; do
+    if grep -qF -- "$_want" "$ENGINE"; then
+        printf 'PASS  %-30s\n' "engine says: ${_want:0:22}"; pass=$((pass+1))
+    else
+        printf 'FAIL  %-30s missing from the engine\n' "engine says: ${_want:0:22}"; fail=$((fail+1))
     fi
 done
 
