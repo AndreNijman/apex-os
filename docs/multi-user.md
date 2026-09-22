@@ -93,12 +93,23 @@ surface for every account after the first; the first is still always an
 administrator, which is correct for a personal machine and is not a choice the
 installer offers to make differently.
 
-**There is no fast user switching.** APEX's power menu offers Shutdown, Reboot,
-Log Out, Lock, Suspend and the Windows/Gaming boot targets, and no
-"Switch User". greetd runs one session at a time on one VT, so switching users
-today means logging out. The per-account isolation a second user needs is real
-and tested — separate agents, separate credentials, separate scratch, separate
-paired devices — but the *switch* is not built.
+**Fast user switching is built.** `apex user switch` is the surface, and it
+covers two operations that share nothing but a noun, which is why `--list` says
+which one a given target would take:
+
+- **The target is already logged in.** Their session is on another VT of this
+  seat with its processes and agents alive, so the switch is `loginctl activate`
+  and it is instant. This is the only path that earns the word *fast*.
+- **The target is not logged in.** There is nothing to activate, so a login
+  screen has to appear somewhere that is not this user's VT. greetd has no
+  notion of a second seat and its VT is fixed at startup — greetd(5): "The
+  specific VT is evaluated at startup, and does not change during the execution
+  of greetd" — so a second greetd instance is started on another VT
+  (`apex-switch-greeter@.service`, with a narrowly scoped sudoers rule).
+
+The per-account isolation a second user needs was already real and tested —
+separate agents, credentials, scratch and paired devices. This adds the switch
+on top of it.
 
 ## Disposable guests
 
