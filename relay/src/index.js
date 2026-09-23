@@ -44,7 +44,7 @@
 // are still there — see `waiting()`.
 
 import { DurableObject } from "cloudflare:workers";
-import { NOTICE, decide, refusal, target } from "./room.js";
+import { NOTICE, UPGRADES_PER_MINUTE, decide, frameVerdict, refusal, roomHasSpace, target } from "./room.js";
 
 export default {
   /**
@@ -71,6 +71,18 @@ export default {
     if (request.headers.get("upgrade")?.toLowerCase() !== "websocket") {
       const r = refusal(426, "this endpoint speaks WebSocket only");
       return new Response(r.body, { status: r.status, headers: r.headers });
+    }
+
+    // Per client IP, before a Durable Object is ever woken: opening rooms is
+    // the cheap thing an abuser would do in bulk. No binding (an old config,
+    // `wrangler dev` without it) means no limit rather than a broken relay.
+    if (env.RATE_LIMIT) {
+      const key = request.headers.get("cf-connecting-ip") ?? "unknown";
+      const { success } = await env.RATE_LIMIT.limit({ key });
+      if (!success) {
+        const r = refusal(429, `more than ${UPGRADES_PER_MINUTE} connections a minute from one address`);
+        return new Response(r.body, { status: r.status, headers: r.headers });
+      }
     }
 
     // One object per rendezvous id, addressed by name. Deterministic, so both
@@ -129,6 +141,12 @@ export class RelayRoom extends DurableObject {
       return new Response(r.body, { status: r.status, headers: r.headers });
     }
 
+    // A cap on live sockets per rendezvous, so one id cannot pin an unbounded
+    // number of them in this object (MAX_SOCKETS_PER_ROOM in room.js).
+    if (!roomHasSpace(this.ctx.getWebSockets().filter(isOpen).length)) {
+      const r = refusal(503, "this rendezvous has too many connections");
+      return new Response(r.body, { status: r.status, headers: r.headers });
+    }
     const verdict = decide(asked.role, this.waiting() !== null);
     if (!verdict.ok) {
       // Before the upgrade, so it is a status a client can read rather than a
@@ -216,6 +234,16 @@ export class RelayRoom extends DurableObject {
    * @param {ArrayBuffer | string} message
    */
   async webSocketMessage(ws, message) {
+    // Text is the relay's own vocabulary and a client never sends it; copying
+    // one would let an end forge the relay's notices to its peer. Oversized
+    // binary is not a Noise message. Either way: tell the peer, close this end
+    // with the code that says why (frameVerdict in room.js).
+    const frame = frameVerdict(message);
+    if (!frame.ok) {
+      this.partnerLost(ws);
+      ws.close(frame.code, frame.why);
+      return;
+    }
     const state = ws.deserializeAttachment();
     if (!state || state.peer === null) {
       // A client that sends payload before it has been told it is paired is

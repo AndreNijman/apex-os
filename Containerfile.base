@@ -412,7 +412,7 @@ RUN set -eux; \
     test ! -e /usr/lib/systemd/user/default.target.wants/apex-agentd.service; \
     # APEX Remote: enabled for every account, and never for the greeter.
     test -s /usr/lib/systemd/user/apex-remoted.service; \
-    grep -q '^ExecStart=/usr/bin/apex-remoted$' /usr/lib/systemd/user/apex-remoted.service; \
+    grep -qx 'ExecStart=/usr/bin/apex-remoted --relay wss://apex-relay.andrenijman.com' /usr/lib/systemd/user/apex-remoted.service; \
     test -L /etc/systemd/user/default.target.wants/apex-remoted.service; \
     grep -qx 'ConditionUser=!greetd' /usr/lib/systemd/user/apex-remoted.service; \
     # getifaddrs() needs a netlink socket; without it every pairing code has

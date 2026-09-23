@@ -44,7 +44,16 @@ ConditionUser=!greetd
 
 [Service]
 Type=simple
-ExecStart=/usr/bin/apex-remoted
+# The relay is on by default (Andre, 2026-09-23): a paired phone reaches this
+# machine from anywhere, not only from this network. It is APEX's own
+# Cloudflare Worker (relay/ in apex-os). It carries Noise ciphertext it cannot
+# read, and sees both addresses, when a session runs and how much data moves —
+# `apex remote status` and `apex remote pair` say so. To stay LAN-only:
+#   systemctl --user edit apex-remoted
+#     [Service]
+#     ExecStart=
+#     ExecStart=/usr/bin/apex-remoted
+ExecStart=/usr/bin/apex-remoted --relay wss://apex-relay.andrenijman.com
 
 # The service refuses to start unless its own cgroup says it is a user
 # service, because `apex-agentd` classifies a caller from that cgroup and a

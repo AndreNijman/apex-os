@@ -31,6 +31,13 @@
   // frames itself, which is the behaviour src/index.js is written against.
   "compatibility_date": "2026-04-07",
 
+  // Upgrades per client IP per minute (UPGRADES_PER_MINUTE in src/room.js).
+  // Enforced at the edge before a Durable Object wakes; a 429 makes a desktop
+  // back off (2 s → 60 s), and a healthy one never comes near it.
+  "ratelimits": [
+    { "name": "RATE_LIMIT", "namespace_id": "5201", "simple": { "limit": 60, "period": 60 } }
+  ],
+
   "durable_objects": {
     "bindings": [{ "name": "ROOM", "class_name": "RelayRoom" }]
   },
@@ -40,5 +47,29 @@
   // way. The migration is still required for the class to exist.
   "migrations": [{ "tag": "v1", "new_sqlite_classes": ["RelayRoom"] }],
 
-  "observability": { "enabled": true }
+  "observability": { "enabled": true },
+
+  // `apex secret use cloudflare cloudflare.wrangler.deploy apex-remote-relay`
+  // always passes `--env production`. Without this section that deployed a NEW
+  // worker, "apex-remote-relay-production" (2026-09-23, since removed by hand);
+  // this names the live one. Bindings are not inherited by an environment, so
+  // they are restated; `routes: []` keeps the custom domain where it is (the
+  // brokered token cannot manage the zone's routes, and does not need to);
+  // workers_dev off means no second public address.
+  //
+  // The broker runs wrangler in the PROJECT ROOT, so deploying this way needs
+  // this file mirrored at the repo root with "main": "relay/src/index.js" —
+  // kept local and untracked, alongside the untracked apex.toml that binds the
+  // account. See README.md.
+  "env": {
+    "production": {
+      "name": "apex-remote-relay",
+      "workers_dev": false,
+      "routes": [],
+      "durable_objects": { "bindings": [{ "name": "ROOM", "class_name": "RelayRoom" }] },
+      "ratelimits": [
+        { "name": "RATE_LIMIT", "namespace_id": "5201", "simple": { "limit": 60, "period": 60 } }
+      ]
+    }
+  }
 }

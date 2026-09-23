@@ -179,6 +179,14 @@ fn pair(text: bool) -> Result<i32> {
                 "The code carries this machine's public key, so the phone that scans it cannot \
                  be talked into trusting a different machine."
             );
+            // With a relay the code also names it, and pairing is the moment to
+            // say what its operator can see — the same sentence `status` prints.
+            if let Ok(Reply::Status { relay: Some(_), .. }) = call(&Request::Status) {
+                eprintln!(
+                    "Away from this network the phone connects {}.",
+                    apex_remote_core::rendezvous::Path::Relay.disclosure()
+                );
+            }
             Ok(0)
         }
         Reply::Error { message } => {

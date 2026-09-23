@@ -21,7 +21,12 @@ Five verbs.
 
 APEX Remote is **on by default** for every account (since 2026-09-23): the
 image enables `apex-remoted` for all user managers, except the login screen's
-own `greetd` account, so pairing from Settings needs no setup step. This verb
+own `greetd` account, so pairing from Settings needs no setup step. It uses
+APEX's relay, `wss://apex-relay.andrenijman.com`, so a paired phone reaches the
+machine from any network; the relay carries encrypted bytes it cannot read, and
+sees both addresses and when and how much data moves (`apex remote status`
+prints this). For LAN-only, override `ExecStart=` with
+`systemctl --user edit apex-remoted` and drop `--relay`. This verb
 turns it back on for an account where it was switched off —
 `systemctl --user enable --now apex-remoted`, the same shape as
 `apex agent enable`. `systemctl --user disable --now apex-remoted` turns it off.
