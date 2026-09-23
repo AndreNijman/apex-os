@@ -355,7 +355,10 @@ Item {
     Timer {
         id: wallpaperDebounce
         interval: 400
-        onTriggered: if (!wallpaperProc.running) wallpaperProc.running = true
+        onTriggered: {
+            if (!wallpaperProc.running) wallpaperProc.running = true
+            if (!accentProc.running) accentProc.running = true
+        }
     }
 
     Process {
@@ -380,6 +383,30 @@ Item {
             onRead: function(line) {
                 var p = line.trim()
                 if (p !== "") ctx.wallpaperPath = p
+            }
+        }
+    }
+
+    // ── Accent (the user's own, from their wallpaper) ─────────────
+    // Published beside the wallpaper by /usr/libexec/apex-greet-wallpaper,
+    // which takes it from APEX Shell's matugen output. Empty means "none
+    // published yet", and the edition colour in shell.qml is used instead.
+    // Validated again here: the file is root-owned, but a colour that is not a
+    // colour must never reach a binding.
+    property string accent: ""
+    Process {
+        id: accentProc
+        running: true
+        environment: ({ "AG_USER": ctx.username })
+        command: ["sh", "-c",
+            "u=\"${AG_USER:-}\";" +
+            " [ -n \"$u\" ] || u=\"$(cat /var/lib/apex-greet/last-user 2>/dev/null)\";" +
+            " case \"$u\" in ''|.*|*[!A-Za-z0-9._-]*) exit 0 ;; esac;" +
+            " head -c 16 \"/var/lib/apex-greet/accents/$u\" 2>/dev/null; echo"]
+        stdout: SplitParser {
+            onRead: function(line) {
+                var c = line.trim()
+                ctx.accent = /^#[0-9a-fA-F]{6}$/.test(c) ? c : ""
             }
         }
     }

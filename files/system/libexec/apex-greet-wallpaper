@@ -159,3 +159,31 @@ for stale in jpg png webp; do
 done
 
 say "published ${src} -> ${DEST_DIR}/${user}.${ext} (${size} bytes)"
+
+# ── The accent, so the login screen matches the desktop ──────────────────────
+# matugen has already run by the time APEX Shell calls this (the wallpaper
+# pipeline runs it first), so ~/.cache/apex-shell/colors.json holds the accent
+# derived from the wallpaper just published. The greeter paints its logo and
+# every focus outline with it; without this it used a fixed per-edition colour
+# that matched no wallpaper at all.
+#
+# Same security argument as the image above: the read is done as the caller,
+# capped at 4 KiB, and all that leaves is ONE colour that must match
+# ^#[0-9a-fA-F]{6}$ — nothing else in the file is carried over, so there is no
+# JSON parser in root's path and nothing for the greeter to misinterpret.
+ACCENT_DIR="${STATE_DIR}/accents"
+colors="${home}/.cache/apex-shell/colors.json"
+accent="$(setpriv --reuid="${uid}" --regid="${gid}" --clear-groups -- \
+            /usr/bin/head -c 4096 -- "${colors}" 2>/dev/null \
+          | grep -oE '"active"[[:space:]]*:[[:space:]]*"#[0-9a-fA-F]{6}"' \
+          | grep -oE '#[0-9a-fA-F]{6}' | head -n1 || true)"
+if [ -n "${accent}" ]; then
+    mkdir -p "${ACCENT_DIR}"; chmod 0755 "${ACCENT_DIR}"
+    atmp="$(mktemp "${ACCENT_DIR}/.publish.XXXXXX")"
+    printf '%s\n' "${accent}" > "${atmp}"
+    chmod 0644 "${atmp}"
+    mv -f "${atmp}" "${ACCENT_DIR}/${user}"
+    say "published accent ${accent} -> ${ACCENT_DIR}/${user}"
+else
+    say "no accent in ${colors} yet; the login screen keeps its default colour"
+fi
