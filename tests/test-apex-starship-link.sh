@@ -22,7 +22,7 @@ finish() { printf '\napex starship-link: %d passed, %d failed\n' "$pass" "$fail"
 
 BLOCK="${WORK}/block.sh"
 sed -n '/^STARSHIP_CACHE=/,/^elif \[ -f "\${STARSHIP_TMPL}" \]; then$/p' "$FIRSTRUN" | sed '$d' > "$BLOCK"
-echo fi >> "$BLOCK"
+echo "fi" >> "$BLOCK"
 if grep -q 'ln -s "\${STARSHIP_CACHE}"' "$BLOCK" && bash -n "$BLOCK"; then
     ok "the starship block is found in apex-shell-firstrun"
 else
