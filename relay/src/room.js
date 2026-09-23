@@ -111,3 +111,53 @@ export function decide(role, waiting) {
 export function refusal(status, why) {
   return { status, body: why + "\n", headers: { "content-type": "text/plain; charset=utf-8" } };
 }
+
+// ── Limits (P1-052 §6: "no rate limiting and no connection cap") ────────────
+//
+// A room is one waiting desktop plus one socket pair per attached device: the
+// desktop re-arms after each attach. Sixteen sockets is eight devices on one
+// machine, far past anyone's phone-and-tablet, and it stops one rendezvous id
+// from pinning an unbounded number of sockets in a single Durable Object.
+export const MAX_SOCKETS_PER_ROOM = 16;
+
+// The carried stream is `[u32 length][Noise ciphertext]`, and a Noise message
+// is at most 65535 bytes, so a real binary frame is never much over 64 KiB. A
+// quarter of a mebibyte leaves room for any framing either end ever batches
+// while refusing a peer that tries to push megabytes through one message.
+export const MAX_FRAME_BYTES = 256 * 1024;
+
+// Per client IP, upgrades per minute — enforced by the RATE_LIMIT binding in
+// wrangler.jsonc, so the number is stated once there and mirrored here for the
+// tests and the refusal text. A desktop re-arms once per attached device and
+// backs off 2 s → 60 s on any failure, so a healthy machine stays far under it.
+export const UPGRADES_PER_MINUTE = 60;
+
+/**
+ * May one more socket join a room that already holds `open` live sockets?
+ * @param {number} open
+ */
+export function roomHasSpace(open) {
+  return open < MAX_SOCKETS_PER_ROOM;
+}
+
+/**
+ * What to do with a frame a client sent.
+ *
+ * Text is the RELAY's vocabulary ({"relay":"waiting"} and friends) and a client
+ * never sends one; copying a client's text frame to its peer would let one end
+ * forge the relay's own notices to the other. Oversized binary is refused
+ * rather than copied. Either way the socket is closed with the RFC 6455 code
+ * that says why.
+ *
+ * @param {string | ArrayBuffer} message
+ * @returns {{ ok: true } | { ok: false, code: number, why: string }}
+ */
+export function frameVerdict(message) {
+  if (typeof message === "string") {
+    return { ok: false, code: 1003, why: "clients send binary frames only" };
+  }
+  if (message.byteLength > MAX_FRAME_BYTES) {
+    return { ok: false, code: 1009, why: "frame too large" };
+  }
+  return { ok: true };
+}
