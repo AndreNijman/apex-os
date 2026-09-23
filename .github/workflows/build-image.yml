@@ -406,8 +406,11 @@ jobs:
           [[ "$REV" =~ ^[0-9a-f]{40}$ ]] || decide true "published core revision '$REV' is not a commit sha"
           git cat-file -e "$REV^{commit}" 2>/dev/null \
             || decide true "published core revision $REV is not in this repository's history"
-          git merge-base --is-ancestor "$REV" "$SHA" 2>/dev/null \
-            || decide true "published core revision $REV is not an ancestor of $SHA"
+          # Deliberately NO ancestry test. The tree diff below asks the whole
+          # question wherever REV sits in the graph, and requiring ancestry would
+          # rebuild core on every dispatch of the integration branch: main's
+          # merge commits, which is what :core is stamped with, are never
+          # ancestors of roadmap/v2.2.
           # shellcheck disable=SC2086  # CORE_PATHS is a word list on purpose
           changed="$(git diff --name-only "$REV" "$SHA" -- $CORE_PATHS)" \
             || decide true "could not diff $REV..$SHA"

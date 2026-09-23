@@ -24,7 +24,10 @@
 #    * published core already at / after the last core change -> REUSE
 #      -> fails a gate that simply rebuilds every time, the other mis-scoping
 #    * every doubt rebuilds: no image, no revision label, a non-sha label, a
-#      sha not in history, a sha not an ancestor, a registry that never answers
+#      sha not in history, a registry that never answers
+#    * a published sha that is not an ancestor (main's merge commit, seen from
+#      a dispatch of the integration branch) is judged by its TREE: reuse when
+#      core's inputs match, rebuild when they differ
 #    * the legacy-name fallback, force_core, the push filter and the weekly
 #      upstream-digest comparison still behave as before
 #    * the step's CORE_PATHS equals the path filter's `core:` list, so the two
@@ -210,7 +213,8 @@ chmod +x "$WORK/bin/skopeo"
 #   c2  Containerfile.kernel + tests/ only <- the last push
 #   c3  kernel/kernel.pin changes
 #   c4  docs only
-#   side  a commit off c0 that is NOT an ancestor of anything above
+#   side-old, side  commits off c0 that are NOT ancestors of anything above;
+#                   side-old has c0's core inputs, side has c4's
 R="$WORK/repo"
 (
     set -e
@@ -232,14 +236,16 @@ R="$WORK/repo"
     git -C "$R" add -A && git -C "$R" commit -qm c3
     echo 'd' > "$R/docs/d.md"
     git -C "$R" add -A && git -C "$R" commit -qm c4
-    # Same core inputs as c4, so only the ancestry test can reject it.
+    # side-old: off c0 with c0's core inputs. side: then given c4's.
     git -C "$R" checkout -q -b side HEAD~4
+    echo 's' > "$R/side.txt"
+    git -C "$R" add -A && git -C "$R" commit -qm side-old
     git -C "$R" checkout -q main -- Containerfile.core kernel
     git -C "$R" add -A && git -C "$R" commit -qm side
     git -C "$R" checkout -q main
 ) >/dev/null 2>&1 || { echo "FATAL: fixture build failed"; exit 1; }
 c() { git -C "$R" rev-parse "$1"; }
-C0="$(c main~4)"; C1="$(c main~3)"; C2="$(c main~2)"; C3="$(c main~1)"; C4="$(c main)"; SIDE="$(c side)"
+C0="$(c main~4)"; C1="$(c main~3)"; C2="$(c main~2)"; C3="$(c main~1)"; C4="$(c main)"; SIDE="$(c side)"; SIDE_OLD="$(c side~1)"
 mapfile -t FILTER < "$WORK/filter-core"
 
 # gate EVENT BEFORE SHA FORCE CORE_META LEGACY_META UPSTREAM
@@ -321,8 +327,13 @@ expect "published core revision is 'dev' -> REBUILD" \
     'rc=0 core=true' "$(gate push "$C3" "$C4" false "dev|$D1" FAIL "$D1")" 'is not a commit sha'
 expect 'published core revision is not in this history -> REBUILD' \
     'rc=0 core=true' "$(gate push "$C3" "$C4" false "deadbeefdeadbeefdeadbeefdeadbeefdeadbeef|$D1" FAIL "$D1")" 'not in this repository'
-expect 'published core revision exists but is not an ancestor (rewritten history) -> REBUILD' \
-    'rc=0 core=true' "$(gate push "$C3" "$C4" false "$SIDE|$D1" FAIL "$D1")" 'not an ancestor'
+# A dispatch of the integration branch: :core is stamped with a MAIN merge
+# commit, which is never an ancestor of the branch. Identical core inputs must
+# reuse; an ancestry requirement would rebuild core on every such dispatch.
+expect 'published core stamped with a non-ancestor sha, identical core inputs -> REUSE' \
+    'rc=0 core=false' "$(gate workflow_dispatch '' "$C4" false "$SIDE|$D1" FAIL "$D1")" 'no core-relevant change since published core'
+expect 'published core stamped with a non-ancestor sha, differing core inputs -> REBUILD' \
+    'rc=0 core=true' "$(gate workflow_dispatch '' "$C4" false "$SIDE_OLD|$D1" FAIL "$D1")" 'since published core'
 expect 'no published core readable under either name -> REBUILD' \
     'rc=0 core=true' "$(gate push "$C3" "$C4" false FAIL FAIL "$D1")" 'no published core could be read'
 
