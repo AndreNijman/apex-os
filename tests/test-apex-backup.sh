@@ -407,7 +407,16 @@ printf '%s' "$swapped" | grep -q "a declaration and never an authority" \
     || { bad "its refusal says why a file the project owns is not enough"; printf '      %s\n' "$swapped"; }
 # And a typo is caught before anything is written, not at the restore that
 # needed it.
-sed "s|^recipient = .*|recipient = \"${RECIPIENT%?}X\"|" "${PROJ}/apex.toml" > "${PROJ}/apex.toml.typo"
+#
+# The typo must be a DIFFERENT character. An age recipient is bech32, which is
+# case-insensitive and has `x` in its alphabet, so the old `…X` substitution was
+# the same key whenever the last character already was `x` — about one run in
+# 32, and the run then correctly succeeded and this assertion failed in CI.
+# `q` and `p` are both bech32 characters, so the result stays well-formed and
+# only the checksum is wrong.
+_last="$(printf '%s' "$RECIPIENT" | tail -c 1 | tr '[:upper:]' '[:lower:]')"
+if [ "$_last" = "q" ]; then _typo_char=p; else _typo_char=q; fi
+sed "s|^recipient = .*|recipient = \"${RECIPIENT%?}${_typo_char}\"|" "${PROJ}/apex.toml" > "${PROJ}/apex.toml.typo"
 mv "${PROJ}/apex.toml.typo" "${PROJ}/apex.toml"
 typo="$("$APEX" backup run --project "$PROJ" 2>&1)"
 [ $? -ne 0 ] && ok "a one-character typo in the recipient refuses the run" \
