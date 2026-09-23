@@ -162,7 +162,43 @@ fn call(req: &Request) -> Result<Reply> {
     serde_json::from_str(reply.trim()).with_context(|| format!("unreadable reply: {reply}"))
 }
 
+/// Start the daemon if it is not answering, and wait for it to.
+///
+/// APEX Remote is enabled for every account, but pairing must not depend on
+/// it having come up: a unit that crash-looped once (a port another account
+/// held, before that was fixed) stays down until something starts it. So the
+/// commands a person reaches for to pair start it themselves. `start`, not
+/// `enable` — whether it runs at login is the image's decision, not this
+/// command's side effect.
+fn ensure_running() -> bool {
+    let socket = socket_path();
+    if UnixStream::connect(&socket).is_ok() {
+        return true;
+    }
+    let _ = std::process::Command::new("systemctl")
+        .args(["--user", "reset-failed", "apex-remoted"])
+        .output();
+    let _ = std::process::Command::new("systemctl")
+        .args(["--user", "start", "apex-remoted"])
+        .output();
+    wait_for_socket(&socket)
+}
+
+/// Whether the daemon answers on `socket` within three seconds.
+fn wait_for_socket(socket: &std::path::Path) -> bool {
+    (0..30).any(|_| {
+        if UnixStream::connect(socket).is_ok() {
+            return true;
+        }
+        std::thread::sleep(std::time::Duration::from_millis(100));
+        false
+    })
+}
+
 fn pair(text: bool) -> Result<i32> {
+    // Best effort: if it still cannot be reached, `call` below says so, with
+    // the socket path, exactly as before.
+    ensure_running();
     match call(&Request::Pair)? {
         Reply::Offer { qr, expires_ms } => {
             let left = expires_ms.saturating_sub(apex_remote_core::now_ms()) / 1000;
@@ -379,13 +415,7 @@ fn enable() -> Result<i32> {
     // silent `systemctl`, both happened while the daemon was dying on a port
     // in use. So wait for it to answer, and when it does not, show its own
     // last words rather than systemctl's.
-    let running = out.status.success() && {
-        let socket = socket_path();
-        (0..30).any(|_| {
-            std::thread::sleep(std::time::Duration::from_millis(100));
-            UnixStream::connect(&socket).is_ok()
-        })
-    };
+    let running = out.status.success() && wait_for_socket(&socket_path());
     if !running {
         let systemctl = String::from_utf8_lossy(&out.stderr).trim().to_string();
         let journal = std::process::Command::new("journalctl")
