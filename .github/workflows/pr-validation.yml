@@ -3253,6 +3253,12 @@ jobs:
       # no compositor on the runner, but the guard is set anyway — the bug it
       # exists for was a test that reconfigured the live desktop it ran on, and
       # a developer running this locally is exactly that situation.
+      # The login screen's accent: the reader prints the colour and then an
+      # empty line, and a per-line handler reset the accent on the empty one.
+      - name: Run greeter accent assertions
+        if: ${{ !cancelled() }}
+        run: ./tests/test-apex-greet-accent.sh
+
       - name: Run display-settings assertions
         if: ${{ !cancelled() }}
         env:
