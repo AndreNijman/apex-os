@@ -1326,11 +1326,29 @@ pub fn verify_provenance(roots: &Roots, repo: &str, digest: &str) -> Verdict {
         // cosign puts the certificate in the layer annotations, the same place
         // as for a signature; some producers put it in the envelope's own
         // signature entry instead, so both are read.
+        //
+        // The SIGNATURE, though, is in the envelope. `cosign attest` writes the
+        // `dev.cosignproject.cosign/signature` annotation present but EMPTY —
+        // measured on the first real APEX attestation (length 0, with the
+        // certificate and chain beside it) — because a DSSE signature belongs
+        // to the envelope. Taking the empty annotation checked a zero-byte
+        // signature and refused every update as "does not verify".
+        let entry = envelope.get("signatures").and_then(Value::as_array).and_then(|a| a.first());
+        let env_sig = entry.and_then(|e| e.get("sig")).and_then(Value::as_str);
         let (cert, chain, sig_b64) = match annotations(layer) {
-            Some(a) => (a.certificate, a.chain, a.signature),
+            Some(a) => match attestation_signature(&a.signature, env_sig) {
+                Some(s) => (a.certificate, a.chain, s),
+                None => {
+                    last = Verdict::CouldNotRun(
+                        "the attestation's signature annotation is empty and its envelope \
+                         carries no signature"
+                            .to_string(),
+                    );
+                    continue;
+                }
+            },
             None => {
-                let entry = envelope.get("signatures").and_then(Value::as_array).and_then(|a| a.first());
-                let sig = entry.and_then(|e| e.get("sig")).and_then(Value::as_str);
+                let sig = env_sig;
                 let cert = entry.and_then(|e| e.get("cert")).and_then(Value::as_str);
                 match (sig, cert) {
                     (Some(s), Some(c)) => (c.to_string(), None, s.to_string()),
@@ -1366,6 +1384,16 @@ pub fn verify_provenance(roots: &Roots, repo: &str, digest: &str) -> Verdict {
         last = v;
     }
     last
+}
+
+/// Which signature an attestation layer's check uses: the annotation when it
+/// holds one, else the DSSE envelope's. `cosign attest` leaves the annotation
+/// present and empty. `None` when neither has one.
+fn attestation_signature(annotation: &str, envelope: Option<&str>) -> Option<String> {
+    if !annotation.is_empty() {
+        return Some(annotation.to_string());
+    }
+    envelope.filter(|s| !s.is_empty()).map(str::to_string)
 }
 
 /// Both checks for one digest.
@@ -2165,6 +2193,15 @@ mod tests {
     }
 
     // ── the encodings ───────────────────────────────────────────────────────
+
+    #[test]
+    fn an_empty_signature_annotation_falls_back_to_the_envelope_signature() {
+        // The shape of the first real APEX attestation: annotation present, 0 bytes.
+        assert_eq!(attestation_signature("", Some("MEUCIQ")), Some("MEUCIQ".to_string()));
+        assert_eq!(attestation_signature("MEYCIQ", Some("MEUCIQ")), Some("MEYCIQ".to_string()));
+        assert_eq!(attestation_signature("", Some("")), None);
+        assert_eq!(attestation_signature("", None), None);
+    }
 
     #[test]
     fn the_dsse_preauthentication_encoding_is_over_raw_bytes_and_their_lengths() {
