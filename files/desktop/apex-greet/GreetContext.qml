@@ -403,11 +403,23 @@ Item {
             " [ -n \"$u\" ] || u=\"$(cat /var/lib/apex-greet/last-user 2>/dev/null)\";" +
             " case \"$u\" in ''|.*|*[!A-Za-z0-9._-]*) exit 0 ;; esac;" +
             " head -c 16 \"/var/lib/apex-greet/accents/$u\" 2>/dev/null; echo"]
+        // Collected, and applied once the read has finished. It used to set
+        // `accent` per line, and the command prints the file (which ends in a
+        // newline) and then `echo`s another — so the second, EMPTY line reset
+        // the accent to "" immediately after the colour set it, and the login
+        // screen stayed on the edition green with the accent file correct and
+        // readable (L16, 2026-09-23). The last valid colour wins; none means
+        // none, so switching to an account with no accent still clears it.
+        property string _seen: ""
         stdout: SplitParser {
             onRead: function(line) {
                 var c = line.trim()
-                ctx.accent = /^#[0-9a-fA-F]{6}$/.test(c) ? c : ""
+                if (/^#[0-9a-fA-F]{6}$/.test(c)) accentProc._seen = c
             }
+        }
+        onExited: {
+            ctx.accent = accentProc._seen
+            accentProc._seen = ""
         }
     }
 
