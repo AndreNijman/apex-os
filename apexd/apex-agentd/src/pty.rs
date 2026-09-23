@@ -10,6 +10,7 @@ use std::ffi::{CString, OsStr, OsString};
 use std::os::unix::ffi::OsStrExt;
 use std::os::unix::io::RawFd;
 use std::path::{Path, PathBuf};
+use std::sync::{mpsc, OnceLock};
 
 use anyhow::{bail, Context, Result};
 use apex_agent_core::term::WinSize;
@@ -42,7 +43,80 @@ pub struct Spawned {
 /// from `--setenv` alone; an unconfined session is the documented escape hatch
 /// and its environment is the daemon's. Whoever narrows this must check
 /// `disposable::engine_env`, which exists because of it.
+///
+/// **The fork happens on [`spawner`]'s thread, never the caller's.** A confined
+/// session is `bwrap --die-with-parent`, which is `PR_SET_PDEATHSIG(SIGKILL)`,
+/// and Linux fires that when the THREAD that forked the process exits — not
+/// the process (prctl(2)). The daemon serves every connection on a thread of
+/// its own, so forking here from the caller had a confined session SIGKILLed
+/// the moment the client that started it hung up: `apex agent run -d`
+/// returning was enough. It was a race — a connection thread that exited
+/// before bwrap reached its `prctl` left bwrap reparented and safe — so it
+/// passed on a fast machine and failed `tests/test-secret-broker.sh` on CI
+/// with one transcript line and "killed by signal 9". apex-aid hit the same
+/// kernel rule and solved it the same way (`apex-aid/src/main.rs`,
+/// `Daemon::spawn`). `tests/spawner_thread.rs` pins it.
 pub fn spawn(
+    argv: &[String],
+    cwd: &Path,
+    env: &[(String, String)],
+    clear_env: bool,
+    no_new_privs: bool,
+    size: WinSize,
+) -> Result<Spawned> {
+    let (argv, cwd, env) = (argv.to_vec(), cwd.to_path_buf(), env.to_vec());
+    on_spawner_thread(move || spawn_here(&argv, &cwd, &env, clear_env, no_new_privs, size))
+}
+
+/// A unit of work for the spawner thread.
+type Job = Box<dyn FnOnce() + Send + 'static>;
+
+/// The one thread every session is forked from. It is started on first use
+/// and NEVER exits: its job loop reads from a channel whose sender lives in a
+/// static, so the loop has no end, and a panicking job is caught rather than
+/// allowed to unwind the thread — because that thread exiting is exactly the
+/// event that kills every session forked from it.
+fn spawner() -> Result<&'static mpsc::Sender<Job>> {
+    static SPAWNER: OnceLock<std::result::Result<mpsc::Sender<Job>, String>> = OnceLock::new();
+    SPAWNER
+        .get_or_init(|| {
+            let (tx, rx) = mpsc::channel::<Job>();
+            std::thread::Builder::new()
+                .name("apex-agentd-spawn".into())
+                .spawn(move || {
+                    for job in rx {
+                        let _ = std::panic::catch_unwind(std::panic::AssertUnwindSafe(job));
+                    }
+                })
+                .map(|_| tx)
+                .map_err(|e| format!("starting the session spawner thread: {e}"))
+        })
+        .as_ref()
+        .map_err(|e| anyhow::anyhow!("{e}"))
+}
+
+/// Run `f` on the spawner thread and wait for its result.
+///
+/// There is deliberately no fallback to running `f` here: forking from the
+/// caller's thread is the defect this exists to prevent, and a session that
+/// dies when its client hangs up is worse than one that refuses to start.
+fn on_spawner_thread<T: Send + 'static>(
+    f: impl FnOnce() -> Result<T> + Send + 'static,
+) -> Result<T> {
+    let (reply_tx, reply_rx) = mpsc::sync_channel(1);
+    spawner()?
+        .send(Box::new(move || {
+            let _ = reply_tx.send(f());
+        }))
+        .map_err(|_| anyhow::anyhow!("the session spawner thread is gone"))?;
+    reply_rx
+        .recv()
+        .map_err(|_| anyhow::anyhow!("the session spawner thread dropped the request (it panicked)"))?
+}
+
+/// [`spawn`], on the calling thread. Only [`spawn`] calls this, and only from
+/// the spawner thread.
+fn spawn_here(
     argv: &[String],
     cwd: &Path,
     env: &[(String, String)],
