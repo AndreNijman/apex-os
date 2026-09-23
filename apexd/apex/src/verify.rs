@@ -1326,11 +1326,30 @@ pub fn verify_provenance(roots: &Roots, repo: &str, digest: &str) -> Verdict {
         // cosign puts the certificate in the layer annotations, the same place
         // as for a signature; some producers put it in the envelope's own
         // signature entry instead, so both are read.
+        //
+        // The SIGNATURE, though, is in the envelope. `cosign attest` writes the
+        // `dev.cosignproject.cosign/signature` annotation present but EMPTY —
+        // measured on the first real APEX attestation (length 0, with the
+        // certificate and chain beside it) — because a DSSE signature belongs
+        // to the envelope. Taking the empty annotation checked a zero-byte
+        // signature and refused every update as "does not verify".
+        let entry = envelope.get("signatures").and_then(Value::as_array).and_then(|a| a.first());
+        let env_sig = entry.and_then(|e| e.get("sig")).and_then(Value::as_str);
         let (cert, chain, sig_b64) = match annotations(layer) {
-            Some(a) => (a.certificate, a.chain, a.signature),
+            Some(a) if !a.signature.is_empty() => (a.certificate, a.chain, a.signature),
+            Some(a) => match env_sig {
+                Some(s) => (a.certificate, a.chain, s.to_string()),
+                None => {
+                    last = Verdict::CouldNotRun(
+                        "the attestation's signature annotation is empty and its envelope \
+                         carries no signature"
+                            .to_string(),
+                    );
+                    continue;
+                }
+            },
             None => {
-                let entry = envelope.get("signatures").and_then(Value::as_array).and_then(|a| a.first());
-                let sig = entry.and_then(|e| e.get("sig")).and_then(Value::as_str);
+                let sig = env_sig;
                 let cert = entry.and_then(|e| e.get("cert")).and_then(Value::as_str);
                 match (sig, cert) {
                     (Some(s), Some(c)) => (c.to_string(), None, s.to_string()),
