@@ -337,8 +337,14 @@ The *browsing* half is the device's, and it is the Android app's (P1-053).
   Noise refuses an impostor at either end — but a public deployment would want
   a token, or Cloudflare Access in front of it, before it is given a URL that
   strangers can reach. Not done, and not pretended.
-- **No rate limiting and no connection cap.** A room is two sockets, but
-  nothing stops somebody opening rooms.
+- ~~**No rate limiting and no connection cap.**~~ **CLOSED 2026-09-23** —
+  60 upgrades per client IP per minute (Workers Rate Limiting, 429), 16 live
+  sockets per rendezvous (503), binary frames up to 256 KiB and no client text
+  frames (1009 / 1003). Deployed as version a3d5792a; verified on the live
+  domain (text frame → 1003) and the relay suite 8/8 over wss.
+- **The relay is on by default** (Andre, 2026-09-23): the unit passes
+  `--relay wss://apex-relay.andrenijman.com`. §3's "LAN-only is the shipped
+  default" no longer holds; the binary still has no default relay.
 - **Reconnect is the desktop's half only.** The daemon re-arms unasked and the
   agent runtime keeps its sessions, both asserted. A phone deciding to re-dial
   after its network changes is the Android app's job (P1-053) and is not in
