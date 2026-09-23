@@ -315,7 +315,7 @@ def hypr_monitor_line(o):
     return line
 
 
-def apply_hypr(model, dry_run):
+def apply_hypr(model, dry_run, icc=None):
     """Apply the layout to the RUNNING Hyprland.
 
     `hyprctl eval`, not `hyprctl keyword`. keyword refuses outright against a
@@ -333,8 +333,9 @@ def apply_hypr(model, dry_run):
     if eval is not understood.
     """
     notes = []
+    icc = icc or {}
     for o in model["outputs"]:
-        call = hypr_monitor_call(o)
+        call = hypr_monitor_call(o, icc.get(o["name"]))
         if dry_run:
             notes.append(f"would run: hyprctl eval {call}")
             continue
@@ -403,7 +404,7 @@ def lua_str(value):
     return '"' + str(value).replace("\\", "\\\\").replace('"', '\\"') + '"'
 
 
-def hypr_monitor_call(o):
+def hypr_monitor_call(o, icc=None):
     """One `hl.monitor` call for an output.
 
     The hyprlang form was a single comma-separated value whose meaning came from
@@ -427,10 +428,12 @@ def hypr_monitor_call(o):
         fields.append(f"transform = {t}")
     if o.get("adaptive_sync"):
         fields.append("vrr = 1")
+    if icc:
+        fields.append("icc = " + lua_str(icc))
     return "hl.monitor({ " + ", ".join(fields) + " })"
 
 
-def gen_hypr(model):
+def gen_hypr(model, icc=None):
     lines = [
         f"-- {BANNER}",
         "--",
@@ -455,7 +458,8 @@ def gen_hypr(model):
         'hl.monitor({ output = "", mode = "preferred", position = "auto", scale = 1.0 })',
         "",
     ]
-    lines += [hypr_monitor_call(o) for o in model["outputs"]]
+    icc = icc or {}
+    lines += [hypr_monitor_call(o, icc.get(o["name"])) for o in model["outputs"]]
     lines.append("")
     return "\n".join(lines)
 
@@ -500,10 +504,10 @@ def atomic_write(path, text):
     os.replace(tmp, path)
 
 
-def persist(model, live, dry_run):
+def persist(model, live, dry_run, icc=None):
     notes = []
     kanshi = gen_kanshi(model, live)
-    hypr = gen_hypr(model)
+    hypr = gen_hypr(model, icc)
     if dry_run:
         print(f"--- {KANSHI_OUT} ---\n{kanshi}")
         print(f"--- {HYPR_OUT} ---\n{hypr}")
@@ -580,6 +584,172 @@ def icc_has_vcgt(path):
         if table[12 * i:12 * i + 4] == b"vcgt":
             return True
     return False
+
+
+# ── gamut: what the panel can show vs what a profile describes ─────────────
+# A display profile says what colour space a screen HAS. Hyprland takes it at
+# its word (an `icc` rule overrides the colour-management preset), so assigning
+# "Adobe RGB" to a panel that cannot reach Adobe RGB's greens makes ordinary
+# sRGB content look washed out: it is squeezed into a gamut the panel is only
+# pretending to have. The page still lets the user choose any profile, but it
+# has to say which ones the panel can honour, and it says it from the panel's
+# own EDID chromaticities rather than from a table of guesses.
+#
+# Coverage is the share of the profile's gamut triangle that lies inside the
+# panel's, in CIE 1976 u'v' (closer to perceptual than 1931 xy). A profile the
+# panel covers to GAMUT_SUPPORTED or better is "supported".
+GAMUT_SUPPORTED = 0.90
+
+
+def _s15(b):
+    return int.from_bytes(b, "big", signed=True) / 65536.0
+
+
+def _mat_inv3(m):
+    a, b, c = m[0]
+    d, e, f = m[1]
+    g, h, i = m[2]
+    det = a * (e * i - f * h) - b * (d * i - f * g) + c * (d * h - e * g)
+    if abs(det) < 1e-12:
+        return None
+    return [[(e * i - f * h) / det, (c * h - b * i) / det, (b * f - c * e) / det],
+            [(f * g - d * i) / det, (a * i - c * g) / det, (c * d - a * f) / det],
+            [(d * h - e * g) / det, (b * g - a * h) / det, (a * e - b * d) / det]]
+
+
+def icc_primaries(path):
+    """The red, green and blue primaries an ICC display profile describes, as
+    absolute CIE xy, or None when it is not a matrix profile.
+
+    rXYZ/gXYZ/bXYZ are stored adapted to the D50 connection space; the `chad`
+    tag is the matrix that did that, so its inverse gives back the colours the
+    profile actually means. Every profile colord ships here carries one
+    (measured: all six display profiles, v4). Without it the D50 values are used
+    as they are, which errs toward reporting a slightly different gamut rather
+    than inventing an adaptation the file does not state.
+    """
+    try:
+        with open(path, "rb") as fh:
+            data = fh.read(1 << 20)
+    except OSError:
+        return None
+    if len(data) < 132 or data[36:40] != b"acsp":
+        return None
+    count = int.from_bytes(data[128:132], "big")
+    if count > 4096 or len(data) < 132 + 12 * count:
+        return None
+    tags = {}
+    for i in range(count):
+        e = data[132 + 12 * i:144 + 12 * i]
+        off, size = int.from_bytes(e[4:8], "big"), int.from_bytes(e[8:12], "big")
+        tags[e[:4]] = data[off:off + size]
+
+    def xyz(tag):
+        t = tags.get(tag, b"")
+        if len(t) < 20 or t[:4] != b"XYZ ":
+            return None
+        return [_s15(t[8 + 4 * j:12 + 4 * j]) for j in range(3)]
+
+    cols = [xyz(t) for t in (b"rXYZ", b"gXYZ", b"bXYZ")]
+    if None in cols:
+        return None
+    chad = tags.get(b"chad", b"")
+    inv = None
+    if len(chad) >= 44 and chad[:4] == b"sf32":
+        vals = [_s15(chad[8 + 4 * j:12 + 4 * j]) for j in range(9)]
+        inv = _mat_inv3([vals[0:3], vals[3:6], vals[6:9]])
+    out = []
+    for c in cols:
+        if inv:
+            c = [sum(inv[r][k] * c[k] for k in range(3)) for r in range(3)]
+        total = sum(c)
+        if total <= 0:
+            return None
+        out.append((c[0] / total, c[1] / total))
+    return out
+
+
+def edid_primaries(raw):
+    """The panel's red, green and blue primaries from EDID bytes 25-34, as CIE
+    xy, or None when the EDID has none (all zero, or no EDID at all).
+
+    Ten bits each: the high eight in bytes 27-32, the low two packed into bytes
+    25 (red, green) and 26 (blue, white).
+    """
+    if not raw or len(raw) < 35:
+        return None
+    lo_rg, lo_bw, hi = raw[25], raw[26], raw[27:33]
+
+    def c(h, lo):
+        return ((h << 2) | lo) / 1024.0
+
+    prim = [(c(hi[0], lo_rg >> 6 & 3), c(hi[1], lo_rg >> 4 & 3)),
+            (c(hi[2], lo_rg >> 2 & 3), c(hi[3], lo_rg & 3)),
+            (c(hi[4], lo_bw >> 6 & 3), c(hi[5], lo_bw >> 4 & 3))]
+    if any(y <= 0 for _, y in prim):
+        return None
+    return prim
+
+
+def _uv(p):
+    x, y = p
+    d = -2 * x + 12 * y + 3
+    return (4 * x / d, 9 * y / d)
+
+
+def _area(poly):
+    return abs(sum(poly[i][0] * poly[i - 1][1] - poly[i - 1][0] * poly[i][1]
+                   for i in range(len(poly)))) / 2.0
+
+
+def _clip(subject, clipper):
+    """Sutherland-Hodgman: the part of convex `subject` inside convex `clipper`."""
+    def ccw(poly):
+        s = sum(poly[i - 1][0] * poly[i][1] - poly[i][0] * poly[i - 1][1]
+                for i in range(len(poly)))
+        return poly if s > 0 else poly[::-1]
+
+    def inside(p, a, b):
+        return (b[0] - a[0]) * (p[1] - a[1]) - (b[1] - a[1]) * (p[0] - a[0]) >= 0
+
+    def cross(p, q, a, b):
+        x1, y1, x2, y2 = p[0], p[1], q[0], q[1]
+        x3, y3, x4, y4 = a[0], a[1], b[0], b[1]
+        den = (x1 - x2) * (y3 - y4) - (y1 - y2) * (x3 - x4)
+        if abs(den) < 1e-15:
+            return q
+        t = ((x1 - x3) * (y3 - y4) - (y1 - y3) * (x3 - x4)) / den
+        return (x1 + t * (x2 - x1), y1 + t * (y2 - y1))
+
+    out = ccw(list(subject))
+    clipper = ccw(list(clipper))
+    for i in range(len(clipper)):
+        a, b = clipper[i - 1], clipper[i]
+        inp, out = out, []
+        for j in range(len(inp)):
+            p, q = inp[j - 1], inp[j]
+            if inside(q, a, b):
+                if not inside(p, a, b):
+                    out.append(cross(p, q, a, b))
+                out.append(q)
+            elif inside(p, a, b):
+                out.append(cross(p, q, a, b))
+        if not out:
+            return []
+    return out
+
+
+def gamut_coverage(profile, panel):
+    """Share (0..1) of the profile's gamut the panel can show, or None."""
+    if not profile or not panel:
+        return None
+    prof = [_uv(p) for p in profile]
+    pan = [_uv(p) for p in panel]
+    whole = _area(prof)
+    if whole <= 0:
+        return None
+    inter = _clip(prof, pan)
+    return min(1.0, _area(inter) / whole) if len(inter) >= 3 else 0.0
 
 
 def edid_for(name):
@@ -720,6 +890,7 @@ def colour_profiles():
             "kind": rec.get("Type", ""),
             # None means "could not be read", which is not the same as "no curve".
             "vcgt": icc_has_vcgt(filename),
+            "primaries": icc_primaries(filename),
         })
     out.sort(key=lambda p: p["title"].lower())
     return out
@@ -764,6 +935,17 @@ def curve_verdict(which):
        hyprland-ctm-control-v1, a colour matrix, which is a different slot from
        the gamma LUT, so both could be live at once.
     """
+    if which == "hyprland":
+        # Hyprland loads the whole profile itself through an `icc` monitor rule,
+        # and with render:icc_vcgt_enabled (default on) also sends its vcgt to
+        # KMS. The profiles colord ships have no vcgt, so for them the effect is
+        # the colour description only — which is the part that changes colours.
+        return {
+            "loader": "Hyprland",
+            "lut_shared_with_night_light": False,
+            "reason": "Hyprland applies the assigned profile to the screen itself "
+                      "(an icc monitor rule), and loads its curve when it has one",
+        }
     loader = next((t for t in ("xcalib", "dispwin", "wl-gammactl")
                    if shutil.which(t)), None)
     shared = which in ("labwc", "niri", "sway", "unknown")
@@ -782,6 +964,26 @@ def curve_verdict(which):
              "; Hyprland's night light is a colour matrix (hyprland-ctm-control-v1), "
              "a different slot from the gamma LUT, so a curve could coexist with it"),
     }
+
+
+def assigned_icc(names):
+    """{output: ICC filename} for every output colord has a default profile
+    for, keeping only files that exist. Empty when colord is not answering.
+
+    This is what makes an assignment DO something on Hyprland: the filename
+    goes into that output's `hl.monitor` rule as `icc = ...`, which Hyprland
+    loads with lcms2 as the display's colour description.
+    """
+    if not colord_available():
+        return {}
+    out = {}
+    for name in names:
+        recs = _colormgr_records(["device-get-default-profile",
+                                  device_id(name, edid_for(name))])
+        f = recs[0].get("Filename", "") if recs else ""
+        if f and os.path.isabs(f) and os.path.isfile(f):
+            out[name] = f
+    return out
 
 
 def colour_state(live=None):
@@ -811,9 +1013,21 @@ def colour_state(live=None):
                                 "kind": rec.get("Type", ""),
                                 "vcgt": icc_has_vcgt(rec["Filename"])}
         mfg, model, serial = edid_identity(raw)
+        panel = edid_primaries(raw)
+        support = {}
+        for p in profiles:
+            cov = gamut_coverage(p.get("primaries"), panel)
+            support[p["id"]] = {
+                "coverage": None if cov is None else round(cov, 3),
+                # Unknown is not unsupported: a panel with no chromaticities
+                # (a headless output, a blank EDID) greys nothing out.
+                "supported": cov is None or cov >= GAMUT_SUPPORTED,
+            }
         outs.append({
             "name": name,
             "device": dev,
+            "gamut": panel,
+            "support": support,
             "make": mfg,
             "model": model,
             "serial": serial,
@@ -835,7 +1049,7 @@ def colour_state(live=None):
     }
 
 
-def colour_assign(name, profile, dry_run=False):
+def colour_assign(name, profile, dry_run=False, model_path=None):
     """Give an output a profile, creating its colord device if need be.
 
     Returns (rc, notes). Every failure is named: a settings page that says
@@ -884,7 +1098,46 @@ def colour_assign(name, profile, dry_run=False):
     if wanted["vcgt"] is False:
         notes.append("this profile carries no vcgt, so there is no curve to load "
                      "even where one could be")
+    cov = gamut_coverage(wanted.get("primaries"), edid_primaries(raw))
+    if cov is not None and cov < GAMUT_SUPPORTED:
+        notes.append("you can apply this, but your panel does not properly support "
+                     "it: it can show about %d%% of %s's colours, so colours will "
+                     "look duller or shifted" % (round(cov * 100), wanted["title"]))
+    notes += hypr_push_icc(name, wanted["filename"], model_path or MODEL_PATH)
     return 0, notes
+
+
+def hypr_push_icc(name, filename, model_path):
+    """Make a colord assignment take effect on Hyprland, live and at login.
+
+    Only Hyprland: it is the one session here that loads an ICC profile itself
+    (an `icc` monitor rule, lcms2). The live call is the output's FULL rule —
+    a bare `hl.monitor({ output, icc })` replaces the rule and would reset the
+    mode, position and scale to defaults.
+    """
+    if compositor() != "hyprland":
+        return ["on this session nothing applies an ICC profile to the screen; "
+                "it is recorded for applications that read colord"]
+    model, _ = load_model(model_path)
+    live = outputs()
+    entry = next((o for o in model["outputs"] if o["name"] == name), None)
+    if entry is None:
+        # Not in the saved layout: describe it from what is live now, and add it
+        # to what is persisted so the profile survives a login too.
+        entry = next((dict(o) for o in live if o.get("name") == name), None)
+        if entry is None:
+            return ["%s is not connected; the profile applies when it is" % name]
+        entry.pop("modes", None)
+        model = {"outputs": model["outputs"] + [entry]}
+    icc = assigned_icc([o["name"] for o in model["outputs"]])
+    icc[name] = filename
+    notes = []
+    if os.environ.get("APEX_DISPLAY_NO_LIVE"):
+        notes.append("APEX_DISPLAY_NO_LIVE is set; the live screen was not changed")
+    else:
+        notes += apply_hypr({"outputs": [entry]}, False, icc)
+    notes += persist(model, live, False, icc)
+    return notes
 
 
 # ── self-test ───────────────────────────────────────────────────────────────
@@ -903,6 +1156,45 @@ SAMPLE = {
 
 def self_test():
     rc = 0
+    srgb = [(0.64, 0.33), (0.30, 0.60), (0.15, 0.06)]
+    narrow = [(0.60, 0.36), (0.35, 0.57), (0.15, 0.11)]
+    adobe = [(0.64, 0.33), (0.21, 0.71), (0.15, 0.06)]
+    for label, got, want in (
+            ("a gamut covers itself fully", gamut_coverage(srgb, srgb), lambda c: c > 0.999),
+            ("a narrow panel does not cover sRGB", gamut_coverage(srgb, narrow), lambda c: c < GAMUT_SUPPORTED),
+            ("sRGB covers less of Adobe RGB than of itself",
+             gamut_coverage(adobe, srgb), lambda c: 0.5 < c < 0.95),
+            ("a wide panel covers sRGB", gamut_coverage(srgb, adobe), lambda c: c > 0.999),
+            ("no panel primaries is unknown, not zero", gamut_coverage(srgb, None), lambda c: c is None)):
+        if want(got):
+            print(f"PASS  gamut: {label}")
+        else:
+            print(f"FAIL  gamut: {label} (got {got})")
+            rc = 1
+    # EDID chromaticity round trip: encode sRGB's primaries the way bytes 25-34 do.
+    raw = bytearray(128)
+    enc = [round(v * 1024) for pt in srgb + [(0.3127, 0.329)] for v in pt]
+    raw[25] = ((enc[0] & 3) << 6) | ((enc[1] & 3) << 4) | ((enc[2] & 3) << 2) | (enc[3] & 3)
+    raw[26] = ((enc[4] & 3) << 6) | ((enc[5] & 3) << 4) | ((enc[6] & 3) << 2) | (enc[7] & 3)
+    for i, v in enumerate(enc):
+        raw[27 + i] = v >> 2
+    back = edid_primaries(bytes(raw))
+    if back and all(abs(a - b) < 0.002 for pa, pb in zip(back, srgb) for a, b in zip(pa, pb)):
+        print("PASS  EDID chromaticities decode to the primaries they encode")
+    else:
+        print(f"FAIL  EDID chromaticities decode to the primaries they encode (got {back})")
+        rc = 1
+    if edid_primaries(bytes(128)) is None:
+        print("PASS  an EDID with no chromaticities reports none")
+    else:
+        print("FAIL  an EDID with no chromaticities reports none")
+        rc = 1
+    call = hypr_monitor_call({"name": "eDP-1"}, "/usr/share/color/icc/colord/sRGB.icc")
+    if 'icc = "/usr/share/color/icc/colord/sRGB.icc"' in call and 'mode = ' in call:
+        print("PASS  an assigned profile rides in the output's full monitor rule")
+    else:
+        print(f"FAIL  an assigned profile rides in the output's full monitor rule ({call})")
+        rc = 1
     live = [{"name": o["name"]} for o in SAMPLE["outputs"]]
 
     k = gen_kanshi(SAMPLE, live)
@@ -1025,7 +1317,8 @@ def main(argv=None):
             print("apex-display: color-assign takes OUTPUT and PROFILE",
                   file=sys.stderr)
             return 2
-        rc, notes = colour_assign(args.rest[0], args.rest[1], args.dry_run)
+        rc, notes = colour_assign(args.rest[0], args.rest[1], args.dry_run,
+                                  args.model)
         for n in notes:
             print(f"apex-display: {n}", file=sys.stderr)
         return rc
@@ -1039,6 +1332,7 @@ def main(argv=None):
 
     live = outputs()
     which = compositor()
+    icc = assigned_icc([o["name"] for o in model["outputs"]])
 
     if args.action == "apply":
         # APEX_DISPLAY_NO_LIVE is a hard refusal, not a hint. `apply` reaches the
@@ -1053,7 +1347,7 @@ def main(argv=None):
                   "live compositor (use `save` to write persistence only)",
                   file=sys.stderr)
             return 2
-        problems = apply_hypr(model, args.dry_run) if which == "hyprland" \
+        problems = apply_hypr(model, args.dry_run, icc) if which == "hyprland" \
             else apply_wlr(model, args.dry_run)
         for p in problems:
             print(f"apex-display: {p}", file=sys.stderr)
@@ -1067,7 +1361,7 @@ def main(argv=None):
         print("apex-display: --no-persist; the live layout changed and nothing "
               "was written", file=sys.stderr)
         return 0
-    for n in persist(model, live, args.dry_run):
+    for n in persist(model, live, args.dry_run, icc):
         print(f"apex-display: {n}", file=sys.stderr)
     return 0
 
