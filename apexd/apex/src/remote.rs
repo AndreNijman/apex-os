@@ -405,16 +405,15 @@ fn ago(ms: u64) -> String {
 /// either: see [`qr_block`]'s body. What is here now is the fallback, and it
 /// is honest about being one.
 fn qr_block(payload: &str) -> String {
-    // No QR encoder is vendored yet. Printing a wrong QR code would be worse
-    // than printing none: a phone would scan it, fail, and the person would
-    // conclude their camera or the app was broken. So this prints the payload
-    // and says where a QR code will come from — APEX Settings, which has a
-    // renderer, and which is where P1-051's first criterion actually points.
+    // No QR encoder is vendored in the terminal. Printing a wrong QR code would
+    // be worse than printing none: a phone would scan it, fail, and the person
+    // would conclude their camera or the app was broken. So this prints the
+    // payload and points at the page that does draw one — Settings → Pair a
+    // device, which has shipped and has a renderer.
     format!(
         "{payload}\n\n\
-         (No QR code here yet: this terminal build does not vendor an encoder, and a wrong QR \
-         is worse than none. Paste the line above into APEX Remote, or use the pairing page in \
-         APEX Settings once it ships.)\n"
+         (To scan a QR code, open APEX Settings → Pair a device. Or paste the line above into \
+         APEX Remote on your phone.)\n"
     )
 }
 
@@ -482,6 +481,9 @@ mod tests {
         let out = qr_block("apex-remote:abc");
         assert!(out.contains("apex-remote:abc"));
         assert!(out.contains("APEX Settings"), "{out}");
+        // The pairing page has shipped; the output must not still promise it.
+        assert!(!out.contains("once it ships"), "{out}");
+        assert!(out.contains("Pair a device"), "{out}");
     }
 
     #[test]

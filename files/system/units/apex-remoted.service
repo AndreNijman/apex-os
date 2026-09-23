@@ -67,9 +67,13 @@ RestrictNamespaces=yes
 LockPersonality=yes
 MemoryDenyWriteExecute=yes
 # AF_UNIX for the two sockets, AF_INET/AF_INET6 for the listener and for an
-# outbound relay connection. Nothing else, so a compromised process cannot
-# open a netlink or packet socket.
-RestrictAddressFamilies=AF_UNIX AF_INET AF_INET6
+# outbound relay connection, and AF_NETLINK because glibc's getifaddrs() — how
+# the daemon learns this machine's LAN addresses for the pairing code — reads
+# them over a netlink socket. Without it getifaddrs() fails with
+# EAFNOSUPPORT (errno 97, measured under this exact restriction), the address
+# list is silently empty, and every pairing code carried "lan":[] — a phone
+# that scanned it had nowhere to connect. Still no packet sockets.
+RestrictAddressFamilies=AF_UNIX AF_INET AF_INET6 AF_NETLINK
 
 [Install]
 WantedBy=default.target
