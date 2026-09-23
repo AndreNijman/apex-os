@@ -1,7 +1,10 @@
 # APEX-OS — APEX Remote desktop service (systemd USER service).
 #
 # Terminates a paired device's encrypted channel and forwards what it carries
-# into `apex-agentd`. Per-user, unprivileged, and NOT enabled by default.
+# into `apex-agentd`. Per-user, unprivileged, and ENABLED by default for every
+# person's session (Andre, 2026-09-23: pairing a phone must not need a setup
+# step first). Its `Wants=apex-agentd.service` means the agent runtime starts
+# with it. It does not run for the login screen — see ConditionUser= below.
 #
 # WHY THIS IS A SEPARATE SERVICE FROM apex-agentd
 # It is the only thing in the agent stack that listens on a network. Giving
@@ -12,8 +15,6 @@
 # edits, tests and pushes — never a root approval, never break-glass, never a
 # raw secret.
 #
-# It also has a different lifetime. Most people who run an agent locally never
-# pair a phone, so `apex agent enable` must not start this.
 #
 # WHY THE PORT IS STILL CLOSED AFTER THIS UNIT STARTS
 # APEX ships a default-drop firewall. Starting this service does not open
@@ -22,8 +23,8 @@
 # opened a port because it had been enabled would make the firewall a list of
 # things somebody once turned on.
 #
-# Turn it on with:
-#   apex remote enable
+# Turn it off for one account with:
+#   systemctl --user disable --now apex-remoted.service
 
 [Unit]
 Description=APEX Remote (paired devices, encrypted channel to the agent runtime)
@@ -36,6 +37,10 @@ After=apex-agentd.service
 # A crash loop must not spin.
 StartLimitIntervalSec=60
 StartLimitBurst=5
+# Enabled for every user manager means the login screen's too: greetd runs the
+# greeter as its own account with its own `systemd --user`, measured (uid 973,
+# user@973.service). A network listener must never run as the greeter.
+ConditionUser=!greetd
 
 [Service]
 Type=simple

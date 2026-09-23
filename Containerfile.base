@@ -259,15 +259,16 @@ RUN systemctl enable apexd.service
 COPY files/system/units/apex-agentd.service /usr/lib/systemd/user/apex-agentd.service
 
 # ── APEX Remote (apex-remoted, §46) ─────────────────────────────────────────
-# A USER unit, and not enabled, for the same reason as apex-agentd plus one
-# more: this is the only thing in the agent stack that listens on a network,
-# and a network listener that starts because the image contains it is not a
-# decision anybody made. `apex remote enable` is that decision.
+# A USER unit, ENABLED for every account (Andre, 2026-09-23): pairing a phone
+# from Settings must work without a setup step first. It pulls in apex-agentd
+# through Wants=, so the agent runtime runs for every account too. The unit's
+# ConditionUser=!greetd keeps it off the login screen's own user manager.
 #
-# The firewall stays shut either way. The port is in the catalogue as
-# `apex-remote` and needs `sudo apex firewall allow apex-remote`, which the
-# relay path does not need at all.
+# The firewall stays shut. Starting the service opens no port: 7717 is in the
+# catalogue as `apex-remote` and needs `sudo apex firewall allow apex-remote`,
+# and the relay path needs no inbound port at all.
 COPY files/system/units/apex-remoted.service /usr/lib/systemd/user/apex-remoted.service
+RUN systemctl --global enable apex-remoted.service
 
 # ── protected secret service (apex-secretd, §11) ────────────────────────────
 # A SYSTEM unit, and enabled — the opposite of apex-agentd, on purpose. It holds
@@ -409,13 +410,11 @@ RUN set -eux; \
     # Opt-in by design: a per-user daemon holding PTYs must not be enabled for
     # users who never run an agent. Assert it is NOT wired into any target.
     test ! -e /usr/lib/systemd/user/default.target.wants/apex-agentd.service; \
-    # APEX Remote: the same opt-in rule, and the stronger reason for it. This
-    # is the only unit in the agent stack that opens a network listener, so an
-    # image that enabled it would put one on every machine that installed the
-    # image rather than on every machine whose owner asked for one.
+    # APEX Remote: enabled for every account, and never for the greeter.
     test -s /usr/lib/systemd/user/apex-remoted.service; \
     grep -q '^ExecStart=/usr/bin/apex-remoted$' /usr/lib/systemd/user/apex-remoted.service; \
-    test ! -e /usr/lib/systemd/user/default.target.wants/apex-remoted.service; \
+    test -L /etc/systemd/user/default.target.wants/apex-remoted.service; \
+    grep -qx 'ConditionUser=!greetd' /usr/lib/systemd/user/apex-remoted.service; \
     # The secret service is the other way round: a SYSTEM unit, and enabled,
     # because everything that brokers a credential depends on it answering.
     test -s /usr/lib/systemd/system/apex-secretd.service; \

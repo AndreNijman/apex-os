@@ -19,9 +19,12 @@ Five verbs.
 
 ## `apex remote enable`
 
-Turns APEX Remote on for this account — `systemctl --user enable --now
-apex-remoted`, the same shape as `apex agent enable`, because a per-user daemon
-that has to be started with a `systemctl` invocation is one people get wrong.
+APEX Remote is **on by default** for every account (since 2026-09-23): the
+image enables `apex-remoted` for all user managers, except the login screen's
+own `greetd` account, so pairing from Settings needs no setup step. This verb
+turns it back on for an account where it was switched off —
+`systemctl --user enable --now apex-remoted`, the same shape as
+`apex agent enable`. `systemctl --user disable --now apex-remoted` turns it off.
 
 It does **not** open the firewall, and says so. LAN access needs
 
