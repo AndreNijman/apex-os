@@ -1230,10 +1230,11 @@ fn two_desktops_cannot_hold_one_rendezvous() {
 
 #[test]
 fn no_relay_is_configured_unless_the_owner_configures_one() {
-    // The image ships `apex-remoted.service` with no --relay, and the QR code
-    // then carries no relay at all. A default that pointed at somebody's
-    // deployment would put every APEX machine's metadata through it without
-    // anyone choosing that.
+    // The BINARY has no default relay: without --relay the QR code carries no
+    // relay at all, so nothing but an explicit flag ever routes a machine's
+    // metadata through somebody's deployment. The image's unit passes APEX's
+    // own relay (2026-09-23, Andre's decision); that choice lives in the unit,
+    // where it is visible and editable, and never in this binary.
     let root = std::env::temp_dir().join(format!(
         "apex-relay-default-{}-{}",
         std::process::id(),
