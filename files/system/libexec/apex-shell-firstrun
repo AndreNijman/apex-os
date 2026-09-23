@@ -367,11 +367,55 @@ if [ -f "${HOME}/.zshrc" ] && grep -qxF "${ZSHRC_BAD_STYLE}" "${HOME}/.zshrc"; t
     fi
     rm -f "${ZSHRC_TMP}"
 fi
-# Re-render when absent, and also when a previous run left the placeholder behind:
-# an unsubstituted @ACCENT@ is not a valid starship colour, so the prompt would
-# lose its edition accent with no error anywhere.
-if [ -f "${STARSHIP_TMPL}" ]; then
-    if [ ! -f "${HOME}/.config/starship.toml" ] \
+# The prompt follows the wallpaper. APEX Shell's matugen renders
+# ~/.cache/apex-shell/starship.toml from the shell's own template on every
+# wallpaper change, and ~/.config/starship.toml is a SYMLINK to it — starship
+# re-reads its config for every prompt, so an open terminal recolours with the
+# wallpaper. It used to be a file seeded once with the static edition accent,
+# which is why the prompt stayed chartreuse while the bar, borders and greeting
+# followed the wallpaper.
+#
+#   * a real file the user wrote is never touched (it stops following the
+#     wallpaper, which is what replacing the link means);
+#   * a file that is byte-identical to what an earlier release seeded, for either
+#     edition accent, or still carries the @ACCENT@ placeholder, is APEX's own:
+#     it is kept as starship.toml.apex-seed and replaced by the link;
+#   * until matugen first runs, the cache is seeded from the same template with
+#     the edition accent, so the link never points at nothing.
+STARSHIP_CACHE="${HOME}/.cache/apex-shell/starship.toml"
+STARSHIP_MTMPL="${SRC_DIR}/src/config/starship.toml.template"
+is_apex_seeded_starship() {
+    [ -f "$1" ] && [ ! -L "$1" ] || return 1
+    grep -q '@ACCENT@' "$1" 2>/dev/null && return 0
+    [ -f "${STARSHIP_TMPL}" ] || return 1
+    local accent
+    for accent in "#D9F99D" "#FDE047"; do
+        sed "s|@ACCENT@|${accent}|g" "${STARSHIP_TMPL}" | cmp -s - "$1" && return 0
+    done
+    return 1
+}
+if [ -f "${STARSHIP_MTMPL}" ]; then
+    mkdir -p "${HOME}/.config" "$(dirname "${STARSHIP_CACHE}")"
+    if [ ! -s "${STARSHIP_CACHE}" ]; then
+        sed "s|{{colors.primary.default.hex}}|${APEX_ACCENT}|g" "${STARSHIP_MTMPL}" \
+            > "${STARSHIP_CACHE}.tmp" && mv -f "${STARSHIP_CACHE}.tmp" "${STARSHIP_CACHE}"
+        log "seeded ${STARSHIP_CACHE} (accent ${APEX_ACCENT} until the wallpaper palette renders)"
+    fi
+    _sc="${HOME}/.config/starship.toml"
+    if [ -L "${_sc}" ]; then
+        :   # already a link — ours, or one the user made; either way, leave it
+    elif [ ! -e "${_sc}" ]; then
+        ln -s "${STARSHIP_CACHE}" "${_sc}"
+        log "linked ~/.config/starship.toml -> ${STARSHIP_CACHE} (prompt follows the wallpaper)"
+    elif is_apex_seeded_starship "${_sc}"; then
+        mv -f "${_sc}" "${_sc}.apex-seed"
+        ln -s "${STARSHIP_CACHE}" "${_sc}"
+        log "replaced the static-accent ~/.config/starship.toml with a link to the wallpaper-themed one (old copy: ${_sc}.apex-seed)"
+    fi
+    unset _sc
+elif [ -f "${STARSHIP_TMPL}" ]; then
+    # A shell without the template (older vendored shell): the static seed.
+    if [ ! -e "${HOME}/.config/starship.toml" ] \
        || grep -q '@ACCENT@' "${HOME}/.config/starship.toml" 2>/dev/null; then
         mkdir -p "${HOME}/.config"
         sed "s|@ACCENT@|${APEX_ACCENT}|g" "${STARSHIP_TMPL}" > "${HOME}/.config/starship.toml"
