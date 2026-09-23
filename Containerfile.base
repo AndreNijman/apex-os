@@ -239,6 +239,10 @@ RUN set -eux; \
     # resume. Both guards are asserted here rather than assumed.
     grep -qF '= "post" ]' /usr/lib/systemd/system-sleep/apex-wifi-resume; \
     grep -qF 'mt7925e' /usr/lib/systemd/system-sleep/apex-wifi-resume; \
+    # The session stays frozen until every system-sleep hook returns, so the
+    # slow part of this one must run detached. See the hook for the measured
+    # 20-second freeze on every lid-open this prevents.
+    grep -qF 'systemd-run --no-block' /usr/lib/systemd/system-sleep/apex-wifi-resume; \
     grep -qF 'wifi.powersave = 2' /etc/NetworkManager/conf.d/20-apex-wifi-powersave.conf; \
     # Both keys, because either one missing turns the check into a no-op that
     # still reads as configured: no uri and NM checks nothing, no response and
@@ -810,6 +814,32 @@ RUN set -eux; \
     rm -rf /usr/share/apex-shell/.git; \
     echo "vendored apex-shell ${SHA}"
 LABEL org.apexos.apex-shell.ref="${APEX_SHELL_REF}"
+
+# ── The shell's own polkit action ────────────────────────────────────────────
+# apex-shell ships org.apexos.shell.agent.policy in dots-extra/polkit/, and its
+# "Always unrestricted agents" setting authenticates with
+# `pkcheck --action-id org.apexos.shell.agent.set-always-unrestricted`. polkitd
+# only reads /usr/share/polkit-1/actions/, and the image installs its own two
+# policies at the top of this file — long before the shell is vendored above —
+# so this one was never copied anywhere. The setting therefore told every user
+# "This machine has no polkit action for the setting" and could not be turned
+# on. Installed from the vendored tree rather than duplicated into this repo,
+# so the file the shell ships is the file polkit reads.
+RUN set -eux; \
+    src=/usr/share/apex-shell/dots-extra/polkit/org.apexos.shell.agent.policy; \
+    test -s "$src" \
+        || { echo "FATAL: apex-shell ${APEX_SHELL_REF} ships no $src; the agent-sandbox setting would have no action to authenticate against"; exit 1; }; \
+    install -D -m 0644 "$src" /usr/share/polkit-1/actions/org.apexos.shell.agent.policy; \
+    xmllint --noout --nonet /usr/share/polkit-1/actions/org.apexos.shell.agent.policy; \
+    grep -q 'id="org.apexos.shell.agent.set-always-unrestricted"' \
+        /usr/share/polkit-1/actions/org.apexos.shell.agent.policy \
+        || { echo "FATAL: the shell's policy no longer declares the action AgentPolicyService.qml names"; exit 1; }; \
+    # The same rule the image holds its own elevation actions to: a human at the
+    # active session, never an inactive or remote one, never a cached yes.
+    if grep -qE '<allow_(any|inactive)>(yes|auth_self_keep|auth_admin_keep)' \
+         /usr/share/polkit-1/actions/org.apexos.shell.agent.policy; then \
+        echo "FATAL: the shell's policy grants an inactive or remote session"; exit 1; fi; \
+    echo "apex-shell polkit action installed: org.apexos.shell.agent.set-always-unrestricted"
 
 # ── Stage 5b2a: the Apex.I18n QML module — the shell's translations ─────────
 # APEX Shell marks 186 strings with qsTr(). qsTr() walks the list of installed
