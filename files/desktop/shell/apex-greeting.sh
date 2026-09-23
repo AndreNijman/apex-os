@@ -75,19 +75,23 @@ if [ "${_apex_greet}" = 1 ]; then
         ""|*[!0-9\;]*) _apex_accent="" ;;
     esac
 
+    # The accent also replaces the "low" colour of percentages (memory, disk):
+    # fastfetch's own green there was the last green left in the greeting.
+    # Yellow and red stay, because those are warnings and mean something.
+    #
     # No accent yet — a first login before any wallpaper has been picked — means
     # no --color at all, leaving the config's own default rather than forcing
     # some colour that may not suit the scheme. Spelled out as four branches
     # because this file is SOURCED: building the argument list with `set --`
     # would overwrite the calling shell's positional parameters.
     if [ -r /etc/fastfetch/config.jsonc ] && [ -n "${_apex_accent}" ]; then
-        fastfetch --config /etc/fastfetch/config.jsonc --logo-color-1 "${_apex_logo_color}" --color "${_apex_accent}"
+        fastfetch --config /etc/fastfetch/config.jsonc --logo-color-1 "${_apex_logo_color}" --color "${_apex_accent}" --percent-color-green "${_apex_accent}"
     elif [ -r /etc/fastfetch/config.jsonc ]; then
         fastfetch --config /etc/fastfetch/config.jsonc --logo-color-1 "${_apex_logo_color}"
     elif [ -n "${_apex_accent}" ]; then
         # Config missing (a partial image, or a user deleted it): still greet
         # rather than silently printing nothing at all.
-        fastfetch --logo-color-1 "${_apex_logo_color}" --color "${_apex_accent}"
+        fastfetch --logo-color-1 "${_apex_logo_color}" --color "${_apex_accent}" --percent-color-green "${_apex_accent}"
     else
         fastfetch --logo-color-1 "${_apex_logo_color}"
     fi
