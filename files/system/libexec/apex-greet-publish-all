@@ -1,0 +1,43 @@
+#!/usr/bin/env bash
+# ─────────────────────────────────────────────────────────────────────────────
+#  APEX-OS — publish every person's wallpaper and accent for the login screen,
+#  at boot, before greetd starts.
+#
+#  apex-greet-wallpaper publishes at login and on every wallpaper change. That
+#  left a gap: the login screen is the FIRST thing after an update, and a
+#  release that adds something new for it to read (the accent, 2026-09-23) was
+#  invisible until each person had logged in once — they saw the edition green,
+#  then peach from the second boot. This runs the same helper for every human
+#  account from apex-greet-publish.service, ordered before greetd, so the first
+#  login screen after an update is already right for everyone.
+#
+#  The helper is written for sudo: it trusts SUDO_UID (only root can set it) and
+#  does every read of the home directory AS that user through setpriv. Calling
+#  it as root with SUDO_UID set is therefore the same operation with the same
+#  threat model, not a second implementation of it.
+#
+#  One account's failure (no wallpaper yet, an unusual name, no home) is that
+#  account's and never stops the rest, and never delays the login screen: the
+#  unit has a short timeout and greetd only orders after it.
+# ─────────────────────────────────────────────────────────────────────────────
+set -u
+helper=/usr/libexec/apex-greet-wallpaper
+[ -x "$helper" ] || exit 0
+uid_min="$(awk '$1 == "UID_MIN" { print $2 }' /etc/login.defs 2>/dev/null)"
+uid_max="$(awk '$1 == "UID_MAX" { print $2 }' /etc/login.defs 2>/dev/null)"
+case "${uid_min}${uid_max}" in ''|*[!0-9]*) uid_min=1000 uid_max=60000 ;; esac
+
+n=0 ok=0
+while IFS=: read -r name _ uid _ _ home _; do
+    case "$uid" in ''|*[!0-9]*) continue ;; esac
+    [ "$uid" -ge "$uid_min" ] && [ "$uid" -le "$uid_max" ] || continue
+    [ -d "$home" ] || continue
+    n=$((n + 1))
+    if SUDO_UID="$uid" "$helper" >/dev/null 2>&1; then
+        ok=$((ok + 1))
+    else
+        echo "apex-greet-publish: nothing published for ${name} (no wallpaper chosen yet, or the helper refused)"
+    fi
+done < <(getent passwd)
+echo "apex-greet-publish: published for ${ok} of ${n} account(s)"
+exit 0

@@ -1,0 +1,16 @@
+# APEX-OS — publish each person's wallpaper and accent for the login screen at
+# boot, so the first login screen after an update already shows them. See
+# /usr/libexec/apex-greet-publish-all.
+[Unit]
+Description=APEX: publish wallpapers and accents for the login screen
+After=local-fs.target
+Before=greetd.service
+# Never hold the login screen back: a hung home directory costs 20 seconds at
+# most, and greetd starts either way (Before= orders, it does not require).
+[Service]
+Type=oneshot
+ExecStart=/usr/libexec/apex-greet-publish-all
+TimeoutStartSec=20
+
+[Install]
+WantedBy=multi-user.target

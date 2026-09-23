@@ -592,6 +592,12 @@ COPY files/desktop/starship/starship.toml /usr/share/apex/starship/starship.toml
 # working and keeps improving across updates.
 COPY files/desktop/bash/apex-starship.sh /etc/profile.d/apex-starship.sh
 
+# zsh-syntax-highlighting in the wallpaper accent instead of its built-in green.
+# Fedora's /etc/zshrc sources /etc/profile.d/*.sh before ~/.zshrc, and the plugin
+# only fills styles that are unset, so this reaches existing accounts without
+# touching their ~/.zshrc.
+COPY files/desktop/zsh/apex-zsh-highlight.sh /etc/profile.d/apex-zsh-highlight.sh
+
 # The fastfetch greeting, sourced by /etc/bashrc AND by the seeded ~/.zshrc, so the
 # two can never drift. Image-managed for the same reason as the prompt above.
 COPY files/desktop/shell/apex-greeting.sh /usr/share/apex/shell/greeting.sh
@@ -3605,6 +3611,17 @@ RUN set -eux; \
 # otherwise get a login screen that silently refuses to follow their choice.
 COPY files/system/libexec/apex-greet-wallpaper /usr/libexec/apex-greet-wallpaper
 COPY files/system/sudoers/apex-greet-wallpaper /etc/sudoers.d/030-apex-greet-wallpaper
+# ...and once at boot for every account, before greetd, so the first login
+# screen after an update already carries each person's wallpaper and accent
+# instead of waiting for them to log in once. Same helper, called as root with
+# SUDO_UID set, so its reads still happen as the user.
+COPY --chmod=0755 files/system/libexec/apex-greet-publish-all /usr/libexec/apex-greet-publish-all
+COPY files/system/units/apex-greet-publish.service /usr/lib/systemd/system/apex-greet-publish.service
+RUN set -eux; \
+    bash -n /usr/libexec/apex-greet-publish-all; \
+    grep -q '^Before=greetd.service$' /usr/lib/systemd/system/apex-greet-publish.service; \
+    systemctl enable apex-greet-publish.service; \
+    test -L /etc/systemd/system/multi-user.target.wants/apex-greet-publish.service
 RUN set -eux; \
     chmod 0755 /usr/libexec/apex-greet-wallpaper; \
     bash -n /usr/libexec/apex-greet-wallpaper; \
