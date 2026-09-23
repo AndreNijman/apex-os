@@ -118,3 +118,21 @@ test("a refusal carries the reason as text a person could read in a log", () => 
   assert.match(r.body, /no desktop is waiting/);
   assert.match(r.headers["content-type"], /text\/plain/);
 });
+
+import { MAX_FRAME_BYTES, MAX_SOCKETS_PER_ROOM, frameVerdict, roomHasSpace } from "../src/room.js";
+
+test("a room admits sockets up to its cap and not one more", () => {
+  assert.equal(roomHasSpace(0), true);
+  assert.equal(roomHasSpace(MAX_SOCKETS_PER_ROOM - 1), true);
+  assert.equal(roomHasSpace(MAX_SOCKETS_PER_ROOM), false);
+  assert.ok(MAX_SOCKETS_PER_ROOM >= 4, "a desktop and a device need a pair plus a waiting host");
+});
+
+test("a client may send binary frames up to the cap, and never text", () => {
+  assert.deepEqual(frameVerdict(new ArrayBuffer(65539)), { ok: true }, "a full Noise message must pass");
+  assert.deepEqual(frameVerdict(new ArrayBuffer(MAX_FRAME_BYTES)), { ok: true });
+  assert.equal(frameVerdict(new ArrayBuffer(MAX_FRAME_BYTES + 1)).code, 1009);
+  const text = frameVerdict('{"relay":"paired"}');
+  assert.equal(text.ok, false, "a client must not be able to forge the relay's notices");
+  assert.equal(text.code, 1003);
+});

@@ -31,6 +31,13 @@
   // frames itself, which is the behaviour src/index.js is written against.
   "compatibility_date": "2026-04-07",
 
+  // Upgrades per client IP per minute (UPGRADES_PER_MINUTE in src/room.js).
+  // Enforced at the edge before a Durable Object wakes; a 429 makes a desktop
+  // back off (2 s → 60 s), and a healthy one never comes near it.
+  "ratelimits": [
+    { "name": "RATE_LIMIT", "namespace_id": "5201", "simple": { "limit": 60, "period": 60 } }
+  ],
+
   "durable_objects": {
     "bindings": [{ "name": "ROOM", "class_name": "RelayRoom" }]
   },
