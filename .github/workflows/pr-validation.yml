@@ -1012,6 +1012,17 @@ jobs:
         if: ${{ !cancelled() }}
         run: ./tests/check-ci-selector-parity.sh
 
+      # The same class of defect in build-image.yml, where it cost a main build:
+      # core's rebuild gate diffed against the PREVIOUS PUSH, so a push after a
+      # cancelled core build skipped core while the published one was three
+      # weeks stale, and base died on a package only the tip's core installs
+      # (run 35791485108). This executes that gate against a fake registry and
+      # proves it rebuilds whenever the PUBLISHED core's revision is behind.
+      # Against the pre-fix step it fails 12 of 20.
+      - name: Core rebuilds when the published core is behind this commit
+        if: ${{ !cancelled() }}
+        run: ./tests/check-core-rebuild-selector.sh
+
   static-windows:
     name: Static validation — Windows installer
     runs-on: ubuntu-24.04

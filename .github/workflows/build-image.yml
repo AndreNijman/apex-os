@@ -51,14 +51,16 @@ name: build-image
 # core entirely.
 #
 # ── When each tier rebuilds ──
-#   core    Containerfile.core / kernel/** changed · force_core · or the weekly
+#   core    Containerfile.core / kernel/** differ between this commit and the
+#           revision the PUBLISHED core is stamped with (not merely the last
+#           push; an unreadable stamp rebuilds) · force_core · or the weekly
 #           cron found a NEW fedora-bootc digest. That last condition matters:
 #           an unconditional weekly rebuild would reissue ~5 GB of
 #           byte-different, content-identical layers to the whole fleet every
 #           Monday, which is the very cost this split exists to remove. The
 #           digest core was built from is stamped on it as a label and compared.
-#   base    Containerfile.base / apexd/** / config/** / files/** changed, or
-#           core rebuilt.
+#   base    every run that has a core to build FROM (the `base` path-filter
+#           output is computed but no job consumes it).
 #   image   every run (it is thin, and it must follow the base digest).
 #
 # The base's immutable digest is passed to the image build as
@@ -196,7 +198,13 @@ jobs:
       - name: Checkout
         uses: actions/checkout@v4
         with:
-          fetch-depth: 2
+          # FULL history, not 2. The core gate below diffs the revision the
+          # PUBLISHED core was built from against this commit, and that
+          # revision is routinely weeks and thousands of commits back. In a
+          # depth-2 clone it is simply absent, the gate cannot tell "unchanged"
+          # from "unknown", and its fail-safe would rebuild core -- 55 minutes
+          # and ~5 GB to every machine -- on every single push.
+          fetch-depth: 0
 
       # Five assertions in the Containerfiles could never pass or never run, and
       # each was found by a `base` job dying at a later step than the last -- 50
@@ -310,46 +318,118 @@ jobs:
       # every core rebuild is a full multi-GB download for every machine on the
       # fleet. So the weekly cron asks whether upstream actually changed instead
       # of assuming it did.
+      #
+      # ═══ COMPARED AGAINST WHAT IS PUBLISHED, NOT AGAINST THE LAST PUSH ═══
+      #
+      # The path filter above answers "did THIS push touch core?", which is not
+      # the question. On 2026-09-22 main received a 1,485-commit merge
+      # (d7fb8f1e) whose core build was cancelled, then a push (9ae4ebf3) that
+      # touched only Containerfile.kernel and a test. Each looked core-clean
+      # against its predecessor, so run 35791485108 skipped core and built base
+      # FROM a published core stamped 57f593ad -- 2026-09-05, three weeks and
+      # every Containerfile.core change since stale -- and base died at
+      # `test -x /usr/bin/xdg-terminal-exec`, a package the tip's core installs
+      # and the published one never had.
+      #
+      # So the gate now reads org.opencontainers.image.revision off the
+      # published core and diffs THAT revision against this commit over
+      # CORE_PATHS. Any doubt -- no image, no label, a registry that will not
+      # answer, a revision this history does not contain -- REBUILDS. A
+      # needless rebuild costs an hour; a wrong skip ships a base built on a
+      # core that does not match its own tree, or no image at all.
+      #
+      # Inputs come through env:, not inline expressions, so the block is plain
+      # bash that tests/check-core-rebuild-selector.sh extracts and executes.
       - name: Decide whether core must rebuild
         id: gate
+        env:
+          FORCE_CORE: ${{ inputs.force_core }}
+          FILTER_CORE: ${{ steps.filter.outputs.core }}
+          EVENT: ${{ github.event_name }}
+          SHA: ${{ github.sha }}
+          REGISTRY_CREDS: ${{ github.actor }}:${{ secrets.GITHUB_TOKEN }}
         run: |
           set -euo pipefail
 
           decide() { echo "core=$1" >> "$GITHUB_OUTPUT"; echo "core rebuild: $1 ($2)"; exit 0; }
 
-          [ "${{ inputs.force_core }}" = "true" ] && decide true "force_core requested"
-          [ "${{ steps.filter.outputs.core }}" = "true" ] && decide true "core sources changed"
+          # Core's content inputs. MUST equal the `core:` list of the path
+          # filter above (tests/check-core-rebuild-selector.sh asserts it), and
+          # deliberately excludes build-image.yml for the reason given there.
+          CORE_PATHS="Containerfile.core kernel/"
 
-          # Not a scheduled run and nothing core-relevant changed → reuse.
-          if [ "${{ github.event_name }}" != "schedule" ]; then
-            decide false "no core-relevant change"
-          fi
+          [ "$FORCE_CORE" = "true" ] && decide true "force_core requested"
+          [ "$FILTER_CORE" = "true" ] && decide true "core sources changed in this push"
 
           command -v skopeo >/dev/null || { sudo apt-get update -qq && sudo apt-get install -y -qq skopeo; }
+
+          # One inspect per candidate ref, both labels at once. Retried, as the
+          # core job's upstream read is: this answer now gates EVERY push, and a
+          # single transient registry error must not cost an hour of build and a
+          # fleet-wide download. After five failures it is treated as absent.
+          fmt='{{ index .Labels "org.opencontainers.image.revision" }}|{{ index .Labels "org.apexos.fedora-bootc.digest" }}'
+          inspect() {
+            # stderr kept apart: a warning on a SUCCESSFUL inspect must not
+            # end up inside the revision it returns.
+            local ref="$1" out err="$RUNNER_TEMP/core-inspect.err" _try
+            for _try in 1 2 3 4 5; do
+              if out="$(skopeo inspect --creds "$REGISTRY_CREDS" --format "$fmt" "docker://$ref" 2>"$err")"; then
+                printf '%s\n' "$out"; return 0
+              fi
+              echo "inspect $ref attempt $_try failed: $(cat "$err")" >&2
+              [ "$_try" -lt 5 ] && sleep $(( _try * ${INSPECT_BACKOFF:-5} ))
+            done
+            return 1
+          }
+
+          # Transitional fallback: before the repo consolidation core lived at
+          # $LEGACY_CORE:latest, and the base job still migrates it from there
+          # when $IMAGE:$TAG_CORE is absent -- so that is the core base would
+          # build FROM, and the one whose revision counts. Without this the
+          # first run after the rename would see "no published core", rebuild
+          # it for 55 minutes, and hand every machine a full ~5 GB download --
+          # to change a name.
+          if META="$(inspect "$IMAGE:$TAG_CORE")"; then
+            echo "published core: $IMAGE:$TAG_CORE"
+          elif META="$(inspect "$LEGACY_CORE:latest")"; then
+            echo "published core: $LEGACY_CORE:latest (resolved from the legacy name)"
+          else
+            decide true "no published core could be read"
+          fi
+          REV="${META%%|*}"
+          HAVE="${META#*|}"
+          [ "$HAVE" = "<no value>" ] && HAVE=""
+          [ "$REV" = "<no value>" ] && REV=""
+          echo "published core was built from revision ${REV:-<none>}, fedora-bootc ${HAVE:-<none>}"
+
+          [ -n "$REV" ] || decide true "published core carries no org.opencontainers.image.revision"
+          [[ "$REV" =~ ^[0-9a-f]{40}$ ]] || decide true "published core revision '$REV' is not a commit sha"
+          git cat-file -e "$REV^{commit}" 2>/dev/null \
+            || decide true "published core revision $REV is not in this repository's history"
+          git merge-base --is-ancestor "$REV" "$SHA" 2>/dev/null \
+            || decide true "published core revision $REV is not an ancestor of $SHA"
+          # shellcheck disable=SC2086  # CORE_PATHS is a word list on purpose
+          changed="$(git diff --name-only "$REV" "$SHA" -- $CORE_PATHS)" \
+            || decide true "could not diff $REV..$SHA"
+          if [ -n "$changed" ]; then
+            echo "core inputs changed since the published core:"
+            sed 's/^/  /' <<<"$changed"
+            decide true "core sources changed since published core ${REV:0:12}"
+          fi
+
+          # Not a scheduled run and nothing core-relevant changed since what is
+          # published → reuse.
+          if [ "$EVENT" != "schedule" ]; then
+            decide false "no core-relevant change since published core ${REV:0:12}"
+          fi
 
           # What upstream is at right now.
           UP="$(skopeo inspect --no-creds --format '{{.Digest}}' "docker://$UPSTREAM_BASE")"
           echo "upstream $UPSTREAM_BASE = $UP"
 
-          # What the published core was built from. Missing image, missing label
-          # or an unreadable registry all fall through to "rebuild" — failing
-          # towards a rebuild is the safe direction for a security refresh.
-          label='{{ index .Labels "org.apexos.fedora-bootc.digest" }}'
-          creds="${{ github.actor }}:${{ secrets.GITHUB_TOKEN }}"
-          HAVE="$(skopeo inspect --creds "$creds" --format "$label" \
-                    "docker://$IMAGE:$TAG_CORE" 2>/dev/null || echo '')"
-          # Transitional fallback: before the repo consolidation core lived at
-          # $LEGACY_CORE:latest. Without this the first run after the rename would
-          # see "no published core", rebuild it for 55 minutes, and hand every
-          # machine a full ~5 GB download — to change a name.
-          if [ -z "$HAVE" ]; then
-            HAVE="$(skopeo inspect --creds "$creds" --format "$label" \
-                      "docker://$LEGACY_CORE:latest" 2>/dev/null || echo '')"
-            [ -n "$HAVE" ] && echo "(resolved from the legacy $LEGACY_CORE)"
-          fi
-          echo "published core was built from = ${HAVE:-<none>}"
-
-          [ -n "$HAVE" ] || decide true "no published core to reuse"
+          # Missing label falls through to "rebuild" — failing towards a
+          # rebuild is the safe direction for a security refresh.
+          [ -n "$HAVE" ] || decide true "published core carries no fedora-bootc digest"
           [ "$HAVE" = "$UP" ] && decide false "upstream fedora-bootc has not moved since the last core"
           decide true "upstream fedora-bootc moved"
 
