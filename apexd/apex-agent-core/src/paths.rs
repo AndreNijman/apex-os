@@ -66,6 +66,13 @@ pub fn home() -> PathBuf {
 }
 
 fn passwd_home() -> Option<PathBuf> {
+    // Safe: getuid cannot fail.
+    passwd_home_of(unsafe { libc::getuid() })
+}
+
+/// The home directory the passwd database records for `uid`, or nothing when
+/// there is no entry or it names no directory.
+pub fn passwd_home_of(uid: libc::uid_t) -> Option<PathBuf> {
     use std::ffi::CStr;
 
     // getpwuid_r, not getpwuid. The plain form returns a pointer into a static
@@ -81,7 +88,7 @@ fn passwd_home() -> Option<PathBuf> {
         // and reports the buffer being too small rather than overrunning it.
         let rc = unsafe {
             libc::getpwuid_r(
-                libc::getuid(),
+                uid,
                 &mut pwd,
                 buf.as_mut_ptr(),
                 buf.len(),
@@ -480,6 +487,17 @@ pub(crate) fn ensure_private_dir_as(dir: &Path, me: u32) -> io::Result<()> {
 
 #[cfg(test)]
 mod tests {
+    #[test]
+    fn a_uid_resolves_to_the_same_home_as_the_current_user_lookup() {
+        // passwd_home_of is what `sudo apex update` uses to find the INVOKING
+        // account's home; for our own uid it must agree with passwd_home.
+        // Safe: getuid cannot fail.
+        let me = unsafe { libc::getuid() };
+        assert_eq!(passwd_home_of(me), passwd_home());
+        // A uid with no passwd entry has no home, rather than root's or "/".
+        assert_eq!(passwd_home_of(4_000_000_000), None);
+    }
+
     use super::*;
 
     #[test]

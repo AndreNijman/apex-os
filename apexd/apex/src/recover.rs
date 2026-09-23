@@ -1203,11 +1203,17 @@ fn package_row(sys: &Sys, running_version: &str) -> Row {
             action: Some("sudo apex pkg rebuild --if-needed".to_string()),
         };
     }
+    // Available, not Attention: a package the owner chose to install with
+    // --allow-unsigned is present and usable with nothing verifying it, which
+    // is what Available means. Attention made it a "regression an update could
+    // have caused" and held every later update for a decision the owner made
+    // on purpose (opencode on the L16, 2026-09-23) — and offered a rebuild,
+    // which does nothing for a signature.
     if unsigned > 0 {
         return Row {
             id,
             label,
-            state: Health::Attention,
+            state: Health::Available,
             detail: format!(
                 "{resolved} packages built for OS {built_for}, of which \
                  {unsigned} were installed with --allow-unsigned and are \
@@ -1512,8 +1518,16 @@ fn cmd_repair(args: RepairArgs) -> i32 {
 /// absolute, an existing directory, at least two components deep, and not one
 /// of the shared parents that are never anybody's home.
 fn user_home() -> Option<PathBuf> {
-    let raw = std::env::var_os("HOME").filter(|v| !v.is_empty())?;
-    let p = PathBuf::from(raw);
+    // Under sudo the account being asked about is the invoking one, not root.
+    // `sudo apex update` runs this check with $HOME=/root, and root has no
+    // ~/.config/apex-shell, so every update on every machine was held as "the
+    // desktop has never been provisioned" (measured on the L16, 2026-09-23).
+    // SUDO_UID is set by sudo itself; only root can forge it, and root already
+    // holds everything it could select.
+    let p = match sudo_invoker_home() {
+        Some(home) => home,
+        None => PathBuf::from(std::env::var_os("HOME").filter(|v| !v.is_empty())?),
+    };
     if !p.is_absolute() || !p.is_dir() {
         return None;
     }
@@ -1528,6 +1542,19 @@ fn user_home() -> Option<PathBuf> {
         return None;
     }
     Some(real)
+}
+
+/// The invoking account's home when this runs as root under sudo, else nothing.
+fn sudo_invoker_home() -> Option<PathBuf> {
+    // Safe: geteuid cannot fail.
+    if unsafe { libc::geteuid() } != 0 {
+        return None;
+    }
+    let uid = std::env::var("SUDO_UID").ok()?.trim().parse::<libc::uid_t>().ok()?;
+    if uid == 0 {
+        return None;
+    }
+    apex_agent_core::paths::passwd_home_of(uid)
 }
 
 /// One resolved reset target.
