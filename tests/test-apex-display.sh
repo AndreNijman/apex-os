@@ -596,11 +596,16 @@ lut_l="$(colour labwc color 2>/dev/null | jqp 'd["curve"]["lut_shared_with_night
                        || bad "on Hyprland the night light does not occupy the gamma LUT"
 [ "$lut_l" = "True" ]  && ok "on a wlroots compositor a curve and a night light are the same slot" \
                        || bad "on a wlroots compositor a curve and a night light are the same slot"
-loader="$(printf '%s' "$state" | jqp 'd["curve"]["loader"]')"
+# Hyprland loads the profile itself (an `icc` monitor rule), so there the
+# loader is the compositor; the external-loader search is for the others.
+loader_h="$(printf '%s' "$state" | jqp 'd["curve"]["loader"]')"
+[ "$loader_h" = "Hyprland" ] && ok "on Hyprland the compositor itself applies the profile" \
+                           || bad "on Hyprland the compositor itself applies the profile (got $loader_h)"
+loader="$(colour labwc color 2>/dev/null | jqp 'd["curve"]["loader"]')"
 [ "$loader" = "None" ] && ok "with no ICC loader installed the page is told so by name" \
                        || bad "with no ICC loader installed the page is told so by name (got $loader)"
 printf '#!/bin/sh\nexit 0\n' > "$CROOT/bin/xcalib"; chmod +x "$CROOT/bin/xcalib"
-loader2="$(colour Hyprland color 2>/dev/null | jqp 'd["curve"]["loader"]')"
+loader2="$(colour labwc color 2>/dev/null | jqp 'd["curve"]["loader"]')"
 rm -f "$CROOT/bin/xcalib"
 [ "$loader2" = "xcalib" ] \
     && ok "a loader that IS installed is found (so 'none' is a measurement)" \
@@ -652,6 +657,26 @@ grep -q "create-device" "${CM_STATE}.calls" \
 printf '%s' "$out2" | grep -q "carries no vcgt" \
     && ok "assigning a profile with no curve says there is no curve to load" \
     || bad "assigning a profile with no curve says there is no curve to load"
+
+# ── on Hyprland an assignment reaches the monitor rule ──────────────────────
+# colord only records a profile; nothing reads it on this session. The rule is
+# what makes the choice change the picture, so it must land in the persisted
+# module — and in the output's FULL rule, not a bare { output, icc }.
+mkdir -p "$CROOT/home/.config/apex-shell"
+printf '{"outputs":[{"name":"eDP-1","enabled":true,"x":0,"y":0,"scale":1.5}]}' \
+    > "$CROOT/home/.config/apex-shell/display.json"
+colour Hyprland color-assign eDP-1 icc-none >/dev/null 2>&1
+mod="$CROOT/home/.config/hypr/apex/monitors.lua"
+grep -qF "icc = \"$CROOT/icc/no-curve.icc\"" "$mod" 2>/dev/null \
+    && ok "a Hyprland assignment writes the profile into the output's monitor rule" \
+    || bad "a Hyprland assignment writes the profile into the output's monitor rule"
+grep -F 'output = "eDP-1"' "$mod" 2>/dev/null | grep -qF 'scale = 1.5' \
+    && ok "the rule keeps the saved layout around the profile" \
+    || bad "the rule keeps the saved layout around the profile"
+colour labwc color-assign eDP-1 icc-with 2>&1 | grep -q "nothing applies an ICC profile" \
+    && ok "off Hyprland the page is told the profile does not reach the screen" \
+    || bad "off Hyprland the page is told the profile does not reach the screen"
+rm -f "$CROOT/home/.config/apex-shell/display.json" "$mod"
 
 # ── a named-colour profile is not a monitor profile ─────────────────────────
 # The image ships x11-colors.icc, kind named-color, from the same get-profiles
