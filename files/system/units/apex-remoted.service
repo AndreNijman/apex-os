@@ -37,10 +37,12 @@ After=apex-agentd.service
 # A crash loop must not spin.
 StartLimitIntervalSec=60
 StartLimitBurst=5
-# Enabled for every user manager means the login screen's too: greetd runs the
-# greeter as its own account with its own `systemd --user`, measured (uid 973,
-# user@973.service). A network listener must never run as the greeter.
-ConditionUser=!greetd
+# Enabled for every user manager means system accounts' too: greetd runs the
+# greeter with its own `systemd --user` (uid 973, user@973.service), and a
+# lingering root has one from boot — whose daemon then held port 7717 and left
+# the owner's crash-looping (L16, 2026-09-23). People only, never a system
+# account: nobody pairs a phone to root or to the login screen.
+ConditionUser=!@system
 
 [Service]
 Type=simple
