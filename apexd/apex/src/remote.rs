@@ -365,12 +365,42 @@ fn connection_line(c: &apex_remote_core::rendezvous::Connection, rtt: &str) -> S
 /// Mirrors `apex agent enable`, which exists because a per-user daemon that
 /// has to be started with a systemctl invocation is one people get wrong.
 fn enable() -> Result<i32> {
+    // A unit that crash-looped earlier is start-limited; clear that first, or
+    // enabling it again changes nothing and says nothing.
+    let _ = std::process::Command::new("systemctl")
+        .args(["--user", "reset-failed", "apex-remoted"])
+        .output();
     let out = std::process::Command::new("systemctl")
         .args(["--user", "enable", "--now", "apex-remoted"])
         .output()
         .context("running systemctl")?;
-    if !out.status.success() {
-        eprintln!("apex: {}", String::from_utf8_lossy(&out.stderr).trim());
+    // `enable --now` succeeds once the process has STARTED, including one that
+    // exits a moment later — which is how "apex:" with nothing after it, and a
+    // silent `systemctl`, both happened while the daemon was dying on a port
+    // in use. So wait for it to answer, and when it does not, show its own
+    // last words rather than systemctl's.
+    let running = out.status.success() && {
+        let socket = socket_path();
+        (0..30).any(|_| {
+            std::thread::sleep(std::time::Duration::from_millis(100));
+            UnixStream::connect(&socket).is_ok()
+        })
+    };
+    if !running {
+        let systemctl = String::from_utf8_lossy(&out.stderr).trim().to_string();
+        let journal = std::process::Command::new("journalctl")
+            .args(["--user", "-u", "apex-remoted", "-n", "20", "-o", "cat", "--no-pager"])
+            .output()
+            .map(|o| String::from_utf8_lossy(&o.stdout).into_owned())
+            .unwrap_or_default();
+        let why = journal
+            .lines()
+            .rev()
+            .find(|l| l.starts_with("apex-remoted:"))
+            .map(str::to_string)
+            .or_else(|| (!systemctl.is_empty()).then_some(systemctl))
+            .unwrap_or_else(|| "it exited without saying why; see `journalctl --user -u apex-remoted`".to_string());
+        eprintln!("apex: APEX Remote did not start: {why}");
         return Ok(1);
     }
     eprintln!("apex: APEX Remote is on. `apex remote pair` shows a code for a phone.");

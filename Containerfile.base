@@ -414,7 +414,7 @@ RUN set -eux; \
     test -s /usr/lib/systemd/user/apex-remoted.service; \
     grep -qx 'ExecStart=/usr/bin/apex-remoted --relay wss://apex-relay.andrenijman.com' /usr/lib/systemd/user/apex-remoted.service; \
     test -L /etc/systemd/user/default.target.wants/apex-remoted.service; \
-    grep -qx 'ConditionUser=!greetd' /usr/lib/systemd/user/apex-remoted.service; \
+    grep -qx 'ConditionUser=!@system' /usr/lib/systemd/user/apex-remoted.service; \
     # getifaddrs() needs a netlink socket; without it every pairing code has
     # no LAN address and a phone has nowhere to connect.
     grep -qE '^RestrictAddressFamilies=.*\bAF_NETLINK\b' /usr/lib/systemd/user/apex-remoted.service; \

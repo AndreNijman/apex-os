@@ -98,11 +98,51 @@ are still recorded as claude-remote-control, because it declares that on every
 connection, but the second guard is gone.
 ";
 
+/// How many ports after [`DEFAULT_PORT`] a daemon with no `--port` tries.
+///
+/// One listener per port, and one daemon per account: a second person on the
+/// same machine — or root's lingering user manager, which is what took 7717
+/// on the L16 on 2026-09-23 and left the owner's daemon crash-looping with
+/// "Address already in use" — must not stop this one starting. The port a
+/// daemon actually gets is read back and advertised, so a phone follows it;
+/// only the LAN firewall rule names 7717, and the relay needs no port at all.
+const FALLBACK_PORTS: u16 = 15;
+
+/// Bind the listener: dual-stack first, IPv4 as the fallback. With no
+/// `--port`, a port in use moves on to the next one instead of failing; an
+/// explicit `--port` is honoured exactly.
+fn listen_on(port: u16, may_move: bool) -> Result<TcpListener, String> {
+    let bind = |p: u16| TcpListener::bind(("::", p)).or_else(|_| TcpListener::bind(("0.0.0.0", p)));
+    let last = if may_move { port.saturating_add(FALLBACK_PORTS) } else { port };
+    let mut first_err = None;
+    for p in port..=last {
+        match bind(p) {
+            Ok(l) => {
+                if p != port {
+                    eprintln!(
+                        "apex-remoted: port {port} is in use (another account's APEX Remote?), \
+                         listening on {p} instead; pairing codes carry {p}"
+                    );
+                }
+                return Ok(l);
+            }
+            Err(e) if e.kind() == std::io::ErrorKind::AddrInUse && may_move => {
+                first_err.get_or_insert(e);
+            }
+            Err(e) => return Err(format!("cannot listen on port {p}: {e}")),
+        }
+    }
+    Err(format!(
+        "cannot listen on port {port} or the {FALLBACK_PORTS} after it: {}",
+        first_err.map(|e| e.to_string()).unwrap_or_default()
+    ))
+}
+
 fn run(args: &[String]) -> Result<(), String> {
-    let port = flag(args, "--port")
+    let asked_port = flag(args, "--port")
         .map(|v| v.parse::<u16>().map_err(|_| format!("--port {v} is not a port")))
-        .transpose()?
-        .unwrap_or(DEFAULT_PORT);
+        .transpose()?;
+    let port = asked_port.unwrap_or(DEFAULT_PORT);
     let relay = flag(args, "--relay");
     let handshake = match flag(args, "--handshake-timeout-ms") {
         None => serve::HANDSHAKE_TIMEOUT,
@@ -163,9 +203,7 @@ fn run(args: &[String]) -> Result<(), String> {
     // does not set `IPV6_V6ONLY`, so a `::` bind accepts both families; on a
     // system where somebody has set it to 1 the IPv4 half is lost, which is
     // why the address actually bound is read back below rather than assumed.
-    let listener = TcpListener::bind(("::", port))
-        .or_else(|_| TcpListener::bind(("0.0.0.0", port)))
-        .map_err(|e| format!("cannot listen on port {port}: {e}"))?;
+    let listener = listen_on(port, asked_port.is_none())?;
     // The ADDRESS AND THE PORT the listener actually got, not the ones asked
     // for. They differ whenever `--port 0` is used — the kernel picks one, and
     // the daemon then advertised `192.168.1.232:0` in the pairing code, told
