@@ -162,14 +162,30 @@ Item {
         spacing: 14
         transform: Translate { x: root.shakeOffset }
 
-        // Edition spark logo, centred above the username.
-        Image {
+        // Spark logo, centred above the username. Tinted to the user's accent
+        // when one is published; drawn as-is (the edition spark) otherwise.
+        // Wrapped in an Item because the Column positions its children and
+        // MultiEffect must overlay the Image rather than sit below it.
+        Item {
             anchors.horizontalCenter: parent.horizontalCenter
-            source:            root.theme.logoSource
-            sourceSize.height: 84
-            fillMode:          Image.PreserveAspectFit
-            smooth:            true
-            asynchronous:      true
+            width:  logo.implicitWidth
+            height: logo.implicitHeight
+            Image {
+                id: logo
+                source:            root.theme.logoSource
+                sourceSize.height: 84
+                fillMode:          Image.PreserveAspectFit
+                smooth:            true
+                asynchronous:      true
+                visible:           !root.theme.tintLogo
+            }
+            MultiEffect {
+                anchors.fill:      logo
+                source:            logo
+                visible:           root.theme.tintLogo && logo.status === Image.Ready
+                colorization:      1.0
+                colorizationColor: root.theme.active
+            }
         }
 
         // Username pill (smaller variant of the password pill).
