@@ -187,3 +187,9 @@ if [ -n "${accent}" ]; then
 else
     say "no accent in ${colors} yet; the login screen keeps its default colour"
 fi
+
+# The boot and shutdown splash follow the same accent. Its own failure is its
+# own: a splash colour must never make publishing the login screen fail.
+if [ -x /usr/libexec/apex-plymouth-accent ]; then
+    /usr/libexec/apex-plymouth-accent >/dev/null 2>&1 || true
+fi

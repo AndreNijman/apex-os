@@ -1,0 +1,8 @@
+[Plymouth Theme]
+Name=APEX-OS accent 23
+Description=APEX-OS boot splash, hue 345° (follows the owner's matugen accent)
+ModuleName=script
+
+[script]
+ImageDir=/usr/share/plymouth/themes/apex-os-accent-23
+ScriptFile=/usr/share/plymouth/themes/apex-os-accent-23/apex-os.script

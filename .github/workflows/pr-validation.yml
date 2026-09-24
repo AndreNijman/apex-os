@@ -3259,6 +3259,13 @@ jobs:
         if: ${{ !cancelled() }}
         run: ./tests/test-apex-greet-accent.sh
 
+      # The boot and shutdown splash follow the owner's accent from the first
+      # frame: the real writer and initramfs reader, round-tripped through a
+      # stand-in ESP, and the 24 accent themes.
+      - name: Run boot-splash accent assertions
+        if: ${{ !cancelled() }}
+        run: ./tests/test-apex-plymouth-accent.sh
+
       - name: Run display-settings assertions
         if: ${{ !cancelled() }}
         env:

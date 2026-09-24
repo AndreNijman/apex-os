@@ -1,0 +1,20 @@
+[Unit]
+Description=APEX-OS: start the boot splash in the owner's accent
+Documentation=man:plymouth(8)
+DefaultDependencies=no
+# Before plymouthd starts, so its first frame is the chosen theme; after udev
+# has seen the disks, so an ESP can be found by its partition type.
+After=systemd-udev-trigger.service systemd-udevd.service
+Before=plymouth-start.service
+Conflicts=shutdown.target
+Before=shutdown.target
+[Service]
+Type=oneshot
+RemainAfterExit=yes
+ExecStart=/usr/bin/apex-plymouth-theme
+# Never hold the boot back for a colour.
+TimeoutStartSec=5
+StandardOutput=kmsg
+StandardError=kmsg
+[Install]
+WantedBy=sysinit.target

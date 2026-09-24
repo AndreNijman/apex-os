@@ -1,0 +1,67 @@
+#!/bin/sh
+# APEX-OS — start the boot splash in the owner's accent. Runs in the initramfs
+# BEFORE plymouth-start.service, so the first frame is already the right colour.
+#
+# The accent is a two-digit hue bucket (00-23, 15° apart) naming one of the
+# themes apex-os-accent-NN. It is read from, in order:
+#   1. /.extra/global_credentials/apex.accent.cred — where systemd-stub puts
+#      loader/credentials/*.cred under a UKI (docs/boot-v2.md: per-machine
+#      settings are ESP credentials, never the command line);
+#   2. loader/credentials/apex.accent.cred on an EFI System Partition, mounted
+#      read-only for the moment it takes — the same file, read directly, for a
+#      machine that boots GRUB and has no stub to collect it.
+# /usr/libexec/apex-plymouth-accent writes it when the owner's accent changes.
+#
+# Best-effort and silent: no ESP, no file, or a value that is not a bucket all
+# leave the default theme. A splash colour must never delay or fail a boot —
+# the unit's own timeout bounds all of this.
+THEMES="${APEX_PLYMOUTH_THEMES:-/usr/share/plymouth/themes}"
+CONF="${APEX_PLYMOUTH_CONF:-/etc/plymouth/plymouthd.conf}"
+
+bucket_of() {
+    v="$(head -c 8 "$1" 2>/dev/null)"
+    v="${v%%[!0-9]*}"
+    case "$v" in [0-2][0-9]) [ "$v" -le 23 ] && printf '%s' "$v" ;; esac
+}
+
+nn=""
+[ -r /.extra/global_credentials/apex.accent.cred ] \
+    && nn="$(bucket_of /.extra/global_credentials/apex.accent.cred)"
+
+if [ -z "$nn" ]; then
+    if [ -n "${APEX_ESP_DIRS:-}" ]; then
+        # Tests: directories standing in for mounted ESPs.
+        for d in $APEX_ESP_DIRS; do
+            nn="$(bucket_of "$d/loader/credentials/apex.accent.cred")"
+            [ -n "$nn" ] && break
+        done
+    else
+        udevadm settle -t 3 >/dev/null 2>&1 || true
+        mnt=/run/apex-plymouth-esp
+        mkdir -p "$mnt"
+        for dev in $(udevadm info --export-db 2>/dev/null | awk '
+                /^P: /                 { dev = "" }
+                /^E: DEVNAME=/         { dev = substr($0, 12) }
+                /^E: ID_PART_ENTRY_TYPE=c12a7328-f81f-11d2-ba4b-00a0c93ec93b$/ { print dev }'); do
+            mount -t vfat -o ro,nosuid,nodev,noexec "$dev" "$mnt" 2>/dev/null || continue
+            nn="$(bucket_of "$mnt/loader/credentials/apex.accent.cred")"
+            umount "$mnt" 2>/dev/null
+            [ -n "$nn" ] && break
+        done
+        rmdir "$mnt" 2>/dev/null
+    fi
+fi
+
+[ -n "$nn" ] || exit 0
+theme="apex-os-accent-$nn"
+[ -f "$THEMES/$theme/$theme.plymouth" ] || exit 0
+
+mkdir -p "$(dirname "$CONF")"
+if [ -f "$CONF" ] && grep -q '^Theme=' "$CONF"; then
+    sed -i "s|^Theme=.*|Theme=$theme|" "$CONF"
+elif [ -f "$CONF" ] && grep -q '^\[Daemon\]' "$CONF"; then
+    sed -i "s|^\[Daemon\]|[Daemon]\nTheme=$theme|" "$CONF"
+else
+    printf '[Daemon]\nTheme=%s\n' "$theme" >> "$CONF"
+fi
+exit 0

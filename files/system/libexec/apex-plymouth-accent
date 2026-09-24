@@ -1,0 +1,84 @@
+#!/bin/sh
+# APEX-OS — keep the boot and shutdown splash in the owner's matugen accent.
+#
+# Run as root after the login screen's accent is published (by
+# apex-greet-wallpaper on a wallpaper change, and apex-greet-publish-all at
+# boot). The owner is the login screen's last user; their accent is
+# /var/lib/apex-greet/accents/<user>. From it, the nearest of 24 hue buckets
+# names a theme, apex-os-accent-NN, and two places are made to agree:
+#
+#   * /etc/plymouth/plymouthd.conf Theme= — shutdown and reboot start a fresh
+#     plymouthd from this root, so this makes them right straight away;
+#   * loader/credentials/apex.accent.cred on the EFI System Partition — the
+#     boot splash starts in the initramfs, before any disk is decrypted or
+#     mounted, and reads it there (apex-plymouth-theme). A systemd credential on
+#     the ESP is the per-machine channel docs/boot-v2.md chose; under a UKI,
+#     systemd-stub delivers this same file to the initramfs itself.
+#
+# The ESP is mounted only in a private mount namespace, only for the write, and
+# only when the value actually changes. The file holds two digits and nothing a
+# boot depends on: if it is wrong or missing, the splash is the default colour.
+# A grey accent, or none, removes it and restores the default theme.
+set -u
+GREET="${APEX_GREET_VAR:-/var/lib/apex-greet}"
+CONF="${APEX_PLYMOUTH_CONF:-/etc/plymouth/plymouthd.conf}"
+THEMES="${APEX_PLYMOUTH_THEMES:-/usr/share/plymouth/themes}"
+DEFAULT_THEME=apex-os-chartreuse
+
+bucket=""
+user="$(head -c 64 "$GREET/last-user" 2>/dev/null)"
+case "$user" in ''|.*|*[!A-Za-z0-9._-]*) user="" ;; esac
+if [ -n "$user" ]; then
+    hex="$(head -c 16 "$GREET/accents/$user" 2>/dev/null)"
+    hex="${hex%%[!#0-9A-Fa-f]*}"
+    case "$hex" in \#[0-9A-Fa-f][0-9A-Fa-f][0-9A-Fa-f][0-9A-Fa-f][0-9A-Fa-f][0-9A-Fa-f])
+        h6="${hex#\#}"; rest="${h6#??}"; r="${h6%"$rest"}"; b="${rest#??}"; g="${rest%"$b"}"
+        r=$(printf '%d' "0x$r"); g=$(printf '%d' "0x$g"); b=$(printf '%d' "0x$b")
+        bucket="$(awk -v r="$r" -v g="$g" -v b="$b" 'BEGIN {
+            r /= 255; g /= 255; b /= 255
+            mx = r; if (g > mx) mx = g; if (b > mx) mx = b
+            mn = r; if (g < mn) mn = g; if (b < mn) mn = b
+            d = mx - mn; if (mx == 0 || d / mx < 0.15) exit
+            if (mx == r)      h = 60 * ((g - b) / d)
+            else if (mx == g) h = 60 * ((b - r) / d) + 120
+            else              h = 60 * ((r - g) / d) + 240
+            if (h < 0) h += 360
+            printf "%02d", int(h / 15 + 0.5) % 24 }')" ;;
+    esac
+fi
+theme="$DEFAULT_THEME"
+[ -n "$bucket" ] && [ -f "$THEMES/apex-os-accent-$bucket/apex-os-accent-$bucket.plymouth" ] \
+    && theme="apex-os-accent-$bucket" || bucket=""
+
+# ── shutdown: this root's plymouthd.conf ─────────────────────────────────────
+if [ -f "$CONF" ] && grep -q "^Theme=$theme$" "$CONF"; then :
+elif [ -f "$CONF" ] && grep -q '^Theme=' "$CONF"; then
+    sed -i "s|^Theme=.*|Theme=$theme|" "$CONF"
+else
+    mkdir -p "$(dirname "$CONF")"
+    printf '[Daemon]\nTheme=%s\n' "$theme" > "$CONF"
+fi
+
+# ── boot: the credential on each ESP ─────────────────────────────────────────
+write_cred() {  # $1 = a mounted ESP
+    c="$1/loader/credentials/apex.accent.cred"
+    if [ -z "$bucket" ]; then rm -f "$c"; return 0; fi
+    [ "$(head -c 8 "$c" 2>/dev/null)" = "$bucket" ] && return 0
+    mkdir -p "$1/loader/credentials" && printf '%s' "$bucket" > "$c.tmp" && mv -f "$c.tmp" "$c"
+}
+if [ -n "${APEX_ESP_DIRS:-}" ]; then
+    for d in $APEX_ESP_DIRS; do write_cred "$d"; done
+    exit 0
+fi
+for dev in $(lsblk -rnpo NAME,PARTTYPE 2>/dev/null | awk 'tolower($2) == "c12a7328-f81f-11d2-ba4b-00a0c93ec93b" { print $1 }'); do
+    unshare -m sh -c '
+        m="$(mktemp -d)" || exit 0
+        mount -t vfat -o rw,nosuid,nodev,noexec "$1" "$m" 2>/dev/null || { rmdir "$m"; exit 0; }
+        c="$m/loader/credentials/apex.accent.cred"
+        if [ -z "$2" ]; then rm -f "$c"
+        elif [ "$(head -c 8 "$c" 2>/dev/null)" != "$2" ]; then
+            mkdir -p "$m/loader/credentials" && printf "%s" "$2" > "$c.tmp" && mv -f "$c.tmp" "$c" && sync -f "$m"
+        fi
+        umount "$m"; rmdir "$m"' sh "$dev" "$bucket"
+done
+exit 0
