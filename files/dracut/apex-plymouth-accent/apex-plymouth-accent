@@ -1,0 +1,51 @@
+#!/bin/sh
+# APEX-OS — tell the boot splash the owner's matugen accent. Runs in the
+# initramfs once the root filesystem is mounted at /sysroot, before switch-root.
+#
+# The accent is the file APEX Shell publishes for the login screen,
+# /var/lib/apex-greet/accents/<last-user> (#rrggbb), read through /sysroot. The
+# theme ships 24 hue variants (accent/NN/, 15° apart); this picks the nearest
+# and sends `plymouth update --status=apex-accent-NN`.
+#
+# Everything here is best-effort and silent: no plymouth, no file, a colour
+# that is not a colour, or a grey one all leave the edition chartreuse. A boot
+# splash colour must never be the reason a boot fails or stalls.
+command -v plymouth >/dev/null 2>&1 || exit 0
+plymouth --ping >/dev/null 2>&1 || exit 0
+
+# Where the deployment's /var is while the initramfs is still the root:
+# ostree keeps it per stateroot; the composefs layout keeps it under state/.
+ROOT="${APEX_SYSROOT:-/sysroot}"
+var=""
+for d in "$ROOT"/ostree/deploy/*/var "$ROOT"/state/os/*/var "$ROOT"/var; do
+    [ -r "$d/lib/apex-greet/last-user" ] && { var="$d"; break; }
+done
+[ -n "$var" ] || exit 0
+
+user="$(head -c 64 "$var/lib/apex-greet/last-user" 2>/dev/null)"
+case "$user" in ''|.*|*[!A-Za-z0-9._-]*) exit 0 ;; esac
+hex="$(head -c 16 "$var/lib/apex-greet/accents/$user" 2>/dev/null)"
+hex="${hex%%[!#0-9A-Fa-f]*}"
+case "$hex" in \#[0-9A-Fa-f][0-9A-Fa-f][0-9A-Fa-f][0-9A-Fa-f][0-9A-Fa-f][0-9A-Fa-f]) ;; *) exit 0 ;; esac
+
+# Nearest of 24 hue buckets; a colour with too little saturation has no hue
+# worth matching, and keeps the default.
+h6="${hex#\#}"
+rest="${h6#??}"; r="${h6%"$rest"}"; b="${rest#??}"; g="${rest%"$b"}"
+# printf, not awk: gawk reads "0xfa" as 0 unless run with --non-decimal-data.
+r=$(printf '%d' "0x$r") g=$(printf '%d' "0x$g") b=$(printf '%d' "0x$b") || exit 0
+bucket="$(awk -v r="$r" -v g="$g" -v b="$b" 'BEGIN {
+    r /= 255; g /= 255; b /= 255
+    mx = r; if (g > mx) mx = g; if (b > mx) mx = b
+    mn = r; if (g < mn) mn = g; if (b < mn) mn = b
+    d = mx - mn; if (mx == 0 || d / mx < 0.15) { exit }
+    if (mx == r)      h = 60 * ((g - b) / d)
+    else if (mx == g) h = 60 * ((b - r) / d) + 120
+    else              h = 60 * ((r - g) / d) + 240
+    if (h < 0) h += 360
+    n = int(h / 15 + 0.5) % 24
+    printf "%02d", n
+}')"
+[ -n "$bucket" ] || exit 0
+plymouth update --status="apex-accent-$bucket" >/dev/null 2>&1 || true
+exit 0

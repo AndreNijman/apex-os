@@ -256,6 +256,59 @@ fun message (text) {
 }
 
 Plymouth.SetRefreshFunction(refresh);
+
+# ── The owner's accent (P: plymouth follows matugen, 2026-09-24) ─────────────
+#
+# Plymouth's script cannot tint an image, so accent/NN/ holds the art pre-rotated
+# to 24 hues (make-accent-variants.sh). An initramfs unit (dracut module
+# apex-plymouth-accent) reads the owner's published matugen accent once the root
+# filesystem is mounted and sends `plymouth update --status=apex-accent-NN`; this
+# swaps the three coloured images and the highlight colour for everything drawn
+# after it. No message, or one this does not know, leaves the chartreuse.
+#
+# It has to arrive while the initramfs is still the root: after switch-root the
+# theme's files are gone, so an Image() loaded later would fail. The unit is
+# ordered before switch-root for exactly that reason.
+ACCENT_NAME[0] = "00"; ACCENT_R[0] = 0.976; ACCENT_G[0] = 0.616; ACCENT_B[0] = 0.616;
+ACCENT_NAME[1] = "01"; ACCENT_R[1] = 0.976; ACCENT_G[1] = 0.706; ACCENT_B[1] = 0.616;
+ACCENT_NAME[2] = "02"; ACCENT_R[2] = 0.976; ACCENT_G[2] = 0.796; ACCENT_B[2] = 0.616;
+ACCENT_NAME[3] = "03"; ACCENT_R[3] = 0.976; ACCENT_G[3] = 0.886; ACCENT_B[3] = 0.616;
+ACCENT_NAME[4] = "04"; ACCENT_R[4] = 0.976; ACCENT_G[4] = 0.976; ACCENT_B[4] = 0.616;
+ACCENT_NAME[5] = "05"; ACCENT_R[5] = 0.886; ACCENT_G[5] = 0.976; ACCENT_B[5] = 0.616;
+ACCENT_NAME[6] = "06"; ACCENT_R[6] = 0.796; ACCENT_G[6] = 0.976; ACCENT_B[6] = 0.616;
+ACCENT_NAME[7] = "07"; ACCENT_R[7] = 0.706; ACCENT_G[7] = 0.976; ACCENT_B[7] = 0.616;
+ACCENT_NAME[8] = "08"; ACCENT_R[8] = 0.616; ACCENT_G[8] = 0.976; ACCENT_B[8] = 0.616;
+ACCENT_NAME[9] = "09"; ACCENT_R[9] = 0.616; ACCENT_G[9] = 0.976; ACCENT_B[9] = 0.706;
+ACCENT_NAME[10] = "10"; ACCENT_R[10] = 0.616; ACCENT_G[10] = 0.976; ACCENT_B[10] = 0.796;
+ACCENT_NAME[11] = "11"; ACCENT_R[11] = 0.616; ACCENT_G[11] = 0.976; ACCENT_B[11] = 0.886;
+ACCENT_NAME[12] = "12"; ACCENT_R[12] = 0.616; ACCENT_G[12] = 0.976; ACCENT_B[12] = 0.976;
+ACCENT_NAME[13] = "13"; ACCENT_R[13] = 0.616; ACCENT_G[13] = 0.886; ACCENT_B[13] = 0.976;
+ACCENT_NAME[14] = "14"; ACCENT_R[14] = 0.616; ACCENT_G[14] = 0.796; ACCENT_B[14] = 0.976;
+ACCENT_NAME[15] = "15"; ACCENT_R[15] = 0.616; ACCENT_G[15] = 0.706; ACCENT_B[15] = 0.976;
+ACCENT_NAME[16] = "16"; ACCENT_R[16] = 0.616; ACCENT_G[16] = 0.616; ACCENT_B[16] = 0.976;
+ACCENT_NAME[17] = "17"; ACCENT_R[17] = 0.706; ACCENT_G[17] = 0.616; ACCENT_B[17] = 0.976;
+ACCENT_NAME[18] = "18"; ACCENT_R[18] = 0.796; ACCENT_G[18] = 0.616; ACCENT_B[18] = 0.976;
+ACCENT_NAME[19] = "19"; ACCENT_R[19] = 0.886; ACCENT_G[19] = 0.616; ACCENT_B[19] = 0.976;
+ACCENT_NAME[20] = "20"; ACCENT_R[20] = 0.976; ACCENT_G[20] = 0.616; ACCENT_B[20] = 0.976;
+ACCENT_NAME[21] = "21"; ACCENT_R[21] = 0.976; ACCENT_G[21] = 0.616; ACCENT_B[21] = 0.886;
+ACCENT_NAME[22] = "22"; ACCENT_R[22] = 0.976; ACCENT_G[22] = 0.616; ACCENT_B[22] = 0.796;
+ACCENT_NAME[23] = "23"; ACCENT_R[23] = 0.976; ACCENT_G[23] = 0.616; ACCENT_B[23] = 0.706;
+
+fun apex_accent_status(status) {
+  for (n = 0; n < 24; n++) {
+    if (status == "apex-accent-" + ACCENT_NAME[n]) {
+      dir = "accent/" + ACCENT_NAME[n] + "/";
+      # global.: refresh() reads these every frame, and an assignment inside
+      # a function must not be left to whatever the default scope is.
+      global.comet_image = Image(dir + "comet.png");
+      global.glow_image  = Image(dir + "glow.png");
+      global.spark_image = Image(dir + "spark.png");
+      global.HI_R = ACCENT_R[n]; global.HI_G = ACCENT_G[n]; global.HI_B = ACCENT_B[n];
+    }
+  }
+}
+Plymouth.SetUpdateStatusFunction(apex_accent_status);
+
 Plymouth.SetDisplayPasswordFunction(display_password);
 Plymouth.SetDisplayNormalFunction(display_normal);
 Plymouth.SetMessageFunction(message);
