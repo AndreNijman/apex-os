@@ -666,7 +666,9 @@ fn respond(writer: &mut UnixStream, response: &Response) -> Result<()> {
 fn dispatch(daemon: &Arc<Daemon>, request: Request, caller: &mut privilege::Caller) -> Response {
     match request {
         Request::Hello => {
-            let cfg = daemon.config.lock().expect("config lock");
+            // Fresh, for the same reason a session start is: the default can
+            // change under a running daemon.
+            let cfg = Config::load();
             Response::Hello {
                 version: PROTOCOL_VERSION,
                 agents: adapter::ids().into_iter().map(|s| s.to_string()).collect(),
