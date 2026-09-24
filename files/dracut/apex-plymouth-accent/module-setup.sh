@@ -1,5 +1,10 @@
 #!/bin/bash
 # Start the boot splash in the owner's accent. See apex-plymouth-theme.
+#
+# dracut sources this file with $moddir, $initdir and $systemdsystemunitdir
+# already set, and calls check()/depends()/install() itself — so shellcheck sees
+# unassigned variables and unreachable functions that are neither.
+# shellcheck disable=SC2154,SC2317
 check() {
     return 0
 }
