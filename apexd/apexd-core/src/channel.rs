@@ -633,11 +633,32 @@ pub fn verdict(rows: &[(String, Health, String)], failed_units: &[String]) -> Ve
     // LoaderBootCountPath and every published image boots GRUB, so it never
     // runs and its verdict file does not exist.
     for unit in failed_units {
+        if is_splash_unit(unit) {
+            continue;
+        }
         healthy = false;
         reasons.push(format!("systemd unit failed: {unit}"));
     }
 
     Verdict { healthy, reasons }
+}
+
+/// The boot splash failing is not evidence an update broke the machine.
+///
+/// plymouthd 24.004.60 (Fedora 43) segfaults in `hide_splash` when the GPU
+/// driver replaces simpledrm while a script theme is showing:
+/// `free_keyboards_for_renderer` frees the keyboard without firing
+/// `keyboard_removed_handler` (the display case just above it does), so the
+/// script plugin's `plugin->keyboard` dangles until the splash is hidden. On
+/// the L16, amdgpu binds ~10 s in, from the real root, and plymouth-quit runs
+/// under a second later, so the crash is a race that appears on some boots and
+/// not others, on the old deployment as much as the new one. It held every
+/// update on the L16 and a second machine on 2026-09-24 with
+/// `systemd unit failed: plymouth-start.service`, after the splash had already
+/// shown. A splash dying on its way out cannot make an update worse, and a
+/// rollback would not stop it.
+fn is_splash_unit(unit: &str) -> bool {
+    unit.starts_with("plymouth-") && unit.ends_with(".service")
 }
 
 fn first_line(s: &str) -> String {
@@ -863,6 +884,23 @@ mod tests {
         let v = verdict(&[], &["apex-shell.service".to_string()]);
         assert!(!v.healthy);
         assert!(v.reasons[0].contains("apex-shell.service"), "{:?}", v.reasons);
+    }
+
+    #[test]
+    fn a_crashed_boot_splash_does_not_hold_the_update() {
+        // L16, 2026-09-24: plymouthd segfaulted in hide_splash after amdgpu
+        // replaced simpledrm, and every update was held on it.
+        let v = verdict(&[], &["plymouth-start.service".to_string()]);
+        assert!(v.healthy, "{:?}", v.reasons);
+        assert!(v.reasons.is_empty(), "{:?}", v.reasons);
+        // ...while a real failure alongside it still holds.
+        let v = verdict(
+            &[],
+            &["plymouth-start.service".to_string(), "apex-shell.service".to_string()],
+        );
+        assert!(!v.healthy);
+        assert_eq!(v.reasons, vec!["systemd unit failed: apex-shell.service"]);
+        assert!(!is_splash_unit("apex-plymouth-theme.service"));
     }
 
     #[test]
