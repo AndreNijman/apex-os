@@ -53,7 +53,15 @@ pub fn start(daemon: &Arc<Daemon>, req: RunRequest, caller: &Caller) -> Result<S
         bail!("working directory {} does not exist", cwd.display());
     }
 
-    let cfg = daemon.config.lock().expect("config lock").clone();
+    // Read fresh, not the copy the daemon loaded at startup. `apex agent
+    // default codex` writes agent.json and returns; with the cached copy every
+    // later `a` still started the agent the daemon booted with, until the
+    // daemon was restarted (L16, 2026-09-24: default set to codex, `a` started
+    // claude). The rest of this function already reads the file fresh (below),
+    // so the default agent was the one setting that lagged. The cache is kept
+    // current for the readers that still use it.
+    let cfg = config::Config::load();
+    *daemon.config.lock().expect("config lock") = cfg.clone();
 
     // ── §36's `[identity.agent]`, before anything is resolved ──────────────
     //
