@@ -107,6 +107,18 @@ table inet apex {
         # and the seventeen listening ports on this machine are mostly here.
         iif lo accept
 
+        # sing-box's own tunnel (the VPN APEX Shell toggles). With its `system`
+        # stack, every TCP connection an app makes through the VPN is handed to
+        # sing-box as a NEW inbound connection on sb-tun, so the drop policy
+        # dropped all of them: the tunnel came up, DNS and UDP worked, and every
+        # TCP connection timed out (L16, 2026-09-24 — 200 via the VPS the
+        # moment this rule was added). Like loopback, what arrives here is this
+        # machine's own traffic looped through sing-box; the far side is
+        # sing-box, never a remote network. Named exactly: `tun*` would also
+        # admit OpenVPN's tun0, whose far side IS a remote network. APEX Shell
+        # requires the device to be called sb-tun (VPNTab waits for it).
+        iifname "sb-tun" accept
+
         # ICMP is not optional. Dropping it breaks path MTU discovery, which
         # fails as a slow connection rather than a refused one, and on IPv6 it
         # breaks neighbour discovery outright, which means no network at all.

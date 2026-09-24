@@ -655,5 +655,17 @@ else
 fi
 
 echo
+# ── sing-box's tunnel ────────────────────────────────────────────────────────
+# With sing-box's system stack every TCP connection through the VPN arrives as a
+# NEW inbound connection on sb-tun; without this rule the drop policy killed all
+# of them (the VPN "connected" and no TCP got through). Exactly sb-tun: a
+# wildcard would also admit OpenVPN's tun0, whose far side is a remote network.
+grep -qE '^[[:space:]]*iifname "sb-tun" accept$' "$RULES" \
+    && ok "input accepts sing-box's own tunnel, sb-tun" \
+    || bad "input accepts sing-box's own tunnel, sb-tun" "missing: TCP through the VPN is dropped"
+grep -qE 'iifname "tun\*"|iifname "tun[0-9]*" accept' "$RULES" \
+    && bad "no wildcard tunnel accept (would admit a remote VPN)" "found one" \
+    || ok "no wildcard tunnel accept (would admit a remote VPN)"
+
 printf 'apex-firewall: %d passed, %d failed, %d skipped\n' "$pass" "$fail" "$skip"
 [ "$fail" -eq 0 ]
