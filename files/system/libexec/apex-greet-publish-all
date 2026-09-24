@@ -40,4 +40,6 @@ while IFS=: read -r name _ uid _ _ home _; do
     fi
 done < <(getent passwd)
 echo "apex-greet-publish: published for ${ok} of ${n} account(s)"
+# And the boot/shutdown splash, from the same published accent.
+[ -x /usr/libexec/apex-plymouth-accent ] && /usr/libexec/apex-plymouth-accent || true
 exit 0

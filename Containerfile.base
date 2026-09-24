@@ -3618,6 +3618,9 @@ COPY files/system/sudoers/apex-greet-wallpaper /etc/sudoers.d/030-apex-greet-wal
 # instead of waiting for them to log in once. Same helper, called as root with
 # SUDO_UID set, so its reads still happen as the user.
 COPY --chmod=0755 files/system/libexec/apex-greet-publish-all /usr/libexec/apex-greet-publish-all
+# The boot and shutdown splash in the same accent: shutdown's plymouthd.conf and
+# the ESP credential the initramfs reads (files/dracut/apex-plymouth-accent).
+COPY --chmod=0755 files/system/libexec/apex-plymouth-accent /usr/libexec/apex-plymouth-accent
 COPY files/system/units/apex-greet-publish.service /usr/lib/systemd/system/apex-greet-publish.service
 RUN set -eux; \
     bash -n /usr/libexec/apex-greet-publish-all; \

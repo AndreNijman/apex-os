@@ -257,17 +257,43 @@ RUN set -eux; \
 # See ROADMAP/evidence/initramfs-slim2-20260922.md.
 COPY files/branding/plymouth/apex-os-chartreuse \
      /usr/share/plymouth/themes/apex-os-chartreuse
+# The 24 accent themes (make-accent-themes.sh) and the dracut module that starts
+# the splash in the owner's one before plymouthd does, from an ESP credential
+# (files/dracut/apex-plymouth-accent). Copied whole and moved in the RUN below:
+# a COPY glob over several directories would flatten them into one.
+COPY files/branding/plymouth /tmp/apex-plymouth-src
+COPY --chmod=0755 files/dracut/apex-plymouth-accent \
+     /usr/lib/dracut/modules.d/50apex-plymouth-accent
 COPY --chmod=0755 files/scripts/check-initramfs-budget.sh \
      /tmp/check-initramfs-budget.sh
 RUN set -eux; \
     command -v plymouth-set-default-theme >/dev/null \
         || { echo "FATAL: plymouth engine missing from core"; exit 1; }; \
+    for t in /tmp/apex-plymouth-src/apex-os-accent-*; do \
+        cp -a "$t" /usr/share/plymouth/themes/; \
+    done; \
+    rm -rf /tmp/apex-plymouth-src; \
+    test "$(ls -d /usr/share/plymouth/themes/apex-os-accent-* | wc -l)" -eq 24 \
+        || { echo "FATAL: expected 24 accent themes"; exit 1; }; \
     plymouth-set-default-theme apex-os-chartreuse; \
     KVER="$(cat /usr/lib/apex-kver)"; \
     dracut --force --no-hostonly --reproducible --zstd \
-        --add plymouth --kver "${KVER}" \
+        --add "plymouth apex-plymouth-accent" --kver "${KVER}" \
         "/usr/lib/modules/${KVER}/initramfs.img"; \
     test -s "/usr/lib/modules/${KVER}/initramfs.img"; \
+    # The splash can only start in the owner's accent if the chooser and every
+    # theme it can choose are in the initramfs: dracut's plymouth module carries
+    # only the default theme.
+    _ls="$(lsinitrd "/usr/lib/modules/${KVER}/initramfs.img")"; \
+    for want in usr/bin/apex-plymouth-theme \
+                sysinit.target.wants/apex-plymouth-theme.service \
+                themes/apex-os-accent-00/apex-os-accent-00.plymouth \
+                themes/apex-os-accent-01/spark.png \
+                themes/apex-os-accent-23/apex-os.script \
+                fs/fat/vfat.ko; do \
+        printf '%s\n' "$_ls" | grep -qF "$want" \
+            || { echo "FATAL: $want is not in the initramfs"; exit 1; }; \
+    done; \
     # ── the gates ──────────────────────────────────────────────────────────
     # These used to be ~140 lines of inline `grep` right here, which makes them
     # the one kind of test that cannot be run by running the test suite: they
