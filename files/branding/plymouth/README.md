@@ -1,7 +1,10 @@
 # APEX-OS Plymouth Themes
 
 Boot splash for APEX-OS, in two colorways. **`apex-os-chartreuse` is the one
-that ships** — APEX publishes a single image and `Containerfile.apex` installs
+that ships**, and it follows the owner's matugen accent: `accent/NN/` holds the
+art rotated to 24 hues (`make-accent-variants.sh`), and the initramfs module
+`files/dracut/apex-plymouth-accent` tells the theme which to draw once the root
+filesystem is mounted — APEX publishes a single image and `Containerfile.apex` installs
 only that theme. `apex-os-gold` is source art for the other colourway and is
 installed by nothing; it dates from when Gaming was a separate edition.
 

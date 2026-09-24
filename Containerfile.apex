@@ -257,6 +257,13 @@ RUN set -eux; \
 # See ROADMAP/evidence/initramfs-slim2-20260922.md.
 COPY files/branding/plymouth/apex-os-chartreuse \
      /usr/share/plymouth/themes/apex-os-chartreuse
+# The boot splash in the owner's matugen accent (2026-09-24). The theme carries
+# 24 pre-rotated hue variants under accent/ (Plymouth's script cannot tint), and
+# this dracut module adds a unit that, once the root filesystem is mounted,
+# reads the owner's published accent through /sysroot and tells the theme which
+# variant to draw. See files/dracut/apex-plymouth-accent.
+COPY --chmod=0755 files/dracut/apex-plymouth-accent \
+     /usr/lib/dracut/modules.d/50apex-plymouth-accent
 COPY --chmod=0755 files/scripts/check-initramfs-budget.sh \
      /tmp/check-initramfs-budget.sh
 RUN set -eux; \
@@ -265,9 +272,22 @@ RUN set -eux; \
     plymouth-set-default-theme apex-os-chartreuse; \
     KVER="$(cat /usr/lib/apex-kver)"; \
     dracut --force --no-hostonly --reproducible --zstd \
-        --add plymouth --kver "${KVER}" \
+        --add "plymouth apex-plymouth-accent" --kver "${KVER}" \
         "/usr/lib/modules/${KVER}/initramfs.img"; \
     test -s "/usr/lib/modules/${KVER}/initramfs.img"; \
+    # The accent reached the initramfs, or the splash silently stays green:
+    # the helper, its unit wired into initrd.target, a variant, and the handler.
+    _ls="$(lsinitrd "/usr/lib/modules/${KVER}/initramfs.img")"; \
+    for want in usr/bin/apex-plymouth-accent \
+                initrd.target.wants/apex-plymouth-accent.service \
+                themes/apex-os-chartreuse/accent/01/spark.png \
+                themes/apex-os-chartreuse/accent/23/comet.png; do \
+        printf '%s\n' "$_ls" | grep -qF "$want" \
+            || { echo "FATAL: $want is not in the initramfs"; exit 1; }; \
+    done; \
+    lsinitrd -f usr/share/plymouth/themes/apex-os-chartreuse/apex-os.script \
+        "/usr/lib/modules/${KVER}/initramfs.img" | grep -qF 'SetUpdateStatusFunction(apex_accent_status)' \
+        || { echo "FATAL: the initramfs theme has no accent handler"; exit 1; }; \
     # ── the gates ──────────────────────────────────────────────────────────
     # These used to be ~140 lines of inline `grep` right here, which makes them
     # the one kind of test that cannot be run by running the test suite: they

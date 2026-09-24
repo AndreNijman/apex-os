@@ -3259,6 +3259,12 @@ jobs:
         if: ${{ !cancelled() }}
         run: ./tests/test-apex-greet-accent.sh
 
+      # The boot splash follows the owner's accent: the initramfs helper, run
+      # against a fake /sysroot, and the theme's 24 variants and handler.
+      - name: Run boot-splash accent assertions
+        if: ${{ !cancelled() }}
+        run: ./tests/test-apex-plymouth-accent.sh
+
       - name: Run display-settings assertions
         if: ${{ !cancelled() }}
         env:

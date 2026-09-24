@@ -1,0 +1,16 @@
+[Unit]
+Description=APEX-OS: colour the boot splash with the owner's accent
+Documentation=man:plymouth(8)
+DefaultDependencies=no
+# The accent is read through /sysroot, and must reach the theme while the
+# initramfs is still the root — its accent/ images are gone after switch-root.
+After=sysroot.mount plymouth-start.service
+Before=initrd-switch-root.target initrd-cleanup.service
+ConditionPathExists=/run/plymouth/pid
+[Service]
+Type=oneshot
+ExecStart=/usr/bin/apex-plymouth-accent
+StandardOutput=kmsg
+StandardError=kmsg
+[Install]
+WantedBy=initrd.target
