@@ -469,6 +469,22 @@ else
     printf 'PASS  %-30s\n' "no podman pull"; pass=$((pass+1))
 fi
 
+# Every `skopeo copy` must name its temp dir. TMPDIR alone does not reach the
+# containers-storage destination: skopeo 1.22 takes that from containers.conf's
+# image_copy_tmp_dir (/var/tmp), which on a live ISO is the 5.3 GB overlay.
+# A VM install from the netinstall ISO filled it and died silently at
+# "Preparing the installer runtime"; a host run cannot see this, because the
+# host's /var/tmp is huge. So it is checked here, statically, on every line.
+_bare=$(grep -nE '^\s*(if\s+)?skopeo\s+copy' "$ENGINE" || true)
+_named=$(grep -cE '^\s*(if\s+)?skopeo\s+"\$\{SKOPEO_TMP\[@\]\}"\s+copy' "$ENGINE" || true)
+if [ -n "$_bare" ]; then
+    printf 'FAIL  %-30s %s\n' "skopeo copy names --tmpdir" "bare skopeo copy at line(s): $(cut -d: -f1 <<<"$_bare" | tr '\n' ' ')"; fail=$((fail+1))
+elif [ "${_named:-0}" -lt 2 ]; then
+    printf 'FAIL  %-30s %s\n' "skopeo copy names --tmpdir" "expected both netinstall copies to pass SKOPEO_TMP, found $_named"; fail=$((fail+1))
+else
+    printf 'PASS  %-30s\n' "skopeo copy names --tmpdir"; pass=$((pass+1))
+fi
+
 echo "── GUI: every page must draw — it is the only front end there is ──────"
 
 GUI=./apex-installer-gui

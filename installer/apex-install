@@ -318,6 +318,16 @@ $_state"
   # is the same RAM write this whole section exists to remove, and it applies to
   # BOTH staging homes — it is not specific to the on-target fallback.
   export TMPDIR="$_tmp"
+  # …and TMPDIR alone is NOT enough for the containers-storage copy below.
+  # skopeo 1.22 takes that destination's big temporary files from
+  # containers.conf's image_copy_tmp_dir, which defaults to /var/tmp and wins
+  # over $TMPDIR. Measured in a VM booted from the netinstall ISO: the download
+  # stayed on the staging disk, then "Preparing the installer runtime" wrote
+  # /var/tmp/container_images_storage*/ into the 5.3 GB live overlay, filled it
+  # 40 s in, and died with no error in the log — the log lives on the same full
+  # filesystem. The host-side suites never saw it: this laptop's /var/tmp has
+  # hundreds of GB. So every skopeo copy here names its temp dir explicitly.
+  SKOPEO_TMP=(--tmpdir "$_tmp")
   note "Staging to $scratch (needs ~${NEED_SCRATCH_GB} GB)."
   log "scratch: $scratch ($(df -PBG "$scratch" 2>/dev/null | awk 'NR==2{print $4}') free, TMPDIR=$TMPDIR)"
 
@@ -342,7 +352,7 @@ $_state"
         note "Download failed — waiting ${_wait}s, then retrying (attempt $attempt of 3)…"
         sleep "$_wait"
       fi
-      if skopeo copy --retry-times 3 \
+      if skopeo "${SKOPEO_TMP[@]}" copy --retry-times 3 \
            "docker://$NET_SOURCE_IMAGE" "oci:$OCI_SCRATCH:apex" 2>&1 | tee -a "$LOG"; then
         pull_ok=1; break
       fi
@@ -371,7 +381,7 @@ The exact error is above and in $LOG."
   note "Preparing the installer runtime…"
   if ! podman --root "$STORE_SCRATCH/graph" --runroot "$STORE_SCRATCH/run" \
          image exists "$TARGET_IMAGE" 2>/dev/null; then
-    skopeo copy "oci:$OCI_SCRATCH:apex" \
+    skopeo "${SKOPEO_TMP[@]}" copy "oci:$OCI_SCRATCH:apex" \
       "containers-storage:[overlay@$STORE_SCRATCH/graph+$STORE_SCRATCH/run]$TARGET_IMAGE" \
       2>&1 | tee -a "$LOG" \
       || die "Could not prepare the installer runtime from the downloaded image.
