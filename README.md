@@ -57,8 +57,8 @@ Releases before v1.0.0 published one ISO per edition
 names are gone; take the newest release.
 
 Each ISO downloads the exact APEX-OS build it was tested with (its image digest
-is recorded inside the ISO and printed in the release notes), not whatever was
-published last. The installed machine follows the normal `:apex` update channel
+is recorded inside the ISO at `/usr/lib/apex-installer/image-digest`, and a
+release should quote it in its notes), not whatever was published last. The installed machine follows the normal `:apex` update channel
 from then on, so the first `sudo apex update` brings it current.
 
 Check the download is intact. A truncated ISO fails much later, in ways that
