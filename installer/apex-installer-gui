@@ -18,8 +18,8 @@
 #  Design (see docs/branding.md — colours are the established APEX tokens, not
 #  invented here): industrial/technical instrument. Mono for anything the
 #  machine said (device paths, sizes, serials); humanist sans for prose. The
-#  accent follows the EDITION being installed — chartreuse for Daily, gold for
-#  Gaming — so the installer looks like the thing it is about to install.
+#  accent is chartreuse, the APEX token: the editions converged into one image,
+#  so there is no longer a second accent for the installer to pick between.
 #
 #  The memorable screen is Confirm: a stark, honest inventory of what dies and
 #  what survives. That screen is why this exists — whiptail silently CLIPPED it
@@ -67,15 +67,15 @@ SURFACE = "#0B0E14"
 RAISED  = "#131722"
 TEXT    = "#D9DEEB"
 DANGER  = "#FF5C5C"
-ACCENTS = {"daily": "#D9F99D", "gaming-nvidia": "#FDE047", "gaming-mesa": "#FDE047"}
+ACCENT  = "#D9F99D"
 
 
 def edition():
     try:
         with open(EDITION_FILE) as f:
-            return f.read().strip() or "daily"
+            return f.read().strip() or "apex"
     except OSError:
-        return "daily"
+        return "apex"
 
 
 def run(cmd, timeout=15):
@@ -139,20 +139,34 @@ def list_disks():
 
 
 def list_partitions(disk):
-    rc, txt = run(["lsblk", "-rno", "NAME,TYPE,SIZE,FSTYPE,LABEL,PARTTYPE", disk])
+    # -P (KEY="value" pairs), not whitespace columns. With -r an EMPTY column
+    # simply vanishes, so a partition with no filesystem shifted its label into
+    # the FSTYPE slot, and a label with a space in it ("Basic data partition")
+    # split into words that the old heuristics then guessed back together. The
+    # ESP detection below reads PARTTYPE out of this, so a guess here is a
+    # guess about which partition is safe to write boot files to.
+    rc, txt = run(["lsblk", "-nP", "-o", "NAME,TYPE,SIZE,FSTYPE,LABEL,PARTTYPE", disk])
     out = []
     for line in txt.splitlines():
-        f = line.split()
-        if len(f) < 3 or f[1] != "part":
+        f = dict(re.findall(r'([A-Z:]+)="([^"]*)"', line))
+        if f.get("TYPE") != "part" or not f.get("NAME"):
             continue
-        name, _t, size = f[0], f[1], f[2]
-        fstype = f[3] if len(f) > 3 else ""
-        rest = f[4:] if len(f) > 4 else []
-        parttype = rest[-1] if rest and rest[-1].startswith("0x") or (rest and "-" in rest[-1]) else ""
-        label = " ".join(rest[:-1]) if parttype else " ".join(rest)
-        out.append({"dev": f"/dev/{name}", "size": size, "fstype": fstype,
-                    "label": label, "parttype": parttype})
+        out.append({"dev": f"/dev/{f['NAME']}", "size": f.get("SIZE", "?"),
+                    "fstype": f.get("FSTYPE", ""), "label": f.get("LABEL", ""),
+                    "parttype": f.get("PARTTYPE", "")})
     return out
+
+
+def device_fingerprint(dev):
+    """What the confirm page binds the typed ERASE to. The engine computes the
+    same string with the same lsblk call immediately before its first write,
+    and refuses if they differ — a /dev path is a name, and between this page
+    and that write a disk can be unplugged and another take its name. Empty
+    means the device could not be read, which the confirm page treats as
+    'cannot confirm', never as 'matches anything'."""
+    rc, value = run(["lsblk", "-bdnP", "-o",
+                     "MAJ:MIN,SIZE,WWN,SERIAL,PTUUID,PARTUUID,PARTTYPE", dev])
+    return value.strip().splitlines()[0] if rc == 0 and value.strip() else ""
 
 
 def find_esp(disk):
@@ -612,7 +626,7 @@ class Installer(Adw.Application):
                          flags=Gio.ApplicationFlags.NON_UNIQUE)
         self.connect("activate", self.startup)
         self.ed = edition()
-        self.accent = ACCENTS.get(self.ed, ACCENTS["daily"])
+        self.accent = ACCENT
         # ── "LUKS2 by default" lives HERE ────────────────────────────────
         # The engine refuses to guess: it needs `encrypt=` spelled out in the
         # answers file. "By default" is therefore a property of the question
@@ -801,9 +815,7 @@ class Installer(Adw.Application):
         col.set_margin_start(SP * 6); col.set_margin_end(SP * 6)
         col.set_valign(Gtk.Align.FILL)
 
-        ed_name = {"daily": "DAILY", "gaming-nvidia": "GAMING",
-                   "gaming-mesa": "GAMING"}.get(self.ed, self.ed.upper())
-        col.append(lbl(f"APEX-OS  {ed_name}   ·   {step}", "apex-step"))
+        col.append(lbl(f"APEX-OS   ·   {step}", "apex-step"))
         col.append(lbl(title, "apex-title"))
         if subtitle:
             col.append(lbl(subtitle, "apex-sub"))
@@ -1271,6 +1283,11 @@ class Installer(Adw.Application):
     # ── 3. disk ──────────────────────────────────────────────────────────────
     def p_disk(self):
         body = Gtk.Box(orientation=Gtk.Orientation.VERTICAL, spacing=SP * 3)
+        # Set by begin() when a device changed under the confirm page; shown
+        # once, here, where the user can do something about it.
+        if getattr(self, "_disk_error", ""):
+            body.append(lbl(self._disk_error, "apex-danger"))
+            self._disk_error = ""
         disks = list_disks()
         self._disks = disks
 
@@ -1830,6 +1847,14 @@ class Installer(Adw.Application):
         body = Gtk.Box(orientation=Gtk.Orientation.VERTICAL, spacing=SP * 3)
         mode = self.answers["mode"]
         target = self.target if mode == "partition" else self.disk
+        # Snapshot the identity of every device this page is about to name.
+        # begin() re-reads them, and the engine checks them again before its
+        # first write — see device_fingerprint().
+        self._confirmed_devices = {"disk": self.disk}
+        if mode == "partition":
+            self._confirmed_devices.update(target=self.target, esp=self.esp)
+        self._confirmed_ids = {name: device_fingerprint(dev)
+                               for name, dev in self._confirmed_devices.items()}
 
         # The warning comes FIRST and is never truncated. whiptail clipped this
         # silently once a disk had five partitions — hiding the destruction
@@ -1956,7 +1981,8 @@ class Installer(Adw.Application):
 
         go = self.btn("Erase and install", "apex-destroy", lambda *_: self.begin(), False)
         self.e_erase.connect("changed",
-                             lambda e: go.set_sensitive(e.get_text().strip() == "ERASE"))
+                             lambda e: go.set_sensitive(e.get_text().strip() == "ERASE"
+                                                        and all(self._confirmed_ids.values())))
         self.e_erase.connect("activate",
                              lambda e: self.begin() if e.get_text().strip() == "ERASE" else None)
 
@@ -1974,6 +2000,23 @@ class Installer(Adw.Application):
 
     # ── 7. run ───────────────────────────────────────────────────────────────
     def begin(self):
+        # Reached from the button AND from Enter in the entry, and the entry's
+        # handler does not know whether the button is sensitive — so every
+        # condition the button checks is checked again here.
+        if self.e_erase.get_text().strip() != "ERASE":
+            return
+        if (not all(self._confirmed_ids.values()) or
+                any(device_fingerprint(dev) != self._confirmed_ids[name]
+                    for name, dev in self._confirmed_devices.items())):
+            self._disk_error = ("A disk or partition changed while the confirm page "
+                                "was open. Nothing was written. Choose the disk again.")
+            self.go("disk")
+            return
+        self.answers["confirmed"] = "ERASE"
+        self.answers["confirm_target"] = (self.target if self.answers["mode"] == "partition"
+                                          else self.disk)
+        for name, identity in self._confirmed_ids.items():
+            self.answers[f"confirm_{name}_id"] = identity
         self.go("run")
 
     def p_run(self):
@@ -2049,7 +2092,9 @@ class Installer(Adw.Application):
                 # "no", both truthy, so the get() guard below cannot drop it.
                 for k in ("mode", "disk", "target", "esp", "username", "password",
                           "hostname", "rootfs", "mokpw", "encrypt", "lukspass",
-                          "keymap", "keyvariant", "timezone"):
+                          "keymap", "keyvariant", "timezone", "confirmed",
+                          "confirm_target", "confirm_disk_id",
+                          "confirm_target_id", "confirm_esp_id"):
                     if a.get(k):
                         f.write(f"{k}={a[k]}\n")
         except OSError as e:

@@ -1,9 +1,9 @@
 # APEX-OS installer live-environment rootfs.
 #
 # A small Fedora rootfs (NOT the APEX image) that boots as a live ISO and runs
-# the apex-install TUI. The APEX-OS image to install is embedded in this env's
-# container storage so the install works fully offline via
-#   podman run localhost/apex-os:daily bootc install to-disk …
+# the GTK installer over the apex-install engine. The netinstall build downloads
+# the APEX image (a digest pinned at ISO build time) during the install; the
+# offline build embeds it in this env's container storage and installs from it.
 #
 # NOTE: the APEX image is NOT embedded here. `skopeo copy … containers-storage:`
 # cannot run inside a podman build (the build container's fs is overlayfs and
@@ -149,7 +149,7 @@ RUN dnf -y install --setopt=install_weak_deps=False \
         adwaita-icon-theme jetbrains-mono-fonts google-noto-sans-fonts \
         abattis-cantarell-fonts \
         grub2-tools-extra grub2-efi-x64-modules grub2-pc-modules \
-        shim-x64 grub2-efi-x64 mokutil efibootmgr \
+        shim-x64 grub2-efi-x64 mokutil efibootmgr xorriso \
     && dnf clean all
 
 # The installer TUI.

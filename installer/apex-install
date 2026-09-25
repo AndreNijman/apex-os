@@ -48,20 +48,25 @@ set -uo pipefail
 
 LOG=/var/log/apex-install.log
 : > "$LOG" 2>/dev/null || LOG=/tmp/apex-install.log
-# Which edition this ISO carries. build-live-iso.sh stamps it; a missing stamp
-# means an old ISO, so fall back to daily.
+# Which tag this ISO installs. build-live-iso.sh stamps it; a missing stamp
+# falls back to `apex`, the one image every edition converged into. `:daily`,
+# `:gaming-mesa` and `:gaming-nvidia` survive only as aliases of the same digest.
 #
 # This MUST drive TARGET_IMAGE. It is not cosmetic: TARGET_IMAGE is written into
-# the installed system as its `bootc upgrade` origin. A Gaming ISO that recorded
-# the daily origin would install correctly and then SILENTLY convert itself to
-# Daily on the first upgrade — dropping the NVIDIA driver on a machine that
-# needs it to display anything. Caught before the first Katana flash.
-EDITION="${APEX_EDITION:-$(cat /usr/lib/apex-installer/edition 2>/dev/null || echo daily)}"
+# the installed system as its `bootc upgrade` origin, so a stale tag here is a
+# machine that follows an alias instead of the canonical image forever.
+EDITION="${APEX_EDITION:-$(cat /usr/lib/apex-installer/edition 2>/dev/null || echo apex)}"
 # The image to install. The live env preloads it into podman storage as this ref
 # (see the ISO build); override with APEX_IMAGE=... for testing.
 IMAGE="${APEX_IMAGE:-localhost/apex-os:${EDITION}}"
 # Update origin recorded in the INSTALLED system (so `bootc upgrade` works).
 TARGET_IMAGE="${APEX_TARGET_IMAGE:-ghcr.io/andrenijman/apex-os:${EDITION}}"
+# What a network install DOWNLOADS, as opposed to what the installed system
+# FOLLOWS. A production netinstall ISO pins this to the digest it was qualified
+# against (see the preflight below), so a push to :apex between the ISO build
+# and somebody's install cannot swap the payload under a tested ISO. The origin
+# recorded on the disk stays TARGET_IMAGE, the tag, or the machine never updates.
+NET_SOURCE_IMAGE="$TARGET_IMAGE"
 ROOTFS_TYPE="${APEX_ROOTFS:-btrfs}"
 
 # NETWORK INSTALL. The full ISO embeds the OS image twice (an OCI dir on the ISO
@@ -316,7 +321,7 @@ $_state"
   note "Staging to $scratch (needs ~${NEED_SCRATCH_GB} GB)."
   log "scratch: $scratch ($(df -PBG "$scratch" 2>/dev/null | awk 'NR==2{print $4}') free, TMPDIR=$TMPDIR)"
 
-  note "Downloading APEX-OS from $TARGET_IMAGE — this is the slow part."
+  note "Downloading APEX-OS from $NET_SOURCE_IMAGE — this is the slow part."
   if [ -f "$OCI_SCRATCH/index.json" ]; then
     note "Already downloaded."
     pull_ok=1
@@ -338,11 +343,11 @@ $_state"
         sleep "$_wait"
       fi
       if skopeo copy --retry-times 3 \
-           "docker://$TARGET_IMAGE" "oci:$OCI_SCRATCH:apex" 2>&1 | tee -a "$LOG"; then
+           "docker://$NET_SOURCE_IMAGE" "oci:$OCI_SCRATCH:apex" 2>&1 | tee -a "$LOG"; then
         pull_ok=1; break
       fi
     done
-    [ "$pull_ok" = 1 ] || die "Could not download APEX-OS from $TARGET_IMAGE after 3 attempts.
+    [ "$pull_ok" = 1 ] || die "Could not download APEX-OS from $NET_SOURCE_IMAGE after 3 attempts.
 
 $_state
 
@@ -738,13 +743,24 @@ if [ "$NETINSTALL" = 1 ]; then
   # install that is about to become perfectly possible. The real check, and the
   # pull, happen at the install step — before anything is written to the disk.
   IMAGE="$TARGET_IMAGE"
+  # The marker file, not APEX_NETINSTALL: only a real netinstall ISO carries the
+  # pin, and a test forcing the netinstall guards on has no digest to read.
+  if [ -f /usr/lib/apex-installer/netinstall ]; then
+    RELEASE_DIGEST=$(tr -d '[:space:]' 2>/dev/null < /usr/lib/apex-installer/image-digest || true)
+    [[ "$RELEASE_DIGEST" =~ ^sha256:[0-9a-f]{64}$ ]] \
+      || die "This network installer has no valid pinned image digest, so it cannot know which APEX-OS it was tested with.
+
+Nothing has been erased — your disks are untouched.
+The ISO is damaged or was built incorrectly; download it again."
+    NET_SOURCE_IMAGE="${TARGET_IMAGE%:*}@$RELEASE_DIGEST"
+  fi
   # skopeo is what fetches the image now, so its absence must be a refusal here
   # and not a "command not found" halfway through the download.
   have skopeo || die "skopeo is missing from the live environment, so a network install cannot fetch APEX-OS.
 
 Nothing has been erased — your disks are untouched.
 Use the full offline ISO, which needs no download."
-  note "Network install: APEX-OS will be downloaded from $TARGET_IMAGE."
+  note "Network install: APEX-OS will be downloaded from $NET_SOURCE_IMAGE."
 elif [ "${1:-}" = --check-passphrase ]; then
   # --check-passphrase is a one-shot, NO-DISK advisory check: it asks whether a
   # passphrase can be typed on the initramfs keymap and prints one line. It
@@ -1654,6 +1670,9 @@ KEYMAP=""; KEYVARIANT=""; TIMEZONE=""
 # Encryption is a DECISION, and a decision that goes missing must not be made
 # silently in either direction — see the `encrypt` validation below.
 ENCRYPT=""; LUKSPASS=""
+# The typed ERASE and the identity of every device it was typed against. See
+# the confirmation binding immediately before the dry-run stop.
+CONFIRMED=""; CONFIRM_TARGET=""; CONFIRM_DISK_ID=""; CONFIRM_TARGET_ID=""; CONFIRM_ESP_ID=""
 
 while IFS= read -r line || [ -n "$line" ]; do
   case "$line" in
@@ -1676,6 +1695,11 @@ while IFS= read -r line || [ -n "$line" ]; do
     timezone)  TIMEZONE="$v" ;;
     encrypt)   ENCRYPT="$v" ;;
     lukspass)  LUKSPASS="$v" ;;
+    confirmed) CONFIRMED="$v" ;;
+    confirm_target)    CONFIRM_TARGET="$v" ;;
+    confirm_disk_id)   CONFIRM_DISK_ID="$v" ;;
+    confirm_target_id) CONFIRM_TARGET_ID="$v" ;;
+    confirm_esp_id)    CONFIRM_ESP_ID="$v" ;;
     *)         die "unknown key in answers file: $k" ;;
   esac
 done < "$ANSWERS"
@@ -2176,7 +2200,7 @@ erased — and try again."
     #
     # What it cannot prove is that a link working now still works in ten
     # minutes. Nothing can, and the message below does not pretend otherwise.
-    note "Checking APEX-OS can be downloaded from $TARGET_IMAGE …"
+    note "Checking APEX-OS can be downloaded from $NET_SOURCE_IMAGE …"
     insp_ok=0
     for attempt in 1 2 3; do
       if [ "$attempt" != 1 ]; then
@@ -2184,9 +2208,9 @@ erased — and try again."
         note "Could not reach the registry — waiting ${_wait}s, then retrying (attempt $attempt of 3)…"
         sleep "$_wait"
       fi
-      if skopeo inspect --raw "docker://$TARGET_IMAGE" >>"$LOG" 2>&1; then insp_ok=1; break; fi
+      if skopeo inspect --raw "docker://$NET_SOURCE_IMAGE" >>"$LOG" 2>&1; then insp_ok=1; break; fi
     done
-    [ "$insp_ok" = 1 ] || die "Could not reach APEX-OS at $TARGET_IMAGE after 3 attempts.
+    [ "$insp_ok" = 1 ] || die "Could not reach APEX-OS at $NET_SOURCE_IMAGE after 3 attempts.
 
 Nothing has been erased — your disks are untouched.
 
@@ -2272,6 +2296,46 @@ install APEX-OS unencrypted, or use a newer ISO."
   else
     luks_helper_checked=1
   fi
+fi
+
+# ── The typed ERASE is bound to the devices it was typed against ─────────────
+# The confirm page names devices by /dev path, and a /dev path is not an
+# identity. Between the user typing ERASE and this line there can be a
+# multi-minute download, and in that time a USB disk can drop off the bus and
+# come back under another name, or a second one can be plugged in and take the
+# first one's name — /dev/sdb is whichever disk the kernel enumerated second,
+# not the disk the user looked at. So the front end records each device's
+# kernel identity, size, WWN, serial and partition-table/partition UUIDs when
+# the confirm page is drawn, and this is the check that they still match,
+# made here because this is the last line before anything is destroyed.
+#
+# It is a hard refusal in the ENGINE, not a check in the GUI, because the
+# engine is the only thing between an answers file and a wipe: a front end with
+# a bug, or an answers file written by hand, gets exactly the same treatment.
+device_fingerprint() {
+  lsblk -bdnP -o MAJ:MIN,SIZE,WWN,SERIAL,PTUUID,PARTUUID,PARTTYPE "$1" 2>/dev/null | head -1
+}
+[ "$CONFIRMED" = ERASE ] \
+  || die "The final confirmation (typing ERASE) is missing from the answers file. Nothing has been erased."
+[ -n "$CONFIRM_TARGET" ] && [ "$CONFIRM_TARGET" = "$TARGET" ] \
+  || die "The confirmation was typed for ${CONFIRM_TARGET:-no device}, not $TARGET. Nothing has been erased."
+[ -n "$CONFIRM_DISK_ID" ] && [ "$(device_fingerprint "$DISK")" = "$CONFIRM_DISK_ID" ] \
+  || die "$DISK is not the disk that was confirmed: it changed, or a different disk now has that name. Nothing has been erased.
+
+Go back to the disk page and choose the disk again."
+if [ "$INSTALL_MODE" = partition ]; then
+  [ -n "$CONFIRM_TARGET_ID" ] && [ "$(device_fingerprint "$TARGET")" = "$CONFIRM_TARGET_ID" ] \
+    || die "$TARGET is not the partition that was confirmed. Nothing has been erased.
+
+Go back to the disk page and choose the partition again."
+  [ -n "$CONFIRM_ESP_ID" ] && [ "$(device_fingerprint "$ESP_DEV")" = "$CONFIRM_ESP_ID" ] \
+    || die "$ESP_DEV is not the EFI System Partition that was confirmed. Nothing has been erased.
+
+Go back to the disk page and choose the partition again."
+  [ "$(lsblk -dno PKNAME "$TARGET" 2>/dev/null | tr -d ' ')" = "$(basename "$DISK")" ] \
+    || die "$TARGET is no longer on the confirmed disk $DISK. Nothing has been erased."
+  [ "$(lsblk -dno PKNAME "$ESP_DEV" 2>/dev/null | tr -d ' ')" = "$(basename "$DISK")" ] \
+    || die "$ESP_DEV is no longer on the confirmed disk $DISK. Nothing has been erased."
 fi
 
 if [ "${STAGE_ON_TARGET:-0}" = 1 ]; then

@@ -452,7 +452,7 @@ ensure_engine_image() {
 }
 
 engine() {   # engine <answers-file> -> the engine's combined output
-    sudo -n APEX_IMAGE="$ENGINE_IMAGE" "$ENGINE" --headless "$1" 2>&1 </dev/null
+    sudo -n APEX_DRY_RUN=1 APEX_IMAGE="$ENGINE_IMAGE" "$ENGINE" --headless "$1" 2>&1 </dev/null
 }
 
 section "a bad layout is refused before anything is erased"

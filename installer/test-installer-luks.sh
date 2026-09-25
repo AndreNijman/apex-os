@@ -199,7 +199,7 @@ done
 run_engine() {  # $1=engine path  $2=answers body  [$3..]=extra env assignments
     local eng="$1" body="$2"; shift 2
     printf '%s\n' "$body" > "$ANS"
-    sudo -n APEX_IMAGE="$ENGINE_IMAGE" "$@" "$eng" --headless "$ANS" 2>&1 </dev/null
+    sudo -n APEX_DRY_RUN=1 APEX_IMAGE="$ENGINE_IMAGE" "$@" "$eng" --headless "$ANS" 2>&1 </dev/null
 }
 
 # $1 name, $2 expected substring, $3 answers body, $4.. extra env
@@ -305,8 +305,10 @@ if [ -n "$LOOPDEV" ]; then
     # keymap=bg on purpose. `bg` is one of the 36 XKB layout names (of 99) that
     # is NOT a loadable console keymap, so it is a layout where the conversion
     # has to do real work: the answer must come back as bg_bds-utf8.
+    LOOP_FP=$(lsblk -bdnP -o MAJ:MIN,SIZE,WWN,SERIAL,PTUUID,PARTUUID,PARTTYPE "$LOOPDEV")
     printf '%s\n' "mode=disk" "disk=$LOOPDEV" "username=bob" "password=pw" \
-        "hostname=apex" "encrypt=yes" "lukspass=correct horse 9" "keymap=bg" > "$ANS"
+        "hostname=apex" "encrypt=yes" "lukspass=correct horse 9" "keymap=bg" \
+        "confirmed=ERASE" "confirm_target=$LOOPDEV" "confirm_disk_id=$LOOP_FP" > "$ANS"
 
     # dry_run <engine> <keymap-tree> <model-map> — the same run three ways.
     dry_run() {
@@ -542,8 +544,11 @@ if [ "$ENGINE_RUNNABLE" = 1 ] && [ "$nohelper_made" = 1 ] && command -v losetup 
 fi
 
 net_answers() {  # $1 = disk
+    local disk_fp
+    disk_fp=$(lsblk -bdnP -o MAJ:MIN,SIZE,WWN,SERIAL,PTUUID,PARTUUID,PARTTYPE "$1")
     printf '%s\n' "mode=disk" "disk=$1" "username=bob" "password=pw" \
-        "hostname=apex" "encrypt=yes" "lukspass=correct horse 9" "keymap=us" > "$ANS"
+        "hostname=apex" "encrypt=yes" "lukspass=correct horse 9" "keymap=us" \
+        "confirmed=ERASE" "confirm_target=$1" "confirm_disk_id=$disk_fp" > "$ANS"
 }
 
 if [ -n "$LOOP_BIG" ] && [ -n "$LOOP_SMALL" ]; then

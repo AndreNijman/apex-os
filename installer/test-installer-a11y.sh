@@ -620,8 +620,12 @@ type_into() {   # type_into <accessible name> <text>
 # directions: the destructive button must NOT be reachable before the words are
 # typed, and it MUST be reachable after. That is the whole keyboard-only path
 # through the last screen before an irreversible erase.
-ring_confirm() {
-    local wid found
+ring_confirm() {   # ring_confirm reachable|locked
+    # `locked` is the page drawn for a device whose identity cannot be read.
+    # The typed ERASE is bound to that identity (see device_fingerprint in the
+    # GUI), so there the button must stay OUT of the ring even with ERASE typed:
+    # an unreadable device is "cannot confirm", never "matches anything".
+    local expect="${1:-reachable}" wid found
     if ! kill -0 "$GPID" 2>/dev/null; then
         skp "page 'confirm': its Tab ring can be walked" \
             "the page's process is not running — see the audit above"
@@ -671,6 +675,15 @@ ring_confirm() {
         f="$(focused_name)"
         [ "${f#*|}" = "Erase and install" ] && { found=1; break; }
     done
+    if [ "$expect" = locked ]; then
+        if [ "$found" = 1 ]; then
+            bad "page 'confirm': a disk whose identity cannot be read cannot be erased" \
+                "the field reads ERASE and Tab reached 'Erase and install' for a device lsblk cannot describe"
+        else
+            ok "page 'confirm': a disk whose identity cannot be read cannot be erased, even with ERASE typed"
+        fi
+        return
+    fi
     if [ "$found" = 1 ]; then
         ok "page 'confirm': typing ERASE puts the erase button in the Tab ring, so the whole page can be completed with the keyboard"
     else
@@ -743,8 +756,32 @@ kill "$GPID" 2>/dev/null
 # the page builds and nothing real is ever named as a target.
 audit_page confirm    "Type ERASE to confirm"         3 \
     APEX_GUI_DISK=/dev/zzz-not-a-disk APEX_GUI_MODE=disk
-ring_confirm
+ring_confirm locked
 kill "$GPID" 2>/dev/null
+# The same page with the device given an identity. `lsblk` is stubbed the way
+# nmcli is for the wifi page: the fingerprint query answers for the stand-in
+# disk, everything else goes to the real lsblk, and the disk still does not
+# exist — nothing real is ever named as a target.
+LSBLK_STUB="$ATSPI_W/lsblk-stub"
+mkdir -p "$LSBLK_STUB"
+REAL_LSBLK="$(command -v lsblk)"
+cat >"$LSBLK_STUB/lsblk" <<STUBEOF
+#!/bin/sh
+case " \$* " in
+  *" -bdnP "*) echo 'MAJ:MIN="253:99" SIZE="68719476736" WWN="" SERIAL="A11Y-STUB" PTUUID="" PARTUUID="" PARTTYPE=""'; exit 0 ;;
+esac
+exec "$REAL_LSBLK" "\$@"
+STUBEOF
+chmod +x "$LSBLK_STUB/lsblk"
+if "$LSBLK_STUB/lsblk" -bdnP -o SIZE /dev/zzz-not-a-disk 2>/dev/null | grep -q A11Y-STUB; then
+    audit_page confirm    "Type ERASE to confirm"         3 \
+        APEX_GUI_DISK=/dev/zzz-not-a-disk APEX_GUI_MODE=disk PATH="$LSBLK_STUB:$PATH"
+    ring_confirm reachable
+    kill "$GPID" 2>/dev/null
+else
+    skp "page 'confirm': typing ERASE puts the erase button in the Tab ring" \
+        "$LSBLK_STUB/lsblk will not execute — $ATSPI_W is probably mounted noexec. COULD-NOT-RUN, not a pass"
+fi
 # account goes LAST and is deliberately left running: the keyboard-only section
 # below drives it.
 audit_page account    "Computer name"                  6

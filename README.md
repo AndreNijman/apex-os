@@ -56,6 +56,11 @@ Releases before v1.0.0 published one ISO per edition
 (`apex-os-daily-netinstall.iso`, `apex-os-gaming-nvidia-netinstall.iso`). Those
 names are gone; take the newest release.
 
+Each ISO downloads the exact APEX-OS build it was tested with (its image digest
+is recorded inside the ISO and printed in the release notes), not whatever was
+published last. The installed machine follows the normal `:apex` update channel
+from then on, so the first `sudo apex update` brings it current.
+
 Check the download is intact. A truncated ISO fails much later, in ways that
 look like hardware problems.
 
@@ -196,7 +201,10 @@ you can switch it on later without reinstalling.
 
 **7 · Confirm** — every partition is listed as **ERASED**, **KEPT** or
 **SHARED**. This is the last point at which nothing has been written. Type
-`ERASE` and start the install.
+`ERASE` and start the install. What you confirm is the disk itself, not its
+name: the installer records each device's serial, size and partition IDs on
+this page and checks them again immediately before the first write, so a USB
+drive unplugged or swapped during the download cannot be erased in its place.
 
 If you encrypted the disk, the final screen prints a **recovery key** and will
 not let you reboot until you tick that you have written it down. It opens the
@@ -248,7 +256,8 @@ Please open an issue with the photograph or the log.
 
 ### Building the ISOs yourself
 
-Needs podman, about 90 GB free and roughly 40 minutes.
+Needs podman, about 90 GB free and roughly 40 minutes (the netinstall needs
+far less space: no OS image is embedded).
 
 ```sh
 cd installer
@@ -266,7 +275,13 @@ EDITION=apex WORK=/var/tmp/apex-iso \
 
 `EDITION` names the tag the installed machine records as its update origin, so
 it has to match a published tag; `daily`, `gaming-mesa` and `gaming-nvidia` still
-work and still resolve to the same image.
+work and still resolve to the same image, but a production build (`PRODUCTION=1`,
+the default) refuses anything but `apex`.
+
+The netinstall build resolves `:apex` to a digest once, refuses it unless it is
+signed by `build-image.yml` on `main` (cosign), and stamps it into the ISO. Pass
+`RELEASE_DIGEST=sha256:…` to pin a specific build instead — use the digest the
+boot-tested build printed, so the ISO you publish downloads the image you tested.
 
 To build the OS images with a signed kernel, use `./build-local.sh` — it passes
 the Secure Boot signing key and refuses to produce an unsigned image by accident.
