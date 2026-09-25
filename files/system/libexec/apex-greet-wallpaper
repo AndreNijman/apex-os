@@ -53,6 +53,52 @@
 # ─────────────────────────────────────────────────────────────────────────────
 set -euo pipefail
 
+# ── Motion preferences, parsed without trusting the file ─────────────────────
+# Reads an APEX Shell settings.json on stdin and prints exactly three lines the
+# login screen understands, each from a closed vocabulary:
+#
+#     reduce=0|1            Reduce Motion
+#     speed=snappy|balanced|relaxed
+#     scale=<0..2.5>        the advanced duration scale
+#
+# No JSON parser runs in root's path: each value is matched by a pattern that
+# only accepts its own vocabulary, and anything else — absent, malformed, out of
+# range, a string with a newline smuggled into it — becomes the default. A file
+# from before the motion settings carries only `animDuration` (milliseconds);
+# its ratio to 320 is what motionScale means, the same migration APEX Shell's
+# SettingsService applies on load.
+#
+# Defined BEFORE the root check so tests/test-apex-greet-motion.sh can source
+# this file and run the real function against hostile fixtures.
+motion_prefs() {
+    local raw reduce speed scale legacy
+    raw="$(head -c 16384)"
+    reduce="$(printf '%s' "${raw}" \
+        | grep -oE '"reduceMotion"[[:space:]]*:[[:space:]]*(true|false)' \
+        | grep -oE '(true|false)$' | head -n1 || true)"
+    speed="$(printf '%s' "${raw}" \
+        | grep -oE '"motionSpeed"[[:space:]]*:[[:space:]]*"(snappy|balanced|relaxed)"' \
+        | grep -oE '(snappy|balanced|relaxed)' | head -n1 || true)"
+    scale="$(printf '%s' "${raw}" \
+        | grep -oE '"motionScale"[[:space:]]*:[[:space:]]*[0-9]{1,2}(\.[0-9]{1,4})?([,}[:space:]]|$)' \
+        | grep -oE '[0-9]{1,2}(\.[0-9]{1,4})?' | tail -n1 || true)"
+    if [ -z "${scale}" ]; then
+        legacy="$(printf '%s' "${raw}" \
+            | grep -oE '"animDuration"[[:space:]]*:[[:space:]]*[0-9]{1,4}([,}[:space:]]|$)' \
+            | grep -oE '[0-9]{1,4}' | head -n1 || true)"
+        [ -n "${legacy}" ] && scale="$(awk -v ms="${legacy}" 'BEGIN { printf "%.2f", ms / 320 }')"
+    fi
+    [ "${reduce}" = true ] && reduce=1 || reduce=0
+    [ -n "${speed}" ] || speed=balanced
+    if [ -z "${scale}" ] || ! awk -v s="${scale}" 'BEGIN { exit !(s >= 0 && s <= 2.5) }'; then
+        scale=1
+    fi
+    printf 'reduce=%s\nspeed=%s\nscale=%s\n' "${reduce}" "${speed}" "${scale}"
+}
+
+# Sourced by the test suite for the function above; nothing below runs then.
+[ "${BASH_SOURCE[0]}" = "$0" ] || return 0
+
 STATE_DIR=/var/lib/apex-greet
 DEST_DIR="${STATE_DIR}/wallpapers"
 # 64 MiB. Comfortably above any real wallpaper (a 6K JPEG is ~10 MB) and far
@@ -186,6 +232,24 @@ if [ -n "${accent}" ]; then
     say "published accent ${accent} -> ${ACCENT_DIR}/${user}"
 else
     say "no accent in ${colors} yet; the login screen keeps its default colour"
+fi
+
+# ── Motion, so the login screen moves the way the desktop does ───────────────
+# The password field's shapes (APEX Shell's PasswordShapes, which the greeter
+# loads) animate on the user's own motion settings — and, above all, respect
+# their Reduce Motion before they have even logged in. Same argument as the
+# accent: read as the caller, capped, and only three validated lines leave.
+# APEX Shell calls this helper again whenever one of the three changes.
+MOTION_DIR="${STATE_DIR}/motion"
+settings="${home}/.config/apex-shell/src/user_data/settings.json"
+if prefs="$(setpriv --reuid="${uid}" --regid="${gid}" --clear-groups -- \
+                /usr/bin/head -c 16384 -- "${settings}" 2>/dev/null | motion_prefs)"; then
+    mkdir -p "${MOTION_DIR}"; chmod 0755 "${MOTION_DIR}"
+    mtmp="$(mktemp "${MOTION_DIR}/.publish.XXXXXX")"
+    printf '%s\n' "${prefs}" > "${mtmp}"
+    chmod 0644 "${mtmp}"
+    mv -f "${mtmp}" "${MOTION_DIR}/${user}"
+    say "published motion ($(printf '%s' "${prefs}" | tr '\n' ' ')) -> ${MOTION_DIR}/${user}"
 fi
 
 # The boot and shutdown splash follow the same accent. Its own failure is its
