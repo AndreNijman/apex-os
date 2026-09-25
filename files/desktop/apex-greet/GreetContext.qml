@@ -1,4 +1,5 @@
 import QtQuick
+import Quickshell
 import Quickshell.Io
 import Quickshell.Services.Greetd
 
@@ -358,6 +359,7 @@ Item {
         onTriggered: {
             if (!wallpaperProc.running) wallpaperProc.running = true
             if (!accentProc.running) accentProc.running = true
+            if (!motionProc.running) motionProc.running = true
         }
     }
 
@@ -384,6 +386,61 @@ Item {
                 var p = line.trim()
                 if (p !== "") ctx.wallpaperPath = p
             }
+        }
+    }
+
+    // ── Password shapes: APEX Shell's own component, not a copy ───
+    // The password field draws its feedback with the same PasswordShapes the
+    // lock screen uses, loaded from the APEX Shell tree the image vendors to
+    // /usr/share/apex-shell — one implementation, so the two screens cannot
+    // drift. GreetSurface loads it through a Loader and keeps the plain masked
+    // dots if it is missing (a shell older than the component, a dev box), so
+    // a decoration can never be the reason a login screen fails to load.
+    // APEX_GREET_SHELL_ROOT points at a checkout for the test suites.
+    readonly property url shapesSource:
+        "file://" + (Quickshell.env("APEX_GREET_SHELL_ROOT") || "/usr/share/apex-shell")
+        + "/src/components/auth/PasswordShapes.qml"
+
+    // ── Motion (the user's own Reduce Motion and speed) ───────────
+    // Published beside the accent by /usr/libexec/apex-greet-wallpaper from
+    // APEX Shell's settings.json, three lines from a closed vocabulary. The
+    // password field's shapes (PasswordShapes, loaded from APEX Shell) move on
+    // these, so a user who turned Reduce Motion on is not shown motion at the
+    // login screen either. Validated again here, line by line; anything else
+    // keeps the default, which is the shell's own default.
+    property bool   motionReduced: false
+    property string motionSpeed:   "balanced"
+    property real   motionScale:   1.0
+    Process {
+        id: motionProc
+        running: true
+        environment: ({ "AG_USER": ctx.username })
+        command: ["sh", "-c",
+            "u=\"${AG_USER:-}\";" +
+            " [ -n \"$u\" ] || u=\"$(cat /var/lib/apex-greet/last-user 2>/dev/null)\";" +
+            " case \"$u\" in ''|.*|*[!A-Za-z0-9._-]*) exit 0 ;; esac;" +
+            " head -c 256 \"/var/lib/apex-greet/motion/$u\" 2>/dev/null; echo"]
+        // Collected and applied once the read has finished, for the reason the
+        // accent reader below documents: a trailing empty line must not reset
+        // what the lines before it set.
+        property var _seen: ({})
+        stdout: SplitParser {
+            onRead: function(line) {
+                var m = /^(reduce|speed|scale)=(.*)$/.exec(line.trim())
+                if (!m) return
+                var v = m[2]
+                if (m[1] === "reduce" && (v === "0" || v === "1")) motionProc._seen.reduce = v === "1"
+                else if (m[1] === "speed" && /^(snappy|balanced|relaxed)$/.test(v)) motionProc._seen.speed = v
+                else if (m[1] === "scale" && /^[0-9]{1,2}(\.[0-9]{1,4})?$/.test(v)
+                         && parseFloat(v) >= 0 && parseFloat(v) <= 2.5) motionProc._seen.scale = parseFloat(v)
+            }
+        }
+        onExited: {
+            var s = motionProc._seen
+            ctx.motionReduced = s.reduce === true
+            ctx.motionSpeed   = s.speed !== undefined ? s.speed : "balanced"
+            ctx.motionScale   = s.scale !== undefined ? s.scale : 1.0
+            motionProc._seen  = ({})
         }
     }
 
