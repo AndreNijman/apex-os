@@ -319,7 +319,7 @@ if [ ! -s "$_fns" ]; then
 else
 (
     set +u
-    NEED_SCRATCH_GB=22
+    NEED_SCRATCH_GB=32
     DISK=/dev/sdz
     # shellcheck disable=SC1090
     . "$_fns"
@@ -378,10 +378,10 @@ else
     _gb() { echo $(( $1 * 1024 * 1024 )); }
     out=$(stage_budget_kb "$(_gb 200)" || echo REFUSED)
     _ck "200 GB target accepted"      "$out" "$(_gb 185)"
-    out=$(stage_budget_kb "$(_gb 37)" || echo REFUSED)
-    _ck "37 GB target accepted"       "$out" "$(_gb 22)"
-    out=$(stage_budget_kb "$(_gb 36)" || echo REFUSED)
-    _ck "36 GB target refused"        "$out" REFUSED
+    out=$(stage_budget_kb "$(_gb 47)" || echo REFUSED)
+    _ck "47 GB target accepted"       "$out" "$(_gb 32)"
+    out=$(stage_budget_kb "$(_gb 46)" || echo REFUSED)
+    _ck "46 GB target refused"        "$out" REFUSED
     out=$(stage_budget_kb "$(_gb 20)" || echo REFUSED)
     _ck "20 GB target refused"        "$out" REFUSED
     out=$(stage_budget_kb "not-a-number" || echo REFUSED)

@@ -98,11 +98,16 @@ NETINSTALL=0
 # only thing still needing containers-storage is the container bootc itself runs
 # in, and that store is pointed at the same disk.
 #
-# Sizes, measured against the published image (ghcr.io/andrenijman/apex-os:apex,
-# 120 layers / 5762 MiB compressed): ~5.8 GB for the OCI directory, ~12 GB for
-# the runner's store. NEED_SCRATCH_GB is deliberately generous — running out
-# halfway through leaves a half-written disk, which is the worst outcome here.
-NEED_SCRATCH_GB="${APEX_NEED_SCRATCH_GB:-22}"
+# Sizes, measured 2026-09-25 with the live env's own skopeo 1.22.2 against
+# ghcr.io/andrenijman/apex-os@sha256:a754443e… (123 layers): 6.5 GB for the OCI
+# directory, 15.0 GB for the runner's store, and — because the runner copy now
+# stages on this disk too (SKOPEO_TMP, below) — a transient copy of every
+# compressed blob while that store is written. Peak: 27.7 GB, 27.4 GiB.
+# The earlier figure of 22 was sized for a 5.8 GB / 12 GB image and had no
+# headroom left at all; 32 GiB is the measured peak plus ~17%. NEED_SCRATCH_GB
+# stays deliberately generous — running out halfway through leaves a
+# half-written disk, which is the worst outcome here.
+NEED_SCRATCH_GB="${APEX_NEED_SCRATCH_GB:-32}"
 
 # A filesystem that can hold the staged image: writable, real (not a RAM
 # overlay), big enough, and NOT on the disk we are about to repartition.
@@ -150,7 +155,7 @@ scratch_fs_ok() {
 STAGE_TARGET='@target'
 
 # Keep this much of the target free for the OS being installed. The staged store
-# and the install live on the same filesystem at the same time: ~22 GB of blobs
+# and the install live on the same filesystem at the same time: ~28 GB at peak
 # plus the deployed system, and the blobs only go away at stage_teardown.
 STAGE_RESERVE_GB="${APEX_STAGE_RESERVE_GB:-15}"
 
