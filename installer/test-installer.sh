@@ -408,9 +408,12 @@ else
       df()       { command df "$@"; }
       # shellcheck disable=SC2034
       STAGE_DIR="$_st/mnt"
-      # Bound the sparse ceiling to ~25 GB whatever this machine has free.
+      # Bound the sparse ceiling to just over the engine's own budget, whatever
+      # this machine has free. Tied to NEED_SCRATCH_GB rather than a number: a
+      # fixed 25 GB ceiling went stale the day the budget moved to 32 and this
+      # case reported SETUP-FAILED for a stage_setup that was fine.
       _avail_gb=$(command df -PBG "$_st" | awk 'NR==2{gsub(/G/,"",$4); print $4+0}')
-      STAGE_RESERVE_GB=$(( _avail_gb - 25 ))
+      STAGE_RESERVE_GB=$(( _avail_gb - NEED_SCRATCH_GB - 3 ))
       [ "$STAGE_RESERVE_GB" -ge 1 ] || STAGE_RESERVE_GB=1
       mkdir -p "$_st/root"
       stage_setup "$_st/root" >/dev/null 2>&1 || { echo "SETUP-FAILED"; exit 0; }
