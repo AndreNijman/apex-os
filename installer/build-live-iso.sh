@@ -18,14 +18,30 @@ set -euo pipefail
 
 HERE="$(cd "$(dirname "$0")" && pwd)"
 WORK="${WORK:-/var/tmp/apex-iso-build}"
-# Which edition this ISO installs: daily | gaming-nvidia | gaming-mesa.
-# This is NOT cosmetic. It names the embedded storage tag AND is stamped into
-# the live env so apex-install derives its --target-imgref from it. Hardcoding
-# `daily` here (as this script used to) produced a Gaming ISO that installed the
-# right bits but recorded the DAILY registry ref as the upgrade origin — the
-# machine would silently convert itself to Daily on the first `bootc upgrade`,
-# dropping the NVIDIA driver. Keep this parameterised.
-EDITION="${EDITION:-daily}"
+# This script `sudo rm -rf`s directories under WORK. A WORK that resolves to a
+# shared directory would make that a recursive delete of somebody else's files.
+WORK="$(realpath -m "$WORK")"
+case "$WORK" in
+  /|/var|/var/tmp|/tmp|/home|/var/home|/root|/var/lab-scratch)
+    echo "FATAL: WORK must be a dedicated build directory, not $WORK" >&2; exit 1 ;;
+esac
+# The list above only names the obvious shared directories; /var/tmp/shared is
+# just as shared and not on it. So ownership is proven, not assumed: this script
+# works in WORK only if WORK is new, empty, or carries the marker it wrote on an
+# earlier run. The rm -rf calls below target fixed names (rootfs, sqroot,
+# isoroot, cs-run, grub-i386-pc) that another tool's tree could also contain.
+if [ -d "$WORK" ] && [ -n "$(ls -A "$WORK" 2>/dev/null)" ] && [ ! -e "$WORK/.apex-iso-build" ]; then
+  echo "FATAL: $WORK already holds files this script did not create (no .apex-iso-build marker)." >&2
+  echo "       Point WORK at a new or empty directory; nothing has been touched." >&2
+  exit 1
+fi
+mkdir -p "$WORK" && touch "$WORK/.apex-iso-build"
+# Which tag this ISO installs. This is NOT cosmetic: it names the embedded
+# storage tag AND is stamped into the live env so apex-install derives its
+# --target-imgref from it — the origin the installed machine follows on every
+# `bootc upgrade`. The editions converged into one image, `:apex`; the old tags
+# are aliases of the same digest, and new media must record the canonical one.
+EDITION="${EDITION:-apex}"
 OCI="$WORK/apex.oci"                       # produced by: sudo skopeo copy containers-storage:localhost/apex-os:$EDITION oci-archive:$OCI:apex-os-$EDITION
 OUT="${OUT:-$WORK/apex-os-installer.iso}"
 LABEL="APEX-INSTALL"
@@ -40,6 +56,9 @@ ISOROOT="$WORK/isoroot"
 # PRODUCTION=0: test/CI build — bakes the marker + adds the unattended menu entry
 # so the QEMU boot-test can drive an end-to-end install headlessly.
 PRODUCTION="${PRODUCTION:-1}"
+if [ "$PRODUCTION" = 1 ] && [ "$EDITION" != apex ]; then
+  echo "FATAL: production media must record the canonical :apex origin, not :$EDITION" >&2; exit 1
+fi
 
 # NETINSTALL=1: build the small ISO. It ships the live environment only and the
 # installer pulls the OS from the public registry at install time, which takes
@@ -60,8 +79,43 @@ if [ "$NETINSTALL" != 1 ]; then
   [ -f "$OCI" ] || { echo "ERROR: $OCI missing (run the skopeo export first)"; exit 1; }
 fi
 
+if [ "$NETINSTALL" = 1 ]; then
+  echo "== 0. pin and verify the image this ISO installs =="
+  # A netinstall ISO and the image it downloads are one release. Resolving
+  # `:apex` at install time would make every ISO install whatever main pushed
+  # last — an image nobody has booted from this ISO. So the digest is resolved
+  # ONCE, here, and stamped into the live env; apex-install downloads exactly
+  # that digest and still records `:apex` as the origin, so the machine updates
+  # normally afterwards.
+  #
+  # RELEASE_DIGEST is overridable so the PRODUCTION=0 build that gets
+  # boot-tested and the PRODUCTION=1 build that gets published pin the SAME
+  # image even if main pushes in between. Pass the digest the test build printed.
+  RELEASE_REPO="ghcr.io/andrenijman/apex-os"
+  RELEASE_DIGEST="${RELEASE_DIGEST:-$(sudo skopeo inspect --format '{{.Digest}}' "docker://$RELEASE_REPO:$EDITION")}"
+  [[ "$RELEASE_DIGEST" =~ ^sha256:[0-9a-f]{64}$ ]] \
+    || { echo "FATAL: could not resolve $RELEASE_REPO:$EDITION to a digest (got '$RELEASE_DIGEST')" >&2; exit 1; }
+  RELEASE_IMAGE="$RELEASE_REPO@$RELEASE_DIGEST"
+  echo "image pinned: $RELEASE_IMAGE"
+  # Signed by main's build-image workflow, or it does not go on an ISO. Default
+  # TUF trust root; --network host because the default podman network on this
+  # build host does not resolve the Sigstore CDN.
+  sudo podman run --rm --network host ghcr.io/sigstore/cosign/cosign:v3.1.3 verify \
+    --certificate-identity 'https://github.com/AndreNijman/apex-os/.github/workflows/build-image.yml@refs/heads/main' \
+    --certificate-oidc-issuer 'https://token.actions.githubusercontent.com' \
+    "$RELEASE_IMAGE" >/dev/null \
+    || { echo "FATAL: $RELEASE_IMAGE is not signed by main's build-image workflow" >&2; exit 1; }
+  echo "signature verified: build-image.yml@refs/heads/main"
+  # The encrypted install refuses without the recovery-key helper, and it is
+  # the default path. An image without it would turn the default into a refusal.
+  sudo podman run --rm "$RELEASE_IMAGE" test -x /usr/libexec/apex-luks-enroll \
+    || { echo "FATAL: $RELEASE_IMAGE has no /usr/libexec/apex-luks-enroll; the default encrypted install would refuse" >&2; exit 1; }
+fi
+
 echo "== 1. build the installer live-env image =="
-sudo podman build --build-arg "ALLOW_UNATTENDED=$ALLOW_UNATTENDED" \
+# --network host: dnf's metalink fetch hung for minutes on the default podman
+# network on this build host (DNS), and a hung build looks exactly like a slow one.
+sudo podman build --network host --build-arg "ALLOW_UNATTENDED=$ALLOW_UNATTENDED" \
   -f "$HERE/Containerfile.installer" -t "$IMG" "$HERE"
 
 echo "== 2. export the rootfs =="
@@ -84,6 +138,10 @@ echo "== 3. embed the APEX image into the live env's container storage =="
 if [ "$NETINSTALL" = 1 ]; then
   echo "  (netinstall: skipping the embed — the installer downloads the OS instead)"
   sudo install -Dm644 /dev/null "$WORK/rootfs/usr/lib/apex-installer/netinstall"
+  printf '%s\n' "$RELEASE_DIGEST" | sudo tee "$WORK/rootfs/usr/lib/apex-installer/image-digest" >/dev/null
+  grep -qx "$RELEASE_DIGEST" "$WORK/rootfs/usr/lib/apex-installer/image-digest" \
+    || { echo "FATAL: image digest stamp not written"; exit 1; }
+  echo "image digest stamped: $RELEASE_DIGEST"
 else
   sudo rm -rf "$WORK/cs-run"
   sudo skopeo copy "oci-archive:$OCI" \
@@ -113,17 +171,13 @@ echo "edition stamped: $EDITION"
 # point: the alternative was installing, booting, running mokutil by hand and
 # rebooting again, which is a lot to ask of someone who just wanted an OS.
 if [ "$NETINSTALL" = 1 ]; then
-  # A netinstall ISO does not know what it will get. The signed state belongs to
-  # the image in the REGISTRY, which is built by CI and may differ from whatever
-  # happens to be in local storage right now — so reading the local copy would
-  # be answering a different question, and could promise Secure Boot support the
-  # downloaded kernel does not have.
-  #
-  # "unknown" is the honest answer and it fails safe: the GUI only offers MOK
-  # enrolment when the stamp says "signed", so a netinstall simply does not offer
-  # it, and the engine still reports the real state of the DEPLOYED image after
-  # the install. Nobody is told something untrue.
-  KSIGNED=unknown
+  # A netinstall used to stamp "unknown" here, because it could not know which
+  # image the registry would hand it — and "unknown" meant it never offered
+  # Secure Boot enrolment at all. It knows now: step 0 pinned the exact digest
+  # the installer will download, so the answer is read from THAT image.
+  KSIGNED=$(sudo podman run --rm "$RELEASE_IMAGE" \
+              cat /usr/share/apex-os/secureboot/kernel-signed 2>/dev/null | tr -d '\n' || true)
+  [ -n "$KSIGNED" ] || KSIGNED=unknown
 else
   KSIGNED=$(sudo podman run --rm "localhost/apex-os:${EDITION}" \
               cat /usr/share/apex-os/secureboot/kernel-signed 2>/dev/null | tr -d '\n' || true)
@@ -324,19 +378,30 @@ echo "shim:    $SHIM"
 echo "grubefi: $GRUBEFI"
 
 # efiboot.img: FAT image holding the whole signed chain (El Torito UEFI image).
-rm -f "$WORK/efiboot.img"
-mkfs.fat -C -n APEXEFI "$WORK/efiboot.img" 20480
-mmd   -i "$WORK/efiboot.img" ::/EFI ::/EFI/BOOT ::/EFI/fedora
 # install -m 0644, not cp: Fedora ships these EFI binaries mode 700 root:root and
-# `cp` preserves that, so the UNPRIVILEGED mcopy below could not read them
+# `cp` preserves that, so an unprivileged mcopy could not read them
 # ("Permission denied") and set -e killed the build.
 sudo install -m 0644 "$SHIM"    "$WORK/BOOTX64.EFI"
 sudo install -m 0644 "$GRUBEFI" "$WORK/grubx64.efi"
-mcopy -i "$WORK/efiboot.img" "$WORK/BOOTX64.EFI" ::/EFI/BOOT/BOOTX64.EFI
-mcopy -i "$WORK/efiboot.img" "$WORK/grubx64.efi" ::/EFI/BOOT/grubx64.efi
-mcopy -i "$WORK/efiboot.img" "$WORK/grub.cfg"    ::/EFI/BOOT/grub.cfg
-mcopy -i "$WORK/efiboot.img" "$WORK/grub.cfg"    ::/EFI/fedora/grub.cfg
-if [ -n "$MMEFI" ]; then sudo install -m 0644 "$MMEFI" "$WORK/mmx64.efi"; mcopy -i "$WORK/efiboot.img" "$WORK/mmx64.efi" ::/EFI/BOOT/mmx64.efi; fi
+sudo rm -f "$WORK/mmx64.efi"
+[ -z "$MMEFI" ] || sudo install -m 0644 "$MMEFI" "$WORK/mmx64.efi"
+# mtools runs from the installer image, like xorriso, grub2-mkimage and dracut:
+# an ostree build host (an APEX machine) does not ship mmd/mcopy, and a missing
+# one used to surface only here, twenty minutes into the build.
+sudo rm -f "$WORK/efiboot.img"
+sudo podman run --rm --security-opt label=disable -v "$WORK":"$WORK" --entrypoint bash "$IMG" -c '
+  set -euo pipefail
+  W="$1"
+  mkfs.fat -C -n APEXEFI "$W/efiboot.img" 20480
+  mmd   -i "$W/efiboot.img" ::/EFI ::/EFI/BOOT ::/EFI/fedora
+  mcopy -i "$W/efiboot.img" "$W/BOOTX64.EFI" ::/EFI/BOOT/BOOTX64.EFI
+  mcopy -i "$W/efiboot.img" "$W/grubx64.efi" ::/EFI/BOOT/grubx64.efi
+  mcopy -i "$W/efiboot.img" "$W/grub.cfg"    ::/EFI/BOOT/grub.cfg
+  mcopy -i "$W/efiboot.img" "$W/grub.cfg"    ::/EFI/fedora/grub.cfg
+  if [ -f "$W/mmx64.efi" ]; then mcopy -i "$W/efiboot.img" "$W/mmx64.efi" ::/EFI/BOOT/mmx64.efi; fi
+' _ "$WORK"
+sudo test -s "$WORK/efiboot.img" \
+  || { echo "BUILD ASSERT FAILED: efiboot.img was not written"; exit 1; }
 
 sudo mkdir -p "$ISOROOT/EFI/BOOT" "$ISOROOT/EFI/fedora" "$ISOROOT/images"
 sudo cp "$WORK/BOOTX64.EFI" "$ISOROOT/EFI/BOOT/BOOTX64.EFI"
@@ -505,7 +570,11 @@ echo "== 7. xorriso: hybrid BIOS+UEFI ISO (El Torito for CD/QEMU + MBR/GPT for d
 # same efiboot.img as an alt El Torito entry, same appended GPT ESP — a UEFI
 # machine (Secure Boot included) sees exactly what it saw before. This exact
 # combination is what Ubuntu's shipping hybrid ISOs use.
-sudo xorriso -as mkisofs \
+# xorriso runs from the installer image rather than the host: it is not in the
+# APEX image, and an ostree host cannot just dnf install it. Same binary the
+# live env carries.
+sudo podman run --rm --security-opt label=disable -v "$WORK":"$WORK" \
+    --entrypoint xorriso "$IMG" -as mkisofs \
     -iso-level 3 -rational-rock -joliet -joliet-long \
     -V "$LABEL" \
     --grub2-mbr "$WORK/boot_hybrid.img" \
@@ -523,7 +592,8 @@ sudo xorriso -as mkisofs \
 # precisely what each firmware needs (BIOS: x86 El Torito entry + MBR boot
 # code; UEFI: EFI El Torito entry + GPT ESP). If any is absent the image
 # cannot boot somewhere we claim it does, so it must not ship.
-_rep=$(sudo xorriso -indev "$OUT" -report_el_torito plain -report_system_area plain 2>/dev/null)
+_rep=$(sudo podman run --rm --security-opt label=disable -v "$WORK":"$WORK" \
+    --entrypoint xorriso "$IMG" -indev "$OUT" -report_el_torito plain -report_system_area plain 2>/dev/null)
 echo "$_rep" | grep -q 'El Torito boot img :   1  BIOS' \
   || { echo "BUILD ASSERT FAILED: emitted ISO has no BIOS El Torito boot entry"; exit 1; }
 echo "$_rep" | grep -q 'El Torito boot img :   2  UEFI' \

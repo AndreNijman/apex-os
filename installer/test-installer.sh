@@ -87,8 +87,13 @@ SCRATCH_IMAGE="localhost/apex-engine-probe:test"
 ENGINE_IMAGE=""
 scratch_made=0
 BUILD_CTX=""
+LOOP_IMG=""
+LOOP_DEV=""
 cleanup() {
     rm -f "$ANS"
+    # shellcheck disable=SC2033  # the real losetup; the stub further down is scoped to one case
+    [ -n "$LOOP_DEV" ] && sudo -n losetup -d "$LOOP_DEV" 2>/dev/null || true
+    [ -n "$LOOP_IMG" ] && rm -f "$LOOP_IMG"
     [ -n "$BUILD_CTX" ] && rm -rf "$BUILD_CTX"
     [ "$scratch_made" = 1 ] && sudo -n podman rmi -f "$SCRATCH_IMAGE" >/dev/null 2>&1
 }
@@ -132,7 +137,7 @@ check() {
         printf 'SKIP  %-30s no engine image\n' "$name"; return
     fi
     printf '%s\n' "$body" > "$ANS"
-    out=$(sudo -n APEX_IMAGE="$ENGINE_IMAGE" "$ENGINE" --headless "$ANS" 2>&1 </dev/null)
+    out=$(sudo -n APEX_IMAGE="$ENGINE_IMAGE" APEX_DRY_RUN=1 "$ENGINE" --headless "$ANS" 2>&1 </dev/null)
 
     if grep -q 'Unexpected error on line' <<<"$out"; then
         printf 'FAIL  %-30s ERR TRAP FIRED\n' "$name"; fail=$((fail+1)); return
@@ -210,6 +215,87 @@ else
     echo "SKIP  partition-mode cases (need /dev/sda2 and /dev/sdb1 present)"
 fi
 
+echo "── final confirmation: binds the exact device before any write ───────"
+if [ "$ENGINE_RUNNABLE" = 1 ] && command -v losetup >/dev/null \
+   && LOOP_IMG=$(mktemp /var/tmp/apex-confirm-loop.XXXXXX); then
+    truncate -s 18G "$LOOP_IMG"
+    # shellcheck disable=SC2033  # the real losetup, deliberately (see cleanup)
+    LOOP_DEV=$(sudo -n losetup --find --show "$LOOP_IMG" 2>/dev/null || true)
+    if [ -n "$LOOP_DEV" ]; then
+        fp=$(lsblk -bdnP -o MAJ:MIN,SIZE,WWN,SERIAL,PTUUID,PARTUUID,PARTTYPE "$LOOP_DEV")
+        base=$(printf 'mode=disk\ndisk=%s\nusername=bob\npassword=pw\nhostname=apex\nencrypt=no\n' "$LOOP_DEV")
+        check "missing typed confirmation" "The final confirmation (typing ERASE) is missing" "$base"
+        check "wrong confirmed target" "The confirmation was typed for" \
+            "$base"$'\nconfirmed=ERASE\nconfirm_target=/dev/not-this-loop\n'"confirm_disk_id=$fp"
+        check "changed disk identity" "is not the disk that was confirmed" \
+            "$base"$'\nconfirmed=ERASE\n'"confirm_target=$LOOP_DEV"$'\nconfirm_disk_id=changed'
+        printf '%s\nconfirmed=ERASE\nconfirm_target=%s\nconfirm_disk_id=%s\n' \
+            "$base" "$LOOP_DEV" "$fp" > "$ANS"
+        out=$(sudo -n APEX_IMAGE="$ENGINE_IMAGE" APEX_DRY_RUN=1 \
+              "$ENGINE" --headless "$ANS" 2>&1 </dev/null)
+        if grep -q 'APEX-INSTALL-DRYRUN-OK' <<<"$out"; then
+            printf 'PASS  %-30s\n' "exact device dry run"; pass=$((pass+1))
+        else
+            printf 'FAIL  %-30s %s\n' "exact device dry run" \
+                "$(grep -m1 APEX-INSTALL-FAILED <<<"$out" || echo no-sentinel)"
+            fail=$((fail+1))
+        fi
+        # Partition mode binds THREE identities — disk, root partition, ESP —
+        # and each one on its own must be able to stop the install. The disk
+        # below mimics a dual-boot layout (ESP, a partition for APEX, a
+        # partition that must survive), all inside the sparse loop image
+        # allocated above; the engine stays in dry-run mode throughout.
+        if [[ "$LOOP_DEV" == /dev/loop* ]] && command -v sgdisk >/dev/null \
+           && command -v mkfs.vfat >/dev/null; then
+            sudo -n sgdisk --zap-all "$LOOP_DEV" >/dev/null 2>&1
+            sudo -n sgdisk -n1:0:+300M -t1:ef00 -c1:"EFI system partition" \
+                -n2:0:+14G -t2:8300 -c2:apex-root \
+                -n3:0:0 -t3:0700 -c3:"Basic data partition" "$LOOP_DEV" >/dev/null 2>&1
+            sudo -n partprobe "$LOOP_DEV" >/dev/null 2>&1
+            sudo -n udevadm settle --timeout=10 >/dev/null 2>&1
+            esp="${LOOP_DEV}p1"; target="${LOOP_DEV}p2"; kept="${LOOP_DEV}p3"
+            if [ -b "$esp" ] && [ -b "$target" ] && [ -b "$kept" ]; then
+                sudo -n mkfs.vfat -F32 -n SYSTEM "$esp" >/dev/null 2>&1
+                disk_fp=$(lsblk -bdnP -o MAJ:MIN,SIZE,WWN,SERIAL,PTUUID,PARTUUID,PARTTYPE "$LOOP_DEV")
+                target_fp=$(lsblk -bdnP -o MAJ:MIN,SIZE,WWN,SERIAL,PTUUID,PARTUUID,PARTTYPE "$target")
+                esp_fp=$(lsblk -bdnP -o MAJ:MIN,SIZE,WWN,SERIAL,PTUUID,PARTUUID,PARTTYPE "$esp")
+                kept_fp=$(lsblk -bdnP -o MAJ:MIN,SIZE,WWN,SERIAL,PTUUID,PARTUUID,PARTTYPE "$kept")
+                pbase=$(printf 'mode=partition\ndisk=%s\ntarget=%s\nesp=%s\nusername=bob\npassword=pw\nhostname=apex\nencrypt=no\nconfirmed=ERASE\nconfirm_target=%s\nconfirm_disk_id=%s\nconfirm_target_id=%s\nconfirm_esp_id=%s\n' \
+                    "$LOOP_DEV" "$target" "$esp" "$target" "$disk_fp" "$target_fp" "$esp_fp")
+                check "changed root identity" "is not the partition that was confirmed" \
+                    "${pbase/confirm_target_id=$target_fp/confirm_target_id=changed}"
+                check "changed ESP identity" "is not the EFI System Partition that was confirmed" \
+                    "${pbase/confirm_esp_id=$esp_fp/confirm_esp_id=changed}"
+                # The confirmation named p2; an answers file that now says p3
+                # (the partition that must survive) is the renamed-device case
+                # in miniature, and must be refused on the name alone.
+                check "target swapped after confirm" "The confirmation was typed for" \
+                    "${pbase/target=$target/target=$kept}"
+                # …and a correct NAME carrying another partition's identity is
+                # refused on the identity, which is the case a name check misses.
+                check "identity of a kept partition" "is not the partition that was confirmed" \
+                    "${pbase/confirm_target_id=$target_fp/confirm_target_id=$kept_fp}"
+                printf '%s\n' "$pbase" > "$ANS"
+                out=$(sudo -n APEX_IMAGE="$ENGINE_IMAGE" APEX_DRY_RUN=1 \
+                      "$ENGINE" --headless "$ANS" 2>&1 </dev/null)
+                if grep -q 'APEX-INSTALL-DRYRUN-OK' <<<"$out"; then
+                    printf 'PASS  %-30s\n' "partition dry run"; pass=$((pass+1))
+                else
+                    printf 'FAIL  %-30s %s\n' "partition dry run" \
+                        "$(grep -m1 APEX-INSTALL-FAILED <<<"$out" || echo no-sentinel)"
+                    fail=$((fail+1))
+                fi
+            else
+                echo "SKIP  partition confirmation cases (loop partitions unavailable)"
+            fi
+        fi
+    else
+        echo "SKIP  confirmation loop tests (no free loop device)"
+    fi
+else
+    echo "SKIP  confirmation loop tests (no engine or losetup)"
+fi
+
 echo
 echo "── netinstall staging: never RAM, never the disk being wiped ──────────"
 # A network install used to `podman pull` into the live environment's
@@ -233,7 +319,7 @@ if [ ! -s "$_fns" ]; then
 else
 (
     set +u
-    NEED_SCRATCH_GB=22
+    NEED_SCRATCH_GB=32
     DISK=/dev/sdz
     # shellcheck disable=SC1090
     . "$_fns"
@@ -292,10 +378,10 @@ else
     _gb() { echo $(( $1 * 1024 * 1024 )); }
     out=$(stage_budget_kb "$(_gb 200)" || echo REFUSED)
     _ck "200 GB target accepted"      "$out" "$(_gb 185)"
-    out=$(stage_budget_kb "$(_gb 37)" || echo REFUSED)
-    _ck "37 GB target accepted"       "$out" "$(_gb 22)"
-    out=$(stage_budget_kb "$(_gb 36)" || echo REFUSED)
-    _ck "36 GB target refused"        "$out" REFUSED
+    out=$(stage_budget_kb "$(_gb 47)" || echo REFUSED)
+    _ck "47 GB target accepted"       "$out" "$(_gb 32)"
+    out=$(stage_budget_kb "$(_gb 46)" || echo REFUSED)
+    _ck "46 GB target refused"        "$out" REFUSED
     out=$(stage_budget_kb "$(_gb 20)" || echo REFUSED)
     _ck "20 GB target refused"        "$out" REFUSED
     out=$(stage_budget_kb "not-a-number" || echo REFUSED)
@@ -322,9 +408,12 @@ else
       df()       { command df "$@"; }
       # shellcheck disable=SC2034
       STAGE_DIR="$_st/mnt"
-      # Bound the sparse ceiling to ~25 GB whatever this machine has free.
+      # Bound the sparse ceiling to just over the engine's own budget, whatever
+      # this machine has free. Tied to NEED_SCRATCH_GB rather than a number: a
+      # fixed 25 GB ceiling went stale the day the budget moved to 32 and this
+      # case reported SETUP-FAILED for a stage_setup that was fine.
       _avail_gb=$(command df -PBG "$_st" | awk 'NR==2{gsub(/G/,"",$4); print $4+0}')
-      STAGE_RESERVE_GB=$(( _avail_gb - 25 ))
+      STAGE_RESERVE_GB=$(( _avail_gb - NEED_SCRATCH_GB - 3 ))
       [ "$STAGE_RESERVE_GB" -ge 1 ] || STAGE_RESERVE_GB=1
       mkdir -p "$_st/root"
       stage_setup "$_st/root" >/dev/null 2>&1 || { echo "SETUP-FAILED"; exit 0; }
@@ -381,6 +470,22 @@ if grep -qE '^\s*if podman pull' "$ENGINE"; then
     printf 'FAIL  %-30s engine still uses `podman pull` to fetch the OS\n' "no podman pull"; fail=$((fail+1))
 else
     printf 'PASS  %-30s\n' "no podman pull"; pass=$((pass+1))
+fi
+
+# Every `skopeo copy` must name its temp dir. TMPDIR alone does not reach the
+# containers-storage destination: skopeo 1.22 takes that from containers.conf's
+# image_copy_tmp_dir (/var/tmp), which on a live ISO is the 5.3 GB overlay.
+# A VM install from the netinstall ISO filled it and died silently at
+# "Preparing the installer runtime"; a host run cannot see this, because the
+# host's /var/tmp is huge. So it is checked here, statically, on every line.
+_bare=$(grep -nE '^\s*(if\s+)?skopeo\s+copy' "$ENGINE" || true)
+_named=$(grep -cE '^\s*(if\s+)?skopeo\s+"\$\{SKOPEO_TMP\[@\]\}"\s+copy' "$ENGINE" || true)
+if [ -n "$_bare" ]; then
+    printf 'FAIL  %-30s %s\n' "skopeo copy names --tmpdir" "bare skopeo copy at line(s): $(cut -d: -f1 <<<"$_bare" | tr '\n' ' ')"; fail=$((fail+1))
+elif [ "${_named:-0}" -lt 2 ]; then
+    printf 'FAIL  %-30s %s\n' "skopeo copy names --tmpdir" "expected both netinstall copies to pass SKOPEO_TMP, found $_named"; fail=$((fail+1))
+else
+    printf 'PASS  %-30s\n' "skopeo copy names --tmpdir"; pass=$((pass+1))
 fi
 
 echo "── GUI: every page must draw — it is the only front end there is ──────"

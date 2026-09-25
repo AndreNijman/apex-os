@@ -129,10 +129,12 @@ BOOT_KARGS="console=tty1 console=ttyS0,115200 systemd.log_target=kmsg systemd.sh
 # 24 GiB is comfortably over the engine's 16 GB whole-disk floor and leaves
 # ~21 GiB for APEX beside a 512 MiB ESP and a 2 GiB data partition.
 PART_DISK_SIZE=24G
-# 40 GiB is the smallest the STAGING path accepts: stage_budget_kb wants
-# NEED_SCRATCH_GB (22) + STAGE_RESERVE_GB (15) GiB of free space, and the call
-# site subtracts a 2 GiB margin from the RAW device size before asking.
-DISK_DISK_SIZE=40G
+# 52 GiB clears the STAGING path's floor with a little room: stage_budget_kb
+# wants NEED_SCRATCH_GB (32) + STAGE_RESERVE_GB (15) GiB of free space, and the
+# call site subtracts a 2 GiB margin from the RAW device size before asking —
+# 49 GiB raw. At 40 GiB (the old floor, for a 22 GiB budget) the runner copy
+# filled the staging filesystem once its temp files moved there. Sparse.
+DISK_DISK_SIZE=52G
 
 WANT_PATHS="both"
 # ── WHY THE DEFAULT FIXTURE CARRIES A BIOS BOOT PARTITION ────────────────────
@@ -398,6 +400,10 @@ stop_sampler() {
 }
 
 # ── the engine, always through the guard, always with a before/after pair ────
+# The identity string the GUI's confirm page records and the engine re-reads —
+# the same lsblk call on both sides, so the suite writes what the GUI would.
+fingerprint() { lsblk -bdnP -o MAJ:MIN,SIZE,WWN,SERIAL,PTUUID,PARTUUID,PARTTYPE "$1" 2>/dev/null | head -1; }
+
 run_engine() {  # $1 = label  $2 = answers file  $3 = stdout file  rest = env assignments
   local label="$1" ans="$2" out="$3"; shift 3
   local before="$WORK/efi-before-$label.txt" after="$WORK/efi-after-$label.txt"
@@ -685,6 +691,12 @@ encrypt=no
 keymap=us
 timezone=Australia/Perth
 EOF"
+  # The typed ERASE bound to all three identities, as the GUI's confirm page
+  # writes it. Appended separately: the values carry double quotes, which the
+  # sh -c heredoc above would mangle.
+  printf 'confirmed=ERASE\nconfirm_target=%s\nconfirm_disk_id=%s\nconfirm_target_id=%s\nconfirm_esp_id=%s\n' \
+    "$P_ROOT" "$(fingerprint "$LOOP")" "$(fingerprint "$P_ROOT")" "$(fingerprint "$P_ESP")" \
+    | sudo -n tee -a "$ans" >/dev/null
   sudo -n chmod 600 "$ans"
 
   # ── the dry run: every guard, on the real nodes, writing nothing ──────────
@@ -862,6 +874,8 @@ encrypt=no
 keymap=us
 timezone=Australia/Perth
 EOF"
+  printf 'confirmed=ERASE\nconfirm_target=%s\nconfirm_disk_id=%s\n' \
+    "$LOOP" "$(fingerprint "$LOOP")" | sudo -n tee -a "$ans" >/dev/null
   sudo -n chmod 600 "$ans"
 
   # APEX_SCRATCH_CANDIDATES is the engine's own documented test seam: it

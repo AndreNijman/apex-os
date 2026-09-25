@@ -209,6 +209,12 @@ ANS="$WORK/answers"
   printf 'lukspass=%s\n' "$PASSPHRASE"
   printf 'keymap=%s\n' "$KEYMAP_XKB"
   printf 'timezone=Australia/Perth\n'
+  # The typed ERASE and the identity it was typed against, as the GUI writes
+  # them; the engine refuses to write without both (see its confirmation
+  # binding). Read after the loop node exists, which is when the GUI reads it.
+  printf 'confirmed=ERASE\n'
+  printf 'confirm_target=%s\n' "$LOOP"
+  printf 'confirm_disk_id=%s\n' "$(lsblk -bdnP -o MAJ:MIN,SIZE,WWN,SERIAL,PTUUID,PARTUUID,PARTTYPE "$LOOP" | head -1)"
 } > "$ANS"
 chmod 600 "$ANS"
 

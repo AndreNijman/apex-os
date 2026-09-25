@@ -199,7 +199,7 @@ done
 run_engine() {  # $1=engine path  $2=answers body  [$3..]=extra env assignments
     local eng="$1" body="$2"; shift 2
     printf '%s\n' "$body" > "$ANS"
-    sudo -n APEX_IMAGE="$ENGINE_IMAGE" "$@" "$eng" --headless "$ANS" 2>&1 </dev/null
+    sudo -n APEX_DRY_RUN=1 APEX_IMAGE="$ENGINE_IMAGE" "$@" "$eng" --headless "$ANS" 2>&1 </dev/null
 }
 
 # $1 name, $2 expected substring, $3 answers body, $4.. extra env
@@ -305,8 +305,10 @@ if [ -n "$LOOPDEV" ]; then
     # keymap=bg on purpose. `bg` is one of the 36 XKB layout names (of 99) that
     # is NOT a loadable console keymap, so it is a layout where the conversion
     # has to do real work: the answer must come back as bg_bds-utf8.
+    LOOP_FP=$(lsblk -bdnP -o MAJ:MIN,SIZE,WWN,SERIAL,PTUUID,PARTUUID,PARTTYPE "$LOOPDEV")
     printf '%s\n' "mode=disk" "disk=$LOOPDEV" "username=bob" "password=pw" \
-        "hostname=apex" "encrypt=yes" "lukspass=correct horse 9" "keymap=bg" > "$ANS"
+        "hostname=apex" "encrypt=yes" "lukspass=correct horse 9" "keymap=bg" \
+        "confirmed=ERASE" "confirm_target=$LOOPDEV" "confirm_disk_id=$LOOP_FP" > "$ANS"
 
     # dry_run <engine> <keymap-tree> <model-map> — the same run three ways.
     dry_run() {
@@ -531,19 +533,22 @@ net_release() {
     return 0
 }
 if [ "$ENGINE_RUNNABLE" = 1 ] && [ "$nohelper_made" = 1 ] && command -v losetup >/dev/null 2>&1; then
-    # 40 GiB is the smallest disk the engine's own staging budget accepts:
-    # stage_budget_kb wants NEED_SCRATCH_GB (22) + STAGE_RESERVE_GB (15) after
-    # the 2 GiB margin the raw-size check subtracts. 20 GiB is comfortably
-    # under it, which is what makes the refusal case a refusal.
+    # 52 GiB clears the engine's own staging budget: stage_budget_kb wants
+    # NEED_SCRATCH_GB (32) + STAGE_RESERVE_GB (15) after the 2 GiB margin the
+    # raw-size check subtracts (49 GiB raw). 20 GiB is comfortably under it,
+    # which is what makes the refusal case a refusal.
     NETIMG_BIG=$(mktemp "$NETLOOPDIR/apex-luks-net-big.XXXXXX.img")
     NETIMG_SMALL=$(mktemp "$NETLOOPDIR/apex-luks-net-small.XXXXXX.img")
-    truncate -s 40G "$NETIMG_BIG"   2>/dev/null && LOOP_BIG=$(sudo -n losetup -fP --show "$NETIMG_BIG" 2>/dev/null || true)
+    truncate -s 52G "$NETIMG_BIG"   2>/dev/null && LOOP_BIG=$(sudo -n losetup -fP --show "$NETIMG_BIG" 2>/dev/null || true)
     truncate -s 20G "$NETIMG_SMALL" 2>/dev/null && LOOP_SMALL=$(sudo -n losetup -fP --show "$NETIMG_SMALL" 2>/dev/null || true)
 fi
 
 net_answers() {  # $1 = disk
+    local disk_fp
+    disk_fp=$(lsblk -bdnP -o MAJ:MIN,SIZE,WWN,SERIAL,PTUUID,PARTUUID,PARTTYPE "$1")
     printf '%s\n' "mode=disk" "disk=$1" "username=bob" "password=pw" \
-        "hostname=apex" "encrypt=yes" "lukspass=correct horse 9" "keymap=us" > "$ANS"
+        "hostname=apex" "encrypt=yes" "lukspass=correct horse 9" "keymap=us" \
+        "confirmed=ERASE" "confirm_target=$1" "confirm_disk_id=$disk_fp" > "$ANS"
 }
 
 if [ -n "$LOOP_BIG" ] && [ -n "$LOOP_SMALL" ]; then
