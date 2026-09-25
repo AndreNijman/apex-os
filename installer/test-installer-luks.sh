@@ -533,13 +533,13 @@ net_release() {
     return 0
 }
 if [ "$ENGINE_RUNNABLE" = 1 ] && [ "$nohelper_made" = 1 ] && command -v losetup >/dev/null 2>&1; then
-    # 40 GiB is the smallest disk the engine's own staging budget accepts:
-    # stage_budget_kb wants NEED_SCRATCH_GB (22) + STAGE_RESERVE_GB (15) after
-    # the 2 GiB margin the raw-size check subtracts. 20 GiB is comfortably
-    # under it, which is what makes the refusal case a refusal.
+    # 52 GiB clears the engine's own staging budget: stage_budget_kb wants
+    # NEED_SCRATCH_GB (32) + STAGE_RESERVE_GB (15) after the 2 GiB margin the
+    # raw-size check subtracts (49 GiB raw). 20 GiB is comfortably under it,
+    # which is what makes the refusal case a refusal.
     NETIMG_BIG=$(mktemp "$NETLOOPDIR/apex-luks-net-big.XXXXXX.img")
     NETIMG_SMALL=$(mktemp "$NETLOOPDIR/apex-luks-net-small.XXXXXX.img")
-    truncate -s 40G "$NETIMG_BIG"   2>/dev/null && LOOP_BIG=$(sudo -n losetup -fP --show "$NETIMG_BIG" 2>/dev/null || true)
+    truncate -s 52G "$NETIMG_BIG"   2>/dev/null && LOOP_BIG=$(sudo -n losetup -fP --show "$NETIMG_BIG" 2>/dev/null || true)
     truncate -s 20G "$NETIMG_SMALL" 2>/dev/null && LOOP_SMALL=$(sudo -n losetup -fP --show "$NETIMG_SMALL" 2>/dev/null || true)
 fi
 

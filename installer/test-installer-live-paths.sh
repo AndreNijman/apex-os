@@ -129,10 +129,12 @@ BOOT_KARGS="console=tty1 console=ttyS0,115200 systemd.log_target=kmsg systemd.sh
 # 24 GiB is comfortably over the engine's 16 GB whole-disk floor and leaves
 # ~21 GiB for APEX beside a 512 MiB ESP and a 2 GiB data partition.
 PART_DISK_SIZE=24G
-# 40 GiB is the smallest the STAGING path accepts: stage_budget_kb wants
-# NEED_SCRATCH_GB (22) + STAGE_RESERVE_GB (15) GiB of free space, and the call
-# site subtracts a 2 GiB margin from the RAW device size before asking.
-DISK_DISK_SIZE=40G
+# 52 GiB clears the STAGING path's floor with a little room: stage_budget_kb
+# wants NEED_SCRATCH_GB (32) + STAGE_RESERVE_GB (15) GiB of free space, and the
+# call site subtracts a 2 GiB margin from the RAW device size before asking —
+# 49 GiB raw. At 40 GiB (the old floor, for a 22 GiB budget) the runner copy
+# filled the staging filesystem once its temp files moved there. Sparse.
+DISK_DISK_SIZE=52G
 
 WANT_PATHS="both"
 # ── WHY THE DEFAULT FIXTURE CARRIES A BIOS BOOT PARTITION ────────────────────
