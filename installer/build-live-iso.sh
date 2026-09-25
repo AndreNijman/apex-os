@@ -25,6 +25,17 @@ case "$WORK" in
   /|/var|/var/tmp|/tmp|/home|/var/home|/root|/var/lab-scratch)
     echo "FATAL: WORK must be a dedicated build directory, not $WORK" >&2; exit 1 ;;
 esac
+# The list above only names the obvious shared directories; /var/tmp/shared is
+# just as shared and not on it. So ownership is proven, not assumed: this script
+# works in WORK only if WORK is new, empty, or carries the marker it wrote on an
+# earlier run. The rm -rf calls below target fixed names (rootfs, sqroot,
+# isoroot, cs-run, grub-i386-pc) that another tool's tree could also contain.
+if [ -d "$WORK" ] && [ -n "$(ls -A "$WORK" 2>/dev/null)" ] && [ ! -e "$WORK/.apex-iso-build" ]; then
+  echo "FATAL: $WORK already holds files this script did not create (no .apex-iso-build marker)." >&2
+  echo "       Point WORK at a new or empty directory; nothing has been touched." >&2
+  exit 1
+fi
+mkdir -p "$WORK" && touch "$WORK/.apex-iso-build"
 # Which tag this ISO installs. This is NOT cosmetic: it names the embedded
 # storage tag AND is stamped into the live env so apex-install derives its
 # --target-imgref from it — the origin the installed machine follows on every
