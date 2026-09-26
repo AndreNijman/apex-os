@@ -248,7 +248,10 @@ if [ "$ENGINE_RUNNABLE" = 1 ] && command -v losetup >/dev/null \
 r, w = os.pipe(); os.close(r)
 print(subprocess.call(sys.argv[1:], stdin=subprocess.DEVNULL, stdout=w, stderr=w))' \
               sudo -n APEX_IMAGE="$ENGINE_IMAGE" APEX_DRY_RUN=1 "$ENGINE" --headless "$ANS")
-        if [ "$_rc" = 0 ] && sudo -n grep -q 'APEX-DRY-RUN: validation complete' /var/log/apex-install.log; then
+        # ...and the relay must really be in place, stderr included: a merge
+        # condition that can never be true once passed this check unnoticed.
+        if [ "$_rc" = 0 ] && sudo -n grep -q 'APEX-DRY-RUN: validation complete' /var/log/apex-install.log \
+           && sudo -n grep -qE 'stdout relayed via pid [0-9]+; stderr merged: yes' /var/log/apex-install.log; then
             printf 'PASS  %-30s\n' "engine outlives a dead GUI"; pass=$((pass+1))
         else
             printf 'FAIL  %-30s rc=%s %s\n' "engine outlives a dead GUI" "$_rc" \
@@ -557,7 +560,10 @@ _rf=$(mktemp -d /var/tmp/apex-result-test.XXXXXX)
     RESULT_ON=1; RESULT_FILE="$_rf/sub/result"
     INSTALL_MODE=disk; DISK=/dev/vda; TARGET=/dev/vda; USERNAME=bob; HOSTNAME=apex
     RESULT_RECOVERY_KEY=abcd-efgh; RESULT_RECOVERY_SAVED=apex-recovery-key-apex.txt; RESULT_RECOVERY_UNSAVED=
+    log() { :; }
     write_result ok ""
+    # A die() after success must not turn a finished install into a failure.
+    write_result failed "Unexpected error on line 1"
     stat -c %a "$RESULT_FILE"; cat "$RESULT_FILE"
 ) > "$_rf/out" 2>&1
 if grep -qx 600 "$_rf/out" && grep -qx 'status=ok' "$_rf/out" && grep -qx 'recovery_key=abcd-efgh' "$_rf/out" \

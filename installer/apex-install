@@ -91,14 +91,20 @@ fi
 # it does under the GUI. relay_flush lets the relay drain before exit, so the
 # GUI sees the last line before it sees the process end. The relay closes its
 # copy of the lock fd.
+#
+# The shared-pipe test reads /proc/$$, not /proc/self. Inside $(readlink ...)
+# /proc/self is readlink, whose fd 1 is the capture pipe, so an earlier version
+# of this comparison could never match and stderr stayed on the dead pipe. The
+# outcome is logged below ("stderr merged: yes") and the suite checks for it.
 APEX_RELAY_PID=
-if [ "${1:-}" != --check-passphrase ] && [ -p /proc/self/fd/1 ]; then
-  _apex_fd1=$(readlink /proc/self/fd/1 2>/dev/null || true)
-  _apex_fd2=$(readlink /proc/self/fd/2 2>/dev/null || true)
+APEX_STDERR_MERGED=no
+if [ "${1:-}" != --check-passphrase ] && [ -p /proc/$$/fd/1 ]; then
+  _apex_share=no
+  [ /proc/$$/fd/1 -ef /proc/$$/fd/2 ] && _apex_share=yes
   exec 1> >(exec 9>&-; trap '' PIPE
             while IFS= read -r _l || [ -n "$_l" ]; do printf '%s\n' "$_l" 2>/dev/null || :; done)
   APEX_RELAY_PID=$!
-  if [ -n "$_apex_fd1" ] && [ "$_apex_fd1" = "$_apex_fd2" ]; then exec 2>&1; fi
+  if [ "$_apex_share" = yes ]; then exec 2>&1; APEX_STDERR_MERGED=yes; fi
 fi
 relay_flush() {
   [ -n "$APEX_RELAY_PID" ] || return 0
@@ -130,6 +136,14 @@ if [ "$APEX_HOLDS_LOCK" = 1 ] && [ "${APEX_DRY_RUN:-0}" != 1 ] && [ "${1:-}" != 
 fi
 write_result() {  # $1=ok|failed  $2=message (first line kept)
   [ "$RESULT_ON" = 1 ] || return 0
+  # An install that recorded success stays a success. Nothing after that
+  # point writes the disk, so a later die() is a defect in reporting, not an
+  # install failure. That was how a finished install once read as "failed".
+  if [ "$1" != ok ] && [ "${RESULT_OK_WRITTEN:-0}" = 1 ]; then
+    log "not recording '$1' over a result that already says ok: ${2:-}"
+    return 0
+  fi
+  if [ "$1" = ok ]; then RESULT_OK_WRITTEN=1; fi
   local dir tmp msg
   dir=$(dirname "$RESULT_FILE"); msg=$(printf '%s' "${2:-}" | head -1)
   mkdir -p "$dir" 2>/dev/null || return 0
@@ -548,6 +562,7 @@ fi
 # `|| true`: a full RAM disk (or an unwritable log) must never trip the ERR trap
 # and turn a fine install into a reported failure.
 log()  { printf '%s %s\n' "$(date +%T)" "$*" >>"$LOG" 2>/dev/null || true; }
+[ -z "$APEX_RELAY_PID" ] || log "front-end pipe: stdout relayed via pid $APEX_RELAY_PID; stderr merged: $APEX_STDERR_MERGED"
 have() { command -v "$1" >/dev/null 2>&1; }
 
 # ── The firmware is not part of the target disk ─────────────────────────────
