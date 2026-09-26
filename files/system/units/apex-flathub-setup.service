@@ -21,6 +21,23 @@ ConditionPathExists=!/var/lib/flatpak/.apex-flathub-added
 # The shipped repo file must be present to add the remote from it.
 ConditionPathExists=/etc/flatpak/flathub.flatpakrepo
 
+# ── Boot never waits for this ────────────────────────────────────────────────
+# A target orders itself After= every unit it Wants, so with default
+# dependencies multi-user.target (and graphical.target behind it) waited for
+# this oneshot: every attempt, and every 60 s RestartSec pause in between. On a
+# first boot with no network that was ten failed attempts a minute apart, and
+# the console showed "A start job is running … (9min / no limit)", because a
+# Type=oneshot's TimeoutStartSec defaults to infinity. DefaultDependencies=no
+# removes that implicit ordering; the four lines below put back what the
+# defaults provided, so the unit still starts after basic system setup and
+# still stops cleanly at shutdown. It keeps running and retrying in the
+# background; boot just stops waiting for it.
+DefaultDependencies=no
+Requires=sysinit.target
+After=sysinit.target basic.target
+Conflicts=shutdown.target
+Before=shutdown.target
+
 [Service]
 Type=oneshot
 RemainAfterExit=yes
@@ -45,6 +62,11 @@ ExecStartPost=/usr/bin/touch /var/lib/flatpak/.apex-flathub-added
 # genuinely offline machine installs on a later boot exactly as before.
 Restart=on-failure
 RestartSec=60s
+# One attempt may not hang. remote-add reads a local .flatpakrepo and
+# finishes in well under a second when it works; two minutes only catches a
+# stall (a DNS lookup or TCP connect that never answers), which then counts
+# as a failure and is retried like one.
+TimeoutStartSec=2min
 
 [Install]
 WantedBy=multi-user.target
