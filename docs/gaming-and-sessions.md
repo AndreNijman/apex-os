@@ -570,6 +570,58 @@ three different subsets, all broken, all three including
 CachyOS kernel" is the workaround it looks like.
 
 
+## 5e. Once it could load, COPR's scx_lavd stalled the game — APEX builds the fixed one (2026-09-26)
+
+With the `apex1` kernel's BTF fixed, sched-ext finally attached, and the first
+real game session with it froze. Terraria (tModLoader), katana,
+`7.2.6-cachyos1.apex1`, `scx-scheds-1.1.3-3.fc43` from the CachyOS COPR:
+
+| time (AWST) | kernel: "runnable task stall" | starved |
+|---|---|---|
+| 08:03:46 | `fossilize_repla` | 35.3 s |
+| 08:10:58 | `.NET TP Worker` | 34.9 s |
+| 08:12:33 | `apex` | 37.4 s |
+| 08:15:11 | `dotnet` | 32.4 s |
+| 08:19:19 | `.NET TP Worker` | 31.5 s — scx_loader gives up, "attempt 5/5" |
+
+Plus Firefox (`IPC I/O Child`, 41.4 s) the night before. Every loader dump has
+the same shape:
+
+```
+R dotnet[50542] *root -32375ms
+    dsq_id=0x8
+    cpus=00004 no_mig=1
+    \_ cpdom_id: 0   scpu: 8
+```
+
+The task is migration-disabled on CPU 2 (`cpus=00004 no_mig=1`) but queued on
+the per-CPU DSQ of CPU 8, its cached suggested CPU (`scpu: 8`). CPU 8 cannot run
+it and CPU 2 never looks there, so it waits until the watchdog ejects the whole
+scheduler. That is **sched-ext/scx#3791**, and upstream commit `6d31ddd89`
+fixes it: lavd_enqueue's REENQ path now checks the cached CPU against
+`cpus_ptr`. Arch shipped that as `scx-scheds 1.1.3-2`. COPR's `1.1.3-3` is the
+v1.1.3 tag plus hotfixes for scx_cake and scx_pandemonium, not this one.
+
+**What APEX does:** `Containerfile.core`'s toolbuilder builds scx_lavd from
+the same v1.1.3 tag with the vendored patch
+(`files/system/src/scx/lavd-6d31ddd89-reenq-cpus-ptr.patch`), and the final
+stage installs it over COPR's binary only while COPR is still at 1.1.3. Any
+later scx release already contains the fix, so a newer COPR is kept and the
+log says to drop the rebuild. `/usr/lib/apex-scx-versions` records which
+binary shipped. The patched binary's embedded BPF line info carries the fix
+(one more `bpf_cpumask_first(p->cpus_ptr)` than COPR's: 4 against 3).
+
+`scx_loader` restarting lavd after every watchdog exit is what turned one bug
+into five freezes. apexd reports "sched-ext loaded" once at entry and never
+looks again. Both are still true and worth fixing separately.
+
+The Hyprland crash the same day is a different defect. It was an i915 GPU hang
+in the game's own context (`ecode 12:1:84dffffb`, rcs0), which reset Hyprland's
+context too because both ran on the Intel iGPU. It reproduced in daily mode with
+sched-ext off. The cause was the launcher ignoring Steam's
+`PrefersNonDefaultGPU=true`, fixed in apex-shell's `DesktopExec`.
+
+
 ## 6. What still needs katana, and the exact commands
 
 None of the rows below can be answered by a machine with one GPU and no
