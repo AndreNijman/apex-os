@@ -90,6 +90,27 @@ for n in $(seq 0 23); do
     grep -q "^ImageDir=/usr/share/plymouth/themes/$t$" "$THEMES/$t/$t.plymouth" || missing=$((missing + 1))
 done
 [ "$missing" -eq 0 ] && ok "all 24 accent themes are complete" || bad "all 24 accent themes are complete ($missing missing)"
+# Every word on the splash is an Image.Text(), and Image.Text() draws nothing
+# at all without a label plugin: no error, just an empty sprite. Until
+# 2026-09-26 no image had one, so an encrypted machine's passphrase prompt was
+# invisible. The package must be installed, and the build must refuse an
+# initramfs the plugin or its font did not reach.
+grep -q 'Image.Text' "$THEMES"/apex-os-chartreuse/apex-os.script \
+    && grep -vE '^[[:space:]]*#' "$ROOT/Containerfile.core" \
+        | grep -E 'dnf5 -y install plymouth ' | grep -qw 'plymouth-plugin-label' \
+    && ok "the splash's text has a renderer: core installs plymouth-plugin-label" \
+    || bad "the splash's text has a renderer: core installs plymouth-plugin-label"
+_want="$(sed -n '/for want in usr\/bin\/apex-plymouth-theme/,/; do/p' "$ROOT/Containerfile.apex")"
+printf '%s\n' "$_want" | grep -qF 'usr/lib64/plymouth/label-freetype.so' \
+    && printf '%s\n' "$_want" | grep -qF 'usr/share/fonts/Plymouth.ttf' \
+    && ok "the build asserts the label plugin and its font are in the initramfs" \
+    || bad "the build asserts the label plugin and its font are in the initramfs"
+# The initramfs draws with the freetype label, which drew U+00B7 as a
+# missing-glyph box. Keep every message sent to the splash plain ASCII.
+_nonascii="$(grep -rlE 'plymouth +message' "$ROOT/files" 2>/dev/null | grep -v '\.script$' \
+    | xargs -r env LC_ALL=C grep -nP '^[^#]*--text=.*[^\x00-\x7F]' 2>/dev/null)"
+[ -z "$_nonascii" ] && ok "every splash message is plain ASCII" \
+    || bad "every splash message is plain ASCII: $_nonascii"
 # No mid-animation switching: the theme is chosen before plymouth starts.
 grep -rq 'SetUpdateStatusFunction' "$THEMES"/apex-os-accent-*/apex-os.script "$THEMES"/apex-os-chartreuse/apex-os.script \
     && bad "no theme switches colour mid-animation" || ok "no theme switches colour mid-animation"
