@@ -236,40 +236,66 @@ else
     log "plymouth: binary not present — nothing to quit"
 fi
 
-# ── Launch. Exactly one retry, then diagnose ─────────────────────────────────
-# Why one retry and not a loop: the only transient first-start failure seen in
-# practice is cage racing a late DRM-master release (plymouth or the console
-# layer finishing its handover just after we start). Two seconds and a second
-# attempt absorb that. Anything that fails twice is a real defect, and
-# retrying it forever is indistinguishable from a black screen — the one
-# outcome this script exists to rule out.
+# ── Launch. One retry for a failed START, relaunches for a crash at RUNTIME ──
+# Why one retry and not a loop for starts: the only transient first-start
+# failure seen in practice is cage racing a late DRM-master release (plymouth
+# or the console layer finishing its handover just after we start). Two
+# seconds and a second attempt absorb that. Anything that fails to START twice
+# is a real defect, and retrying it forever is indistinguishable from a black
+# screen — the one outcome this script exists to rule out.
+#
+# A session that ran for a while and THEN died is a different event, and it
+# used to spend the same budget. Measured in a VM: Ctrl+Alt+F2 and back can
+# make cage's next atomic commit fail (EACCES) and the compositor exit, half an
+# hour into an install. One such crash used the retry; a second dropped the
+# user to a root shell while the engine was still writing the disk. So a
+# session that lived RUNTIME_MIN seconds counts as a runtime crash: relaunch,
+# and the fresh front end reattaches to the install in progress (or shows the
+# result it recorded). Bounded, so a crash loop still ends in the diagnostic.
+RUNTIME_MIN="${APEX_INSTALLER_RUNTIME_MIN:-20}"
+MAX_RUNTIME_RELAUNCHES="${APEX_INSTALLER_MAX_RELAUNCHES:-10}"
 start_gui() {
-    log "launching (attempt $1 of 2): ${GUI_CMD[*]}"
+    log "launching (attempt $1): ${GUI_CMD[*]}"
     "${GUI_CMD[@]}" >>"$LOG" 2>&1
     local rc=$?
     log "attempt $1: cage exited rc=$rc"
     return "$rc"
 }
 
-start_gui 1
-rc=$?
-if [ "$rc" -eq 0 ]; then
-    log "GUI session ended cleanly — done"
-    exit 0
-fi
-log "attempt 1 failed (rc=$rc) — sleeping 2 s in case DRM master was released late, then retrying ONCE"
-sleep 2
-# Re-pick the GPU: the card that existed a moment ago may have been replaced by
-# the real driver taking over from simpledrm, which is precisely the handover
-# this retry is here to survive.
-pick_gpu
-start_gui 2
-rc=$?
-if [ "$rc" -eq 0 ]; then
-    log "GUI session ended cleanly on the retry — done"
-    exit 0
-fi
-log "attempt 2 failed (rc=$rc) — the GUI cannot start on this machine; writing the diagnostic to tty1"
+attempt=0; start_failures=0; relaunches=0
+while :; do
+    attempt=$((attempt + 1))
+    _t0=$SECONDS
+    start_gui "$attempt"
+    rc=$?
+    _ran=$((SECONDS - _t0))
+    if [ "$rc" -eq 0 ]; then
+        log "GUI session ended cleanly — done"
+        exit 0
+    fi
+    if [ "$_ran" -ge "$RUNTIME_MIN" ]; then
+        relaunches=$((relaunches + 1))
+        if [ "$relaunches" -gt "$MAX_RUNTIME_RELAUNCHES" ]; then
+            log "the session crashed at runtime $relaunches times — treating it as a defect"
+            break
+        fi
+        log "the session ran ${_ran}s, then exited rc=$rc — a runtime crash (e.g. after a VT switch), not a failed start; relaunching ($relaunches of $MAX_RUNTIME_RELAUNCHES)"
+        sleep 1
+        pick_gpu
+        continue
+    fi
+    start_failures=$((start_failures + 1))
+    if [ "$start_failures" -ge 2 ]; then
+        break
+    fi
+    log "attempt $attempt failed after ${_ran}s (rc=$rc) — sleeping 2 s in case DRM master was released late, then retrying ONCE"
+    sleep 2
+    # Re-pick the GPU: the card that existed a moment ago may have been replaced
+    # by the real driver taking over from simpledrm, which is precisely the
+    # handover this retry is here to survive.
+    pick_gpu
+done
+log "giving up (last rc=$rc, start failures=$start_failures, runtime relaunches=$relaunches) — writing the diagnostic to tty1"
 
 # ── The failure path: diagnose on tty1, then a live root shell ───────────────
 # Non-negotiables: no black screen, no dead console, and a screen the user can
@@ -292,8 +318,9 @@ write_report() {
     printf ' APEX-OS INSTALLER BUG — the graphical installer could not start\n'
     printf '===============================================================================\n'
     printf ' This is a defect in the installer image, NOT something you did wrong.\n'
-    printf ' The installer session (cage + the GUI) exited with code %s on both\n' "$rc"
-    printf ' attempts. Code 70 there means the session refused a keyboard restart.\n'
+    printf ' The installer session (cage + the GUI) last exited with code %s\n' "$rc"
+    printf ' (%s failed starts, %s runtime relaunches). Code 70 means the session\n' "$start_failures" "$relaunches"
+    printf ' refused a keyboard restart.\n'
     printf ' DRM nodes: %s\n /run/seatd.sock: %s   pinned GPU: %s\n' \
         "$card" "$seat" "${WLR_DRM_DEVICES:-<auto>}"
     printf ' ---- last lines of %s ----\n' "$LOG"
