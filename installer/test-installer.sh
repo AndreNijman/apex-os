@@ -631,7 +631,9 @@ rm -rf "$_rf"
 _pin="$_wf/pin-netinstall-image.yml"
 if [ -f "$_pin" ] && grep -q -- '--preserve-digests' "$_pin" \
    && grep -q 'netinstall-\$RELEASE' "$_pin" && grep -q 'write-once' "$_pin" \
-   && grep -q 'pin-netinstall-image.yml' ./build-live-iso.sh; then
+   && grep -q "grep -q 'manifest unknown'" "$_pin" \
+   && grep -q 'pin-netinstall-image.yml' ./build-live-iso.sh \
+   && ! grep -q 'release=vX.Y.Z' ./build-live-iso.sh; then
     printf 'PASS  %-30s\n' "netinstall digest gets pinned"; pass=$((pass+1))
 else
     printf 'FAIL  %-30s %s\n' "netinstall digest gets pinned" \

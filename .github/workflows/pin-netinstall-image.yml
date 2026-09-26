@@ -98,7 +98,19 @@ jobs:
           set -euo pipefail
           creds="$GHCR_USER:$GHCR_TOKEN"
           tag="netinstall-$RELEASE"
-          have="$(skopeo inspect --creds "$creds" --format '{{.Digest}}' "docker://$IMAGE:$tag" 2>/dev/null || echo MISSING)"
+          # MISSING only when the registry says so. Any other inspect failure
+          # (an outage, an auth or permission error) proves nothing about the
+          # tag, and treating it as absence would let this step overwrite a pin
+          # that an ISO in the wild depends on.
+          if have="$(skopeo inspect --creds "$creds" --format '{{.Digest}}' "docker://$IMAGE:$tag" 2>/tmp/inspect.err)"; then
+            :
+          elif grep -q 'manifest unknown' /tmp/inspect.err; then
+            have=MISSING
+          else
+            echo "::error::could not tell whether $IMAGE:$tag exists; refusing to write it"
+            cat /tmp/inspect.err
+            exit 1
+          fi
           if [ "$have" = "$DIGEST" ]; then
             echo "  ok   :$tag already pins this digest — nothing to do"; exit 0
           fi

@@ -617,5 +617,12 @@ if [ "$NETINSTALL" = 1 ] && [ "$PRODUCTION" = 1 ]; then
   echo "== BEFORE PUBLISHING =="
   echo "This ISO downloads $RELEASE_IMAGE."
   echo "Give that digest a durable tag, so no GHCR cleanup can ever remove it:"
-  echo "  gh workflow run pin-netinstall-image.yml -f digest=$RELEASE_DIGEST -f release=vX.Y.Z"
+  # RELEASE=v2.1.0 makes this line runnable as printed. Without it the release
+  # is a placeholder, and it is labelled as one instead of looking finished.
+  if printf '%s' "${RELEASE:-}" | grep -qE '^v[0-9]+\.[0-9]+\.[0-9]+$'; then
+    echo "  gh workflow run pin-netinstall-image.yml -f digest=$RELEASE_DIGEST -f release=$RELEASE"
+  else
+    echo "  gh workflow run pin-netinstall-image.yml -f digest=$RELEASE_DIGEST -f release=<RELEASE>"
+    echo "  (replace <RELEASE> with the release this ISO ships in, e.g. v2.1.0, or build with RELEASE=v2.1.0)"
+  fi
 fi
