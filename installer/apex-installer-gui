@@ -2267,13 +2267,19 @@ class Installer(Adw.Application):
                 return False
         if cond & GLib.IO_HUP or (self.proc and self.proc.poll() is not None):
             rc = self.proc.wait() if self.proc else 1
-            # Drain anything buffered after HUP so a failure reason is never lost.
+            # Drain anything buffered after HUP so a failure reason is never lost:
+            # the engine can exit before its last lines have been read, and the
+            # APEX-INSTALL-FAILED line is the one that says why.
+            reason = ""
             try:
                 for rest in src:
                     self.append_log(rest)
+                    if not reason and "APEX-INSTALL-FAILED" in rest:
+                        reason = rest.split("APEX-INSTALL-FAILED:", 1)[-1].strip()
             except (ValueError, OSError):
                 pass
-            self.finish(rc == 0, "" if rc == 0 else f"The installer exited with status {rc}.")
+            self.finish(rc == 0, "" if rc == 0 else
+                        (reason or f"The installer exited with status {rc}."))
             return False
         return True
 

@@ -240,6 +240,20 @@ if [ "$ENGINE_RUNNABLE" = 1 ] && command -v losetup >/dev/null \
                 "$(grep -m1 APEX-INSTALL-FAILED <<<"$out" || echo no-sentinel)"
             fail=$((fail+1))
         fi
+        # The GUI can die mid-install and the engine must still finish. Same
+        # dry run, with stdout and stderr on a pipe whose reader is already
+        # gone. Before the relay, the bare `echo` of the final sentinel failed
+        # there and the ERR trap recorded a finished install as a failure.
+        _rc=$(python3 -c 'import os, subprocess, sys
+r, w = os.pipe(); os.close(r)
+print(subprocess.call(sys.argv[1:], stdin=subprocess.DEVNULL, stdout=w, stderr=w))' \
+              sudo -n APEX_IMAGE="$ENGINE_IMAGE" APEX_DRY_RUN=1 "$ENGINE" --headless "$ANS")
+        if [ "$_rc" = 0 ] && sudo -n grep -q 'APEX-DRY-RUN: validation complete' /var/log/apex-install.log; then
+            printf 'PASS  %-30s\n' "engine outlives a dead GUI"; pass=$((pass+1))
+        else
+            printf 'FAIL  %-30s rc=%s %s\n' "engine outlives a dead GUI" "$_rc" \
+                "$(sudo -n tail -1 /var/log/apex-install.log 2>/dev/null)"; fail=$((fail+1))
+        fi
         # Partition mode binds THREE identities — disk, root partition, ESP —
         # and each one on its own must be able to stop the install. The disk
         # below mimics a dual-boot layout (ESP, a partition for APEX, a

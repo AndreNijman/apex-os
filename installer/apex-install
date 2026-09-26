@@ -76,6 +76,40 @@ if [ "${1:-}" != --check-passphrase ] && [ "$(id -u)" = 0 ] && command -v flock 
   fi
 fi
 
+# ── Outlive the front end's pipe ─────────────────────────────────────────────
+# The GUI reads this engine's stdout and stderr through one pipe. When the GUI
+# dies mid-install (see above), every later write to that pipe fails with EPIPE,
+# and under the ERR trap a failed bare `echo` is a die(). SIGPIPE is ignored and
+# note()/log() swallow the error, but not every write goes through them.
+# Measured in a VM: cage was killed mid-download, the install ran to the end,
+# and then its last line, `echo "APEX-INSTALL-OK"`, failed. The install was
+# recorded as FAILED on a disk that was completely installed.
+#
+# So when stdout is a pipe, it goes through a relay. The relay forwards each
+# line while the GUI is reading and drops lines once it is gone, so no write of
+# ours ever meets the broken pipe. stderr joins it when it shares the pipe, as
+# it does under the GUI. relay_flush lets the relay drain before exit, so the
+# GUI sees the last line before it sees the process end. The relay closes its
+# copy of the lock fd.
+APEX_RELAY_PID=
+if [ "${1:-}" != --check-passphrase ] && [ -p /proc/self/fd/1 ]; then
+  _apex_fd1=$(readlink /proc/self/fd/1 2>/dev/null || true)
+  _apex_fd2=$(readlink /proc/self/fd/2 2>/dev/null || true)
+  exec 1> >(exec 9>&-; trap '' PIPE
+            while IFS= read -r _l || [ -n "$_l" ]; do printf '%s\n' "$_l" 2>/dev/null || :; done)
+  APEX_RELAY_PID=$!
+  if [ -n "$_apex_fd1" ] && [ "$_apex_fd1" = "$_apex_fd2" ]; then exec 2>&1; fi
+fi
+relay_flush() {
+  [ -n "$APEX_RELAY_PID" ] || return 0
+  exec 1>&- 2>&-
+  local i=0
+  # Bounded: a child that inherited the pipe keeps the relay open, and the
+  # exit must not wait on it indefinitely.
+  while kill -0 "$APEX_RELAY_PID" 2>/dev/null && [ "$i" -lt 50 ]; do sleep 0.1; i=$((i + 1)); done
+}
+trap relay_flush EXIT
+
 LOG=/var/log/apex-install.log
 : > "$LOG" 2>/dev/null || LOG=/tmp/apex-install.log
 
