@@ -583,6 +583,29 @@ if [ "$(tr '\n' ' ' < "$_rf/gone")" = "GONE-PINNED UNPINNED-NOT-GONE OFFLINE-NOT
 else
     printf 'FAIL  %-30s %s\n' "withdrawn image told apart" "$(tr '\n' ' ' < "$_rf/gone")"; fail=$((fail+1))
 fi
+# A relaunched session must land on tty1. seatd binds it to whichever VT is in
+# front, and after a crash that is the VT the user switched to: in a VM the
+# relaunched GUI came up on tty2 while tty1 showed boot messages. So the
+# launcher brings tty1 forward before every start, and a chvt that never
+# returns must not keep cage from starting.
+mkdir -p "$_rf/bin"
+printf '#!/bin/sh\necho "chvt $*" >> "%s/order"\n' "$_rf" > "$_rf/bin/chvt"
+printf '#!/bin/sh\necho gui >> "%s/order"\n' "$_rf" > "$_rf/bin/gui"
+chmod +x "$_rf/bin/chvt" "$_rf/bin/gui"
+_launch_fns="$(sed -n '/^front_tty1() {/,/^}/p; /^start_gui() {/,/^}/p' apex-installer-launch)"
+( set +u; PATH="$_rf/bin:$PATH"; LOG="$_rf/launch.log"; log() { :; }; GUI_CMD=("$_rf/bin/gui")
+  eval "$_launch_fns"; start_gui 1 ) >/dev/null 2>&1
+_order="$(tr '\n' ' ' < "$_rf/order" 2>/dev/null)"
+printf '#!/bin/sh\nexec sleep 30\n' > "$_rf/bin/chvt"; : > "$_rf/order"
+_t0=$SECONDS
+( set +u; PATH="$_rf/bin:$PATH"; LOG="$_rf/launch.log"; log() { :; }; GUI_CMD=("$_rf/bin/gui")
+  eval "$_launch_fns"; start_gui 2 ) >/dev/null 2>&1
+_hung=$((SECONDS - _t0))
+if [ "$_order" = "chvt 1 gui " ] && grep -qx gui "$_rf/order" && [ "$_hung" -le 10 ]; then
+    printf 'PASS  %-30s\n' "relaunch lands on tty1"; pass=$((pass+1))
+else
+    printf 'FAIL  %-30s order=[%s] hung-chvt start took %ss\n' "relaunch lands on tty1" "$_order" "$_hung"; fail=$((fail+1))
+fi
 rm -rf "$_rf"
 
 _pin="$_wf/pin-netinstall-image.yml"

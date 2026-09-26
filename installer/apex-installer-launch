@@ -254,7 +254,19 @@ fi
 # result it recorded). Bounded, so a crash loop still ends in the diagnostic.
 RUNTIME_MIN="${APEX_INSTALLER_RUNTIME_MIN:-20}"
 MAX_RUNTIME_RELAUNCHES="${APEX_INSTALLER_MAX_RELAUNCHES:-10}"
+# seatd binds a new session to whichever VT is in front when cage asks for the
+# seat. After a runtime crash that is usually NOT tty1: the user is on the VT
+# they switched to. Measured in a VM: cage killed while tty2 was in front, and
+# the relaunched GUI came up on tty2, over its login prompt, while Ctrl+Alt+F1
+# (what the failure page tells people to press) showed boot messages. So tty1
+# is brought to the front before every start. Bounded, because chvt waits for
+# the switch and a wait that never ends would be a black screen.
+front_tty1() {
+    command -v chvt >/dev/null 2>&1 || return 0
+    timeout 5 chvt 1 >>"$LOG" 2>&1 || log "chvt 1 did not complete — starting cage anyway"
+}
 start_gui() {
+    front_tty1
     log "launching (attempt $1): ${GUI_CMD[*]}"
     "${GUI_CMD[@]}" >>"$LOG" 2>&1
     local rc=$?
