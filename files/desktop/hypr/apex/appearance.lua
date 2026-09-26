@@ -50,54 +50,61 @@ hl.config({
 
 -- ── Motion ───────────────────────────────────────────────────────────────────
 -- The compositor moves on the same beats and curves as APEX Shell (UI/UX
--- roadmap v3 Phase 20), so a window opening and a panel opening read as one
--- system. The numbers are the shell's own tokens (src/theme/motion.js, at the
--- default "balanced" speed); a speed here is in tenths of a second.
+-- roadmap v3 Phase 20, retuned 2026-09-26 with the shell's fluid motion), so a
+-- window opening and a panel opening read as one system. The numbers are the
+-- shell's own tokens (apex-shell src/theme/motion.js, at the default
+-- "balanced" speed); a speed here is in tenths of a second. The shell scales
+-- every one of them by its own speed setting at runtime (hyprMotion.js).
 --
---   opening   fast initial response, decelerated settle   emphasizedDecel
---   closing   shorter and accelerated                      emphasizedAccel
---   moving    direct: no overshoot, no emphasis            standard
---   fading    the effects curve                            effects
+-- Andre: "everything goes way too quick and doesn't feel liquid and fluid."
+-- The first tuning (240 ms opens on a curve with a near-vertical first frame)
+-- snapped windows into place. Nothing physical starts at full speed:
+--
+--   arriving  a critically damped spring from rest, fitted   spring
+--   leaving   eases in and out, shorter                      standardAccel
+--   moving    the same spring: a tile glides to its place    spring
+--   fading    Core Animation's ease, no hard edge            effects
 --
 -- hyprlang carried these as `bezier =` / `animation =` keys; each is its own
 -- call now, `enabled / speed / curve` becoming named fields.
-hl.curve("apexDecel",    { type = "bezier", points = { { 0.05, 0.7 }, { 0.1, 1.0 } } })
-hl.curve("apexAccel",    { type = "bezier", points = { { 0.3, 0.0 }, { 0.8, 0.15 } } })
-hl.curve("apexStandard", { type = "bezier", points = { { 0.2, 0.0 }, { 0.0, 1.0 } } })
-hl.curve("apexEffects",  { type = "bezier", points = { { 0.3, 0.7 }, { 0.3, 1.0 } } })
+hl.curve("apexSpring",   { type = "bezier", points = { { 0.25, 0.2 }, { 0.15, 1.0 } } })
+hl.curve("apexAccel",    { type = "bezier", points = { { 0.4, 0.0 }, { 0.65, 1.0 } } })
+hl.curve("apexStandard", { type = "bezier", points = { { 0.25, 0.1 }, { 0.25, 1.0 } } })
+hl.curve("apexEffects",  { type = "bezier", points = { { 0.25, 0.1 }, { 0.25, 1.0 } } })
 
--- Windows: in on the shell's morphEnter (240 ms), out on morphExit (175 ms),
--- both from 87 % so a window grows into place rather than zooming from a dot.
-hl.animation({ leaf = "windowsIn",   enabled = true, speed = 2.4,  bezier = "apexDecel",    style = "popin 87%" })
-hl.animation({ leaf = "windowsOut",  enabled = true, speed = 1.75, bezier = "apexAccel",    style = "popin 87%" })
-hl.animation({ leaf = "windowsMove", enabled = true, speed = 2.0,  bezier = "apexStandard" })
+-- Windows: in over 420 ms, out over 280, both from 90 % so a window grows into
+-- place rather than zooming from a dot; a window moving (a tile reflowing, a
+-- float dragged into a slot) glides on the page beat, 380 ms.
+hl.animation({ leaf = "windowsIn",   enabled = true, speed = 4.2, bezier = "apexSpring", style = "popin 90%" })
+hl.animation({ leaf = "windowsOut",  enabled = true, speed = 2.8, bezier = "apexAccel",  style = "popin 90%" })
+hl.animation({ leaf = "windowsMove", enabled = true, speed = 3.8, bezier = "apexSpring" })
 
--- Fades: a window's opacity on the shell's fadeIn (130 ms) and, closing, over
+-- Fades: a window's opacity on the shell's fadeIn (280 ms) and, closing, over
 -- the length of its exit so the popin is seen; focus and dim changes on the
--- state beat; an application's own menus quicker still (micro, 100 ms).
-hl.animation({ leaf = "fadeIn",     enabled = true, speed = 1.3,  bezier = "apexEffects" })
-hl.animation({ leaf = "fadeOut",    enabled = true, speed = 1.5,  bezier = "apexAccel" })
-hl.animation({ leaf = "fadeSwitch", enabled = true, speed = 1.3,  bezier = "apexEffects" })
-hl.animation({ leaf = "fadeShadow", enabled = true, speed = 1.3,  bezier = "apexEffects" })
-hl.animation({ leaf = "fadeDim",    enabled = true, speed = 1.3,  bezier = "apexEffects" })
-hl.animation({ leaf = "fadePopups", enabled = true, speed = 1.0,  bezier = "apexEffects" })
+-- state beat (220 ms); an application's own menus quicker (micro, 140 ms).
+hl.animation({ leaf = "fadeIn",     enabled = true, speed = 2.8, bezier = "apexEffects" })
+hl.animation({ leaf = "fadeOut",    enabled = true, speed = 2.8, bezier = "apexAccel" })
+hl.animation({ leaf = "fadeSwitch", enabled = true, speed = 2.2, bezier = "apexEffects" })
+hl.animation({ leaf = "fadeShadow", enabled = true, speed = 2.2, bezier = "apexEffects" })
+hl.animation({ leaf = "fadeDim",    enabled = true, speed = 2.2, bezier = "apexEffects" })
+hl.animation({ leaf = "fadePopups", enabled = true, speed = 1.4, bezier = "apexEffects" })
 
 -- Other programs' layer surfaces (a wallpaper daemon, an input method, a
 -- third-party launcher) fade on the small-surface beats. APEX Shell's own are
 -- exempt below: it draws every one of their motions itself.
-hl.animation({ leaf = "layersIn",      enabled = true, speed = 1.9,  bezier = "apexDecel", style = "fade" })
-hl.animation({ leaf = "layersOut",     enabled = true, speed = 1.35, bezier = "apexAccel", style = "fade" })
-hl.animation({ leaf = "fadeLayersIn",  enabled = true, speed = 1.9,  bezier = "apexEffects" })
-hl.animation({ leaf = "fadeLayersOut", enabled = true, speed = 1.35, bezier = "apexAccel" })
+hl.animation({ leaf = "layersIn",      enabled = true, speed = 3.6, bezier = "apexSpring",  style = "fade" })
+hl.animation({ leaf = "layersOut",     enabled = true, speed = 2.4, bezier = "apexAccel",   style = "fade" })
+hl.animation({ leaf = "fadeLayersIn",  enabled = true, speed = 3.6, bezier = "apexEffects" })
+hl.animation({ leaf = "fadeLayersOut", enabled = true, speed = 2.4, bezier = "apexAccel" })
 
--- Workspaces: a keyboard switch is directional and quick (the shell's page
--- beat, 200 ms). A touchpad swipe (input-defaults.lua) follows the fingers
--- directly and uses this curve only for the settle after release.
-hl.animation({ leaf = "workspaces",       enabled = true, speed = 2.0, bezier = "apexDecel", style = "slide" })
-hl.animation({ leaf = "specialWorkspace", enabled = true, speed = 1.9, bezier = "apexDecel", style = "slidefadevert 15%" })
+-- Workspaces: a keyboard switch slides on the page beat (380 ms) and lands on
+-- the spring's long tail. A touchpad swipe (input-defaults.lua) follows the
+-- fingers directly and uses this curve only for the settle after release.
+hl.animation({ leaf = "workspaces",       enabled = true, speed = 3.8, bezier = "apexSpring", style = "slide" })
+hl.animation({ leaf = "specialWorkspace", enabled = true, speed = 3.6, bezier = "apexSpring", style = "slidefadevert 15%" })
 
 -- A focus change re-colours the border on the state beat; it was 600 ms.
-hl.animation({ leaf = "border", enabled = true, speed = 1.3, bezier = "apexStandard" })
+hl.animation({ leaf = "border", enabled = true, speed = 2.2, bezier = "apexStandard" })
 
 -- ── APEX Shell's surfaces are not animated by the compositor ────────────────
 -- Every one of them — the bar, a panel pouring out of it, the OSD, a toast —
