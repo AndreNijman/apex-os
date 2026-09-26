@@ -46,8 +46,123 @@
 # ─────────────────────────────────────────────────────────────────────────────
 set -uo pipefail
 
+# ── One engine at a time — decided before ANYTHING else runs ─────────────────
+# The graphical front end can die while an install is running: a VT switch
+# (Ctrl+Alt+F2 and back) can make cage's next display commit fail, and the
+# launcher then starts a fresh front end. The old engine keeps going — it
+# ignores SIGPIPE on purpose so a dead front end cannot strand a half-written
+# disk. Before this lock, nothing stopped the fresh front end from starting a
+# SECOND engine on the same disk, and that engine's first acts would have been
+# to truncate the running install's log (the line right below) and, in
+# preflight, unmount "leftover" targets — which would have been the live
+# install's own mounts.
+#
+# So the lock is taken here, above the log truncation, and a refusal touches
+# nothing at all: no log, no mounts, no result file, just the sentinel the
+# front end already understands. --check-passphrase is exempt: it reads no disk
+# and the encrypt page calls it while no install runs. Root only, and only
+# where flock exists, so an unprivileged `apex-install` still reaches its own
+# "must run as root" refusal instead of a misleading "already running".
+APEX_HOLDS_LOCK=0
+if [ "${1:-}" != --check-passphrase ] && [ "$(id -u)" = 0 ] && command -v flock >/dev/null 2>&1; then
+  APEX_INSTALL_LOCK="${APEX_INSTALL_LOCK:-/run/apex-install.lock}"
+  if exec 9>>"$APEX_INSTALL_LOCK"; then
+    if ! flock -n 9; then
+      echo "APEX-INSTALL-FAILED: Another APEX-OS installation is already running on this machine. Nothing was touched; let it finish." >&2
+      echo "APEX-INSTALL-FAILED: Another APEX-OS installation is already running on this machine. Nothing was touched; let it finish."
+      exit 1
+    fi
+    APEX_HOLDS_LOCK=1
+  fi
+fi
+
+# ── Outlive the front end's pipe ─────────────────────────────────────────────
+# The GUI reads this engine's stdout and stderr through one pipe. When the GUI
+# dies mid-install (see above), every later write to that pipe fails with EPIPE,
+# and under the ERR trap a failed bare `echo` is a die(). SIGPIPE is ignored and
+# note()/log() swallow the error, but not every write goes through them.
+# Measured in a VM: cage was killed mid-download, the install ran to the end,
+# and then its last line, `echo "APEX-INSTALL-OK"`, failed. The install was
+# recorded as FAILED on a disk that was completely installed.
+#
+# So when stdout is a pipe, it goes through a relay. The relay forwards each
+# line while the GUI is reading and drops lines once it is gone, so no write of
+# ours ever meets the broken pipe. stderr joins it when it shares the pipe, as
+# it does under the GUI. relay_flush lets the relay drain before exit, so the
+# GUI sees the last line before it sees the process end. The relay closes its
+# copy of the lock fd.
+#
+# The shared-pipe test reads /proc/$$, not /proc/self. Inside $(readlink ...)
+# /proc/self is readlink, whose fd 1 is the capture pipe, so an earlier version
+# of this comparison could never match and stderr stayed on the dead pipe. The
+# outcome is logged below ("stderr merged: yes") and the suite checks for it.
+APEX_RELAY_PID=
+APEX_STDERR_MERGED=no
+if [ "${1:-}" != --check-passphrase ] && [ -p /proc/$$/fd/1 ]; then
+  _apex_share=no
+  [ /proc/$$/fd/1 -ef /proc/$$/fd/2 ] && _apex_share=yes
+  exec 1> >(exec 9>&-; trap '' PIPE
+            while IFS= read -r _l || [ -n "$_l" ]; do printf '%s\n' "$_l" 2>/dev/null || :; done)
+  APEX_RELAY_PID=$!
+  if [ "$_apex_share" = yes ]; then exec 2>&1; APEX_STDERR_MERGED=yes; fi
+fi
+relay_flush() {
+  [ -n "$APEX_RELAY_PID" ] || return 0
+  exec 1>&- 2>&-
+  local i=0
+  # Bounded: a child that inherited the pipe keeps the relay open, and the
+  # exit must not wait on it indefinitely.
+  while kill -0 "$APEX_RELAY_PID" 2>/dev/null && [ "$i" -lt 50 ]; do sleep 0.1; i=$((i + 1)); done
+}
+trap relay_flush EXIT
+
 LOG=/var/log/apex-install.log
 : > "$LOG" 2>/dev/null || LOG=/tmp/apex-install.log
+
+# ── The result a reattaching front end reads ─────────────────────────────────
+# stdout is the front end's only channel, and a front end that died mid-install
+# never sees the ending — including the disk recovery key, which is shown on
+# screen and nowhere else on the machine. So a real run (lock held, not a dry
+# run) also records its outcome here, root-only, on /run (RAM, this boot only).
+# A fresh front end that finds the lock held follows the log until it is
+# released, then shows this; one that finds no lock but a result shows the
+# result. The previous run's result is cleared as this one starts.
+RESULT_FILE="${APEX_RESULT_FILE:-/run/apex-installer/result}"
+RESULT_ON=0
+RESULT_RECOVERY_KEY=""; RESULT_RECOVERY_SAVED=""; RESULT_RECOVERY_UNSAVED=""
+if [ "$APEX_HOLDS_LOCK" = 1 ] && [ "${APEX_DRY_RUN:-0}" != 1 ] && [ "${1:-}" != --check-passphrase ]; then
+  RESULT_ON=1
+  rm -f "$RESULT_FILE" 2>/dev/null || true
+fi
+write_result() {  # $1=ok|failed  $2=message (first line kept)
+  [ "$RESULT_ON" = 1 ] || return 0
+  # An install that recorded success stays a success. Nothing after that
+  # point writes the disk, so a later die() is a defect in reporting, not an
+  # install failure. That was how a finished install once read as "failed".
+  if [ "$1" != ok ] && [ "${RESULT_OK_WRITTEN:-0}" = 1 ]; then
+    log "not recording '$1' over a result that already says ok: ${2:-}"
+    return 0
+  fi
+  if [ "$1" = ok ]; then RESULT_OK_WRITTEN=1; fi
+  local dir tmp msg
+  dir=$(dirname "$RESULT_FILE"); msg=$(printf '%s' "${2:-}" | head -1)
+  mkdir -p "$dir" 2>/dev/null || return 0
+  tmp="$RESULT_FILE.tmp.$$"
+  ( umask 077
+    { printf 'status=%s\n' "$1"
+      printf 'message=%s\n' "$msg"
+      printf 'mode=%s\n' "${INSTALL_MODE:-}"
+      printf 'disk=%s\n' "${DISK:-}"
+      printf 'target=%s\n' "${TARGET:-}"
+      printf 'username=%s\n' "${USERNAME:-}"
+      printf 'hostname=%s\n' "${HOSTNAME:-}"
+      printf 'recovery_key=%s\n' "$RESULT_RECOVERY_KEY"
+      printf 'recovery_saved=%s\n' "$RESULT_RECOVERY_SAVED"
+      printf 'recovery_unsaved=%s\n' "$RESULT_RECOVERY_UNSAVED"
+    } > "$tmp" ) 2>/dev/null && mv -f "$tmp" "$RESULT_FILE" 2>/dev/null
+  rm -f "$tmp" 2>/dev/null
+  return 0
+}
 # Which tag this ISO installs. build-live-iso.sh stamps it; a missing stamp
 # falls back to `apex`, the one image every edition converged into. `:daily`,
 # `:gaming-mesa` and `:gaming-nvidia` survive only as aliases of the same digest.
@@ -301,6 +416,26 @@ stage_teardown() {
 # disk when it fails, and the messages say which — a "nothing has been erased"
 # on the path where the disk was erased first would be a lie in the frightening
 # direction.
+# The registry answered, and the answer was that this ISO's pinned build is not
+# there. Distinct from "unreachable": the network is fine, retrying will not
+# help, and the right advice is a newer ISO. Only meaningful for a pinned
+# digest; pin-netinstall-image.yml exists so this should never happen.
+pinned_image_gone() {
+  [ "$NET_SOURCE_IMAGE" != "$TARGET_IMAGE" ] || return 1
+  tail -n 60 "$LOG" 2>/dev/null | grep -qi 'manifest unknown'
+}
+pinned_image_gone_msg() {  # $1 = what is true about the disk
+  printf '%s\n' "This installer's build of APEX-OS is no longer on the registry:
+$NET_SOURCE_IMAGE
+
+$1
+
+The registry answered, so the network is fine — but the exact build this ISO
+was tested with has been removed, and retrying will not bring it back.
+Download the newest installer from the APEX-OS releases page; it pins a
+build that is still published."
+}
+
 netinstall_fetch_into() {   # $1 = a directory on a real filesystem with room
   local scratch="$1" attempt _wait pull_ok _state _tmp
   if [ "${STAGE_ON_TARGET:-0}" = 1 ]; then
@@ -362,6 +497,9 @@ $_state"
         pull_ok=1; break
       fi
     done
+    if [ "$pull_ok" != 1 ] && pinned_image_gone; then
+      die "$(pinned_image_gone_msg "$_state")"
+    fi
     [ "$pull_ok" = 1 ] || die "Could not download APEX-OS from $NET_SOURCE_IMAGE after 3 attempts.
 
 $_state
@@ -424,6 +562,7 @@ fi
 # `|| true`: a full RAM disk (or an unwritable log) must never trip the ERR trap
 # and turn a fine install into a reported failure.
 log()  { printf '%s %s\n' "$(date +%T)" "$*" >>"$LOG" 2>/dev/null || true; }
+[ -z "$APEX_RELAY_PID" ] || log "front-end pipe: stdout relayed via pid $APEX_RELAY_PID; stderr merged: $APEX_STDERR_MERGED"
 have() { command -v "$1" >/dev/null 2>&1; }
 
 # ── The firmware is not part of the target disk ─────────────────────────────
@@ -651,6 +790,7 @@ unmount_target() {
 die() {
   restore_console
   log "FATAL: $1"
+  write_result failed "$1"
   # Always release our own mounts first: leaving /run/apex-target (and the shared
   # ESP under it) mounted makes the very next run refuse with "currently
   # mounted", stranding the user on a half-installed disk.
@@ -1333,6 +1473,7 @@ part_dev() {  # $1=disk  $2=partition number — prints the node, or nothing
 # that is encrypted, unencrypted, and an attacker with the laptop has them.
 surface_recovery_key() {  # $1=the recovery key — SECRET
   local key="$1" esp dst path saved=0 why=""
+  RESULT_RECOVERY_KEY="$key"
   # 1. the screen.
   secret_line "APEX-INSTALL-RECOVERY-KEY: $key"
   # 2. the stick. APEX_RECOVERY_DIR is a TEST hook (environment only, never the
@@ -1380,8 +1521,10 @@ surface_recovery_key() {  # $1=the recovery key — SECRET
     [ -n "${APEX_RECOVERY_DIR:-}" ] || { umount "$dst" 2>/dev/null || true; rmdir "$dst" 2>/dev/null || true; }
   fi
   if [ "$saved" = 1 ]; then
+    RESULT_RECOVERY_SAVED="apex-recovery-key-${HOSTNAME:-apex}.txt"
     note "APEX-INSTALL-RECOVERY-SAVED: apex-recovery-key-${HOSTNAME:-apex}.txt"
   else
+    RESULT_RECOVERY_UNSAVED="${why:-unknown reason}"
     note "APEX-INSTALL-RECOVERY-UNSAVED: ${why:-unknown reason}"
   fi
   return 0
@@ -2225,6 +2368,9 @@ erased — and try again."
       fi
       if skopeo inspect --raw "docker://$NET_SOURCE_IMAGE" >>"$LOG" 2>&1; then insp_ok=1; break; fi
     done
+    if [ "$insp_ok" != 1 ] && pinned_image_gone; then
+      die "$(pinned_image_gone_msg "Nothing has been erased — your disks are untouched.")"
+    fi
     [ "$insp_ok" = 1 ] || die "Could not reach APEX-OS at $NET_SOURCE_IMAGE after 3 attempts.
 
 Nothing has been erased — your disks are untouched.
@@ -3308,6 +3454,7 @@ itself up (needs network the first time).
 
 Full log: $LOG"
 log "install complete"
+write_result ok ""
 # The machine-readable success sentinel. It MUST be the very last line on
 # stdout: the graphical front end declares victory on exactly this string, the
 # same way it declares defeat on the APEX-INSTALL-FAILED: line die() emits.
