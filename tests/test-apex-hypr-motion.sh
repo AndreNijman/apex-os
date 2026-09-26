@@ -61,10 +61,10 @@ def verdict(rule, good, detail=""):
 
 # The shell's tokens (apex-shell src/theme/motion.js CURVES), as control points.
 TOKENS = {
-    "apexDecel":    [(0.05, 0.7), (0.1, 1.0)],   # emphasizedDecel
-    "apexAccel":    [(0.3, 0.0), (0.8, 0.15)],   # emphasizedAccel
-    "apexStandard": [(0.2, 0.0), (0.0, 1.0)],    # standard
-    "apexEffects":  [(0.3, 0.7), (0.3, 1.0)],    # effects
+    "apexSpring":   [(0.25, 0.2), (0.15, 1.0)],  # spring (critically damped, fitted)
+    "apexAccel":    [(0.4, 0.0), (0.65, 1.0)],   # standardAccel
+    "apexStandard": [(0.25, 0.1), (0.25, 1.0)],  # standard
+    "apexEffects":  [(0.25, 0.1), (0.25, 1.0)],  # effects
 }
 curves = {}
 for m in re.finditer(r'hl\.curve\(\s*"(\w+)"\s*,\s*\{[^}]*points\s*=\s*\{\s*\{\s*([-\d.]+)\s*,\s*([-\d.]+)\s*\}\s*,\s*\{\s*([-\d.]+)\s*,\s*([-\d.]+)\s*\}', code):
@@ -94,8 +94,8 @@ verdict("CLOSE_SHORTER",
 
 cv = lambda l: anims.get(l, {}).get("curve")
 verdict("CHARACTER",
-        cv("windowsIn") == "apexDecel" and cv("windowsOut") == "apexAccel"
-        and cv("windowsMove") == "apexStandard" and cv("workspaces") == "apexDecel",
+        cv("windowsIn") == "apexSpring" and cv("windowsOut") == "apexAccel"
+        and cv("windowsMove") == "apexSpring" and cv("workspaces") == "apexSpring",
         f"in={cv('windowsIn')} out={cv('windowsOut')} move={cv('windowsMove')} ws={cv('workspaces')}")
 
 rules = [m.group(1) for m in re.finditer(r'hl\.layer_rule\(\s*\{(.*?)\}\s*\)', code, re.S)]
@@ -107,10 +107,10 @@ PY
 
 label() {
     case "$1" in
-        CURVES)        echo "the four curves are APEX Shell's tokens (emphasizedDecel/Accel, standard, effects)" ;;
+        CURVES)        echo "the four curves are APEX Shell's tokens (spring, standardAccel, standard, effects)" ;;
         CLASSES)       echo "every motion class is declared and enabled: windows in/out/move, fades, workspaces, layers, border" ;;
         CLOSE_SHORTER) echo "closing is shorter than opening, for windows and for layers" ;;
-        CHARACTER)     echo "opening decelerates, closing accelerates, a move is direct, a workspace switch settles" ;;
+        CHARACTER)     echo "opening, moving and a workspace switch land on the spring; closing eases out" ;;
         EXEMPT)        echo "exactly one layer rule leaves APEX Shell's surfaces (^quickshell\$) unanimated" ;;
     esac
 }
@@ -138,10 +138,10 @@ PY
     if static_verdicts "$MW/a.lua" | grep -q "^$4 FAIL"; then ok "self-test $1: caught"
     else bad "self-test $1: SURVIVED"; fi
 }
-mutant "a curve drifting from its token" '{ { 0.05, 0.7 }, { 0.1, 1.0 } }' '{ { 0.05, 0.7 }, { 0.2, 1.0 } }' CURVES
+mutant "a curve drifting from its token" '{ { 0.25, 0.2 }, { 0.15, 1.0 } }' '{ { 0.25, 0.2 }, { 0.2, 1.0 } }' CURVES
 mutant "the move class dropped" 'hl.animation({ leaf = "windowsMove"' 'hl.animation({ leaf = "windowsMoveX"' CLASSES
-mutant "a close as long as the open" 'leaf = "windowsOut",  enabled = true, speed = 1.75' 'leaf = "windowsOut",  enabled = true, speed = 2.4' CLOSE_SHORTER
-mutant "a close on the opening curve" 'speed = 1.75, bezier = "apexAccel"' 'speed = 1.75, bezier = "apexDecel"' CHARACTER
+mutant "a close as long as the open" 'leaf = "windowsOut",  enabled = true, speed = 2.8' 'leaf = "windowsOut",  enabled = true, speed = 4.2' CLOSE_SHORTER
+mutant "a close on the opening curve" 'speed = 2.8, bezier = "apexAccel",  style' 'speed = 2.8, bezier = "apexSpring",  style' CHARACTER
 mutant "the exemption animating again" 'no_anim = true' 'no_anim = false' EXEMPT
 
 # ── VERIFY ───────────────────────────────────────────────────────────────────
@@ -183,7 +183,7 @@ PY
     else ok "self-test $1: rejected"; fi
 }
 vmutant "an animation leaf this Hyprland does not have" 'leaf = "windowsIn"' 'leaf = "windowsInn"'
-vmutant "a style this Hyprland does not have" 'style = "popin 87%"' 'style = "wobble"'
+vmutant "a style this Hyprland does not have" 'style = "popin 90%"' 'style = "wobble"'
 vmutant "a layer-rule key this Hyprland does not have" 'namespace = "^quickshell$"' 'namespacex = "^quickshell$"'
 
 finish
