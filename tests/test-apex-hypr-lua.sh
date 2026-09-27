@@ -188,12 +188,21 @@ check_bind "a bare XF86 media key is bound"        0 XF86AudioRaiseVolume
 # virtual pointer holding SUPER: release:true moved no window, release:false
 # floated it and followed the pointer. `mouse` reads false for both, so it
 # tells them apart no better than the file does; `release` is the observable.
+#
+# Each key is checked on its own: exactly one SUPER (modmask 64) bind, on
+# press, carrying its own action's description. A Lua bind's dispatcher reads
+# `__lua` plus a registry number, so the description is the only field that
+# says which action is behind it — two unrelated press binds on these keys, or
+# the right ones under another modifier, would otherwise pass.
 if hc binds -j | python3 -c '
 import json, sys
 binds = json.load(sys.stdin)
-drag = [b for b in binds if b.get("key") in ("mouse:272", "mouse:273")]
-vol  = [b for b in binds if b.get("key") == "XF86AudioRaiseVolume"]
-sys.exit(0 if len(drag) == 2 and not any(b.get("release") for b in drag)
+def one(key, desc):
+    hits = [b for b in binds if b.get("key") == key and b.get("modmask") == 64]
+    return (len(hits) == 1 and not hits[0].get("release")
+            and hits[0].get("description") == desc)
+vol = [b for b in binds if b.get("key") == "XF86AudioRaiseVolume"]
+sys.exit(0 if one("mouse:272", "Move window") and one("mouse:273", "Resize window")
                 and vol and vol[0].get("repeat") and vol[0].get("locked") else 1)'; then
     ok "the mouse drag binds fire on press, and locked/repeat reached the compositor"
 else
