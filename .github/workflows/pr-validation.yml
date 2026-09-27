@@ -3322,6 +3322,28 @@ jobs:
               [ "$passed" -ge 22 ] || { echo "::error::only $passed apex hypr-lua assertions ran; 22 ran on 2026-09-18, so some no longer execute"; exit 1; }
           fi
 
+      # The compositor's motion classes (UI/UX roadmap v3 Phase 20) and the
+      # layer rule that leaves APEX Shell's surfaces to the shell. Unlike the
+      # two nested suites around it, most of this one runs HERE: its static
+      # half is python over appearance.lua, so only the `Hyprland
+      # --verify-config` half skips on the runner. The floor is the static
+      # half's count, so a runner without Hyprland still has to assert it.
+      - name: Run the Hyprland motion-class assertions
+        if: ${{ !cancelled() }}
+        run: |
+          set -uo pipefail
+          rc=0; out="$(./tests/test-apex-hypr-motion.sh 2>&1)" || rc=$?
+          printf '%s\n' "$out"
+          [ "$rc" = 0 ] || { echo "::error::test-apex-hypr-motion.sh exited $rc"; exit 1; }
+          summary="$(printf '%s\n' "$out" | grep -E '^apex hypr-motion: [0-9]+ passed, [0-9]+ failed, [0-9]+ skipped$' || true)"
+          [ -n "$summary" ] || { echo "::error::test-apex-hypr-motion.sh printed no summary line; nothing below can be believed"; exit 1; }
+          [ "$(printf '%s\n' "$summary" | wc -l)" = 1 ] || { echo "::error::more than one line looked like test-apex-hypr-motion.sh's summary"; exit 1; }
+          passed="$(printf '%s' "$summary" | awk '{print $3}')"
+          failed="$(printf '%s' "$summary" | awk '{print $5}')"
+          echo "measured: passed=$passed failed=$failed"
+          [ "$failed" = 0 ] || { echo "::error::$failed apex hypr-motion assertions failed"; exit 1; }
+          [ "$passed" -ge 11 ] || { echo "::error::only $passed apex hypr-motion assertions ran; the static half alone is 11"; exit 1; }
+
       # What SUPER+arrow actually DOES, which no config grep can answer. The
       # seeded session focus-follows-mouse, so a keyboard focus change that
       # leaves the pointer behind is undone by the next twitch of the mouse —
