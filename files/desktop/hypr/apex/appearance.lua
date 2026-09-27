@@ -50,40 +50,93 @@ hl.config({
 
 -- ── Motion ───────────────────────────────────────────────────────────────────
 -- The compositor moves on the same beats and curves as APEX Shell (UI/UX
--- roadmap v3 Phase 20, retuned 2026-09-26 with the shell's fluid motion), so a
--- window opening and a panel opening read as one system. The numbers are the
--- shell's own tokens (apex-shell src/theme/motion.js, at the default
--- "balanced" speed); a speed here is in tenths of a second. The shell scales
--- every one of them by its own speed setting at runtime (hyprMotion.js).
+-- roadmap v3 Phase 20, retuned 2026-09-26 with the shell's fluid motion, and
+-- 2026-09-27 onto real springs), so a window opening and a panel opening read
+-- as one system. The curves are the shell's own tokens (apex-shell
+-- src/theme/motion.js, at the default "balanced" speed); a speed here is in
+-- tenths of a second. The shell scales every one of them by its own speed
+-- setting at runtime (hyprMotion.js).
 --
--- Andre: "everything goes way too quick and doesn't feel liquid and fluid."
--- The first tuning (240 ms opens on a curve with a near-vertical first frame)
--- snapped windows into place. Nothing physical starts at full speed:
+-- Andre, 2026-09-27: "make the … hyprland window animations cleaner and sleek,
+-- not just fading." Measured in a nested Hyprland 0.56.2 with alacritty, the
+-- 2026-09-26 tuning was mostly a fade: a window's first frame was already 95 %
+-- of its size and 61 % opaque, and a close faded over the whole of its 280 ms
+-- while shrinking by only a tenth. Now the SIZE carries the change:
 --
---   arriving  a critically damped spring from rest, fitted   spring
---   leaving   eases in and out, shorter                      standardAccel
---   moving    the same spring: a tile glides to its place    spring
---   fading    Core Animation's ease, no hard edge            effects
+--   arriving  grows from 80 % on a spring, opaque within 180 ms     apexArrive
+--   leaving   shrinks to 85 %, gathering speed, gone in 200 ms      emphasizedAccel
+--             its opacity held until the end                     exitFade
+--   moving    a tile glides to its place, velocity kept            apexGlide
+--   a switch  the workspace slides, and stops without a crawl      apexPage
+--   fading    Core Animation's ease, no hard edge                  effects
+--
+-- A spring is not a curve over a duration. Hyprland steps it in real time and
+-- it finishes when it is at rest, so a window moved again half-way keeps its
+-- velocity instead of restarting from rest and kinking; `speed` does not time
+-- it. On a spring leaf `speed` is the spring's response (its undamped period,
+-- in tenths of a second): Hyprland ignores it, and the shell scales it with
+-- the curve so it can tell its own push from a reload.
+--
+-- Exits stay on a curve. A spring finishes only when it is still (Hyprland's
+-- rest threshold, about 0.7 s for these), and a closing window lives until its
+-- animation ends.
 --
 -- hyprlang carried these as `bezier =` / `animation =` keys; each is its own
 -- call now, `enabled / speed / curve` becoming named fields.
-hl.curve("apexSpring",   { type = "bezier", points = { { 0.25, 0.2 }, { 0.15, 1.0 } } })
-hl.curve("apexAccel",    { type = "bezier", points = { { 0.4, 0.0 }, { 0.65, 1.0 } } })
-hl.curve("apexStandard", { type = "bezier", points = { { 0.25, 0.1 }, { 0.25, 1.0 } } })
-hl.curve("apexEffects",  { type = "bezier", points = { { 0.25, 0.1 }, { 0.25, 1.0 } } })
+hl.curve("apexSpring",      { type = "bezier", points = { { 0.25, 0.2 }, { 0.15, 1.0 } } })
+hl.curve("apexAccel",       { type = "bezier", points = { { 0.4, 0.0 }, { 0.65, 1.0 } } })
+hl.curve("apexStandard",    { type = "bezier", points = { { 0.25, 0.1 }, { 0.25, 1.0 } } })
+hl.curve("apexEffects",     { type = "bezier", points = { { 0.25, 0.1 }, { 0.25, 1.0 } } })
+hl.curve("emphasizedAccel", { type = "bezier", points = { { 0.4, 0.0 }, { 0.75, 0.9 } } })
+-- A closing window's opacity: Material 3's own emphasized-accelerate, harder
+-- than the shell's. It holds (84 % at half-time) and lets go at the end, so
+-- the shrink is what is seen; on the shell's softer curve the same close read
+-- as a crossfade with a slight zoom.
+hl.curve("exitFade",        { type = "bezier", points = { { 0.3, 0.0 }, { 0.8, 0.15 } } })
 
--- Windows: in over 420 ms, out over 280, both from 90 % so a window grows into
--- place rather than zooming from a dot; a window moving (a tile reflowing, a
--- float dragged into a slot) glides on the page beat, 380 ms.
-hl.animation({ leaf = "windowsIn",   enabled = true, speed = 4.2, bezier = "apexSpring", style = "popin 90%" })
-hl.animation({ leaf = "windowsOut",  enabled = true, speed = 2.8, bezier = "apexAccel",  style = "popin 90%" })
-hl.animation({ leaf = "windowsMove", enabled = true, speed = 3.8, bezier = "apexSpring" })
+-- The springs. Parameterised as the shell's are (motion.js SPRINGS): a
+-- response in seconds and a damping fraction, 1 landing without overshoot and
+-- below it with a whisper of one. Hyprland takes mass, stiffness and damping
+-- instead; with mass 1, stiffness = (2π / response)² and dampening =
+-- 2 · damping · √stiffness. (The key is `dampening`: this Hyprland rejects
+-- `damping`, whatever its wiki says.)
+--
+-- Each is also kept in APEX_SPRINGS, a global the shell's own `hyprctl eval`
+-- can read: Hyprland reports a spring leaf as "spring:<name>" and nothing
+-- more, so this table is how the shell scales a spring by its speed setting
+-- (stiffness / s², dampening / s: the same motion, s times slower) without
+-- a copy of these numbers of its own.
+APEX_SPRINGS = {}
+local function spring(name, response, damping)
+    local stiffness = (2 * math.pi / response) ^ 2
+    local s = { mass = 1, stiffness = stiffness, dampening = 2 * damping * math.sqrt(stiffness) }
+    APEX_SPRINGS[name] = s
+    hl.curve(name, { type = "spring", mass = s.mass, stiffness = s.stiffness, dampening = s.dampening })
+end
+-- A window arriving: response 0.48 s, damping 0.8. Slower than the 2026-09-26
+-- curve on purpose: a new window's first frame reaches the screen a few frames
+-- after it maps (50-100 ms in the nested measurement), and on a faster spring
+-- that gap swallowed half the growth. It lands 1.5 % past its size and settles.
+spring("apexArrive", 0.48, 0.80)
+-- A tile gliding to a new place: the shell's selection spring (0.40 s, 0.86).
+spring("apexGlide",  0.40, 0.86)
+-- A workspace sliding: the shell's page response (0.38 s), damped 0.92 rather
+-- than 1 — a critically damped slide crawls its last 60 px for 300 ms; this
+-- one overshoots by about a pixel and is still by 330 ms.
+spring("apexPage",   0.38, 0.92)
 
--- Fades: a window's opacity on the shell's fadeIn (280 ms) and, closing, over
--- the length of its exit so the popin is seen; focus and dim changes on the
--- state beat (220 ms); an application's own menus quicker (micro, 140 ms).
-hl.animation({ leaf = "fadeIn",     enabled = true, speed = 2.8, bezier = "apexEffects" })
-hl.animation({ leaf = "fadeOut",    enabled = true, speed = 2.8, bezier = "apexAccel" })
+-- Windows: in on the arrival spring from 80 %, out in 200 ms to 85 %; a window
+-- moving (a tile reflowing, a float dragged into a slot) glides.
+hl.animation({ leaf = "windowsIn",   enabled = true, speed = 4.8, spring = "apexArrive",      style = "popin 80%" })
+hl.animation({ leaf = "windowsOut",  enabled = true, speed = 2.0, bezier = "emphasizedAccel", style = "popin 85%" })
+hl.animation({ leaf = "windowsMove", enabled = true, speed = 4.0, spring = "apexGlide" })
+
+-- Fades: a window is opaque within 180 ms of opening, well before it has
+-- grown, so the growth is what is seen; closing, it holds its opacity while
+-- it shrinks and lets go at the end. Focus and dim changes on the state beat
+-- (220 ms); an application's own menus quicker (micro, 140 ms).
+hl.animation({ leaf = "fadeIn",     enabled = true, speed = 1.8, bezier = "apexEffects" })
+hl.animation({ leaf = "fadeOut",    enabled = true, speed = 2.0, bezier = "exitFade" })
 hl.animation({ leaf = "fadeSwitch", enabled = true, speed = 2.2, bezier = "apexEffects" })
 hl.animation({ leaf = "fadeShadow", enabled = true, speed = 2.2, bezier = "apexEffects" })
 hl.animation({ leaf = "fadeDim",    enabled = true, speed = 2.2, bezier = "apexEffects" })
@@ -97,11 +150,11 @@ hl.animation({ leaf = "layersOut",     enabled = true, speed = 2.4, bezier = "ap
 hl.animation({ leaf = "fadeLayersIn",  enabled = true, speed = 3.6, bezier = "apexEffects" })
 hl.animation({ leaf = "fadeLayersOut", enabled = true, speed = 2.4, bezier = "apexAccel" })
 
--- Workspaces: a keyboard switch slides on the page beat (380 ms) and lands on
--- the spring's long tail. A touchpad swipe (input-defaults.lua) follows the
--- fingers directly and uses this curve only for the settle after release.
-hl.animation({ leaf = "workspaces",       enabled = true, speed = 3.8, bezier = "apexSpring", style = "slide" })
-hl.animation({ leaf = "specialWorkspace", enabled = true, speed = 3.6, bezier = "apexSpring", style = "slidefadevert 15%" })
+-- Workspaces: a keyboard switch slides on the page spring. A touchpad swipe
+-- (input-defaults.lua) follows the fingers directly and uses it only for the
+-- settle after release.
+hl.animation({ leaf = "workspaces",       enabled = true, speed = 3.8, spring = "apexPage", style = "slide" })
+hl.animation({ leaf = "specialWorkspace", enabled = true, speed = 3.8, spring = "apexPage", style = "slidefadevert 15%" })
 
 -- A focus change re-colours the border on the state beat; it was 600 ms.
 hl.animation({ leaf = "border", enabled = true, speed = 2.2, bezier = "apexStandard" })
