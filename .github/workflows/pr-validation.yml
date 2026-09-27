@@ -3259,6 +3259,17 @@ jobs:
         if: ${{ !cancelled() }}
         run: ./tests/test-apex-greet-accent.sh
 
+      # The login screen's password shapes (APEX Shell's PasswordShapes, loaded
+      # from /usr/share/apex-shell) and the motion settings they move on. The
+      # publisher's parser is sourced and run against hostile fixtures — it may
+      # emit only its closed vocabulary; the greeter validates each line again;
+      # the shapes are handed the field's LENGTH and nothing else, the field
+      # stays masked, it falls back to plain dots without the component, and a
+      # refusal's error survives the field being cleared.
+      - name: Run greeter password-shape and motion assertions
+        if: ${{ !cancelled() }}
+        run: ./tests/test-apex-greet-motion.sh
+
       # The boot and shutdown splash follow the owner's accent from the first
       # frame: the real writer and initramfs reader, round-tripped through a
       # stand-in ESP, and the 24 accent themes.

@@ -398,8 +398,18 @@ Item {
                 clip:                true
                 enabled:             !root.ctx.checking
                 focus:               true
-                color:               root.theme.text
-                selectionColor:      root.theme.active
+                // With the shapes loaded the field paints nothing itself —
+                // mask characters, cursor and selection all transparent — and
+                // the shapes show its LENGTH. Without them (the component
+                // could not be loaded) it is the plain masked field it always
+                // was. Either way it stays echoMode Password, mask delay 0.
+                color:               shapes.active ? "transparent" : root.theme.text
+                selectionColor:      shapes.active ? "transparent" : root.theme.active
+                selectedTextColor:   shapes.active ? "transparent" : root.theme.background
+                // The caret is not painted in `color`: with the shapes on it
+                // would float where the invisible mask text ends. No caret
+                // then; the stock one when the field is plain dots.
+                cursorDelegate:      shapes.active ? noCaret : null
                 font.family:         root.theme.fontFamily
                 font.pixelSize:      18
                 echoMode:            TextInput.Password
@@ -437,9 +447,15 @@ Item {
                 KeyNavigation.backtab: layoutPill
 
                 // Mirror the buffer into shared state (used by Greetd).
+                //
+                // The error clears when the user TYPES, not when the field is
+                // emptied: onFailed below clears the field after fail() has set
+                // hasError, and a reset on every text change meant the refusal
+                // was undone the moment it was shown — the red outline and the
+                // shapes' refusal tint never survived their own frame.
                 onTextChanged: {
                     root.ctx.password = text
-                    if (root.ctx.hasError) root.ctx.hasError = false
+                    if (root.ctx.hasError && text.length > 0) root.ctx.hasError = false
                 }
 
                 // Enter submits.
@@ -476,15 +492,44 @@ Item {
                     }
                 }
 
-                // Placeholder
+                // Placeholder. With the shapes loaded it waits for them to
+                // have actually left, so it never draws over a leaving row.
                 Text {
                     anchors.verticalCenter: parent.verticalCenter
                     anchors.left:           parent.left
-                    visible: passwordInput.text.length === 0 && !root.ctx.checking
+                    visible: (shapes.active ? shapes.item.empty
+                                            : passwordInput.text.length === 0)
+                             && !root.ctx.checking
                     text:  "Enter password"
                     color: root.theme.subtext
                     font.family:    passwordInput.font.family
                     font.pixelSize: passwordInput.font.pixelSize
+                }
+            }
+
+            Component { id: noCaret; Item {} }
+
+            // What the field holds, as shapes: APEX Shell's PasswordShapes,
+            // handed the field's LENGTH and never its text (see GreetContext's
+            // shapesSource). Its motion is the last user's own — speed, scale
+            // and Reduce Motion as their session published them.
+            Loader {
+                id: shapes
+                readonly property bool active: status === Loader.Ready && item !== null
+                anchors.fill: passwordInput
+                source: root.ctx.shapesSource
+                onLoaded: {
+                    item.length      = Qt.binding(function () { return passwordInput.length })
+                    item.accent      = Qt.binding(function () { return root.theme.active })
+                    item.text        = Qt.binding(function () { return root.theme.text })
+                    item.background  = Qt.binding(function () { return root.theme.background })
+                    item.danger      = Qt.binding(function () { return root.theme.errorColor })
+                    item.error       = Qt.binding(function () { return root.ctx.hasError })
+                    item.busy        = Qt.binding(function () { return root.ctx.checking })
+                    item.speed       = Qt.binding(function () { return root.ctx.motionSpeed })
+                    item.motionScale = Qt.binding(function () { return root.ctx.motionScale })
+                    item.reduced     = Qt.binding(function () { return root.ctx.motionReduced })
+                    item.size        = 15
                 }
             }
 
