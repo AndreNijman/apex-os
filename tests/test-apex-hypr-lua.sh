@@ -178,21 +178,35 @@ check_bind "the mouse drag bind is registered"    64 "mouse:272"
 check_bind "a bare XF86 media key is bound"        0 XF86AudioRaiseVolume
 
 # bindm/bindel semantics survived the move to Lua options. `hyprctl binds -j`
-# spells the repeat flag "repeat", and exposes no "drag" field at all — a drag
-# bind shows up as release:true, which is the half of `{ drag = true }` that is
-# observable from here. The Lua handle reports drag=true directly; this is the
-# compositor-side confirmation that the option was not silently dropped, which
-# is exactly what `{ mouse = true }` does.
+# spells the repeat flag "repeat".
+#
+# The mouse drag binds must be PRESS binds: release:false. This used to assert
+# the opposite, and so enforced the bug it should have caught. window.drag() and
+# window.resize() start on button-down and end the move themselves; a bind with
+# release:true (what `{ drag = true }` produces) fires only on button-up, and
+# SUPER+drag moves nothing. Measured 2026-09-27 in a nested 0.56.2 with a
+# virtual pointer holding SUPER: release:true moved no window, release:false
+# floated it and followed the pointer. `mouse` reads false for both, so it
+# tells them apart no better than the file does; `release` is the observable.
+#
+# Each key is checked on its own: exactly one SUPER (modmask 64) bind, on
+# press, carrying its own action's description. A Lua bind's dispatcher reads
+# `__lua` plus a registry number, so the description is the only field that
+# says which action is behind it — two unrelated press binds on these keys, or
+# the right ones under another modifier, would otherwise pass.
 if hc binds -j | python3 -c '
 import json, sys
 binds = json.load(sys.stdin)
-drag = [b for b in binds if b.get("key") == "mouse:272"]
-vol  = [b for b in binds if b.get("key") == "XF86AudioRaiseVolume"]
-sys.exit(0 if drag and drag[0].get("release")
+def one(key, desc):
+    hits = [b for b in binds if b.get("key") == key and b.get("modmask") == 64]
+    return (len(hits) == 1 and not hits[0].get("release")
+            and hits[0].get("description") == desc)
+vol = [b for b in binds if b.get("key") == "XF86AudioRaiseVolume"]
+sys.exit(0 if one("mouse:272", "Move window") and one("mouse:273", "Resize window")
                 and vol and vol[0].get("repeat") and vol[0].get("locked") else 1)'; then
-    ok "drag/locked/repeat reached the compositor, not just the file"
+    ok "the mouse drag binds fire on press, and locked/repeat reached the compositor"
 else
-    bad "drag/locked/repeat reached the compositor, not just the file"
+    bad "the mouse drag binds fire on press, and locked/repeat reached the compositor"
 fi
 
 sec "the live-change path is hyprctl eval, because keyword is dead under Lua"

@@ -53,17 +53,25 @@ theme, because there is no second image to install it into.
   presence as evidence that a second image exists.
 
 Each theme contains its `.plymouth` descriptor, the shared `apex-os.script`
-animation, and the sprite images `spark.png`, `comet.png`, `glow.png`,
-`flash.png`.
+(identical in every theme but for its highlight colour), and the images the
+script loads: the spark as 1x and `-hd` masters (`spark.png`, `spark-hd.png`),
+two out-of-focus sparks (`spark-blur.png`, `spark-soft.png`), `halo.png`,
+the password dot (`bullet.png`, `bullet-hd.png`), the wordmark
+(`wordmark.png`, `wordmark-hd.png`) and a fallback prompt (`prompt.png`,
+`prompt-hd.png`) for an initramfs without a label plugin.
+`make-splash-art.sh` draws them for a colourway; `make-accent-themes.sh`
+derives the 24 accent themes from chartreuse.
 
-**Animation — "Convergence":** four comets with soft, speed-stretched light
-trails swoop in from outside the frame, orbit and accelerate, spiral into the
-center, flash, and morph into the spark; the wordmark rises in underneath and
-the spark holds with a subtle breathing loop. The trails are tapered ribbons
-sampled from each comet's own past path (stretching with angular velocity),
-and the heads rotate with the true velocity vector, so the motion reads as a
-continuous fluid sweep rather than orbiting dashes. LUKS password prompts are
-handled (theme dims, prompt + bullets shown); shutdown shows a static spark.
+**Animation — "Focus":** on plain black, the spark comes into focus out of a
+soft glow of its own light, a halo blooms behind it and settles, and the
+`APEX OS` wordmark fades in; the halo then breathes slowly while the machine
+boots. Nothing moves: every image is scaled once, and each frame only changes
+opacities along curves of real elapsed time, because plymouth truncates sprite
+positions to whole pixels and has no vsync (the "Convergence" comet animation
+this replaced was choppy for exactly those reasons; `apex-os.script` records
+the measurements). LUKS prompts are handled (the splash dims, the prompt takes
+the wordmark's place, typed characters show as dots, never as text); shutdown
+and reboot show the settled splash.
 
 Install (inside the image build):
 
@@ -86,8 +94,10 @@ cd files/branding/plymouth
 ./render-preview.sh apex-os-chartreuse previews/preview-chartreuse.gif
 ```
 
-`render-preview.sh` reproduces the `.script` animation math in `awk` and
-composites frames with ImageMagick (`magick`), so it requires ImageMagick 7.
+`render-preview.py` (which the `.sh` wraps) is a frame-exact simulation of
+`apex-os.script` on plymouth's own pixel arithmetic, and also writes a 60 fps
+MP4, a contact sheet and per-frame metrics. It needs python3 with numpy and
+Pillow, and ffmpeg.
 
 ### Wallpaper — `files/branding/wallpapers/`
 
@@ -139,7 +149,7 @@ Fixes land in one of two places:
 | 14 | Kernel-version stamp file | `/usr/lib/apex-cachyos-kver` | `/usr/lib/apex-kver` | image | `Containerfile.base` / `.daily` / `.gaming` |
 | 15 | Installer completion screen | *"look for \"Fedora\" / \"APEX\""* | *"pick it from the one-time boot menu (F12 on ThinkPads)"* | image | `installer/apex-install` |
 | 16 | Live-ISO GRUB menu | already `Install APEX-OS` | unchanged | image (pre-existing) | `installer/build-live-iso.sh` |
-| 17 | Plymouth boot splash | `apex-os-chartreuse` on every machine (gold is source art only), wordmark `A P E X   O S` | unchanged | image (pre-existing) | `files/branding/plymouth/` |
+| 17 | Plymouth boot splash | `apex-os-chartreuse` and its 24 accent themes (gold is source art only), wordmark `APEX OS` | unchanged | image (pre-existing) | `files/branding/plymouth/` |
 | 18 | Greeter (`apex-greet`) | no distro string at all | unchanged | n/a | verified clean |
 | 18a | `hostnamectl` "Operating System" | `Fedora Linux 43 (Forty Three)` | `APEX-OS` | image | reads os-release `PRETTY_NAME`; covered by surface 3. Its "Kernel:" line still shows the CachyOS release string — see the unfixable table |
 | 18b | `neofetch` / `screenfetch` / `lsb_release` | — | — | n/a | **not installed** in the image (verified). `fastfetch` is the only fetch tool, and it is handled by surfaces 12–13. If one is ever layered in, it will auto-detect the Fedora logo from `ID` exactly as bare `fastfetch` would, and needs the same `logo.source` pin |

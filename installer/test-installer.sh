@@ -240,6 +240,23 @@ if [ "$ENGINE_RUNNABLE" = 1 ] && command -v losetup >/dev/null \
                 "$(grep -m1 APEX-INSTALL-FAILED <<<"$out" || echo no-sentinel)"
             fail=$((fail+1))
         fi
+        # The GUI can die mid-install and the engine must still finish. Same
+        # dry run, with stdout and stderr on a pipe whose reader is already
+        # gone. Before the relay, the bare `echo` of the final sentinel failed
+        # there and the ERR trap recorded a finished install as a failure.
+        _rc=$(python3 -c 'import os, subprocess, sys
+r, w = os.pipe(); os.close(r)
+print(subprocess.call(sys.argv[1:], stdin=subprocess.DEVNULL, stdout=w, stderr=w))' \
+              sudo -n APEX_IMAGE="$ENGINE_IMAGE" APEX_DRY_RUN=1 "$ENGINE" --headless "$ANS")
+        # ...and the relay must really be in place, stderr included: a merge
+        # condition that can never be true once passed this check unnoticed.
+        if [ "$_rc" = 0 ] && sudo -n grep -q 'APEX-DRY-RUN: validation complete' /var/log/apex-install.log \
+           && sudo -n grep -qE 'stdout relayed via pid [0-9]+; stderr merged: yes' /var/log/apex-install.log; then
+            printf 'PASS  %-30s\n' "engine outlives a dead GUI"; pass=$((pass+1))
+        else
+            printf 'FAIL  %-30s rc=%s %s\n' "engine outlives a dead GUI" "$_rc" \
+                "$(sudo -n tail -1 /var/log/apex-install.log 2>/dev/null)"; fail=$((fail+1))
+        fi
         # Partition mode binds THREE identities — disk, root partition, ESP —
         # and each one on its own must be able to stop the install. The disk
         # below mimics a dual-boot layout (ESP, a partition for APEX, a
@@ -486,6 +503,142 @@ elif [ "${_named:-0}" -lt 2 ]; then
     printf 'FAIL  %-30s %s\n' "skopeo copy names --tmpdir" "expected both netinstall copies to pass SKOPEO_TMP, found $_named"; fail=$((fail+1))
 else
     printf 'PASS  %-30s\n' "skopeo copy names --tmpdir"; pass=$((pass+1))
+fi
+
+# A published netinstall ISO downloads a pinned DIGEST. Once :apex moves on,
+# that digest is untagged, and deleting untagged package versions would break
+# every ISO in the wild at its first pull. Two halves: no workflow may delete
+# package versions, and every release pins its digest with a durable
+# netinstall-<release> tag through pin-netinstall-image.yml (write-once, and
+# byte-for-byte: --preserve-digests).
+_wf=../.github/workflows
+# Comment lines are skipped: explaining why deletion is dangerous is not deletion.
+_del=$(grep -nE 'delete-package-versions|/packages/container/[^[:space:]]*/versions/|(-X|--method)[[:space:]]+DELETE[^#]*packages' "$_wf"/*.yml 2>/dev/null \
+       | grep -vE '^[^:]+:[0-9]+:[[:space:]]*#' || true)
+if [ -n "$_del" ]; then
+    printf 'FAIL  %-30s %s\n' "no GHCR version deletion" "$(head -1 <<<"$_del")"; fail=$((fail+1))
+else
+    printf 'PASS  %-30s\n' "no GHCR version deletion"; pass=$((pass+1))
+fi
+echo "── one engine at a time, and a front end that died can reattach ───────"
+# A VT switch can take cage (and so the GUI) down mid-install while the engine
+# keeps writing. The fresh front end must never start a second engine, and a
+# second engine must refuse before it touches the first one's log or mounts.
+_lock_ln=$(grep -n 'flock -n 9' "$ENGINE" | head -1 | cut -d: -f1)
+_trunc_ln=$(grep -n '^: > "\$LOG"' "$ENGINE" | head -1 | cut -d: -f1)
+_um_ln=$(grep -n '^unmount_target$' "$ENGINE" | head -1 | cut -d: -f1)
+if [ -n "$_lock_ln" ] && [ -n "$_trunc_ln" ] && [ -n "$_um_ln" ] \
+   && [ "$_lock_ln" -lt "$_trunc_ln" ] && [ "$_lock_ln" -lt "$_um_ln" ]; then
+    printf 'PASS  %-30s\n' "lock before log and mounts"; pass=$((pass+1))
+else
+    printf 'FAIL  %-30s %s\n' "lock before log and mounts" "flock at ${_lock_ln:-?}, log truncation at ${_trunc_ln:-?}, unmount_target at ${_um_ln:-?}"; fail=$((fail+1))
+fi
+if [ "$ENGINE_RUNNABLE" = 1 ] && command -v flock >/dev/null; then
+    _L=/run/apex-install-test.$$.lock
+    sudo -n sh -c 'printf "log of the install that is running\n" > /var/log/apex-install.log'
+    sudo -n timeout 20 flock "$_L" sleep 20 & _holder=$!
+    sleep 1
+    printf 'mode=disk\ndisk=/dev/null\nusername=bob\npassword=pw\nhostname=apex\nencrypt=no\n' > "$ANS"
+    out=$(sudo -n APEX_INSTALL_LOCK="$_L" APEX_IMAGE="$ENGINE_IMAGE" APEX_DRY_RUN=1 "$ENGINE" --headless "$ANS" 2>&1 </dev/null); _rc=$?
+    kill "$_holder" 2>/dev/null; wait "$_holder" 2>/dev/null
+    if [ "$_rc" = 1 ] && grep -q 'already running' <<<"$out" \
+       && sudo -n grep -q 'log of the install that is running' /var/log/apex-install.log; then
+        printf 'PASS  %-30s\n' "second engine refuses cleanly"; pass=$((pass+1))
+    else
+        printf 'FAIL  %-30s rc=%s %s\n' "second engine refuses cleanly" "$_rc" "$(tail -1 <<<"$out")"; fail=$((fail+1))
+    fi
+    sudo -n rm -f "$_L"
+else
+    echo "SKIP  second engine refuses cleanly (no engine or flock)"
+fi
+# The result record a reattaching front end reads: root-only, and it carries
+# the recovery key (the only on-machine copy once the front end is gone).
+_rf=$(mktemp -d /var/tmp/apex-result-test.XXXXXX)
+(
+    set +u
+    eval "$(sed -n '/^write_result() {/,/^}/p' "$ENGINE")"
+    RESULT_ON=1; RESULT_FILE="$_rf/sub/result"
+    INSTALL_MODE=disk; DISK=/dev/vda; TARGET=/dev/vda; USERNAME=bob; HOSTNAME=apex
+    RESULT_RECOVERY_KEY=abcd-efgh; RESULT_RECOVERY_SAVED=apex-recovery-key-apex.txt; RESULT_RECOVERY_UNSAVED=
+    log() { :; }
+    write_result ok ""
+    # A die() after success must not turn a finished install into a failure.
+    write_result failed "Unexpected error on line 1"
+    stat -c %a "$RESULT_FILE"; cat "$RESULT_FILE"
+) > "$_rf/out" 2>&1
+if grep -qx 600 "$_rf/out" && grep -qx 'status=ok' "$_rf/out" && grep -qx 'recovery_key=abcd-efgh' "$_rf/out" \
+   && grep -qx 'username=bob' "$_rf/out"; then
+    printf 'PASS  %-30s\n' "engine records its result"; pass=$((pass+1))
+else
+    printf 'FAIL  %-30s %s\n' "engine records its result" "$(tr '\n' ' ' < "$_rf/out")"; fail=$((fail+1))
+fi
+# ...and the GUI reads it back into the state its done page draws from.
+printf 'status=failed\nmessage=disk went away\nmode=disk\ndisk=/dev/vda\ntarget=\nusername=bob\nhostname=apex\nrecovery_key=abcd\nrecovery_saved=\nrecovery_unsaved=x\n' > "$_rf/result"
+if APEX_RESULT_FILE="$_rf/result" python3 -c "
+import os, re, subprocess
+src = open('apex-installer-gui').read()
+g = {'os': os, 're': re, 'subprocess': subprocess}
+exec(compile(src[src.index('ENGINE = '):src.index('def netinstall')].replace('ENGINE = ', 'ENGINE_ = ', 1), 'gui', 'exec'), g)
+r = g['read_result']()
+assert r and r['status'] == 'failed' and r['message'] == 'disk went away' and r['recovery_key'] == 'abcd', r
+" 2>"$_rf/pyerr"; then
+    printf 'PASS  %-30s\n' "GUI reads the result back"; pass=$((pass+1))
+else
+    printf 'FAIL  %-30s %s\n' "GUI reads the result back" "$(tail -1 "$_rf/pyerr")"; fail=$((fail+1))
+fi
+# A withdrawn pinned image is not a network failure, and must not say it is.
+(
+    set +u
+    eval "$(sed -n '/^pinned_image_gone() {/,/^}/p' "$ENGINE")"
+    LOG="$_rf/log"; printf 'reading manifest sha256:00 in ghcr.io/andrenijman/apex-os: manifest unknown\n' > "$LOG"
+    NET_SOURCE_IMAGE=ghcr.io/andrenijman/apex-os@sha256:00; TARGET_IMAGE=ghcr.io/andrenijman/apex-os:apex
+    pinned_image_gone && echo GONE-PINNED
+    NET_SOURCE_IMAGE=$TARGET_IMAGE
+    pinned_image_gone || echo UNPINNED-NOT-GONE
+    printf 'dial tcp: lookup ghcr.io: no such host\n' > "$LOG"; NET_SOURCE_IMAGE=ghcr.io/andrenijman/apex-os@sha256:00
+    pinned_image_gone || echo OFFLINE-NOT-GONE
+) > "$_rf/gone" 2>&1
+if [ "$(tr '\n' ' ' < "$_rf/gone")" = "GONE-PINNED UNPINNED-NOT-GONE OFFLINE-NOT-GONE " ]; then
+    printf 'PASS  %-30s\n' "withdrawn image told apart"; pass=$((pass+1))
+else
+    printf 'FAIL  %-30s %s\n' "withdrawn image told apart" "$(tr '\n' ' ' < "$_rf/gone")"; fail=$((fail+1))
+fi
+# A relaunched session must land on tty1. seatd binds it to whichever VT is in
+# front, and after a crash that is the VT the user switched to: in a VM the
+# relaunched GUI came up on tty2 while tty1 showed boot messages. So the
+# launcher brings tty1 forward before every start, and a chvt that never
+# returns must not keep cage from starting.
+mkdir -p "$_rf/bin"
+printf '#!/bin/sh\necho "chvt $*" >> "%s/order"\n' "$_rf" > "$_rf/bin/chvt"
+printf '#!/bin/sh\necho gui >> "%s/order"\n' "$_rf" > "$_rf/bin/gui"
+chmod +x "$_rf/bin/chvt" "$_rf/bin/gui"
+_launch_fns="$(sed -n '/^front_tty1() {/,/^}/p; /^start_gui() {/,/^}/p' apex-installer-launch)"
+( set +u; PATH="$_rf/bin:$PATH"; LOG="$_rf/launch.log"; log() { :; }; GUI_CMD=("$_rf/bin/gui")
+  eval "$_launch_fns"; start_gui 1 ) >/dev/null 2>&1
+_order="$(tr '\n' ' ' < "$_rf/order" 2>/dev/null)"
+printf '#!/bin/sh\nexec sleep 30\n' > "$_rf/bin/chvt"; : > "$_rf/order"
+_t0=$SECONDS
+( set +u; PATH="$_rf/bin:$PATH"; LOG="$_rf/launch.log"; log() { :; }; GUI_CMD=("$_rf/bin/gui")
+  eval "$_launch_fns"; start_gui 2 ) >/dev/null 2>&1
+_hung=$((SECONDS - _t0))
+if [ "$_order" = "chvt 1 gui " ] && grep -qx gui "$_rf/order" && [ "$_hung" -le 10 ]; then
+    printf 'PASS  %-30s\n' "relaunch lands on tty1"; pass=$((pass+1))
+else
+    printf 'FAIL  %-30s order=[%s] hung-chvt start took %ss\n' "relaunch lands on tty1" "$_order" "$_hung"; fail=$((fail+1))
+fi
+rm -rf "$_rf"
+
+_pin="$_wf/pin-netinstall-image.yml"
+if [ -f "$_pin" ] && grep -q -- '--preserve-digests' "$_pin" \
+   && grep -q 'netinstall-\$RELEASE' "$_pin" && grep -q 'write-once' "$_pin" \
+   && grep -q "grep -q 'manifest unknown'" "$_pin" \
+   && grep -q 'pin-netinstall-image.yml' ./build-live-iso.sh \
+   && ! grep -q 'release=vX.Y.Z' ./build-live-iso.sh; then
+    printf 'PASS  %-30s\n' "netinstall digest gets pinned"; pass=$((pass+1))
+else
+    printf 'FAIL  %-30s %s\n' "netinstall digest gets pinned" \
+        "pin-netinstall-image.yml missing or not write-once/--preserve-digests, or build-live-iso.sh no longer says to run it"
+    fail=$((fail+1))
 fi
 
 echo "── GUI: every page must draw — it is the only front end there is ──────"

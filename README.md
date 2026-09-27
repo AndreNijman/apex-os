@@ -283,6 +283,17 @@ signed by `build-image.yml` on `main` (cosign), and stamps it into the ISO. Pass
 `RELEASE_DIGEST=sha256:…` to pin a specific build instead — use the digest the
 boot-tested build printed, so the ISO you publish downloads the image you tested.
 
+Before publishing a netinstall ISO, pin that digest. It goes untagged when
+`:apex` moves on, and untagged versions are what a registry cleanup removes, so
+every copy of the ISO would fail at its first download:
+
+```sh
+gh workflow run pin-netinstall-image.yml -f digest=sha256:… -f release=v2.1.0
+```
+
+That gives the digest a write-once `netinstall-<release>` tag after checking its
+signature. The build prints the exact command at the end.
+
 To build the OS images with a signed kernel, use `./build-local.sh` — it passes
 the Secure Boot signing key and refuses to produce an unsigned image by accident.
 `./build-local.sh kernel` builds the kernel tier on its own (about 45 minutes);

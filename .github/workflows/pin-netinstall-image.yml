@@ -1,0 +1,140 @@
+# Pin the image a netinstall ISO was qualified against.
+#
+# A netinstall ISO does not download `:apex`. It downloads the exact digest it
+# was tested with (build-live-iso.sh stamps it into the ISO), so the ISO keeps
+# installing the build it was qualified on. The moment `:apex` moves on, that
+# digest is untagged — and an untagged version is exactly what a GHCR cleanup
+# policy or a `delete-package-versions` step removes. Every published ISO
+# pinned to it would then fail at the first pull, on someone else's machine.
+#
+# So each release gives its digest a durable tag of its own, `netinstall-<release>`.
+# Tagged versions are never "untagged", whatever a retention rule does to the
+# rest. The tag is WRITE-ONCE: this workflow refuses to move an existing one,
+# because a published ISO names its digest, not the tag, and a moved tag would
+# silently stop protecting the digest that ISO actually downloads.
+#
+# Run it for every netinstall release, before publishing:
+#   gh workflow run pin-netinstall-image.yml -f digest=sha256:… -f release=v2.1.0
+# installer/test-installer.sh refuses any workflow that deletes package versions.
+name: Pin a netinstall image
+
+on:
+  workflow_dispatch:
+    inputs:
+      digest:
+        description: "The image digest the ISO pins (sha256:…, printed by build-live-iso.sh)"
+        type: string
+        required: true
+      release:
+        description: "The release the ISO ships in, e.g. v2.1.0"
+        type: string
+        required: true
+
+concurrency:
+  group: apex-image-publish
+  cancel-in-progress: false
+
+permissions:
+  contents: read
+  packages: write
+
+env:
+  REGISTRY: ghcr.io
+  IMAGE: ghcr.io/andrenijman/apex-os
+
+jobs:
+  pin:
+    name: pin netinstall-${{ inputs.release }}
+    runs-on: ubuntu-24.04
+    steps:
+      - name: Install cosign
+        uses: sigstore/cosign-installer@v3
+
+      - name: Install skopeo
+        run: |
+          set -euo pipefail
+          command -v skopeo >/dev/null || { sudo apt-get update -qq && sudo apt-get install -y -qq skopeo; }
+
+      - name: Check the inputs
+        env:
+          DIGEST: ${{ inputs.digest }}
+          RELEASE: ${{ inputs.release }}
+        run: |
+          set -euo pipefail
+          if ! printf '%s' "$DIGEST" | grep -qE '^sha256:[0-9a-f]{64}$'; then
+            echo "::error::'$DIGEST' is not a sha256 digest"; exit 1
+          fi
+          if ! printf '%s' "$RELEASE" | grep -qE '^v[0-9]+\.[0-9]+\.[0-9]+$'; then
+            echo "::error::'$RELEASE' is not a release name like v2.1.0"; exit 1
+          fi
+
+      - name: Log in to the registry
+        env:
+          GHCR_USER: ${{ github.actor }}
+          GHCR_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+        run: |
+          set -euo pipefail
+          echo "$GHCR_TOKEN" | cosign login "$REGISTRY" -u "$GHCR_USER" --password-stdin
+
+      - name: The digest must be signed by this repository's build workflow
+        env:
+          DIGEST: ${{ inputs.digest }}
+        run: |
+          set -euo pipefail
+          IDENTITY="https://github.com/${{ github.repository }}/.github/workflows/build-image.yml@refs/heads/main"
+          cosign verify \
+            --certificate-identity "$IDENTITY" \
+            --certificate-oidc-issuer https://token.actions.githubusercontent.com \
+            "$IMAGE@$DIGEST" > /dev/null
+          echo "signed by $IDENTITY"
+
+      - name: Tag it netinstall-<release> (write-once)
+        env:
+          DIGEST: ${{ inputs.digest }}
+          RELEASE: ${{ inputs.release }}
+          GHCR_USER: ${{ github.actor }}
+          GHCR_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+        run: |
+          set -euo pipefail
+          creds="$GHCR_USER:$GHCR_TOKEN"
+          tag="netinstall-$RELEASE"
+          # MISSING only when the registry says so. Any other inspect failure
+          # (an outage, an auth or permission error) proves nothing about the
+          # tag, and treating it as absence would let this step overwrite a pin
+          # that an ISO in the wild depends on.
+          if have="$(skopeo inspect --creds "$creds" --format '{{.Digest}}' "docker://$IMAGE:$tag" 2>/tmp/inspect.err)"; then
+            :
+          elif grep -q 'manifest unknown' /tmp/inspect.err; then
+            have=MISSING
+          else
+            echo "::error::could not tell whether $IMAGE:$tag exists; refusing to write it"
+            cat /tmp/inspect.err
+            exit 1
+          fi
+          if [ "$have" = "$DIGEST" ]; then
+            echo "  ok   :$tag already pins this digest — nothing to do"; exit 0
+          fi
+          if [ "$have" != MISSING ]; then
+            echo "::error::$IMAGE:$tag already pins '$have'. Pins are write-once: an ISO in the wild downloads that digest, and moving the tag would stop protecting it."
+            exit 1
+          fi
+          # --preserve-digests: the tag must name the SAME manifest the ISO
+          # pins, byte for byte — never a re-encoded copy with a new digest.
+          skopeo copy --retry-times 3 --preserve-digests --src-creds "$creds" --dest-creds "$creds" \
+            "docker://$IMAGE@$DIGEST" "docker://$IMAGE:$tag"
+
+      - name: Read the tag back out of the registry
+        env:
+          DIGEST: ${{ inputs.digest }}
+          RELEASE: ${{ inputs.release }}
+          GHCR_USER: ${{ github.actor }}
+          GHCR_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+        run: |
+          set -euo pipefail
+          creds="$GHCR_USER:$GHCR_TOKEN"
+          got="$(skopeo inspect --creds "$creds" --format '{{.Digest}}' "docker://$IMAGE:netinstall-$RELEASE" 2>/dev/null || echo MISSING)"
+          if [ "$got" != "$DIGEST" ]; then
+            echo "::error::$IMAGE:netinstall-$RELEASE resolves to '$got', expected '$DIGEST'"
+            exit 1
+          fi
+          echo "  ok   $IMAGE:netinstall-$RELEASE -> $DIGEST"

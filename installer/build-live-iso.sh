@@ -608,3 +608,21 @@ echo "asserts OK: emitted ISO carries BIOS+UEFI El Torito entries, isohybrid MBR
 sudo sha256sum "$OUT" | sudo tee "$OUT.sha256" >/dev/null
 echo "== DONE: $OUT =="
 ls -lh "$OUT"; cat "$OUT.sha256"
+
+# A netinstall ISO is only as durable as the digest it pins: once :apex moves
+# on, that digest is untagged, and a registry cleanup of untagged versions
+# would break this ISO for everyone who downloads it. Pinning is a release
+# step, run from CI where the token can write packages.
+if [ "$NETINSTALL" = 1 ] && [ "$PRODUCTION" = 1 ]; then
+  echo "== BEFORE PUBLISHING =="
+  echo "This ISO downloads $RELEASE_IMAGE."
+  echo "Give that digest a durable tag, so no GHCR cleanup can ever remove it:"
+  # RELEASE=v2.1.0 makes this line runnable as printed. Without it the release
+  # is a placeholder, and it is labelled as one instead of looking finished.
+  if printf '%s' "${RELEASE:-}" | grep -qE '^v[0-9]+\.[0-9]+\.[0-9]+$'; then
+    echo "  gh workflow run pin-netinstall-image.yml -f digest=$RELEASE_DIGEST -f release=$RELEASE"
+  else
+    echo "  gh workflow run pin-netinstall-image.yml -f digest=$RELEASE_DIGEST -f release=<RELEASE>"
+    echo "  (replace <RELEASE> with the release this ISO ships in, e.g. v2.1.0, or build with RELEASE=v2.1.0)"
+  fi
+fi
