@@ -41,6 +41,14 @@ import tempfile
 import threading
 
 ENGINE = "/usr/bin/apex-install"
+# The engine holds this lock for its whole run and records its outcome in the
+# result file (see the top of apex-install). A front end that starts while the
+# lock is held is a front end that came back after the last one died — a VT
+# switch can take cage down — so it reattaches instead of offering a second
+# install. Overridable for the test suites only.
+ENGINE_LOCK = os.environ.get("APEX_INSTALL_LOCK", "/run/apex-install.lock")
+RESULT_FILE = os.environ.get("APEX_RESULT_FILE", "/run/apex-installer/result")
+INSTALL_LOG = "/var/log/apex-install.log"
 EDITION_FILE = "/usr/lib/apex-installer/edition"
 
 # ── keyboard ─────────────────────────────────────────────────────────────────
@@ -224,6 +232,27 @@ def eth_status():
         if len(f) >= 3 and f[1] == "ethernet":
             return ("connected" if f[2] == "connected" else "disconnected"), f[0]
     return "absent", ""
+
+
+def engine_running():
+    """True while an install engine holds ENGINE_LOCK. `flock -n -E 75` exits
+    75 only on a conflict; any other failure (no flock, no lock file yet) means
+    nothing is running and must not be read as an install in progress."""
+    if not os.path.exists(ENGINE_LOCK):
+        return False
+    rc, _ = run(["flock", "-n", "-E", "75", ENGINE_LOCK, "true"], timeout=5)
+    return rc == 75
+
+
+def read_result():
+    """The engine's recorded outcome, or None. key=value, one per line; the
+    file is root-only and written atomically by the engine."""
+    try:
+        with open(RESULT_FILE, errors="replace") as f:
+            out = dict(l.rstrip("\n").split("=", 1) for l in f if "=" in l)
+    except OSError:
+        return None
+    return out if out.get("status") in ("ok", "failed") else None
 
 
 def netinstall():
@@ -731,14 +760,34 @@ class Installer(Adw.Application):
                         if os.environ.get("APEX_INSTALLER_RESUMED") == "1"
                         else "welcome")
         start = os.environ.get("APEX_GUI_PAGE", default_page)
-        if start not in ("welcome", "keyboard"):
-            self.disk = os.environ.get("APEX_GUI_DISK", "")
-            self.target = os.environ.get("APEX_GUI_TARGET", "") or None
-            self.esp = os.environ.get("APEX_GUI_ESP", "")
-            self.answers.setdefault("username", "andre")
-            self.answers.setdefault("hostname", "apex")
-            self.answers["mode"] = os.environ.get("APEX_GUI_MODE", "disk")
-            self.ok = os.environ.get("APEX_GUI_OK", "") == "1"
+        self.attach = False
+        if "APEX_GUI_PAGE" in os.environ:
+            # Test affordance: the suites render a page directly and supply
+            # the state an earlier page would have chosen.
+            if start not in ("welcome", "keyboard"):
+                self.disk = os.environ.get("APEX_GUI_DISK", "")
+                self.target = os.environ.get("APEX_GUI_TARGET", "") or None
+                self.esp = os.environ.get("APEX_GUI_ESP", "")
+                self.answers.setdefault("username", "andre")
+                self.answers.setdefault("hostname", "apex")
+                self.answers["mode"] = os.environ.get("APEX_GUI_MODE", "disk")
+                self.ok = os.environ.get("APEX_GUI_OK", "") == "1"
+        elif os.environ.get("APEX_INSTALLER_RESUMED") == "1":
+            # A keyboard-layout restart is deliberate and happens before any
+            # install: never reattach or replay an old result from here.
+            pass
+        elif engine_running():
+            # Came back after the last front end died, with the install still
+            # running: follow it rather than offer a second one.
+            self.attach = True
+            start = "run"
+        else:
+            # ...or it finished while nobody was watching. Show its result —
+            # the recovery key lives on that page and nowhere else here.
+            r = read_result()
+            if r is not None:
+                self.load_result(r)
+                start = "done"
         self.go(start)
         self.win.present()
 
@@ -2043,12 +2092,78 @@ class Installer(Adw.Application):
         body.append(lbl("Do not power off. Full log: /var/log/apex-install.log",
                         "apex-dim"))
 
+        if getattr(self, "attach", False):
+            # Reattached: the engine was started by a front end that has since
+            # died. Follow its log and wait for its result — never start a
+            # second one (it would refuse anyway: the lock is held).
+            self._log_pos = 0
+            self.run_state.set_text("Reconnected to the installation already in progress…")
+            page = self.frame("INSTALLING", "Installing APEX-OS",
+                              "Reconnected — the installation kept running while "
+                              "the screen restarted.", body, [])
+            GLib.timeout_add(1000, self.attach_poll)
+            GLib.timeout_add(120, self.pulse)
+            return page
         page = self.frame("INSTALLING", "Installing APEX-OS",
                           self.target if self.answers["mode"] == "partition" else self.disk,
                           body, [])
         GLib.idle_add(self.spawn_engine)
         GLib.timeout_add(120, self.pulse)
         return page
+
+    def attach_poll(self):
+        """Reattached run page: show what the engine has logged since we last
+        looked, and when it lets go of the lock, show the result it recorded."""
+        if self.stack.get_visible_child_name() != "run":
+            return False
+        try:
+            with open(INSTALL_LOG, errors="replace") as f:
+                f.seek(self._log_pos)
+                new = f.read()
+                self._log_pos = f.tell()
+        except OSError:
+            new = ""
+        if new:
+            self.append_log(new)
+            last = [l for l in new.splitlines() if l.strip() and not l.startswith("+")]
+            if last:
+                # log() lines carry an HH:MM:SS stamp; the status line reads
+                # better without it.
+                t = re.sub(r"^\d\d:\d\d:\d\d ", "", last[-1].strip())
+                self.run_state.set_text(t[:110])
+        if engine_running():
+            return True
+        r = read_result()
+        if r is None:
+            self.finish(False, "The installation stopped without recording a result. "
+                               "See the log below; it is safe to start again.")
+        else:
+            self.load_result(r)
+            self.finish(self.ok, self.err)
+        return False
+
+    def load_result(self, r):
+        """State the done page needs, from the engine's recorded result."""
+        self.ok = r.get("status") == "ok"
+        self.err = r.get("message", "")
+        self.answers["mode"] = r.get("mode") or self.answers.get("mode", "disk")
+        if r.get("username"):
+            self.answers["username"] = r["username"]
+        if r.get("hostname"):
+            self.answers["hostname"] = r["hostname"]
+        self.disk = r.get("disk") or getattr(self, "disk", "")
+        self.target = r.get("target") or getattr(self, "target", None)
+        self.recovery_key = r.get("recovery_key", "")
+        self.recovery_saved = r.get("recovery_saved", "")
+
+    def clear_result_and_restart(self):
+        """'Try again' after a failure: the old result must not be replayed if
+        this front end later has to come back."""
+        try:
+            os.unlink(RESULT_FILE)
+        except OSError:
+            pass
+        self.go("welcome")
 
     def pulse(self):
         if self.stack.get_visible_child_name() != "run":
@@ -2152,13 +2267,19 @@ class Installer(Adw.Application):
                 return False
         if cond & GLib.IO_HUP or (self.proc and self.proc.poll() is not None):
             rc = self.proc.wait() if self.proc else 1
-            # Drain anything buffered after HUP so a failure reason is never lost.
+            # Drain anything buffered after HUP so a failure reason is never lost:
+            # the engine can exit before its last lines have been read, and the
+            # APEX-INSTALL-FAILED line is the one that says why.
+            reason = ""
             try:
                 for rest in src:
                     self.append_log(rest)
+                    if not reason and "APEX-INSTALL-FAILED" in rest:
+                        reason = rest.split("APEX-INSTALL-FAILED:", 1)[-1].strip()
             except (ValueError, OSError):
                 pass
-            self.finish(rc == 0, "" if rc == 0 else f"The installer exited with status {rc}.")
+            self.finish(rc == 0, "" if rc == 0 else
+                        (reason or f"The installer exited with status {rc}."))
             return False
         return True
 
@@ -2230,7 +2351,8 @@ class Installer(Adw.Application):
                          "apex-dim", sel=True))
             i.append(lbl("Nothing further will be written. The full log is at "
                          "/var/log/apex-install.log — switch to a shell with "
-                         "Ctrl+Alt+F2 (root / apex) to read it.", "apex-dim"))
+                         "Ctrl+Alt+F2 (root / apex) to read it, and Ctrl+Alt+F1 "
+                         "to come back here.", "apex-dim"))
         card.append(i)
         body.append(card)
 
@@ -2307,7 +2429,8 @@ class Installer(Adw.Application):
                                      lambda *_: self.go("welcome")), False))
         else:
             acts.append((self.btn("Quit", "apex-ghost", lambda *_: self.quit()), False))
-            acts.append((self.btn("Try again", "apex-go", lambda *_: self.go("welcome")), True))
+            acts.append((self.btn("Try again", "apex-go",
+                                  lambda *_: self.clear_result_and_restart()), True))
 
         return self.frame("DONE" if ok else "FAILED",
                           "Installation complete" if ok else "Installation failed",
