@@ -178,7 +178,10 @@ APEX_MARKERS = (
 # hyprlang bind verbs and the Lua bind options they become.
 BIND_VERBS = {
     "bind":   {},
-    "bindm":  {"drag": True},      # NOT { mouse = true }: accepted, does nothing
+    # Upstream's form. NOT { drag = true }: that forces release = true, so the
+    # bind fires only on button-up and SUPER+drag moves nothing (measured on
+    # 0.56.2; keybindings.lua has the detail).
+    "bindm":  {"mouse": True},
     "bindl":  {"locked": True},
     "binde":  {"repeating": True},
     "bindel": {"locked": True, "repeating": True},
@@ -957,9 +960,9 @@ def self_test():
     check("...and the mangled key it used to produce is gone",
           "misc { disable_splash_rendering" not in text)
     check("a user bindm becomes a drag bind, not a directional move",
-          'hl.bind("SUPER + ALT + mouse:272", hl.dsp.window.drag(), { drag = true })' in text)
-    check("...and never the { mouse = true } upstream's own example still uses",
-          "mouse = true" not in text)
+          'hl.bind("SUPER + ALT + mouse:272", hl.dsp.window.drag(), { mouse = true })' in text)
+    check("...and never { drag = true }, which makes it fire only on button-up",
+          "drag = true" not in text)
     check("a user bindel becomes locked + repeating",
           'hl.bind("SUPER + F5", hl.dsp.exec_cmd("my-repeating-thing"), '
           "{ locked = true, repeating = true })" in text)

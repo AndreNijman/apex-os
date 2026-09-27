@@ -2186,8 +2186,20 @@ RUN set -eux; \
 # neither of which touches the rpmdb. dracut is invoked with --reproducible, so
 # an unchanged theme + unchanged kernel now produce a byte-identical initramfs
 # and bootc re-fetches nothing.
+#
+# plymouth-plugin-label is what draws TEXT. The script plugin's Image.Text()
+# hands every string to a label plugin, and with none installed it returns an
+# empty image without a word in any log. That was every APEX image until
+# 2026-09-26: the LUKS passphrase prompt, the bullets, apex-unlock-hint's
+# keyboard/recovery-key line and the wordmark all drew as nothing, so an
+# encrypted machine booted to a dimmed star and a prompt nobody could see.
+# Measured in a VM booting the released initramfs against a LUKS2 disk, then
+# the same initramfs rebuilt with this package: all four appear. The package
+# ships label-pango.so and label-freetype.so; plymouth-populate-initrd copies
+# only the freetype one into the initramfs, with the default font linked as
+# usr/share/fonts/Plymouth.ttf (+1.3 MB). Containerfile.apex asserts both.
 RUN set -eux; \
-    dnf5 -y install plymouth plymouth-scripts plymouth-plugin-script; \
+    dnf5 -y install plymouth plymouth-scripts plymouth-plugin-script plymouth-plugin-label; \
     dnf5 clean all
 
 # ── efibootmgr: an EXPLICIT dependency of the Windows-boot helper ──────────

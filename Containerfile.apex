@@ -221,7 +221,11 @@ RUN set -eux; \
 # -R only sets the default; we run dracut ourselves (mirroring core's Stage-1
 # flags) because on bootc the initramfs is regenerated in-image, not by the
 # tool's -R host path. The theme uses `ModuleName=script`, so the script plugin
-# (plymouth-plugin-script) is required — it is installed in Containerfile.core.
+# (plymouth-plugin-script) is required, and so is a label plugin
+# (plymouth-plugin-label): without one every Image.Text() — the passphrase
+# prompt included — silently draws nothing. Both are installed in
+# Containerfile.core; the loop below asserts the label plugin and its font
+# reached the initramfs.
 #
 # THIS IS THE LAST INITRAMFS REGENERATION IN THE BUILD, which is why core's
 # 99-nvidia-dracut.conf has to be in place before it. That file used to be what
@@ -290,6 +294,8 @@ RUN set -eux; \
                 themes/apex-os-accent-00/apex-os-accent-00.plymouth \
                 themes/apex-os-accent-01/spark.png \
                 themes/apex-os-accent-23/apex-os.script \
+                usr/lib64/plymouth/label-freetype.so \
+                usr/share/fonts/Plymouth.ttf \
                 fs/fat/vfat.ko; do \
         printf '%s\n' "$_ls" | grep -qF "$want" \
             || { echo "FATAL: $want is not in the initramfs"; exit 1; }; \

@@ -237,12 +237,19 @@ bind(mod, "mouse_down", hl.dsp.focus({ workspace = "e+1" }))
 bind(mod, "mouse_up",   hl.dsp.focus({ workspace = "e-1" }))
 
 -- ── Mouse drag move/resize ───────────────────────────────────────────────────
--- hyprlang's `bindm`. NOT `{ mouse = true }`: that option is accepted and does
--- nothing on 0.56.2 — the resulting keybind reports `mouse=false`, `drag=false`.
--- Upstream's own /usr/share/hypr/hyprland.lua still uses it. `{ drag = true }`
--- is what actually sets the press-and-hold behaviour (it implies `release`).
-bind(mod, "mouse:272", hl.dsp.window.drag(),   { drag = true, description = "Move window" })
-bind(mod, "mouse:273", hl.dsp.window.resize(), { drag = true, description = "Resize window" })
+-- hyprlang's `bindm`, written the way upstream's /usr/share/hypr/hyprland.lua
+-- writes it. window.drag() and window.resize() are PRESS binds: they start the
+-- move on button-down and end it on button-up themselves (v0.56.2 sets
+-- `releasePending` inside the dispatcher). `{ drag = true }` looks like the
+-- right option and is the opposite: it forces `release = true`, so the bind
+-- fires only on button-up and SUPER+drag does nothing at all. That is what
+-- shipped from the Lua migration until 2026-09-27; measured in a nested 0.56.2
+-- with a virtual pointer holding SUPER, `drag = true` moved no window and
+-- `mouse = true` floated it and followed the pointer. `hyprctl binds -j`
+-- reports `mouse=false` for both, which is why it was misread: the field that
+-- tells them apart is `release` (true = broken).
+bind(mod, "mouse:272", hl.dsp.window.drag(),   { mouse = true, description = "Move window" })
+bind(mod, "mouse:273", hl.dsp.window.resize(), { mouse = true, description = "Resize window" })
 
 -- ── Media and brightness keys ────────────────────────────────────────────────
 -- CTRL+SUPER equivalents for keyboards without these keys are shell defaults,

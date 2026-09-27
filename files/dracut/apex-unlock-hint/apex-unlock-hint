@@ -34,8 +34,10 @@ KEYMAP=$(sed -n 's/.*[ 	]vconsole\.keymap=\([^ 	]*\).*/\1/p' "$CMDLINE" | tail -
 [ -n "$KEYMAP" ] || KEYMAP=$(sed -n 's/^vconsole\.keymap=\([^ 	]*\).*/\1/p' "$CMDLINE" | tail -1)
 [ -n "$KEYMAP" ] || KEYMAP=us
 
+# ASCII only. The splash draws this with plymouth's freetype label, which drew
+# the U+00B7 separator this line used to carry as a missing-glyph box.
 plymouth message \
-    --text="Keyboard: $KEYMAP  ·  if this passphrase is refused, type your APEX recovery key here instead" \
+    --text="Keyboard: $KEYMAP  -  if this passphrase is refused, type your APEX recovery key here instead" \
     >/dev/null 2>&1 || exit 0
 
 exit 0
