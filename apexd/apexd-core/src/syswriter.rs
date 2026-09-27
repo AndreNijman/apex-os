@@ -187,9 +187,26 @@ pub fn read_scx_state(sys_root: &Path) -> ScxState {
 /// scheduler as a failure, which is this unit's own defect inverted, so the
 /// comparison strips the prefix from either side and is deliberately a SOFT
 /// check: a mismatch is reported, never treated as "not loaded".
+///
+/// The Rust schedulers also append a build tag: katana's kernel reported
+/// `lavd_1.1.3_x86_64_unknown_linux_gnu` for scx-scheds 1.1.3, and apexd
+/// logged "not the scheduler that was asked for" on every entry. A suffix
+/// counts only when it starts `_<digit>`, so `lavd` never matches some other
+/// scheduler whose name merely begins with it.
 pub fn scx_ops_matches(ops: &str, sched: &str) -> bool {
     let strip = |s: &str| s.trim().trim_start_matches("scx_").to_ascii_lowercase();
-    !ops.trim().is_empty() && strip(ops) == strip(sched)
+    let (ops, sched) = (strip(ops), strip(sched));
+    if ops.is_empty() || sched.is_empty() {
+        return false;
+    }
+    match ops.strip_prefix(&sched) {
+        Some("") => true,
+        Some(tag) => tag
+            .strip_prefix('_')
+            .and_then(|v| v.chars().next())
+            .is_some_and(|c| c.is_ascii_digit()),
+        None => false,
+    }
 }
 
 /// Turns intended [`Action`]s into effects.
@@ -1912,6 +1929,19 @@ exit 0
         assert!(scx_ops_matches("rusty", "scx_rusty"));
         assert!(!scx_ops_matches("rusty", "scx_lavd"));
         assert!(!scx_ops_matches("", "scx_lavd"));
+    }
+
+    #[test]
+    fn the_build_tag_the_rust_schedulers_append_is_not_a_mismatch() {
+        let _serial = serial();
+        // Read verbatim off katana's /sys/kernel/sched_ext/root/ops, 2026-09-26.
+        assert!(scx_ops_matches("lavd_1.1.3_x86_64_unknown_linux_gnu", "scx_lavd"));
+        assert!(scx_ops_matches("rustland_1.1.3_x86_64_unknown_linux_gnu", "scx_rustland"));
+        // …but a longer name is a different scheduler, tag or no tag.
+        assert!(!scx_ops_matches("lavdx_1.1.3_x86_64_unknown_linux_gnu", "scx_lavd"));
+        assert!(!scx_ops_matches("lavd_extra", "scx_lavd"));
+        assert!(!scx_ops_matches("rusty_1.1.3_x86_64_unknown_linux_gnu", "scx_lavd"));
+        assert!(!scx_ops_matches("lavd_1.1.3", ""));
     }
 
     #[test]

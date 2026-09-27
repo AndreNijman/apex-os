@@ -198,6 +198,43 @@ RUN set -eux; \
         echo "yazi: installed prebuilt v${YAZI_VERSION}"; \
     else echo "yazi: DOWNLOAD FAILED (TUI file manager absent; non-fatal — Thunar remains)"; fi
 
+# scx_lavd 1.1.3 with upstream's runnable-task-stall fix. FATAL on failure.
+#
+# Gaming Mode loads scx_lavd, and the build the CachyOS COPR ships (scx-scheds
+# 1.1.3-3: the v1.1.3 tag plus two hotfixes for OTHER schedulers) stalls tasks.
+# On katana, 2026-09-26, the kernel's sched_ext watchdog ejected it five times
+# in one 16-minute Terraria session, each a 31–37 s freeze, and once with
+# Firefox the night before. Every loader dump showed the task `no_mig=1` on a
+# one-CPU mask while queued on the per-CPU DSQ of its cached `scpu`, a CPU it
+# was not allowed to run on. That is sched-ext/scx#3791 exactly. Upstream
+# 6d31ddd89 (lavd_enqueue's REENQ path re-checks the cached CPU against
+# cpus_ptr) fixed it, and Arch shipped it as scx-scheds 1.1.3-2.
+#
+# Only scx_lavd is rebuilt, from the same tag COPR packages, so the one change
+# is the fix. The patch is vendored rather than fetched: a GitHub-generated
+# .patch is not a stable artifact to pin a checksum on. The final stage installs
+# this binary over COPR's only while COPR is still at SCX_VERSION, because any
+# later scx release already contains 6d31ddd89.
+ARG SCX_VERSION=1.1.3
+ARG SCX_SHA256=4dd6dd77ce1cdb9213f14339b17b9ba284e76055f866f6aede53f2488d838979
+COPY files/system/src/scx/lavd-6d31ddd89-reenq-cpus-ptr.patch /build/scx-lavd-6d31ddd89.patch
+RUN set -eux; \
+    dnf5 -y install clang llvm lld elfutils-libelf-devel zlib-ng-compat-devel >/dev/null; \
+    dnf5 clean all; \
+    curl -fsSL -o /tmp/scx.tar.gz \
+      "https://github.com/sched-ext/scx/archive/refs/tags/v${SCX_VERSION}.tar.gz"; \
+    echo "${SCX_SHA256}  /tmp/scx.tar.gz" | sha256sum -c -; \
+    tar xzf /tmp/scx.tar.gz -C /build; \
+    cd "/build/scx-${SCX_VERSION}"; \
+    git apply --check /build/scx-lavd-6d31ddd89.patch; \
+    git apply /build/scx-lavd-6d31ddd89.patch; \
+    grep -q 'suggested_cpu_id may be stale' scheds/rust/scx_lavd/src/bpf/main.bpf.c; \
+    cargo build --release -p scx_lavd; \
+    install -Dm755 target/release/scx_lavd /out/scx/scx_lavd; \
+    echo "${SCX_VERSION}" > /out/scx/base-version; \
+    /out/scx/scx_lavd --version; \
+    rm -rf "/build/scx-${SCX_VERSION}" /tmp/scx.tar.gz
+
 # ─────────────────────────────────────────────────────────────────────────
 # ── The kernel tier, consumed by digest ──────────────────────────────────
 # APEX builds its own kernel in Containerfile.kernel, published as its own
@@ -2337,6 +2374,28 @@ RUN set -eux; \
 # awww / awww-daemon / matugen / yazi / ya. apexd + apex are NOT here — they are
 # the volatile pair and are added by Containerfile.base.
 COPY --from=toolbuilder /out/usr/bin/ /usr/bin/
+
+# scx_lavd: the builder's patched 1.1.3 replaces COPR's 1.1.3 (see the builder
+# stage for the stall it fixes). Only while COPR is still at the version the
+# patch was made against: a newer scx-scheds already carries the fix, and
+# installing a patched older build over it would be a downgrade. An OLDER COPR
+# is a surprise nobody has reviewed, so that one is fatal.
+COPY --from=toolbuilder /out/scx/ /tmp/apex-scx/
+RUN set -eux; \
+    have="$(rpm -q --qf '%{VERSION}' scx-scheds)"; \
+    base="$(cat /tmp/apex-scx/base-version)"; \
+    if [ "$have" = "$base" ]; then \
+        install -m755 /tmp/apex-scx/scx_lavd /usr/bin/scx_lavd; \
+        cmp /tmp/apex-scx/scx_lavd /usr/bin/scx_lavd; \
+        echo "scx_lavd: ${base} + upstream 6d31ddd89 (REENQ cpus_ptr fix), built by APEX" >> /usr/lib/apex-scx-versions; \
+    elif [ "$(printf '%s\n%s\n' "$base" "$have" | sort -V | tail -1)" = "$have" ]; then \
+        echo "scx_lavd: COPR ${have} kept; it postdates the ${base} fix, drop the APEX rebuild" >> /usr/lib/apex-scx-versions; \
+    else \
+        echo "FATAL: COPR scx-scheds ${have} is OLDER than the ${base} the lavd fix targets"; exit 1; \
+    fi; \
+    /usr/bin/scx_lavd --version; \
+    rm -rf /tmp/apex-scx; \
+    cat /usr/lib/apex-scx-versions
 
 # Wallpaper daemon fallback: awww is built best-effort in the builder stage. If
 # it did NOT land (build hiccup), the shell's WallpaperService (`awww img …`) and
