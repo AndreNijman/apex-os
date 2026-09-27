@@ -150,7 +150,10 @@ def bump(t, tp):
 # refuse rather than render something the splash does not do.
 PORTED = [
     "S = odd(short * 0.18);", "B = odd(S * 1.25);", "HALO = odd(S * 2.3);",
-    "spark_img = spark_src.Scale(S, S);",
+    "spark_img = spark_src.Scale(S, S);", "if (S > 300) {", "if (h > 1500) { hd = 1; }",
+    'wm_img = fit(Image("wordmark-hd.png"), 2400);', 'bullet_img = fit(Image("bullet-hd.png"), 2400 * 1.33);',
+    'prompt_fallback = fit(Image("prompt-hd.png"), 2400);', 'wm_img = fit(Image("wordmark.png"), 1200);',
+    'bullet_img = fit(Image("bullet.png"), 1200 * 1.33);', 'prompt_fallback = fit(Image("prompt.png"), 1200);',
     "cy = Math.Int(h * 0.46);", "T0 = 0.12;",
     "local.a_blur = 0.85 * smooth(local.t / 0.5) * (1 - smooth((local.t - 0.35) / 0.6));",
     "local.a_soft = 0.9 * smooth((local.t - 0.15) / 0.45) * (1 - smooth((local.t - 0.75) / 0.5));",
@@ -171,6 +174,9 @@ PORTED = [
     "wm_y = star_bottom + Math.Int(h * 0.036);",
     "bullets_y = wm_y + Math.Int(h * 0.045);", "msg_y = bullets_y + Math.Int(h * 0.05);",
     "SP = Math.Int(BS * 1.9);", "MAXB = 40;",
+    "tsize = Math.Int(12 * h / 1200 + 0.5);", "if (tsize < 12) { tsize = 12; }", "if (tsize > 28) { tsize = 28; }",
+    'text_font = "Sans " + tsize;', "Image.Text(prompt, 0.824, 0.839, 0.871, 1, text_font);",
+    "Image.Text(text, 0.62, 0.66, 0.72, 1, text_font);",
     "(1 - expn(fdt / 0.07));", "local.kb = 1 - expn(fdt / 0.06);",
     "local.err = (global.prog_new - global.sync_off) - global.clock + local.dt / 2;",
 ]
@@ -186,11 +192,11 @@ def script_constants(path):
 
 class Splash:
     def __init__(self, theme, w, h, mode, rate, text_font):
+        # text_font: path of the font label-freetype would use (Plymouth.ttf)
         self.scr = Screen(w, h)
         self.w, self.h = w, h
         self.RATE = rate
         self.intro = 1 if mode == "boot" else 0
-        self.text_font = text_font
         img = lambda n: load_png(os.path.join(theme, n))
         short = min(w, h)
         self.hd = 1 if h > 1500 else 0
@@ -213,7 +219,7 @@ class Splash:
             return resize(im, max(nw, 1), max(nh, 1))
         if self.hd:
             self.wm_img = fit(img("wordmark-hd.png"), 2400)
-            self.bullet_img = fit(img("bullet-hd.png"), 2400 * 0.8)
+            self.bullet_img = fit(img("bullet-hd.png"), 2400 * 1.33)
             self.prompt_fallback = fit(img("prompt-hd.png"), 2400)
         else:
             self.wm_img = fit(img("wordmark.png"), 1200)
@@ -240,6 +246,8 @@ class Splash:
         self.bullet_spr = []; self.bullet_a = []
         self.row_off = 0.0
         self.message_sprite = sc.sprite(); self.message_sprite.SetOpacity(0); self.message_text = ""
+        tsize = min(max(math.floor(12 * h / 1200 + 0.5), 12), 28)
+        self.text_font = ImageFont.truetype(text_font, round(tsize * 96 / 72))
         self.pw_target = 0; self.pw_p = 0.0
         self.msg_target = 0; self.msg_p = 0.0
         self.clock = 0.0; self.last_clock = 0.0
@@ -248,7 +256,7 @@ class Splash:
         self.state = {}
 
     def text(self, s, r, g, b):
-        """Image.Text with label-freetype: 12 pt at 96 dpi of Plymouth.ttf."""
+        """Image.Text with label-freetype: text_font's points at 96 dpi of Plymouth.ttf."""
         if not s:
             return np.zeros((0, 0, 4), np.uint8)
         f = self.text_font
@@ -377,8 +385,7 @@ def main():
     os.makedirs(a.out, exist_ok=True)
     consts = script_constants(os.path.join(a.theme, "apex-os.script"))
     fontpath = subprocess.run(["fc-match", "-f", "%{file}"], capture_output=True, text=True).stdout.strip()
-    font = ImageFont.truetype(fontpath, 16)
-    sp = Splash(a.theme, W, H, a.mode, consts["RATE"], font)
+    sp = Splash(a.theme, W, H, a.mode, consts["RATE"], fontpath)
 
     # refresh instants (seconds after the splash starts)
     if a.refresh_log:

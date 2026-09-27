@@ -126,7 +126,7 @@ fun fit (img, ref) {
 }
 if (hd) {
   wm_img = fit(Image("wordmark-hd.png"), 2400);
-  bullet_img = fit(Image("bullet-hd.png"), 2400 * 0.8);
+  bullet_img = fit(Image("bullet-hd.png"), 2400 * 1.33);
   prompt_fallback = fit(Image("prompt-hd.png"), 2400);
 } else {
   wm_img = fit(Image("wordmark.png"), 1200);
@@ -182,6 +182,14 @@ bullet_text.SetOpacity(0);
 message_sprite = Sprite();
 message_sprite.SetOpacity(0);
 message_text = "";
+
+# Prompt and message text grow with the screen (the label plugin's default is
+# 12 pt on every screen, which a 4K panel shows at half the size of a 1080p
+# one). label-freetype honours only the size in "Family Size".
+tsize = Math.Int(12 * h / 1200 + 0.5);
+if (tsize < 12) { tsize = 12; }
+if (tsize > 28) { tsize = 28; }
+text_font = "Sans " + tsize;
 
 pw_target = 0; pw_p = 0;               # 0 = splash, 1 = password prompt
 msg_target = 0; msg_p = 0;             # progress of each transition, 0..1
@@ -306,7 +314,7 @@ fun display_password (prompt, bullets) {
   if (!global.prompt_ready || prompt != global.prompt_text) {
     global.prompt_ready = 1;
     global.prompt_text = prompt;
-    local.pimg = Image.Text(prompt, 0.824, 0.839, 0.871);
+    local.pimg = Image.Text(prompt, 0.824, 0.839, 0.871, 1, text_font);
     # No label plugin draws a 0x0 image; say something rather than nothing.
     if (!local.pimg || local.pimg.GetWidth() < 1) { local.pimg = prompt_fallback; }
     prompt_sprite.SetImage(local.pimg);
@@ -349,7 +357,7 @@ fun message (text) {
     return;
   }
   global.message_text = text;
-  local.mimg = Image.Text(text, 0.62, 0.66, 0.72);
+  local.mimg = Image.Text(text, 0.62, 0.66, 0.72, 1, text_font);
   message_sprite.SetImage(local.mimg);
   message_sprite.SetPosition(cx - Math.Int(local.mimg.GetWidth() / 2), msg_y, 22);
   global.msg_target = 1;
