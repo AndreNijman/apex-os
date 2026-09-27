@@ -2840,21 +2840,25 @@ RUN set -eux; \
         --verify-config --config "$cfg/hyprland.lua" | grep -q 'config ok'; \
     rm -rf "$cfg" "$runtime"
 
-# The bind options the migration turned on, asserted because both are silent
-# when wrong. `{ mouse = true }` is accepted by 0.56.2 and does NOTHING — the
-# resulting keybind reports mouse=false, drag=false — and upstream's own
-# /usr/share/hypr/hyprland.lua still uses it, so it is the exact thing a future
-# edit would copy in. `{ drag = true }` is what makes SUPER+drag move a window.
+# SUPER+drag move/resize, asserted because it is silent when wrong. This stanza
+# used to REQUIRE `{ drag = true }` and forbid `{ mouse = true }`, and had it
+# backwards: `drag = true` forces `release = true`, so the bind fires only on
+# button-up and SUPER+drag moves nothing. `hyprctl binds -j` reports mouse=false
+# for both forms, which is what was misread as "`mouse = true` does nothing".
+# Measured 2026-09-27 in a nested 0.56.2 with a virtual pointer holding SUPER:
+# `mouse = true` (upstream's own form) floats the window and follows the
+# pointer, `drag = true` leaves it where it was.
 RUN set -eux; \
-    grep -q 'drag = true' /usr/share/apex/hypr/apex/keybindings.lua; \
-    # Executable Lua only, never a comment. The three lines that document WHY
-    # `{ mouse = true }` is wrong live in keybindings.lua and contain the exact
-    # string this forbids, so a plain `grep -r` matched the stanza's own
-    # explanation and the step could only ever fail. That is the third
-    # assertion of this shape on this branch -- 706489ec was the polkit one --
-    # and it is what stopped `base` at step 113 of 151 after the nft fix got it
-    # that far. A comment line is one whose first non-blank character is `-`.
-    ! grep -rqE '^[[:space:]]*[^-[:space:]].*mouse = true' /usr/share/apex/hypr/
+    grep -qE '^bind\(mod, "mouse:272", hl\.dsp\.window\.drag\(\), +\{ mouse = true' \
+        /usr/share/apex/hypr/apex/keybindings.lua; \
+    grep -qE '^bind\(mod, "mouse:273", hl\.dsp\.window\.resize\(\), +\{ mouse = true' \
+        /usr/share/apex/hypr/apex/keybindings.lua; \
+    # Executable Lua only, never a comment: keybindings.lua explains the trap
+    # and names `drag = true` while doing it, and a plain `grep -r` matching a
+    # stanza's own explanation is how 43d98f10 stopped `base` at step 113 of
+    # 151. A comment line is one whose first non-blank character is `-`.
+    if grep -rqE '^[[:space:]]*[^-[:space:]].*mouse:27[23].*drag = true' /usr/share/apex/hypr/ \
+        ; then echo "FATAL: a mouse drag bind uses { drag = true }, which fires only on button-up"; exit 1; fi
 
 # The same guard for niri, which had none because it has no APEX template to
 # grep: niri's config is seeded from niri's OWN default and the APEX additions

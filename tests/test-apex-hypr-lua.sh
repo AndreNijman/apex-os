@@ -178,21 +178,26 @@ check_bind "the mouse drag bind is registered"    64 "mouse:272"
 check_bind "a bare XF86 media key is bound"        0 XF86AudioRaiseVolume
 
 # bindm/bindel semantics survived the move to Lua options. `hyprctl binds -j`
-# spells the repeat flag "repeat", and exposes no "drag" field at all — a drag
-# bind shows up as release:true, which is the half of `{ drag = true }` that is
-# observable from here. The Lua handle reports drag=true directly; this is the
-# compositor-side confirmation that the option was not silently dropped, which
-# is exactly what `{ mouse = true }` does.
+# spells the repeat flag "repeat".
+#
+# The mouse drag binds must be PRESS binds: release:false. This used to assert
+# the opposite, and so enforced the bug it should have caught. window.drag() and
+# window.resize() start on button-down and end the move themselves; a bind with
+# release:true (what `{ drag = true }` produces) fires only on button-up, and
+# SUPER+drag moves nothing. Measured 2026-09-27 in a nested 0.56.2 with a
+# virtual pointer holding SUPER: release:true moved no window, release:false
+# floated it and followed the pointer. `mouse` reads false for both, so it
+# tells them apart no better than the file does; `release` is the observable.
 if hc binds -j | python3 -c '
 import json, sys
 binds = json.load(sys.stdin)
-drag = [b for b in binds if b.get("key") == "mouse:272"]
+drag = [b for b in binds if b.get("key") in ("mouse:272", "mouse:273")]
 vol  = [b for b in binds if b.get("key") == "XF86AudioRaiseVolume"]
-sys.exit(0 if drag and drag[0].get("release")
+sys.exit(0 if len(drag) == 2 and not any(b.get("release") for b in drag)
                 and vol and vol[0].get("repeat") and vol[0].get("locked") else 1)'; then
-    ok "drag/locked/repeat reached the compositor, not just the file"
+    ok "the mouse drag binds fire on press, and locked/repeat reached the compositor"
 else
-    bad "drag/locked/repeat reached the compositor, not just the file"
+    bad "the mouse drag binds fire on press, and locked/repeat reached the compositor"
 fi
 
 sec "the live-change path is hyprctl eval, because keyword is dead under Lua"
