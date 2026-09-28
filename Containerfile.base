@@ -3712,6 +3712,58 @@ RUN set -eux; \
     systemctl enable greetd.service; \
     systemctl set-default graphical.target
 
+# ── Stage 6y: the first boot after APEX-OS ────────────────────────────────── (rime-rename: keep)
+# Every machine in the field ran APEX and wrote its state under that name:
+# /var/lib/apex (packages, the boot-migrate phase, lid, AI models, channel),
+# /var/lib/apex-secretd, /var/lib/apex-greet, /etc/apex, and systemd links
+# naming apex-* units. Every service in this image reads the new names, and
+# systemd-tmpfiles would create them EMPTY at the first boot, so a machine
+# that updated would come up looking freshly installed — and katana, whose
+# boot-migrate phase says `failed`, would try the systemd-boot move again.
+#
+# rime-migrate-from-apex renames that state once (rename(2), never a copy),
+# leaves each old path as a link to the new one, and carries edited /etc
+# files and old-name enablement over. Its unit is ordered before tmpfiles,
+# sysinit.target and rime-firewall, and is enabled STATICALLY from
+# /usr/lib/systemd/system/sysinit.target.wants: the step every later boot
+# depends on must not be something an /etc merge can drop. Here, below the
+# static payload and above the binaries, because it is new in this release and
+# will be tuned; an edit costs the layers under it, not eighty.
+# tests/test-rime-migrate-from-apex.sh runs the script against APEX-shaped
+# fixture roots.
+COPY --chmod=0755 files/system/libexec/rime-migrate-from-apex \
+     /usr/libexec/rime-migrate-from-apex
+COPY files/system/units/rime-migrate-from-apex.service \
+     /usr/lib/systemd/system/rime-migrate-from-apex.service
+RUN set -eux; \
+    bash -n /usr/libexec/rime-migrate-from-apex; \
+    mkdir -p /usr/lib/systemd/system/sysinit.target.wants; \
+    ln -sf ../rime-migrate-from-apex.service \
+        /usr/lib/systemd/system/sysinit.target.wants/rime-migrate-from-apex.service; \
+    test -f /usr/lib/systemd/system/sysinit.target.wants/rime-migrate-from-apex.service; \
+    grep -qE '^Before=.*systemd-tmpfiles-setup[.]service' \
+        /usr/lib/systemd/system/rime-migrate-from-apex.service \
+        || { echo "FATAL: the migration must run before tmpfiles creates the new directories empty"; exit 1; }; \
+    grep -qE '^Before=.*rime-firewall[.]service' \
+        /usr/lib/systemd/system/rime-migrate-from-apex.service \
+        || { echo "FATAL: the migration must run before rime-firewall reads /etc/rime/firewall.d"; exit 1; }; \
+    # A dry run over an empty root must say nothing and change nothing: the
+    # script runs on every boot of every machine, most of which have nothing
+    # left to move.
+    _mr="$(mktemp -d)"; \
+    out="$(/usr/libexec/rime-migrate-from-apex --root "${_mr}" --dry-run)"; \
+    test -z "${out}"; \
+    rm -rf "${_mr}"; \
+    # The one move that decides whether katana stays bootable, on the
+    # image's own tools (mv --no-copy, stat, find), in a throwaway root.
+    _mr="$(mktemp -d)"; \
+    mkdir -p "${_mr}/var/lib/apex/boot-migrate" "${_mr}/etc"; : 'rime-rename: keep'; \
+    printf failed > "${_mr}/var/lib/apex/boot-migrate/phase"; : 'rime-rename: keep'; \
+    /usr/libexec/rime-migrate-from-apex --root "${_mr}"; \
+    test "$(cat "${_mr}/var/lib/rime/boot-migrate/phase")" = failed; \
+    test "$(readlink "${_mr}/var/lib/apex")" = rime; : 'rime-rename: keep'; \
+    rm -rf "${_mr}"
+
 # ── Stage 6z: rimed, rime, rime-agentd, rime-secretd and rime-aid ───────────
 # LAST, and deliberately so. These are the most volatile artefacts in the image
 # — every rimed commit changes them — and `podman build --cache-to` pushes each

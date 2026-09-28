@@ -1,0 +1,478 @@
+#!/usr/bin/env bash
+# ─────────────────────────────────────────────────────────────────────────────
+#  rime-migrate-from-apex — the first boot of Rime OS on a machine that ran
+#  APEX-OS. Moves the system state that was written under the old name to the
+#  new one, once, and leaves the old path pointing at the new.  (rime-rename: keep)
+#
+#  Run by rime-migrate-from-apex.service early in boot, before systemd-tmpfiles
+#  creates the new directories empty and before anything that reads them
+#  (rimed, rime-secretd, rime-lid, rime-firewall, the greeter, rime-pkg's
+#  rebuild, rime-boot-migrate's confirm). It runs on every boot and does
+#  nothing once there is nothing left to move.
+#
+#  ── what moves, and how ──
+#
+#    /var/lib/apex*          -> /var/lib/rime*      (apex, apex-secretd,
+#                                                    apex-greet, apex-backup,
+#                                                    apex-debrand, apex-fleet,
+#                                                    apexos, and any other)
+#    /var/usrlocal/lib/apex-appimage -> rime-appimage (installed AppImages)
+#    /var/lib/flatpak/.apex-flathub-added, .apex-flatpaks-installed
+#                                                 -> the .rime- markers
+#    /etc/apex*              -> /etc/rime*          (apex, apex-greet, ...)
+#    an edited copy of an image drop-in whose name changed (sudoers.d,
+#    profile.d, NetworkManager/conf.d, security/limits.d, dconf, fastfetch)
+#                            -> the new name
+#    systemd enablement in /etc/systemd/{system,user}: wants/requires links,
+#    masks and drop-in directories under an old unit name -> the new name
+#
+#  A move is rename(2) on one filesystem and never a copy: the secret store,
+#  the model blobs and the package cache are moved, not duplicated, and a
+#  source on another filesystem (a mount point) is reported and left alone.
+#  The old path becomes a relative symlink to the new one, so a script, a
+#  unit or a rollback to the APEX image that still names it finds the same
+#  data. (bootc rollback shares /var: the old image then reads and writes the
+#  moved state through that link.)
+#
+#  ── when the new path already exists ──
+#
+#  systemd-tmpfiles creates /var/lib/rime, /var/lib/rime/pkg and
+#  /var/lib/rime-greet at every boot. The unit is ordered before it, but a boot
+#  where this script did not run (it crashed, or was masked) leaves exactly
+#  those empty directories behind, and "the target does not exist" would then
+#  be false for ever. So a target that exists is MERGED: every entry the new
+#  tree lacks is moved in, directories are merged recursively, and on a clash
+#  the OLD entry wins — it is the machine's real state, the new one is at most
+#  a boot old. The displaced new entry is kept beside it as
+#  <name>.rime-migrate-displaced, never deleted, unless it is byte-identical
+#  (dropped as a duplicate) or, under /etc, identical to the image default in
+#  /usr/etc (which ostree can recreate).
+#
+#  Under /etc this is also the rule the ostree merge needs: an image default
+#  the user never edited does not survive an update that renames it — the
+#  3-way merge drops it — so whatever is still at an old /etc path was edited
+#  or added by the user, and it must win over the new image's default.
+#
+#  ── the one file that must not be lost ──
+#
+#  /var/lib/apex/boot-migrate/phase. A machine whose systemd-boot trial failed
+#  (katana: `failed`) must keep that phase, or rime-boot-migrate would treat it
+#  as never migrated, try again, and strand it the way it was stranded on
+#  2026-09-26. It moves with its directory; the value is read before and
+#  compared after, and a difference is an error in the journal.
+#
+#  ── what does not move ──
+#
+#  /var/lib/extensions/apex-user.raw: its name must match the
+#  extension-release file inside it, so rime-pkg adopts it as the current
+#  extension and writes rime-user.raw on its next rebuild. Home directories:
+#  the per-user state moves at login, not here. A full copy of an old unit
+#  under /etc/systemd (`systemctl edit --full`): it is a snapshot of the OLD
+#  unit, so promoting it over the new one would roll that unit back; it is
+#  left where it is, still working through the old-name alias, and named in
+#  the journal.
+#
+#  Usage:  rime-migrate-from-apex [--root DIR] [--dry-run]
+#
+#  --root runs against a fixture tree (tests/test-rime-migrate-from-apex.sh);
+#  --dry-run prints every action and changes nothing. Exit 0 when everything
+#  that needed moving moved, 1 when something was left behind (the journal
+#  names it). A failure never stops the boot: nothing requires this unit.
+# ─────────────────────────────────────────────────────────────────────────────
+set -uo pipefail
+
+# The one place the old name is spelled. Every path below is derived from it.
+readonly OLD=apex   # rime-rename: keep (the name the state on disk was written under)
+readonly NEW=rime
+readonly SUFFIX_DISPLACED=.rime-migrate-displaced
+
+ROOT=/
+DRY=0
+while [ $# -gt 0 ]; do
+    case "$1" in
+        --root) ROOT="${2:?--root needs a directory}"; shift 2 ;;
+        --root=*) ROOT="${1#--root=}"; shift ;;
+        --dry-run) DRY=1; shift ;;
+        -h|--help) sed -n '2,/^# ─.*$/{/^# ─/d;s/^#  \{0,1\}//;p}' "$0" | sed -n '1,80p'; exit 0 ;;
+        *) printf 'rime-migrate-from-apex: unknown argument %s\n' "$1" >&2; exit 2 ;;
+    esac
+done
+ROOT="${ROOT%/}"
+[ -d "${ROOT:-/}" ] || { printf 'rime-migrate-from-apex: no such root %s\n' "$ROOT" >&2; exit 2; }
+
+errors=0
+actions=()
+
+say()    { printf 'rime-migrate-from-apex: %s\n' "$*"; }
+record() { actions+=("$*"); say "$*"; }
+problem(){ errors=$((errors + 1)); printf 'rime-migrate-from-apex: LEFT BEHIND: %s\n' "$*" >&2; actions+=("LEFT BEHIND: $*"); }
+
+# The path as the running system names it, for messages: the fixture prefix is
+# noise in a journal line.
+show() { local p="$1"; [ -n "$ROOT" ] && p="${p#"$ROOT"}"; printf '%s' "${p:-/}"; }
+
+# The same name with the old prefix replaced. Only a LEADING match: an entry
+# that merely contains the word elsewhere is not one of ours.
+new_name() {
+    local b="$1"
+    case "$b" in
+        "$OLD"*) printf '%s%s' "$NEW" "${b#"$OLD"}" ;;
+        *) printf '%s' "$b" ;;
+    esac
+}
+
+exists() { [ -e "$1" ] || [ -L "$1" ]; }
+same_fs() { [ "$(stat -c %d -- "$1")" = "$(stat -c %d -- "$2")" ]; }
+
+# rename(2), never a copy. `--no-copy` makes mv fail rather than fall back to
+# copy-and-delete across filesystems; the device check before it is what
+# explains the refusal.
+move() {
+    local src="$1" dst="$2"
+    if ! same_fs "$src" "$(dirname -- "$dst")"; then
+        problem "$(show "$src") is on a different filesystem from $(show "$(dirname -- "$dst")") (a mount point?); move it by hand"
+        return 1
+    fi
+    if [ "$DRY" = 1 ]; then
+        record "would move $(show "$src") -> $(show "$dst")"
+        return 0
+    fi
+    # The plain mv is for a coreutils without --no-copy; the device check above
+    # already refused the case where it would copy.
+    if mv -T --no-copy -- "$src" "$dst" 2>/dev/null || { ! exists "$dst" && mv -T -- "$src" "$dst"; }; then
+        record "moved $(show "$src") -> $(show "$dst")"
+        return 0
+    fi
+    problem "could not move $(show "$src") -> $(show "$dst")"
+    return 1
+}
+
+# A relative link from the old name to the new one, in the same directory.
+compat_link() {
+    local old="$1" new="$2"
+    if [ "$DRY" = 1 ]; then
+        record "would link $(show "$old") -> $(basename -- "$new")"
+        return 0
+    fi
+    exists "$old" && return 0
+    if ln -s -- "$(basename -- "$new")" "$old"; then
+        record "linked $(show "$old") -> $(basename -- "$new")"
+    else
+        problem "could not create the compatibility link $(show "$old")"
+    fi
+}
+
+# A new entry is about to be replaced by the old one. Keep it unless keeping
+# it is pointless: byte-identical to the old one, or (under /etc) identical to
+# the image default ostree can recreate from /usr/etc.
+displace() {
+    local src="$1" dst="$2" scope="$3" rel spare
+    if [ -f "$src" ] && [ -f "$dst" ] && [ ! -L "$src" ] && [ ! -L "$dst" ] && cmp -s -- "$src" "$dst"; then
+        if [ "$DRY" = 1 ]; then record "would drop $(show "$src"), identical to $(show "$dst")"; return 0; fi
+        rm -f -- "$src" && record "dropped $(show "$src"): identical to $(show "$dst")"
+        return 1   # nothing left to move
+    fi
+    if [ "$scope" = etc ] && [ -f "$dst" ] && [ ! -L "$dst" ]; then
+        rel="${dst#"$ROOT"/etc/}"
+        if [ -f "$ROOT/usr/etc/$rel" ] && cmp -s -- "$dst" "$ROOT/usr/etc/$rel"; then
+            if [ "$DRY" = 1 ]; then record "would replace the image default $(show "$dst") with the edited $(show "$src")"; return 0; fi
+            rm -f -- "$dst" && record "the edited $(show "$src") replaces the image default $(show "$dst")"
+            return 0
+        fi
+    fi
+    spare="${dst}${SUFFIX_DISPLACED}"
+    [ -e "$spare" ] || [ -L "$spare" ] && spare="${dst}${SUFFIX_DISPLACED}.$(date +%s).$$"
+    if [ "$DRY" = 1 ]; then record "would keep $(show "$dst") as $(show "$spare") and move the old one in"; return 0; fi
+    if mv -T -- "$dst" "$spare"; then
+        record "kept the newer $(show "$dst") as $(show "$spare"); the older one wins"
+        return 0
+    fi
+    problem "could not set $(show "$dst") aside"
+    return 2
+}
+
+# Move every entry of the directory $1 into the directory $2. $3 is the scope
+# (var or etc), which only changes what displace() may throw away.
+merge_into() {
+    local src="$1" dst="$2" scope="$3" e s d rc
+    local -a entries=()
+    mapfile -d '' -t entries < <(find "$src" -mindepth 1 -maxdepth 1 -printf '%f\0' 2>/dev/null)
+    for e in "${entries[@]}"; do
+        s="$src/$e"; d="$dst/$e"
+        if ! exists "$d"; then
+            move "$s" "$d"
+        elif [ -d "$s" ] && [ ! -L "$s" ] && [ -d "$d" ] && [ ! -L "$d" ]; then
+            merge_into "$s" "$d" "$scope"
+            [ "$DRY" = 1 ] || rmdir -- "$s" 2>/dev/null || true
+        else
+            displace "$s" "$d" "$scope"; rc=$?
+            if [ "$rc" = 0 ] && [ "$DRY" = 0 ]; then move "$s" "$d"; fi
+        fi
+    done
+}
+
+# One tree: $1 (old) becomes $2 (new), with $1 left as a link to $2.
+migrate_tree() {
+    local old="$1" new="$2" scope="$3"
+    exists "$old" || return 0
+    if [ -L "$old" ]; then
+        # Our own link from an earlier boot names the new entry by its base
+        # name. Anything else is the owner's: /var/lib/apex pointed at a bigger
+        # disk, say. The new name then gets the same link, so it reaches the
+        # same data instead of an empty directory tmpfiles would create.
+        [ "$(readlink -- "$old")" = "$(basename -- "$new")" ] && return 0
+        exists "$new" && return 0
+        if [ "$DRY" = 1 ]; then record "would link $(show "$new") to where $(show "$old") points"; return 0; fi
+        if cp -P -- "$old" "$new"; then
+            record "linked $(show "$new") -> $(readlink -- "$new") (where $(show "$old") points)"
+        else
+            problem "could not copy the link $(show "$old") to $(show "$new")"
+        fi
+        return 0
+    fi
+    if [ -L "$new" ]; then
+        problem "$(show "$new") is a symlink; leaving $(show "$old") where it is"
+        return 0
+    fi
+    if [ -d "$old" ] && mountpoint -q -- "$old" 2>/dev/null; then
+        problem "$(show "$old") is a mount point; mount it at $(show "$new") instead"
+        return 0
+    fi
+    if ! exists "$new"; then
+        move "$old" "$new" && compat_link "$old" "$new"
+        return 0
+    fi
+    if [ -d "$old" ] && [ -d "$new" ]; then
+        merge_into "$old" "$new" "$scope"
+        if [ "$DRY" = 1 ]; then
+            record "would link $(show "$old") -> $(basename -- "$new") once it is empty"
+        elif rmdir -- "$old" 2>/dev/null; then
+            compat_link "$old" "$new"
+        else
+            problem "$(show "$old") still has entries after merging into $(show "$new")"
+        fi
+        return 0
+    fi
+    # Two plain files, or a file against a directory.
+    displace "$old" "$new" "$scope"
+    case $? in
+        0) if [ "$DRY" = 0 ]; then move "$old" "$new" && compat_link "$old" "$new"; fi ;;
+        1) compat_link "$old" "$new" ;;
+    esac
+}
+
+# ── /var ─────────────────────────────────────────────────────────────────────
+migrate_var() {
+    local lib="$ROOT/var/lib" p
+    [ -d "$lib" ] || return 0
+    for p in "$lib/$OLD"*; do
+        exists "$p" || continue
+        migrate_tree "$p" "$lib/$(new_name "$(basename -- "$p")")" var
+    done
+
+    # Installed AppImages: rime-pkg names the directory; the launchers and
+    # manifests written at install time name the old one, which the link keeps
+    # valid.
+    local ul="$ROOT/var/usrlocal/lib"
+    [ -d "$ul" ] && migrate_tree "$ul/$OLD-appimage" "$ul/$NEW-appimage" var
+
+    # The first-boot Flatpak markers. Moved, not recreated: a missing marker
+    # re-runs the preinstall, which reinstalls an app the user removed.
+    local fp="$ROOT/var/lib/flatpak" m
+    if [ -d "$fp" ]; then
+        for m in flathub-added flatpaks-installed; do
+            migrate_tree "$fp/.$OLD-$m" "$fp/.$NEW-$m" var
+        done
+    fi
+}
+
+# The greeter remembers the last session by its desktop-entry id, and three of
+# them were renamed (the labwc desktop, Gaming Mode, Safe Graphics). A stale id
+# is not an error to the greeter — it quietly falls back to the default — so
+# the preference would be lost without anyone seeing why.
+migrate_last_session() {
+    local f="$ROOT/var/lib/$NEW-greet/last-session" cur want
+    [ -f "$f" ] && [ ! -L "$f" ] || return 0
+    cur="$(tr -d '\n' < "$f" 2>/dev/null)"
+    case "$cur" in "$OLD"-*) ;; *) return 0 ;; esac
+    want="$NEW-${cur#"$OLD"-}"
+    [ -f "$ROOT/usr/share/wayland-sessions/$want.desktop" ] || return 0
+    if [ "$DRY" = 1 ]; then record "would remember the last session as $want (was $cur)"; return 0; fi
+    # Rewritten in place, so the file keeps greetd's ownership and mode.
+    if printf '%s' "$want" > "$f"; then
+        record "the greeter's last session is now $want (was $cur)"
+    else
+        problem "could not rewrite $(show "$f")"
+    fi
+}
+
+# ── /etc ─────────────────────────────────────────────────────────────────────
+migrate_etc() {
+    local etc="$ROOT/etc" p
+    [ -d "$etc" ] || return 0
+    for p in "$etc/$OLD"*; do
+        exists "$p" || continue
+        migrate_tree "$p" "$etc/$(new_name "$(basename -- "$p")")" etc
+    done
+
+    # Drop-ins the image ships under a name that changed. An edited copy of the
+    # old one is still here (the ostree merge keeps edits); the image's new one
+    # sits beside it, and both would be read — for NetworkManager, limits and
+    # dconf the later name wins, which is the image's, so the edit would be
+    # silently undone. The edited file takes the new name. Only when the image
+    # actually ships the new name: a file of the user's own that happens to
+    # contain the word is not ours. No link is left: a drop-in directory reads
+    # every name in it, and a link would load the same file twice.
+    local d f b n
+    for d in sudoers.d profile.d NetworkManager/conf.d security/limits.d \
+             dconf/db/local.d fastfetch; do
+        [ -d "$etc/$d" ] || continue
+        for f in "$etc/$d"/*"$OLD"*; do
+            [ -f "$f" ] && [ ! -L "$f" ] || continue
+            b="$(basename -- "$f")"
+            n="${b/$OLD/$NEW}"
+            [ -e "$ROOT/usr/etc/$d/$n" ] || continue
+            if [ -e "$etc/$d/$n" ]; then
+                displace "$f" "$etc/$d/$n" etc
+                case $? in 0) [ "$DRY" = 1 ] || move "$f" "$etc/$d/$n" ;; esac
+            else
+                move "$f" "$etc/$d/$n"
+            fi
+        done
+    done
+}
+
+# ── systemd enablement under /etc ────────────────────────────────────────────
+# The image ships the old unit names as aliases of the new ones, so every link
+# below already resolves and starts the right unit. Moving them to the new
+# names is what lets those aliases be dropped in a later release without
+# disabling anything.
+unit_template() {  # rime-foo@bar.service -> rime-foo@.service
+    local u="$1"
+    case "$u" in
+        *@*.*) printf '%s@.%s' "${u%%@*}" "${u##*.}" ;;
+        *) printf '%s' "$u" ;;
+    esac
+}
+
+# The file a link to unit $2 in scope $1 should point at, or nothing when the
+# image ships no such unit. An alias link is not a unit.
+unit_file() {
+    local scope="$1" u="$2" t lib
+    lib="$ROOT/usr/lib/systemd/$scope"
+    t="$(unit_template "$u")"
+    if [ -f "$lib/$u" ] && [ ! -L "$lib/$u" ]; then
+        printf '/usr/lib/systemd/%s/%s' "$scope" "$u"
+    elif [ -f "$lib/$t" ] && [ ! -L "$lib/$t" ]; then
+        printf '/usr/lib/systemd/%s/%s' "$scope" "$t"
+    fi
+}
+
+migrate_units_scope() {
+    local scope="$1" dir="$ROOT/etc/systemd/$1" l b n target f dep
+    [ -d "$dir" ] || return 0
+
+    # Enablement: <target>.wants/, .requires/ and .upholds/ links.
+    for dep in "$dir"/*.wants "$dir"/*.requires "$dir"/*.upholds; do
+        [ -d "$dep" ] || continue
+        for l in "$dep/$OLD"*; do
+            [ -L "$l" ] || continue
+            b="$(basename -- "$l")"
+            n="$(new_name "$b")"
+            target="$(unit_file "$scope" "$n")"
+            [ -n "$target" ] || continue   # not one of the image's units
+            if ! exists "$dep/$n"; then
+                if [ "$DRY" = 1 ]; then
+                    record "would enable $scope $n in $(basename -- "$dep") (was $b)"
+                    continue
+                fi
+                if ! ln -s -- "$target" "$dep/$n"; then
+                    problem "could not enable $n in $(show "$dep")"
+                    continue
+                fi
+                record "enabled $scope $n in $(basename -- "$dep") (was $b)"
+            fi
+            if [ "$DRY" = 1 ]; then continue; fi
+            rm -f -- "$l" && record "removed the old-name link $(show "$l")"
+        done
+    done
+
+    for l in "$dir/$OLD"*; do
+        exists "$l" || continue
+        b="$(basename -- "$l")"
+        n="$(new_name "$b")"
+        if [ -L "$l" ] && [ "$(readlink -- "$l")" = /dev/null ]; then
+            # A mask. `systemctl mask apex-aid` meant "never run this", and it
+            # must still mean that under the new name.  (rime-rename: keep)
+            [ -n "$(unit_file "$scope" "$n")" ] || continue
+            if ! exists "$dir/$n"; then
+                if [ "$DRY" = 1 ]; then record "would mask $scope $n (was $b)"; continue; fi
+                ln -s /dev/null "$dir/$n" || { problem "could not mask $n"; continue; }
+                record "masked $scope $n (was $b)"
+            fi
+            [ "$DRY" = 1 ] || { rm -f -- "$l" && record "removed the old-name mask $(show "$l")"; }
+        elif [ -d "$l" ] && [ ! -L "$l" ] && [ "${b%.d}" != "$b" ]; then
+            # A drop-in directory (`systemctl edit apex-remoted`): deltas apply
+            # to the renamed unit exactly as they did to the old one.
+            [ -n "$(unit_file "$scope" "${n%.d}")" ] || continue
+            if [ "$DRY" = 1 ]; then record "would move the drop-ins in $(show "$l") to $n"; continue; fi
+            mkdir -p -- "$dir/$n" || { problem "could not create $(show "$dir/$n")"; continue; }
+            for f in "$l"/*; do
+                exists "$f" || continue
+                if exists "$dir/$n/$(basename -- "$f")"; then
+                    problem "$(show "$f") and $(show "$dir/$n/$(basename -- "$f")") both exist; the old one was left"
+                else
+                    move "$f" "$dir/$n/$(basename -- "$f")"
+                fi
+            done
+            rmdir -- "$l" 2>/dev/null || true
+        elif [ -f "$l" ] && [ ! -L "$l" ]; then
+            [ -n "$(unit_file "$scope" "$n")" ] || continue
+            say "NOTE: $(show "$l") is a full copy of the old $b unit. It still runs as $b; compare it with /usr/lib/systemd/$scope/$n before renaming it."
+        fi
+    done
+}
+
+# ── main ─────────────────────────────────────────────────────────────────────
+# Read only while the old tree is still a real directory, i.e. on the boot
+# that moves it; afterwards the old path is a link and there is nothing to
+# compare.
+phase_file="$ROOT/var/lib/$OLD/boot-migrate/phase"
+phase_before=""
+if [ ! -L "$ROOT/var/lib/$OLD" ] && [ -f "$phase_file" ]; then
+    phase_before="$(cat -- "$phase_file" 2>/dev/null)"
+fi
+
+migrate_var
+migrate_last_session
+migrate_etc
+migrate_units_scope system
+migrate_units_scope user
+
+if [ -n "$phase_before" ] && [ "$DRY" = 0 ]; then
+    phase_after="$(cat -- "$ROOT/var/lib/$NEW/boot-migrate/phase" 2>/dev/null)"
+    if [ "$phase_after" = "$phase_before" ]; then
+        record "rime-boot-migrate's phase is still '$phase_after'"
+    else
+        problem "rime-boot-migrate's phase was '$phase_before' and is now '${phase_after:-missing}'"
+    fi
+fi
+
+if [ "${#actions[@]}" -eq 0 ]; then
+    exit 0
+fi
+
+# A record that outlives the journal's retention, for `rime doctor` and for
+# whoever asks later what the first boot did.
+if [ "$DRY" = 0 ] && [ -d "$ROOT/var/lib/$NEW" ] && [ ! -L "$ROOT/var/lib/$NEW" ]; then
+    {
+        printf '== %s\n' "$(date -u +%Y-%m-%dT%H:%M:%SZ)"
+        printf '%s\n' "${actions[@]}"
+    } >> "$ROOT/var/lib/$NEW/migrate-from-apex.log" 2>/dev/null || true
+fi
+
+if [ "$errors" -gt 0 ]; then
+    say "$errors item(s) left behind; see the lines above"
+    exit 1
+fi
+exit 0

@@ -1,0 +1,48 @@
+# Rime OS — move the state an APEX-OS machine wrote under the old name.
+#
+# The first boot of Rime OS on a machine that ran APEX finds /var/lib/apex*,
+# /etc/apex* and old-name systemd links, and every Rime service reads the new
+# names. /usr/libexec/rime-migrate-from-apex renames them (one filesystem,
+# never a copy) and leaves each old path as a link to the new one. It runs on
+# every boot and is a no-op once there is nothing left to move.
+#
+# ORDERING IS THE WHOLE POINT:
+#   * before systemd-tmpfiles-setup.service, which creates /var/lib/rime,
+#     /var/lib/rime/pkg and /var/lib/rime-greet empty. The script merges into
+#     a target that exists, but the normal path should find none;
+#   * before sysinit.target, so before every ordinary service (rimed,
+#     rime-secretd, rime-lid, greetd and rime-greet-publish, rime-sysext-rebuild,
+#     rime-boot-migrate-confirm, the flatpak first-boot pair) — all of them are
+#     After=sysinit.target by default;
+#   * and explicitly before rime-firewall.service, which has
+#     DefaultDependencies=no and reads /etc/rime/firewall.d before the network
+#     comes up;
+#   * after local-fs.target, because /var has to be mounted.
+#
+# NOTHING REQUIRES THIS UNIT. A migration that leaves something behind exits 1,
+# which shows in `systemctl --failed` and the journal, and the boot carries on:
+# the old paths are still there and every old name still resolves through the
+# image's aliases. Enabled statically from /usr/lib/systemd/system/
+# sysinit.target.wants/, so no /etc state can switch it off; mask it to stop it.
+#
+# man:rime(1) · docs: files/system/libexec/rime-migrate-from-apex header
+[Unit]
+Description=Move APEX-OS state to its Rime OS names
+Documentation=man:rime(1)
+DefaultDependencies=no
+After=local-fs.target
+RequiresMountsFor=/var/lib /var/usrlocal
+Before=sysinit.target systemd-tmpfiles-setup.service rime-firewall.service
+Before=rimed.service rime-secretd.service rime-lid.service greetd.service
+Before=rime-greet-publish.service rime-sysext-rebuild.service
+Before=rime-boot-migrate-confirm.service rime-flathub-setup.service rime-flatpak-preinstall.service
+Before=shutdown.target
+Conflicts=shutdown.target
+
+[Service]
+Type=oneshot
+RemainAfterExit=yes
+ExecStart=/usr/libexec/rime-migrate-from-apex
+# A few renames and stats. A minute is generous and still bounds a hung
+# filesystem so the boot is not held.
+TimeoutStartSec=60
