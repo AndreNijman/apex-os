@@ -158,7 +158,7 @@ minutes.
 cosign verify-attestation \
   ghcr.io/andrenijman/rime-os@sha256:... \
   --type spdxjson \
-  --certificate-identity-regexp '^https://github\.com/AndreNijman/rime-os/\.github/workflows/build-image\.yml@' \
+  --certificate-identity-regexp '^https://github\.com/AndreNijman/(apex|rime)-os/\.github/workflows/build-image\.yml@' \
   --certificate-oidc-issuer https://token.actions.githubusercontent.com \
   | jq -r '.payload | @base64d | fromjson | .predicate.packages[] | "\(.name) \(.versionInfo)"'
 ```
@@ -278,7 +278,7 @@ refusing every machine's next update.
 
 ## The rename to Rime OS
 
-Rime becomes Rime OS, and the repository moves from `AndreNijman/rime-os` to
+APEX becomes Rime OS, and the repository moves from `AndreNijman/apex-os` to <!-- rime-rename: keep -->
 `AndreNijman/rime-os`. A Sigstore identity names the repository, so every image
 built after the rename carries a new signer. `rime` accepts both identities by
 default (`EXPECTED_SIGNER` and `RENAMED_SIGNER` in `rimed/rime/src/trust.rs`),
@@ -287,7 +287,7 @@ to that release keeps updating across the rename. An image signed before it,
 and a rollback to one, still verifies.
 
 The image name moves too, and GHCR does not redirect a renamed package. Every
-published build goes out under both `ghcr.io/andrenijman/rime-os` and
+published build goes out under both `ghcr.io/andrenijman/apex-os` and <!-- rime-rename: keep -->
 `ghcr.io/andrenijman/rime-os`, with the same digest, a signature and attestation
 made under each name, and the same tags. On `rime update`, a machine that tracks
 a tag of the old name checks whether the new name serves that tag. If it does,

@@ -25,7 +25,7 @@ from Settings needs no setup step, and the unit's `ConditionUser=!@system`
 keeps it off system accounts (the login screen's `greetd` user, and a lingering
 root). The service pulls in the agent runtime through
 `Wants=rime-agentd.service`. It uses Rime's relay,
-`wss://rime-relay.andrenijman.com`, so a paired phone reaches the machine from
+`wss://apex-relay.andrenijman.com`, so a paired phone reaches the machine from <!-- rime-rename: keep -->
 any network. The relay carries encrypted bytes it cannot read, and sees both
 addresses and when and how much data moves (`rime remote status` prints this).
 For LAN-only, override `ExecStart=` with `systemctl --user edit rime-remoted`
@@ -56,7 +56,7 @@ never be talked into trusting a different machine.
 **The terminal prints no QR code.** No encoder is vendored in the CLI, and a
 wrong QR is worse than none: a phone scans it, fails, and the person concludes
 their camera is broken. The terminal prints the payload itself, an
-`rime-remote:` URI whose body is base64url of the compact-JSON offer, and a
+`apex-remote:` URI whose body is base64url of the compact-JSON offer, and a <!-- rime-rename: keep -->
 line pointing at Rime Settings → Pair a device, which draws the QR code. You
 can also paste the line into Rime Remote on the phone.
 
@@ -72,7 +72,7 @@ So
 rime remote pair --text > offer.txt
 ```
 
-leaves `offer.txt` holding exactly one line, the `rime-remote:` URI, with the
+leaves `offer.txt` holding exactly one line, the `apex-remote:` URI, with the <!-- rime-rename: keep -->
 explanation still on the terminal. That split makes the verb scriptable
 without a second output mode.
 

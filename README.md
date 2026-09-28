@@ -2,7 +2,7 @@
 
 Rime OS is an atomic Linux distribution built on **Fedora bootc** (OCI-native,
 image-based, transactional updates with rollback). Its desktop is
-[Rime Shell](https://github.com/AndreNijman/rime-shell) on Hyprland. The image
+[Rime Shell](https://github.com/AndreNijman/apex-shell) on Hyprland. The image <!-- rime-rename: keep: GitHub redirects the old repository name -->
 build vendors the shell into `/usr/share/rime-shell` instead of cloning it into
 your home directory, and **rimed**, a first-party system daemon, manages the
 machine.
@@ -27,9 +27,11 @@ key that only CI holds, so nobody can add one to a running machine under Secure
 Boot; userspace has no such limit. Every kernel module ships in the image, and
 everything else is a package.
 
-`ghcr.io/andrenijman/rime-os:rime` is the image. `:daily`, `:gaming-mesa` and
-`:gaming-nvidia` resolve to the same digest, so machines installed before the
-merge keep updating and their owners have nothing to do.
+`ghcr.io/andrenijman/rime-os:rime` is the image. `:apex`, `:daily`, `:gaming-mesa` <!-- rime-rename: keep -->
+and `:gaming-nvidia` resolve to the same digest, so machines installed before the
+merge keep updating and their owners have nothing to do. Every build is also
+published under the pre-rebrand name, `ghcr.io/andrenijman/apex-os`, with the <!-- rime-rename: keep -->
+same tags, for machines that have not moved to the new name yet.
 
 The "spark" logo is the mark, in chartreuse, with mono (black/white) variants
 for neutral contexts. See [docs/branding.md](docs/branding.md).
@@ -88,7 +90,7 @@ Allow about 30 minutes start to finish, most of it waiting.
 
 ### Step 1: Download
 
-From the [Releases page](https://github.com/AndreNijman/rime-os/releases), take
+From the [Releases page](https://github.com/AndreNijman/apex-os/releases), take <!-- rime-rename: keep: GitHub redirects the old repository name -->
 the ISO plus its `.sha256` file:
 
 | File | What it installs |
@@ -495,7 +497,7 @@ machines you have paired by scanning a QR code off their screen. There is no
 account and no server of ours in the middle.
 
 The APK goes to the same
-[Releases page](https://github.com/AndreNijman/rime-os/releases) as the ISO,
+[Releases page](https://github.com/AndreNijman/apex-os/releases) as the ISO, <!-- rime-rename: keep: GitHub redirects the old repository name -->
 under its own `android-v<version>` tags, with a `.sha256` beside it. Each release
 explains, for somebody who has never sideloaded an app, what Android will ask
 and how to answer it.
@@ -555,7 +557,7 @@ signing key: who holds it, why GitHub is not its backup, and how to rotate it.
 ## Status
 
 The latest release is **v2.1.0** (2026-09-26), on the
-[Releases page](https://github.com/AndreNijman/rime-os/releases).
+[Releases page](https://github.com/AndreNijman/apex-os/releases). <!-- rime-rename: keep: GitHub redirects the old repository name -->
 
 **The image and CI.** `Containerfile.kernel` → `Containerfile.core` →
 `Containerfile.base` → `Containerfile.rime`. Rime compiles its own CachyOS-based

@@ -1366,7 +1366,7 @@ sudo bootc status                   # note the booted and rollback deployments
 sudo ostree admin pin 0             # pin the current deployment before anything risky
 
 # ── 1. build a UKI from THIS machine's image, in the boot lab ──
-git clone https://github.com/AndreNijman/rime-os.git ~/build/rime-os
+git clone https://github.com/AndreNijman/apex-os.git ~/build/rime-os
 cd ~/build/rime-os
 podman build -t rime-bootlab -f bootlab/Containerfile .
 mkdir -p ~/bootlab-work
@@ -1397,6 +1397,8 @@ podman run --rm -v ~/bootlab-work:/work:z rime-bootlab -c '
       --variant "$(. /etc/os-release; echo "$VARIANT_ID")" \
       --sb-key /work/keys/sb/key.pem --sb-cert /work/keys/sb/cert.pem'
 ```
+
+(The repository's pre-rebrand name: GitHub redirects it after the rename.) <!-- rime-rename: keep -->
 
 `--sb-key`/`--sb-cert` are **your** key, from outside the repository. A private
 key never enters the tree, and `.gitignore` blocks the patterns.

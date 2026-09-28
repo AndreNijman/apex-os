@@ -856,7 +856,7 @@ In detail:
 - Capture runs entirely through plumbing against a temporary index, so your
   staged changes, your stash and your branch are untouched.
 - Undo takes a safety checkpoint **first**, so the undo is itself undoable.
-- Checkpoints live under `refs/rime/checkpoints/`, not `refs/heads/`, so they
+- Checkpoints live under `refs/apex/checkpoints/`, not `refs/heads/`, so they <!-- rime-rename: keep -->
   never show up as branches and a plain `git push` never sends them.
 
 Two boundaries, both on purpose:

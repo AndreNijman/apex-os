@@ -7,7 +7,7 @@ once installed is in `docs/remote.md`.
 
 ## Where a user gets it
 
-The [Releases page](https://github.com/AndreNijman/rime-os/releases), which is
+The [Releases page](https://github.com/AndreNijman/apex-os/releases), which is <!-- rime-rename: keep: GitHub redirects the old repository name -->
 already where `README.md` sends people for the netinstall ISO. The APK is the
 same kind of artefact as the ISO, the thing you fetch *before* you have a Rime
 machine to fetch it from, so it goes to the same place instead of to a registry
@@ -40,8 +40,10 @@ no registry and no channel tag, so it cannot move what a booted machine tracks.
 **The APK signing key** is what Android cares about. Android refuses an update
 signed by a different key than the installed app, so this key is the identity
 of the app on every phone that has it. It lives in four repository secrets
-(`RIME_KEYSTORE_BASE64`, `RIME_KEYSTORE_PASSWORD`, `RIME_KEY_ALIAS`,
-`RIME_KEY_PASSWORD`), and nothing about it is in this repository. The workflow
+(`APEX_KEYSTORE_BASE64`, `APEX_KEYSTORE_PASSWORD`, `APEX_KEY_ALIAS`, <!-- rime-rename: keep -->
+`APEX_KEY_PASSWORD`: they kept their names through the rebrand, because a <!-- rime-rename: keep -->
+secret's value cannot be read back to copy it), and nothing about it is in this
+repository. The workflow
 materialises it into a `0700` directory under `$RUNNER_TEMP`, `0600` on the
 file, validates it with `keytool -list` before starting the build, and `shred`s
 it afterwards in an `if: always()` step. That is the ritual `build-image.yml`
@@ -291,9 +293,9 @@ download:
 ## The signing key
 
 **The key exists.** Checked, not assumed, on 2026-09-28: `gh secret list -R
-AndreNijman/rime-os` lists `RIME_KEYSTORE_BASE64`, `RIME_KEYSTORE_PASSWORD`,
-`RIME_KEY_ALIAS` and `RIME_KEY_PASSWORD`, all set on 2026-09-20, beside
-`RIME_SB_CRT_B64` and `RIME_SB_KEY_B64`. Its certificate fingerprint is
+AndreNijman/apex-os` lists `APEX_KEYSTORE_BASE64`, `APEX_KEYSTORE_PASSWORD`, <!-- rime-rename: keep -->
+`APEX_KEY_ALIAS` and `APEX_KEY_PASSWORD`, all set on 2026-09-20, beside <!-- rime-rename: keep -->
+`APEX_SB_CRT_B64` and `APEX_SB_KEY_B64`. <!-- rime-rename: keep --> Its certificate fingerprint is
 published in `android/signing-certificate.sha256`, in `README.md` and in
 android-signing.md.
 

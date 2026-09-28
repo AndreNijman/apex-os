@@ -32,8 +32,10 @@ step exit code hours into a CI run:
 ```
 ssh katana
 mkdir -p ~/build && cd ~/build
-git clone https://github.com/AndreNijman/rime-os.git
+git clone https://github.com/AndreNijman/apex-os.git
 ```
+
+(The repository's pre-rebrand name: GitHub redirects it after the rename.) <!-- rime-rename: keep -->
 
 `core` is public, so pull it instead of spending 45 minutes rebuilding it:
 

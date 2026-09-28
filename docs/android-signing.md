@@ -97,13 +97,18 @@ checkout.
    password into a shell and from there into its history:
 
    ```
-   gh secret set RIME_KEYSTORE_BASE64   -R AndreNijman/rime-os < ~/rime-android-signing/keystore.base64
-   gh secret set RIME_KEYSTORE_PASSWORD -R AndreNijman/rime-os < ~/rime-android-signing/password.txt
-   gh secret set RIME_KEY_PASSWORD      -R AndreNijman/rime-os < ~/rime-android-signing/password.txt
-   printf '%s' 'rime-release' | gh secret set RIME_KEY_ALIAS -R AndreNijman/rime-os
+   gh secret set APEX_KEYSTORE_BASE64   -R AndreNijman/apex-os < ~/rime-android-signing/keystore.base64
+   gh secret set APEX_KEYSTORE_PASSWORD -R AndreNijman/apex-os < ~/rime-android-signing/password.txt
+   gh secret set APEX_KEY_PASSWORD      -R AndreNijman/apex-os < ~/rime-android-signing/password.txt
+   printf '%s' 'rime-release' | gh secret set APEX_KEY_ALIAS -R AndreNijman/apex-os
    ```
 
-   `RIME_KEY_PASSWORD` is the same value as `RIME_KEYSTORE_PASSWORD` on purpose.
+   The secret names and the repository are the pre-rebrand ones on purpose: <!-- rime-rename: keep -->
+   the secrets kept their names through the rename to Rime OS, because a
+   secret's value cannot be read back to copy it under a new name, and GitHub
+   redirects `AndreNijman/apex-os` once the repository is renamed. <!-- rime-rename: keep -->
+
+   `APEX_KEY_PASSWORD` is the same value as `APEX_KEYSTORE_PASSWORD` on purpose. <!-- rime-rename: keep -->
    Measured with OpenJDK 21's keytool: a PKCS12 keystore cannot hold two
    different passwords (*"Different store and key passwords not supported for
    PKCS12 KeyStores"*), and it ignores the one you gave it.
@@ -117,7 +122,7 @@ checkout.
 4. Dry-run the release before you ever cut one:
 
    ```
-   gh workflow run release-android.yml -R AndreNijman/rime-os -f dry_run=true
+   gh workflow run release-android.yml -R AndreNijman/apex-os -f dry_run=true
    ```
 
    Everything runs (version gate, signed build, signature verification,
