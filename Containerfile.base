@@ -442,7 +442,10 @@ RUN set -eux; \
     # StateDirectoryMode that drifted to 0755 would leave every credential
     # readable by the account it belongs to, which is the whole of P0-002's
     # first criterion, and nothing at runtime would complain.
-    grep -q '^StateDirectory=rime-secretd$' /usr/lib/systemd/system/rime-secretd.service; \
+    # The directory keeps its APEX name (see the unit): a rollback to an APEX
+    # image starts apex-secretd, which refuses a symlinked state directory.
+    # rime-rename: keep
+    grep -q '^StateDirectory=apex-secretd:rime-secretd$' /usr/lib/systemd/system/rime-secretd.service; \
     grep -q '^StateDirectoryMode=0700$' /usr/lib/systemd/system/rime-secretd.service; \
     # And it must NOT have been given a User=: dropping to the owner for the
     # git child needs CAP_SETUID, which a non-root unit does not have, and the
@@ -3733,7 +3736,9 @@ RUN set -eux; \
 #
 # rime-migrate-from-apex renames that state once (rename(2), never a copy),
 # leaves each old path as a link to the new one, and carries edited /etc
-# files and old-name enablement over. Its unit is ordered before tmpfiles,
+# files and old-name enablement over. The secret store is the exception: it
+# stays at /var/lib/apex-secretd and systemd links the new name to it (see
+# rime-secretd.service; rime-rename: keep). The migration's unit is ordered before tmpfiles,
 # sysinit.target and rime-firewall, and is enabled STATICALLY from
 # /usr/lib/systemd/system/sysinit.target.wants: the step every later boot
 # depends on must not be something an /etc merge can drop. Here, below the

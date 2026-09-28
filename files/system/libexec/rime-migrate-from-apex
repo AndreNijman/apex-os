@@ -12,10 +12,10 @@
 #
 #  ── what moves, and how ──
 #
-#    /var/lib/apex*          -> /var/lib/rime*      (apex, apex-secretd,
-#                                                    apex-greet, apex-backup,
-#                                                    apex-debrand, apex-fleet,
-#                                                    apexos, and any other)
+#    /var/lib/apex*          -> /var/lib/rime*      (apex, apex-greet,
+#                                                    apex-backup, apex-debrand,
+#                                                    apex-fleet, apexos, and any
+#                                                    other but apex-secretd)
 #    /var/usrlocal/lib/apex-appimage -> rime-appimage (installed AppImages)
 #    /var/lib/flatpak/.apex-flathub-added, .apex-flatpaks-installed
 #                                                 -> the .rime- markers
@@ -63,6 +63,11 @@
 #  compared after, and a difference is an error in the journal.
 #
 #  ── what does not move ──
+#
+#  /var/lib/apex-secretd, the credential store: an APEX image's
+#  apex-secretd.service refuses a symlinked state directory, so a rollback
+#  needs the real directory at the old name. /var/lib/rime-secretd becomes a
+#  link to it instead (see keep_secret_store).
 #
 #  /var/lib/extensions/apex-user.raw: its name must match the
 #  extension-release file inside it, so rime-pkg adopts it as the current
@@ -263,13 +268,53 @@ migrate_tree() {
 }
 
 # ── /var ─────────────────────────────────────────────────────────────────────
+# The secret store is the one state directory that keeps its old name. The APEX
+# image's apex-secretd.service declares StateDirectory=apex-secretd, and systemd
+# will not start a unit whose state directory is a symlink (238/STATE_DIRECTORY,
+# "Too many levels of symbolic links"): moving the store would leave a rollback
+# to APEX with no credential broker, measured in a VM. rime-secretd.service
+# declares StateDirectory=apex-secretd:rime-secretd instead, so systemd itself
+# makes /var/lib/rime-secretd a link to the old directory.
+#
+# A Rime test build moved the store before this rule existed, leaving the real
+# directory at rime-secretd and our own link at apex-secretd. That is turned
+# back round here; left alone, systemd would find a real directory where it
+# wants to create its link. A real rime-secretd beside a real apex-secretd is
+# merged into it the same way any other target is (the rime-secretd entry wins a
+# clash; the displaced one is kept beside it).
+keep_secret_store() {
+    local lib="$1"
+    local old="$lib/$OLD-secretd" new="$lib/$NEW-secretd"
+    if [ -L "$old" ] && [ "$(readlink -- "$old")" = "$NEW-secretd" ] \
+        && [ -d "$new" ] && [ ! -L "$new" ]; then
+        if [ "$DRY" = 1 ]; then
+            record "would move the secret store $(show "$new") back to $(show "$old") and link $(show "$new") to it"
+            return 0
+        fi
+        if ! rm -f -- "$old"; then
+            problem "could not remove the link $(show "$old"); the secret store stays at $(show "$new")"
+            return 0
+        fi
+        record "removed the link $(show "$old") so the secret store can move back under it"
+    fi
+    migrate_tree "$new" "$old" var
+    # The new name, now rather than when rime-secretd first starts: the guest
+    # units' ReadWritePaths= and rime-guest-wipe name it. The text is the one
+    # systemd would write (relative), so its own step finds it already done.
+    if [ -d "$old" ] && [ ! -L "$old" ] && ! exists "$new"; then
+        compat_link "$new" "$old"
+    fi
+}
+
 migrate_var() {
     local lib="$ROOT/var/lib" p
     [ -d "$lib" ] || return 0
     for p in "$lib/$OLD"*; do
         exists "$p" || continue
+        [ "$(basename -- "$p")" = "$OLD-secretd" ] && continue   # keep_secret_store
         migrate_tree "$p" "$lib/$(new_name "$(basename -- "$p")")" var
     done
+    keep_secret_store "$lib"
 
     # Installed AppImages: rime-pkg names the directory; the launchers and
     # manifests written at install time name the old one, which the link keeps

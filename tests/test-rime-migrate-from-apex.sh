@@ -165,9 +165,13 @@ check_migrated() {
     is  "/var/lib/rime/pkg kept mode 0700"                   700 "$(stat -c %a "$R/var/lib/rime/pkg" 2>/dev/null)"
     is  "/var/lib/apex is a link to rime"                    rime "$(readlink "$R/var/lib/$O" 2>/dev/null)"
     is  "…and reads the same phase through it"               failed "$(cat "$R/var/lib/$O/boot-migrate/phase" 2>/dev/null)"
-    is  "the secret store moved"                             sealed "$(cat "$R/var/lib/rime-secretd/users/1000/store" 2>/dev/null)"
-    is  "…keeping mode 0700"                                 700 "$(stat -c %a "$R/var/lib/rime-secretd" 2>/dev/null)"
-    is  "apex-secretd is a link to rime-secretd"             rime-secretd "$(readlink "$R/var/lib/$O-secretd" 2>/dev/null)"
+    # The one tree that stays: APEX's apex-secretd.service refuses a symlinked
+    # StateDirectory, so a rollback needs the real directory at the old name.
+    is  "the secret store stays at its APEX path"           sealed "$(cat "$R/var/lib/$O-secretd/users/1000/store" 2>/dev/null)"
+    yes_ "…as a real directory (a link fails APEX's unit)"  "[ -d '$R/var/lib/$O-secretd' ] && [ ! -L '$R/var/lib/$O-secretd' ]"
+    is  "…keeping mode 0700"                                 700 "$(stat -c %a "$R/var/lib/$O-secretd" 2>/dev/null)"
+    is  "rime-secretd is the link systemd would make"        "$O-secretd" "$(readlink "$R/var/lib/rime-secretd" 2>/dev/null)"
+    is  "…and reads the same store through it"               sealed "$(cat "$R/var/lib/rime-secretd/users/1000/store" 2>/dev/null)"
     is  "the greeter's last user moved"                      andre "$(cat "$R/var/lib/rime-greet/last-user" 2>/dev/null)"
     is  "the last session is the renamed Gaming Mode"        rime-gaming "$(cat "$R/var/lib/rime-greet/last-session" 2>/dev/null)"
     yes_ "the published wallpaper moved"                     "[ -f '$R/var/lib/rime-greet/wallpapers/andre.jpg' ]"
@@ -221,6 +225,9 @@ is   "the migration exits 0"                    0 "$rc1"
 says "it says the phase survived"               "phase is still 'failed'" "$out1"
 says "it names the full unit copy it left"      "full copy of the old $O-firewall.service" "$out1"
 yes_ "it keeps a record under /var/lib/rime"    "grep -q 'moved /var/lib/$O -> /var/lib/rime' '$R1/var/lib/rime/migrate-from-apex.log'"
+# keep_secret_store would put a moved store back, so only the log shows a
+# loop that moved it anyway (there and back, two renames for nothing).
+is   "the store is never moved, not even there and back" "" "$(grep -F "moved /var/lib/$O-secretd" <<<"$out1")"
 check_migrated "$R1" "$inode"
 
 echo "── idempotent ───────────────────────────────────────────────────────"
@@ -266,6 +273,37 @@ is   "a fresh install exits 0"                           0 "$rc6"
 is   "…says nothing"                                     "" "$out6"
 is   "…and changes nothing"                              "$before6" "$(snapshot "$R4")"
 
+echo "== fixture 5: a Rime test build had already moved the secret store ======="
+# What the first Release B test image did, measured in a VM: the store at
+# rime-secretd and our own link at apex-secretd, which failed APEX's unit on
+# rollback (238/STATE_DIRECTORY) and would fail rime-secretd's colon form too.
+move_store_like_the_test_build() {
+    mv "$1/var/lib/$O-secretd" "$1/var/lib/rime-secretd" && ln -s rime-secretd "$1/var/lib/$O-secretd"
+}
+R5="$WORK/r5"; build_fixture "$R5"; move_store_like_the_test_build "$R5"
+inode5="$(stat -c %i "$R5/var/lib/$O/pkg/state.json")"
+store_ino="$(stat -c %i "$R5/var/lib/rime-secretd/users/1000/store")"
+out7="$(run "$R5")"; rc7=$?
+is   "putting the store back exits 0"                    0 "$rc7"
+says "it says so"                                        "so the secret store can move back under it" "$out7"
+check_migrated "$R5" "$inode5"
+is   "…by rename: the store file is the same inode"      "$store_ino" "$(stat -c %i "$R5/var/lib/$O-secretd/users/1000/store" 2>/dev/null)"
+before8="$(snapshot "$R5")"
+run "$R5" >/dev/null; is "a second run after putting it back changes nothing" "$before8" "$(snapshot "$R5")"
+
+echo "== fixture 6: a real rime-secretd beside the real store ==================="
+R6="$WORK/r6"; mkdir -p "$R6/var/lib"
+mkfile "$R6/var/lib/$O-secretd/users/1000/store"  'sealed'
+mkfile "$R6/var/lib/rime-secretd/users/1000/store" 'newer'
+mkfile "$R6/var/lib/rime-secretd/users/1001/store" 'only-here'
+chmod 0700 "$R6/var/lib/$O-secretd" "$R6/var/lib/rime-secretd"
+run "$R6" >/dev/null; rc8=$?
+is   "merging the two exits 0"                           0 "$rc8"
+is   "an entry only rime-secretd had is kept"            only-here "$(cat "$R6/var/lib/$O-secretd/users/1001/store" 2>/dev/null)"
+is   "on a clash the rime-secretd entry wins"            newer "$(cat "$R6/var/lib/$O-secretd/users/1000/store" 2>/dev/null)"
+is   "…and the other is kept beside it"                  sealed "$(cat "$R6/var/lib/$O-secretd/users/1000/store.rime-migrate-displaced" 2>/dev/null)"
+is   "rime-secretd ends as the link"                     "$O-secretd" "$(readlink "$R6/var/lib/rime-secretd" 2>/dev/null)"
+
 echo "== the unit ==============================================================="
 yes_ "ordered before systemd-tmpfiles-setup"   "grep -qE '^Before=.*\\bsystemd-tmpfiles-setup\\.service\\b' '$UNIT'"
 yes_ "ordered before sysinit.target"           "grep -qE '^Before=.*\\bsysinit\\.target\\b' '$UNIT'"
@@ -286,9 +324,10 @@ echo "== fails both ways: broken copies must be caught =========================
 # Each mutant is a copy of the SHIPPED script with one decision broken. The
 # fixture is rebuilt and the same assertions run; a mutant that passes them
 # means the suite would not notice that regression.
-mutant() {  # $1 = name, $2 = sed expression applied to the script
-    local name="$1" expr="$2" m="$WORK/mutant.sh" R="$WORK/m" before_f
+mutant() {  # $1 = name, $2 = sed expression applied to the script, $3 = extra fixture setup
+    local name="$1" expr="$2" setup="${3:-}" m="$WORK/mutant.sh" R="$WORK/m" before_f
     rm -rf "$R"; build_fixture "$R"
+    [ -n "$setup" ] && "$setup" "$R"
     sed -e "$expr" "$SCRIPT" > "$m"
     if cmp -s "$m" "$SCRIPT"; then bad "mutant: $name" "the sed changed nothing; the mutant tests nothing"; return; fi
     local ino; ino="$(stat -c %i "$R/var/lib/$O/pkg/state.json")"
@@ -308,6 +347,8 @@ mutant "copy instead of rename"          's/mv -T --no-copy -- "\$src" "\$dst" 2
 mutant "the old /var/lib/apex skipped"   's|^    for p in "\$lib/\$OLD"\*; do|    for p in "$lib/$OLD"-*; do|'
 mutant "the image default beats the edit" 's|^            rm -f -- "\$dst" \&\& record "the edited|            rm -f -- "$src" \&\& return 1; record "the edited|'
 mutant "enablement left under old names" 's/^migrate_units_scope system$/:/'
+mutant "the secret store's new name never made" 's/^    keep_secret_store "\$lib"$/    :/'
+mutant "a moved store left where it is"  's/^        if ! rm -f -- "\$old"; then/        if true; then/' move_store_like_the_test_build
 
 echo
 echo "── $pass passed, $fail failed"
