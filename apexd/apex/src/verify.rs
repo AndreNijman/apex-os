@@ -930,14 +930,15 @@ struct Candidate<'a> {
 
 /// Who this machine will accept a signature from.
 pub struct Expect {
-    pub signer: String,
+    /// Every identity accepted; a signature from any one of them verifies.
+    pub signers: Vec<String>,
     pub issuer: String,
 }
 
 fn verify_signed_bytes(roots: &Roots, work: &Path, c: &Candidate<'_>, want: &Expect) -> Verdict {
     let (leaf_pem, chain_pem, signature_b64, signed) =
         (c.leaf_pem, c.chain_pem, c.signature_b64, c.signed);
-    let (expect_signer, expect_issuer) = (want.signer.as_str(), want.issuer.as_str());
+    let expect_issuer = want.issuer.as_str();
     let leaf = work.join("leaf.pem");
     if let Err(e) = std::fs::write(&leaf, leaf_pem) {
         return Verdict::CouldNotRun(format!("{}: {e}", leaf.display()));
@@ -1051,9 +1052,10 @@ fn verify_signed_bytes(roots: &Roots, work: &Path, c: &Candidate<'_>, want: &Exp
             )
         }
     };
-    if signer != expect_signer {
+    if !want.signers.contains(&signer) {
         return Verdict::Failed(format!(
-            "signed by {signer}, and this machine expects {expect_signer}"
+            "signed by {signer}, and this machine expects {}",
+            want.signers.join(" or ")
         ));
     }
     let issuer = match issuer_from_openssl_text(&text.stdout) {
@@ -1082,12 +1084,12 @@ fn verify_signed_bytes(roots: &Roots, work: &Path, c: &Candidate<'_>, want: &Exp
 
 /// The identity and issuer this machine expects, and nothing inferred.
 pub fn expectations(roots: &Roots) -> Expect {
-    let signer = crate::trust::expected_signer(roots);
+    let signers = crate::trust::expected_signers(roots);
     let issuer = match roots.read_optional(ISSUER_OVERRIDE) {
         Ok(Some(s)) if !s.trim().is_empty() => s.trim().to_string(),
         _ => crate::trust::EXPECTED_ISSUER.to_string(),
     };
-    Expect { signer, issuer }
+    Expect { signers, issuer }
 }
 
 /// Who this machine will accept a ROLLOUT DOCUMENT from.
@@ -1103,7 +1105,7 @@ pub fn rollout_expectations(roots: &Roots) -> Expect {
         Ok(Some(s)) if !s.trim().is_empty() => s.trim().to_string(),
         _ => crate::trust::EXPECTED_ISSUER.to_string(),
     };
-    Expect { signer: crate::trust::expected_rollout_signer(roots), issuer }
+    Expect { signers: crate::trust::expected_rollout_signers(roots), issuer }
 }
 
 /// One layer's cosign annotations.
