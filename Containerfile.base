@@ -412,7 +412,7 @@ RUN set -eux; \
     test ! -e /usr/lib/systemd/user/default.target.wants/rime-agentd.service; \
     # Rime Remote: enabled for every account, and never for the greeter.
     test -s /usr/lib/systemd/user/rime-remoted.service; \
-    grep -qx 'ExecStart=/usr/bin/rime-remoted --relay wss://rime-relay.andrenijman.com' /usr/lib/systemd/user/rime-remoted.service; \
+    grep -qx 'ExecStart=/usr/bin/rime-remoted --relay wss://apex-relay.andrenijman.com' /usr/lib/systemd/user/rime-remoted.service; : 'rime-rename: keep (the deployed relay host)'; \
     test -L /etc/systemd/user/default.target.wants/rime-remoted.service; \
     grep -qx 'ConditionUser=!@system' /usr/lib/systemd/user/rime-remoted.service; \
     # getifaddrs() needs a netlink socket; without it every pairing code has

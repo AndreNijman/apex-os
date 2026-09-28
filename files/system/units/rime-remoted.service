@@ -55,7 +55,9 @@ Type=simple
 #     [Service]
 #     ExecStart=
 #     ExecStart=/usr/bin/rime-remoted
-ExecStart=/usr/bin/rime-remoted --relay wss://rime-relay.andrenijman.com
+# rime-rename: keep: the relay Worker is still deployed as apex-relay (relay/wrangler.jsonc),
+# and nobody can deploy a renamed one; the host below must stay until one is.
+ExecStart=/usr/bin/rime-remoted --relay wss://apex-relay.andrenijman.com
 
 # The service refuses to start unless its own cgroup says it is a user
 # service, because `rime-agentd` classifies a caller from that cgroup and a

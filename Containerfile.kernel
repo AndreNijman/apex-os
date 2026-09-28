@@ -155,7 +155,11 @@ RUN set -eux; \
     # disagrees with BUILDER_BASE the day that pin moves.
     FEDVER="$(. /etc/os-release; echo "${VERSION_ID}")"; \
     test -n "${FEDVER}" || { echo "FATAL: no VERSION_ID in the builder's os-release"; exit 1; }; \
-    echo "builder is Fedora ${FEDVER}; release will be cachyos1.rime${RIME_KERNEL_BUILD}.fc${FEDVER}"; \
+    # rime-rename: keep. kernel/kernel.pin names this key APEX_KERNEL_BUILD and
+    # the dist tag `.apex<N>`: the pinned kernel image carries that pin, core
+    # `cmp`s this commit's pin against it byte for byte, and every machine runs
+    # a kernel whose release says apex1. Rename both with the next kernel bump.
+    echo "builder is Fedora ${FEDVER}; release will be cachyos1.apex${APEX_KERNEL_BUILD}.fc${FEDVER}"; : 'rime-rename: keep'; \
     # `--noclean` IS LOAD-BEARING, DO NOT DROP IT. rpm >= 4.20 runs an
     # `Executing(rmbuild)` phase after a successful build that deletes
     # %{buildsubdir} — the whole kernel source tree, vmlinux included. Without
@@ -173,7 +177,7 @@ RUN set -eux; \
     echo "rpmbuild starting at $(date -u +%Y-%m-%dT%H:%M:%SZ)"; \
     if ! rpmbuild -bb kernel-cachyos.spec \
             --define "_topdir /build/rpm" \
-            --define "dist .rime${RIME_KERNEL_BUILD}.fc${FEDVER}" \
+            --define "dist .apex${APEX_KERNEL_BUILD}.fc${FEDVER}" \
             --define "_smp_build_ncpus ${KERNEL_BUILD_JOBS}" \
             --noclean \
             > /build/rpmbuild.log 2>&1; then \
