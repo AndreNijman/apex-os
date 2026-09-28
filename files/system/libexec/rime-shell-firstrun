@@ -38,7 +38,7 @@ SRC_DIR="/usr/share/rime-shell"
 CFG_DIR="${HOME}/.config/rime-shell"
 SYS_WALLPAPER="/usr/share/backgrounds/rime/default.jpg"
 # Where the shell used to be cloned. Only referenced to MIGRATE away from it.
-LEGACY_SRC_DIR="${HOME}/.local/src/rime-shell"
+LEGACY_SRC_DIR="${HOME}/.local/src/apex-shell"  # rime-rename: keep — the clone path pre-vendor machines have on disk
 
 log() { printf '[rime-shell-firstrun] %s\n' "$*"; }
 
@@ -49,6 +49,27 @@ log() { printf '[rime-shell-firstrun] %s\n' "$*"; }
 if [ "$(id -u)" -lt 1000 ]; then
     log "system user (uid $(id -u)) — not a human login; skipping."
     exit 0
+fi
+
+# ── Before anything below creates a directory: the APEX-era names ──────────
+# An account first logging in on this image still has everything under the
+# APEX names: ~/.config/apex-shell, ~/.config/hypr/apex, ~/.local/state/apex
+# (the Remote identity key). Every block below creates or seeds the NEW names
+# (`mkdir -p "${CFG_DIR}"` is one of them), and a new directory existing is
+# precisely what makes a rename of the old one unsafe, so this goes first.
+#
+# rime-session-migrate.service normally ran it already, before basic.target,
+# which is what keeps the per-user daemons from ever seeing the empty new
+# names. This call is the fallback for an account whose unit did not run, and
+# a no-op otherwise. Output captured rather than piped, as for the migrator
+# below: a non-zero exit is a report, not a reason to abort the login.
+if [ -x /usr/libexec/rime-session-migrate ]; then
+    _sm_out="$(/usr/libexec/rime-session-migrate --start-units 2>&1 || true)"
+    if [ -n "${_sm_out}" ]; then
+        printf '%s\n' "${_sm_out}" | while IFS= read -r _line; do
+            log "${_line}"
+        done
+    fi
 fi
 
 # The image must actually contain the shell. If it does not, seeding a config that
@@ -97,7 +118,10 @@ HYPR_LEGACY_CONF="${HOME}/.config/hypr/hyprland.conf"
 # `Hyprland --verify-config` assertion in Containerfile.base is what enforces
 # that this block, the shipped template and the compositor all move together.
 hypr_migrated=0
-for conf in "${HYPR_LEGACY_CONF}" "${HOME}/.config/rime-shell/RimeShellKeybinds.conf"; do
+# The fragment is listed by the name an APEX image gave it: that is the file on
+# disk, and rime-session-migrate renames only its directory.
+for conf in "${HYPR_LEGACY_CONF}" "${HOME}/.config/rime-shell/RimeShellKeybinds.conf" \
+            "${HOME}/.config/rime-shell/ApexShellKeybinds.conf"; do  # rime-rename: keep — file name on disk
     [ -f "$conf" ] || continue
     if grep -qE 'pseudotile[[:space:]]*=|,[[:space:]]*togglesplit([[:space:]]*$|[[:space:]]*#)|suppressevent maximize|nofocus,[[:space:]]*class:\^\$' "$conf"; then
         sed -Ei \
@@ -305,7 +329,7 @@ STARSHIP_TMPL="/usr/share/rime/starship/starship.toml"
 # features we would be adding, is treated as the user's file and left alone.
 is_stock_zshrc() {
     [ -f "$1" ] || return 1
-    grep -q 'Rime OS — default zsh configuration' "$1" && return 1
+    grep -qE '(Rime OS|APEX-OS) — default zsh configuration' "$1" && return 1  # rime-rename: keep — the header APEX seeded
     grep -qE 'starship|zsh-autosuggestions|zsh-syntax-highlighting' "$1" && return 1
     # Byte-identical to the skeleton on this release -> useradd wrote it, not a human.
     [ -f /etc/skel/.zshrc ] && cmp -s "$1" /etc/skel/.zshrc && return 0
@@ -461,7 +485,7 @@ migrate_legacy_paths() {
         # cloned per-user into /usr/share/rime-shell"). Comment markers: # for
         # hypr/hypridle, // for niri's KDL.
         if grep -vE '^[[:space:]]*(#|//)' "${f}" 2>/dev/null \
-           | grep -qE -- "(${LEGACY_SRC_DIR}|~/\.local/src/rime-shell)"; then
+           | grep -qE -- "(${LEGACY_SRC_DIR}|~/\.local/src/apex-shell)"; then  # rime-rename: keep — legacy clone path on disk
             cp -a "${f}" "${f}.pre-vendor.bak" 2>/dev/null || true
             # Detection is live-lines-only (above) but the REWRITE is global, comments
             # included. Once a live line has proven this is a genuine legacy config,
@@ -476,7 +500,7 @@ migrate_legacy_paths() {
             # /home/user/.local/src/rime-shell while $HOME is /var/home/user, and a
             # ${HOME}-anchored pattern misses those while still logging success. One
             # expression covers the absolute, ~ and ${HOME} spellings.
-            sed -i -e "s|[^[:space:]]*\.local/src/rime-shell|${SRC_DIR}|g" "${f}"
+            sed -i -e "s|[^[:space:]]*\.local/src/apex-shell|${SRC_DIR}|g" "${f}"  # rime-rename: keep — legacy clone path on disk
             log "migrated legacy shell path in ${f} (backup: ${f}.pre-vendor.bak)"
             changed=1
         fi
@@ -490,10 +514,10 @@ migrate_legacy_paths() {
              "${HOME}/.config/niri/config.kdl"; do
         [ -f "${f}" ] || continue
         if grep -vE '^[[:space:]]*(#|//)' "${f}" 2>/dev/null \
-           | grep -q -- '\.local/bin/rime-shell-autostart'; then
+           | grep -q -- '\.local/bin/apex-shell-autostart'; then  # rime-rename: keep — the retired shim's name on disk
             cp -a "${f}" "${f}.pre-vendor.bak" 2>/dev/null || true
             # Live-lines detection, global rewrite, suffix match — same reasoning as above.
-            sed -i -e "s|[^[:space:]]*\.local/bin/rime-shell-autostart|/usr/libexec/rime-shell-autostart|g" \
+            sed -i -e "s|[^[:space:]]*\.local/bin/apex-shell-autostart|/usr/libexec/rime-shell-autostart|g" \
                    "${f}"
             log "repointed the retired autostart shim in ${f} -> /usr/libexec/rime-shell-autostart"
             changed=1
@@ -501,10 +525,10 @@ migrate_legacy_paths() {
     done
     # The old ~/.local/bin/rime-shell-autostart shim (rime-logs 51) is superseded
     # by /usr/libexec/rime-shell-autostart, which the seeded config now calls.
-    if [ -f "${HOME}/.local/bin/rime-shell-autostart" ]; then
-        mv -f "${HOME}/.local/bin/rime-shell-autostart" \
-              "${HOME}/.local/bin/rime-shell-autostart.superseded" 2>/dev/null || true
-        log "retired ~/.local/bin/rime-shell-autostart (now /usr/libexec/rime-shell-autostart)"
+    if [ -f "${HOME}/.local/bin/apex-shell-autostart" ]; then  # rime-rename: keep — the retired shim's name on disk
+        mv -f "${HOME}/.local/bin/apex-shell-autostart" \
+              "${HOME}/.local/bin/apex-shell-autostart.superseded" 2>/dev/null || true  # rime-rename: keep — as above
+        log "retired ~/.local/bin/apex-shell-autostart (now /usr/libexec/rime-shell-autostart)"  # rime-rename: keep — as above
     fi
     if [ -d "${LEGACY_SRC_DIR}" ] && [ "${changed}" = 1 ]; then
         log "NOTE: ${LEGACY_SRC_DIR} is no longer used; the shell now runs from ${SRC_DIR}."
@@ -784,7 +808,9 @@ fi
 # The marker is `rime-shell`, matching what the seeded tree carries in
 # rime/session.lua, so a config seeded by step 0 skips this and a config that
 # has never seen Rime gets the block appended once.
-if ! grep -rq 'rime-shell' "${HYPR_CONF}" "${HOME}/.config/hypr/rime" 2>/dev/null; then
+# `apex-shell` counts too: a config seeded before the rename carries the block
+# under that name, and appending a second one would start everything twice.
+if ! grep -rqE '(rime|apex)-shell' "${HYPR_CONF}" "${HOME}/.config/hypr/rime" 2>/dev/null; then  # rime-rename: keep — APEX-era block marker
     cat >> "${HYPR_CONF}" <<'HYPRRIME'
 
 -- ── Rime Shell autostarts (seeded by rime-shell-firstrun) ──
@@ -821,7 +847,8 @@ if command -v niri >/dev/null 2>&1 || [ -x /usr/bin/niri ]; then
             : > "${NIRI_CONF}"
         fi
     fi
-    if ! grep -q 'rime-shell' "${NIRI_CONF}" 2>/dev/null; then
+    # `apex-shell` counts too, for the reason the Hyprland block gives.
+    if ! grep -qE '(rime|apex)-shell' "${NIRI_CONF}" 2>/dev/null; then  # rime-rename: keep — APEX-era block marker
         cat >> "${NIRI_CONF}" <<NIRIRIME
 
 // ── Rime Shell autostarts (seeded by rime-shell-firstrun) ──
@@ -890,8 +917,11 @@ NIRIRIME
     # EMPTY and stays empty until Rime Settings writes it — so on a fresh
     # machine the stock binds are the only binds there are.
     NIRI_BAR_MARKER='disabled by Rime: quickshell is this system'"'"'s bar'
+    # The same edit made by an APEX image. Its waybar line is already commented
+    # out, so nothing below would match it; recognising the marker says so.
+    NIRI_BAR_MARKER_OLD='disabled by APEX: quickshell is this system'"'"'s bar'  # rime-rename: keep — marker on disk
     NIRI_STOCK_WAYBAR='spawn-at-startup "waybar"'
-    if [ -f "${NIRI_CONF}" ] && ! grep -qF "${NIRI_BAR_MARKER}" "${NIRI_CONF}"; then
+    if [ -f "${NIRI_CONF}" ] && ! grep -qF -e "${NIRI_BAR_MARKER}" -e "${NIRI_BAR_MARKER_OLD}" "${NIRI_CONF}"; then
         _bar_line="$(grep -nxF "${NIRI_STOCK_WAYBAR}" "${NIRI_CONF}" | cut -d: -f1)"
         _bar_count="$(printf '%s' "${_bar_line}" | grep -c . || true)"
         if [ -z "${_bar_line}" ]; then
@@ -949,7 +979,13 @@ NIRIRIME
     # them. This block only ever APPENDS — there is no substitution here, so
     # there is no regex that can eat the file.
     NIRI_INC_MARKER='Rime generated configs (rime-shell-firstrun)'
-    if [ -f "${NIRI_CONF}" ] && ! grep -qF "${NIRI_INC_MARKER}" "${NIRI_CONF}"; then
+    # An APEX image appended the same block under its own marker, with
+    # include lines naming ~/.config/apex-shell. rime-session-migrate rewrites
+    # that block to the new names when it can (it needs the new include targets
+    # to exist first, and creates them); either way the block is there, and a
+    # second one would include the generated files twice.
+    NIRI_INC_MARKER_OLD='APEX generated configs (apex-shell-firstrun)'  # rime-rename: keep — marker on disk
+    if [ -f "${NIRI_CONF}" ] && ! grep -qF -e "${NIRI_INC_MARKER}" -e "${NIRI_INC_MARKER_OLD}" "${NIRI_CONF}"; then
         if [ ! -f "${CFG_DIR}/RimeShellInput.kdl" ] || \
            [ ! -f "${CFG_DIR}/RimeShellKeybinds.kdl" ]; then
             # A missing include target is a hard parse error, so writing the
@@ -1060,7 +1096,7 @@ if command -v labwc >/dev/null 2>&1 || [ -x /usr/bin/labwc ]; then
         # created by hand: without this line the session starts with no bar and
         # no way to discover why.
         if [ -f "${LABWC_DIR}/autostart" ] \
-           && ! grep -q 'rime-shell-autostart' "${LABWC_DIR}/autostart" 2>/dev/null; then
+           && ! grep -qE '(rime|apex)-shell-autostart' "${LABWC_DIR}/autostart" 2>/dev/null; then  # rime-rename: keep — APEX-era autostart line
             cat >> "${LABWC_DIR}/autostart" <<'LABWCRIME'
 
 # ── Rime Shell autostarts (appended by rime-shell-firstrun) ──
@@ -1189,7 +1225,7 @@ fi
 # every path actually touched in this block is "${HOME}/.zshrc".
 if is_stock_zshrc "${HOME}/.zshrc"; then
     fail_check "~/.zshrc is still the distro skeleton — the Rime zsh config did not seed (no starship, no completion setup)"
-elif [ -f "${HOME}/.zshrc" ] && grep -q 'Rime OS — default zsh configuration' "${HOME}/.zshrc"; then
+elif [ -f "${HOME}/.zshrc" ] && grep -qE '(Rime OS|APEX-OS) — default zsh configuration' "${HOME}/.zshrc"; then  # rime-rename: keep — the header APEX seeded
     grep -q 'starship init zsh' "${HOME}/.zshrc" \
         || fail_check "~/.zshrc is the Rime config but does not initialise starship"
     grep -q 'zmodload zsh/complist' "${HOME}/.zshrc" \
