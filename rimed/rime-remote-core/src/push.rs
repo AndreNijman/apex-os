@@ -25,7 +25,7 @@
 //!   deliberately avoided one. And every wakeup would be a request to Google,
 //!   which learns *when* an agent on this person's laptop wanted them even if
 //!   it learns nothing about *what*.
-//! * **The Rime relay** (`relay/`, deployed at `rime-relay.andrenijman.com`)
+//! * **The Rime relay** (`relay/`, deployed at `apex-relay.andrenijman.com`)  // rime-rename: keep (the deployed relay's domain)
 //!   looks like the answer because Rime already owns it, and it is the wrong
 //!   layer. It is a rendezvous: a Durable Object that copies bytes between two
 //!   WebSockets **that have both dialled in**. Push is exactly the case where
@@ -132,10 +132,10 @@ pub const MAX_ENDPOINT: usize = 1000;
 
 /// HKDF salt. Fixed, public, and here so the two implementations cannot
 /// disagree about it silently.
-const HKDF_SALT: &[u8] = b"rime.push.v1";
+const HKDF_SALT: &[u8] = b"apex.push.v1";  // rime-rename: keep (HKDF salt; phones derive the push key with it)
 
 /// HKDF info.
-const HKDF_INFO: &[u8] = b"rime.push.envelope";
+const HKDF_INFO: &[u8] = b"apex.push.envelope";  // rime-rename: keep (HKDF info; phones derive the push key with it)
 
 /// What happened, in the vocabulary P1-058 asks for.
 ///
@@ -1116,7 +1116,7 @@ mod tests {
         // Metadata discloses more than the body does, so these must not be
         // there. A `User-Agent` names the software; a `Topic` would let a
         // server collapse two alerts it cannot read.
-        for banned in ["User-Agent", "Topic", "rime", "Rime"] {
+        for banned in ["User-Agent", "Topic", "apex", "APEX", "rime", "Rime"] {  // rime-rename: keep (neither name may leak)
             assert!(!text.contains(banned), "the request named {banned}:\n{text}");
         }
         assert_eq!(&req[req.len() - ENVELOPE_LEN..], sealed.as_bytes());

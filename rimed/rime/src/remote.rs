@@ -521,7 +521,7 @@ mod tests {
         for text in [
             r#"{"reply":"ok"}"#,
             r#"{"reply":"error","message":"nope"}"#,
-            r#"{"reply":"offer","qr":"rime-remote:abc","expires_ms":1}"#,
+            r#"{"reply":"offer","qr":"apex-remote:abc","expires_ms":1}"#,  // rime-rename: keep (SCHEME)
             r#"{"reply":"devices","devices":[]}"#,
             r#"{"reply":"status","version":1,"key":"k","machine":"l16","lan":[],"relay":null,"rendezvous":"r","paired":0,"offer_ms_left":null}"#,
         ] {
@@ -546,8 +546,8 @@ mod tests {
         // The failure this avoids: a phone scans a wrong QR, fails, and the
         // person blames their camera. If an encoder is ever vendored, this
         // test is what has to change with it.
-        let out = qr_block("rime-remote:abc");
-        assert!(out.contains("rime-remote:abc"));
+        let out = qr_block("apex-remote:abc");  // rime-rename: keep (SCHEME)
+        assert!(out.contains("apex-remote:abc"));  // rime-rename: keep (SCHEME)
         assert!(out.contains("Rime Settings"), "{out}");
         // The pairing page has shipped; the output must not still promise it.
         assert!(!out.contains("once it ships"), "{out}");

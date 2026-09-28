@@ -882,15 +882,15 @@ mod tests {
 
     #[test]
     fn a_worker_url_is_dialled_without_being_rewritten_by_hand() {
-        let e = Endpoint::parse("https://rime-relay.andre.workers.dev").expect("parse");
+        let e = Endpoint::parse("https://apex-relay.andre.workers.dev").expect("parse");  // rime-rename: keep (the deployed relay Worker)
         assert_eq!(e, Endpoint {
             secure: true,
-            host: "rime-relay.andre.workers.dev".into(),
+            host: "apex-relay.andre.workers.dev".into(),  // rime-rename: keep (the deployed relay Worker)
             port: 443,
             prefix: String::new(),
         });
-        assert_eq!(e.authority(), "rime-relay.andre.workers.dev");
-        assert_eq!(e.to_string(), "wss://rime-relay.andre.workers.dev");
+        assert_eq!(e.authority(), "apex-relay.andre.workers.dev");  // rime-rename: keep (the deployed relay Worker)
+        assert_eq!(e.to_string(), "wss://apex-relay.andre.workers.dev");  // rime-rename: keep (the deployed relay Worker)
     }
 
     #[test]

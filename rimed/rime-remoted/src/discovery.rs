@@ -56,7 +56,7 @@ use crate::state::State;
 /// Registered nowhere and not meant to be: it is an underscore-prefixed
 /// private type, which is what DNS-SD says to use for a service that is not
 /// in IANA's list.
-pub const SERVICE: &str = "_rime-remote._tcp";
+pub const SERVICE: &str = "_apex-remote._tcp";  // rime-rename: keep (DNS-SD type devices on the network browse for)
 
 /// The tool that holds the registration.
 pub const PUBLISH: &str = "avahi-publish-service";
@@ -164,7 +164,7 @@ mod tests {
 
     #[test]
     fn the_service_type_is_the_one_the_design_note_names() {
-        assert_eq!(SERVICE, "_rime-remote._tcp");
+        assert_eq!(SERVICE, "_apex-remote._tcp");  // rime-rename: keep (SERVICE)
         // Underscore-prefixed and _tcp, which is what DNS-SD requires of a
         // private service type. A type without them is not browsable.
         assert!(SERVICE.starts_with('_'));

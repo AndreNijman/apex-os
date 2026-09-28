@@ -63,7 +63,7 @@ pub const TOKEN_BYTES: usize = 32;
 
 /// What the QR code says.
 ///
-/// Serialised as compact JSON and then base64url'd behind an `rime-remote:`
+/// Serialised as compact JSON and then base64url'd behind an `apex-remote:`  // rime-rename: keep (SCHEME)
 /// scheme, so the whole thing is one URL-safe token a camera can read and a
 /// human can paste. JSON rather than a packed binary encoding: a QR of this
 /// size is comfortable either way, and a payload a developer can decode by
@@ -104,7 +104,7 @@ pub struct PairingOffer {
 /// A scheme rather than a bare blob so a camera app that resolves URIs hands
 /// it to Rime Remote instead of to a browser, and so a string pasted into the
 /// wrong place is recognisably ours.
-pub const SCHEME: &str = "rime-remote:";
+pub const SCHEME: &str = "apex-remote:";  // rime-rename: keep (QR/pairing scheme the installed Android app parses)
 
 impl PairingOffer {
     /// The text that goes in the QR code.
@@ -357,8 +357,8 @@ mod tests {
     fn a_qr_payload_that_is_not_ours_is_refused_by_shape() {
         for bad in [
             "https://example.invalid/",
-            "rime-remote",
-            "rime-remote:not base64",
+            "apex-remote",  // rime-rename: keep (SCHEME without its colon)
+            "apex-remote:not base64",  // rime-rename: keep (SCHEME)
             "",
         ] {
             assert!(

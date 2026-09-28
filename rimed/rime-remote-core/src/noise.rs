@@ -133,7 +133,7 @@ pub fn public_from_secret(secret: &[u8; 32]) -> Result<[u8; 32], NoiseError> {
 /// before that. Noise binds it into the handshake hash: two ends that
 /// disagree do not complete.
 pub fn prologue(version: u32) -> Vec<u8> {
-    let mut p = b"rime-remote/".to_vec();
+    let mut p = b"apex-remote/".to_vec();  // rime-rename: keep (Noise prologue; paired phones hash it into every handshake)
     p.extend_from_slice(version.to_string().as_bytes());
     p
 }

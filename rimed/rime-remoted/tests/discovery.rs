@@ -211,7 +211,7 @@ fn the_record_names_this_machine_this_port_and_nothing_that_identifies_it() {
     let published = f.published().expect("the daemon never published anything");
     let machine = f.machine();
 
-    assert!(published.contains("_rime-remote._tcp"), "{published}");
+    assert!(published.contains("_apex-remote._tcp"), "{published}");  // rime-rename: keep (SERVICE)
     // The port this daemon is actually on, not the catalogue default. A
     // record carrying 7717 while the daemon is somewhere else sends every
     // device on the network to a closed port.

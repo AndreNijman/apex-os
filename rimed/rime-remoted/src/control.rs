@@ -515,7 +515,7 @@ mod tests {
             Reply::Ok,
             Reply::error("something went wrong"),
             Reply::Offer {
-                qr: "rime-remote:abc".into(),
+                qr: "apex-remote:abc".into(),  // rime-rename: keep (SCHEME)
                 expires_ms: 1,
             },
             Reply::Devices { devices: vec![] },

@@ -62,7 +62,7 @@ use sha2::{Digest, Sha256};
 /// So that this hash of a public key can never collide with some other
 /// protocol's hash of the same key. Cheap, and the absence of one is a
 /// recurring footgun in exactly this kind of derivation.
-const DOMAIN: &[u8] = b"rime-remote/rendezvous/v1";
+const DOMAIN: &[u8] = b"apex-remote/rendezvous/v1";  // rime-rename: keep (rendezvous id derivation shared with paired phones and the relay)
 
 /// The meeting-point name for a machine with this static public key.
 ///
