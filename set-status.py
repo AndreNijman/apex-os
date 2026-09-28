@@ -20,7 +20,7 @@ import sys
 import textwrap
 
 VALID = {"verify_existing", "partial", "todo", "blocked", "done"}
-PATH = "/var/home/andre/Projects/apex/ROADMAP/roadmap.yaml"
+PATH = "/var/home/andre/Projects/rime/ROADMAP/roadmap.yaml"
 
 
 def block(text, indent="    "):

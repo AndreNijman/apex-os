@@ -19,7 +19,7 @@
 # ─────────────────────────────────────────────────────────────────────────────
 set -uo pipefail
 
-ROOT=/var/home/andre/Projects/apex
+ROOT=/var/home/andre/Projects/rime
 RM="$ROOT/ROADMAP"
 STATE="$RM/state"
 LOG="$STATE/autoresume.log"
@@ -64,7 +64,7 @@ fi
 # A heartbeat file touched in the last 45 minutes means an orchestrator is alive
 # even with no agents running. Either one means stay out of the way.
 busy=""
-if [ -n "$(find /tmp/claude-*/-var-home-andre-Projects-apex/*/tasks -name '*.output' -mmin -20 2>/dev/null | head -1)" ]; then
+if [ -n "$(find /tmp/claude-*/-var-home-andre-Projects-rime/*/tasks -name '*.output' -mmin -20 2>/dev/null | head -1)" ]; then
     busy="agents are still writing output"
 elif [ -r "$STATE/orchestrator.pid" ] \
      && kill -0 "$(cat "$STATE/orchestrator.pid")" 2>/dev/null \

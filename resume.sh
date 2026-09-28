@@ -23,11 +23,11 @@ set -uo pipefail
 
 HERE="$(cd "$(dirname "$0")" && pwd)"
 STATE="$HERE/state"
-OS=/var/home/andre/Projects/apex/apex-os
-SHELLR=/var/home/andre/Projects/apex/apex-shell
+OS=/var/home/andre/Projects/rime/rime-os
+SHELLR=/var/home/andre/Projects/rime/rime-shell
 INT_OS=/var/tmp/apex-work/int-os
 INT_SHELL=/var/tmp/apex-work/int-shell
-TASKS_GLOB='/tmp/claude-1000/-var-home-andre-Projects-apex/*/tasks'
+TASKS_GLOB='/tmp/claude-1000/-var-home-andre-Projects-rime/*/tasks'
 
 FETCH=0
 [ "${1:-}" = "-f" ] && FETCH=1
@@ -132,8 +132,8 @@ t=$(systemctl --user is-active apex-wip-snapshot.timer 2>&1)
 printf '  snapshot timer: %s   ' "$t"
 systemctl --user list-timers apex-wip-snapshot.timer --no-pager 2>/dev/null | sed -n 2p | awk '{print "last", $5, $6, $7}'
 echo "  wip refs:"
-git -C "$INT_OS"    ls-remote origin 'refs/wip/*' 2>/dev/null | sed 's|^\(.......\).*refs/wip/|    apex-os    \1  |' | head -25
-git -C "$INT_SHELL" ls-remote origin 'refs/wip/*' 2>/dev/null | sed 's|^\(.......\).*refs/wip/|    apex-shell \1  |' | head -25
+git -C "$INT_OS"    ls-remote origin 'refs/wip/*' 2>/dev/null | sed 's|^\(.......\).*refs/wip/|    rime-os    \1  |' | head -25
+git -C "$INT_SHELL" ls-remote origin 'refs/wip/*' 2>/dev/null | sed 's|^\(.......\).*refs/wip/|    rime-shell \1  |' | head -25
 
 # ── 5. What to dispatch next ────────────────────────────────────────────────
 sec "next"
