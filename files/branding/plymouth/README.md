@@ -10,7 +10,7 @@ separate edition.
 
 **Animation: "Focus".** On a plain black screen the spark comes into focus
 out of a soft glow of its own light (a wide blur, a closer blur, then the sharp
-logo), a halo blooms behind it and settles, and the tracked-out `Rime OS`
+logo), a halo blooms behind it and settles, and the tracked-out `RIME OS`
 wordmark fades in beneath. While the machine boots, the halo breathes on a
 5.2 s period. Shutdown, reboot and update modes show the settled splash from
 the first frame. At a LUKS prompt the splash dims, the wordmark gives way to

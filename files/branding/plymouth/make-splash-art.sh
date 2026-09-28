@@ -86,10 +86,10 @@ for s in 16:bullet 32:bullet-hd; do
         -resize "${n}x${n}" -depth 8 "${PNG[@]}" "$OUT/$name.png"
 done
 
-# ── the wordmark: Rime OS, tracked out, in the shell's typeface ──────────────
+# ── the wordmark: RIME OS, tracked out, in the shell's typeface ──────────────
 word() {   # word <pointsize> <tracking> <gap> <out>
     magick -background none -fill "$TEXT" -font "$FONT" -pointsize "$1" \
-        -kerning "$2" label:Rime -trim +repage "$TMP/w1.png"
+        -kerning "$2" label:RIME -trim +repage "$TMP/w1.png"
     magick -background none -fill "$TEXT" -font "$FONT" -pointsize "$1" \
         -kerning "$2" label:OS -trim +repage "$TMP/w2.png"
     magick "$TMP/w1.png" \( -size "$3x1" xc:none \) "$TMP/w2.png" \
