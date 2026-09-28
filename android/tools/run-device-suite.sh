@@ -153,7 +153,7 @@ agentd_pid=$!
 # and the three relay tests fail naming the argument they were not given, which
 # is the right answer on a machine with no internet — a skip would be a suite
 # reporting success for a leg it never touched.
-relay=${RIME_DEVICE_SUITE_RELAY-wss://rime-relay.andrenijman.com}
+relay=${RIME_DEVICE_SUITE_RELAY-wss://apex-relay.andrenijman.com}  # rime-rename: keep (the deployed relay)
 
 start_remoted() {
   local extra=()

@@ -22,7 +22,7 @@ package com.rimeos.remote.core.agent
  *
  * **The earlier text here said there was no push transport anywhere in Rime,
  * and that the relay had never been deployed. Both were true when written and
- * neither is now**: the relay is serving at `rime-relay.andrenijman.com`, and
+ * neither is now**: the relay is serving at `apex-relay.andrenijman.com`, and (rime-rename: keep)
  * the push path above exists. The relay is still not what carries a push, and
  * the reason is worth keeping — it is a rendezvous that both ends dial into at
  * the same time, which is precisely the situation push exists to handle the

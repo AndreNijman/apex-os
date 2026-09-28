@@ -136,8 +136,12 @@ data class PrivilegeRequest(
         const val ALLOW_FOR_PROJECT = "allow_for_project"
         const val DENIED = "denied"
 
-        /** `RequestOrigin::is_local()`, as the two kebab names it covers. */
-        val LOCAL_ORIGINS = setOf("local-terminal", "rime-shell")
+        /**
+         * `RequestOrigin::is_local()`, as the kebab names it covers. The shell's
+         * under both spellings: a desktop from before the rebrand sends
+         * `apex-shell`, and this app talks to both generations. (rime-rename: keep)
+         */
+        val LOCAL_ORIGINS = setOf("local-terminal", "rime-shell", "apex-shell") // rime-rename: keep (read both origin spellings)
 
         /**
          * What a phone says where a desktop would put Allow and Deny.

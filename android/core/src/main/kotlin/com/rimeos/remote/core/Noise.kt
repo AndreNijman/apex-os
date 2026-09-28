@@ -47,14 +47,16 @@ object Noise {
 
     /**
      * Everything both patterns agree on before a byte is sent: the literal
-     * bytes `rime-remote/<version>`.
+     * bytes `apex-remote/<version>` (the pre-rebrand name, kept: see below). // rime-rename: keep
      *
      * The version is in here rather than in a frame, because a frame is only
      * readable after the handshake and a version mismatch has to be catchable
      * before that. Noise binds the prologue into the handshake hash, so two
      * ends that disagree do not complete.
      */
-    fun prologue(version: Int): ByteArray = "rime-remote/$version".toByteArray(Charsets.US_ASCII)
+    // KEPT through the rebrand: hashed into every handshake, so it must be the
+    // exact bytes every desktop in the field and noise-vectors.json use.
+    fun prologue(version: Int): ByteArray = "apex-remote/$version".toByteArray(Charsets.US_ASCII) // rime-rename: keep (Noise prologue, wire)
 
     /** The device's side of pairing: it knows the desktop's key from the QR. */
     fun pairingInitiator(

@@ -160,8 +160,8 @@ chmod 600 "$pw_file"
 # MEASURED, not assumed: a PKCS12 keystore cannot hold a key password that
 # differs from the store password — keytool says
 #   "Different store and key passwords not supported for PKCS12 KeyStores"
-# and ignores the one you gave it. That is why RIME_KEY_PASSWORD and
-# RIME_KEYSTORE_PASSWORD below are the same value, and it is not an oversight.
+# and ignores the one you gave it. That is why APEX_KEY_PASSWORD and  (rime-rename: keep: the GitHub secrets keep their names)
+# APEX_KEYSTORE_PASSWORD below are the same value, and it is not an oversight.  (rime-rename: keep: the GitHub secrets keep their names)
 ks="$out/release.jks"
 if ! "$KEYTOOL" -genkeypair \
         -storetype PKCS12 \
@@ -266,7 +266,7 @@ WHAT THIS IS
   password.txt    the password to it. The keystore is useless without this
                   file, so the two are ONE backup unit, never separated.
   keystore.base64 release.jks, base64, as it is stored in the GitHub secret
-                  RIME_KEYSTORE_BASE64.
+                  APEX_KEYSTORE_BASE64.
 
 WHAT IT COSTS TO LOSE IT
 
@@ -330,22 +330,22 @@ say ""
 say "2. Then give GitHub its working copy. Four secrets, read from files so"
 say "   that no password is ever typed into a shell and into its history:"
 say ""
-say "     gh secret set RIME_KEYSTORE_BASE64   -R AndreNijman/rime-os < $out/keystore.base64"
-say "     gh secret set RIME_KEYSTORE_PASSWORD -R AndreNijman/rime-os < $pw_file"
-say "     gh secret set RIME_KEY_PASSWORD      -R AndreNijman/rime-os < $pw_file"
-say "     printf '%s' '$alias_name' | gh secret set RIME_KEY_ALIAS -R AndreNijman/rime-os"
+say "     gh secret set APEX_KEYSTORE_BASE64   -R AndreNijman/apex-os < $out/keystore.base64"  # rime-rename: keep (the GitHub secret names; the old repo name redirects)
+say "     gh secret set APEX_KEYSTORE_PASSWORD -R AndreNijman/apex-os < $pw_file"  # rime-rename: keep (the GitHub secret names; the old repo name redirects)
+say "     gh secret set APEX_KEY_PASSWORD      -R AndreNijman/apex-os < $pw_file"  # rime-rename: keep (the GitHub secret names; the old repo name redirects)
+say "     printf '%s' '$alias_name' | gh secret set APEX_KEY_ALIAS -R AndreNijman/apex-os"  # rime-rename: keep (the GitHub secret names; the old repo name redirects)
 say ""
-say "   RIME_KEY_PASSWORD is the same value as RIME_KEYSTORE_PASSWORD on"
+say "   APEX_KEY_PASSWORD is the same value as APEX_KEYSTORE_PASSWORD on"  # rime-rename: keep (the GitHub secret names; the old repo name redirects)
 say "   purpose: a PKCS12 keystore cannot have two different passwords."
 say ""
 say "3. Check they arrived — the names are readable even though the values are"
 say "   not, which is the whole point:"
 say ""
-say "     gh secret list -R AndreNijman/rime-os"
+say "     gh secret list -R AndreNijman/apex-os"  # rime-rename: keep (the GitHub secret names; the old repo name redirects)
 say ""
 say "4. Then a dry run before any real release:"
 say ""
-say "     gh workflow run release-android.yml -R AndreNijman/rime-os -f dry_run=true"
+say "     gh workflow run release-android.yml -R AndreNijman/apex-os -f dry_run=true"  # rime-rename: keep (the GitHub secret names; the old repo name redirects)
 say ""
 say "The password is NOT printed here on purpose. It is in $pw_file."
 say "──────────────────────────────────────────────────────────────────────────"

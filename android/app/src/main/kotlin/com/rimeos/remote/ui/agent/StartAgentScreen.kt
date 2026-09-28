@@ -411,7 +411,7 @@ fun StartAgentScreen(
                     // there is no checkpoint request on this socket, only this
                     // flag on `run` and the id the daemon reports back.
                     Text(
-                        "A commit under refs/rime that is not a branch and is never pushed. " +
+                        "A commit under refs/apex that is not a branch and is never pushed. " + // rime-rename: keep (checkpoint.rs REF_PREFIX)
                             "Your index, your stash and your branch are left alone. Undoing it " +
                             "is done at the machine with `rime agent undo`; this app can show " +
                             "you the command but cannot run it or say what it would change.",

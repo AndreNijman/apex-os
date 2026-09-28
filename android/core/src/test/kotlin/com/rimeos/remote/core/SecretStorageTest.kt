@@ -99,7 +99,7 @@ class SecretStorageTest {
         key = desktopKey,
         token = Base64Url.encode(ByteArray(Pairing.TOKEN_BYTES) { 7 }),
         lan = listOf("192.168.1.10:7717"),
-        relay = "https://rime-relay.andrenijman.com",
+        relay = "https://apex-relay.andrenijman.com", // rime-rename: keep (the deployed relay)
         expiresMs = 1_757_000_000_000L,
     )
 

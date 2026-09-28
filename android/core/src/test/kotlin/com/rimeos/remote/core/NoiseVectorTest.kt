@@ -30,9 +30,10 @@ class NoiseVectorTest {
     private val responderEphemeral = EphemeralSource.fixedForTestingOnly(Vectors.hex("responder_ephemeral_hex"))
 
     @Test
-    fun `the prologue is the literal bytes rime-remote slash version`() {
+    // The pre-rebrand bytes, KEPT: every desktop in the field hashes them in.
+    fun `the prologue is the literal bytes apex-remote slash version`() { // rime-rename: keep (Noise prologue)
         assertArrayEquals(Vectors.hex("prologue_hex"), Noise.prologue(version))
-        assertEquals("rime-remote/1", String(Vectors.hex("prologue_hex")))
+        assertEquals("apex-remote/1", String(Vectors.hex("prologue_hex"))) // rime-rename: keep (Noise prologue)
     }
 
     @Test

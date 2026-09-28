@@ -25,8 +25,11 @@ object Pairing {
      *
      * A scheme rather than a bare blob so a camera app that resolves URIs
      * hands it to Rime Remote instead of to a browser.
+     *
+     * KEPT through the rebrand: every desktop in the field prints its pairing
+     * code under this scheme, and the manifest's intent filter must match it.
      */
-    const val SCHEME = "rime-remote:"
+    const val SCHEME = "apex-remote:" // rime-rename: keep (pairing URI scheme shared with the desktop)
 
     /** The bytes in a pairing token. */
     const val TOKEN_BYTES = 32

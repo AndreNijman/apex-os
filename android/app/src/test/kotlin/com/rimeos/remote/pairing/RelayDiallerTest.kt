@@ -177,7 +177,7 @@ class RelayDiallerTest {
         // Asserted on a real SSLSocket rather than through a certificate
         // authority nobody has: what is checked is the configuration the
         // handshake will run under.
-        val endpoint = RelayEndpoint.parse("wss://rime-relay.andrenijman.com")
+        val endpoint = RelayEndpoint.parse("wss://apex-relay.andrenijman.com") // rime-rename: keep (the deployed relay)
         ServerSocket(0).use { listener ->
             val plain = Socket("127.0.0.1", listener.localPort)
             listener.accept().use {
@@ -196,7 +196,7 @@ class RelayDiallerTest {
                     // was resolved on the way here — Cloudflare answers for the
                     // wrong site without it.
                     assertEquals(
-                        listOf("rime-relay.andrenijman.com"),
+                        listOf("apex-relay.andrenijman.com"), // rime-rename: keep (the deployed relay)
                         tls.sslParameters.serverNames.map { n -> String(n.encoded) },
                     )
                     assertTrue(
@@ -214,9 +214,9 @@ class RelayDiallerTest {
         // Two spellings of one meeting point would leave the phone waiting
         // somewhere the desktop is not, and neither would fail a test of its
         // own.
-        val endpoint = RelayEndpoint.parse("https://rime-relay.andrenijman.com/x/")
+        val endpoint = RelayEndpoint.parse("https://apex-relay.andrenijman.com/x/") // rime-rename: keep (the deployed relay)
         assertEquals(
-            Rendezvous.path("https://rime-relay.andrenijman.com/x/", "abc"),
+            Rendezvous.path("https://apex-relay.andrenijman.com/x/", "abc"), // rime-rename: keep (the deployed relay)
             endpoint.requestTarget("abc", Rendezvous.Role.GUEST),
         )
     }

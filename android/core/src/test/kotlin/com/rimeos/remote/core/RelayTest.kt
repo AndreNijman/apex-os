@@ -240,13 +240,13 @@ class RelayTest {
         // `relay/wrangler.jsonc`. What a person has in front of them is the
         // https URL, and asking them to change the scheme is a step that exists
         // only to be got wrong.
-        val e = RelayEndpoint.parse("https://rime-relay.andrenijman.com")
+        val e = RelayEndpoint.parse("https://apex-relay.andrenijman.com") // rime-rename: keep (the deployed relay)
         assertEquals(
-            RelayEndpoint(secure = true, host = "rime-relay.andrenijman.com", port = 443, prefix = ""),
+            RelayEndpoint(secure = true, host = "apex-relay.andrenijman.com", port = 443, prefix = ""), // rime-rename: keep (the deployed relay)
             e,
         )
-        assertEquals("rime-relay.andrenijman.com", e.authority())
-        assertEquals("wss://rime-relay.andrenijman.com", e.toString())
+        assertEquals("apex-relay.andrenijman.com", e.authority()) // rime-rename: keep (the deployed relay)
+        assertEquals("wss://apex-relay.andrenijman.com", e.toString()) // rime-rename: keep (the deployed relay)
     }
 
     @Test

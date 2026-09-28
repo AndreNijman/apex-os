@@ -53,9 +53,12 @@ object Push {
     const val BODY_LEN: Int = 22
     const val ENVELOPE_LEN: Int = 1 + NONCE_LEN + BODY_LEN + TAG_LEN
 
-    /** Fixed, public, and the same bytes `push.rs` uses. */
-    private val HKDF_SALT = "rime.push.v1".toByteArray(Charsets.US_ASCII)
-    private val HKDF_INFO = "rime.push.envelope".toByteArray(Charsets.US_ASCII)
+    /**
+     * Fixed, public, and the same bytes `push.rs` uses. KEPT through the
+     * rebrand: every push a desktop in the field seals is keyed by them.
+     */
+    private val HKDF_SALT = "apex.push.v1".toByteArray(Charsets.US_ASCII) // rime-rename: keep (push HKDF salt, wire)
+    private val HKDF_INFO = "apex.push.envelope".toByteArray(Charsets.US_ASCII) // rime-rename: keep (push HKDF info, wire)
 
     private val random = SecureRandom()
 

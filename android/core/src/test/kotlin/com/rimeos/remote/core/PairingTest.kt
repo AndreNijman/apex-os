@@ -47,7 +47,7 @@ class PairingTest {
 
     @Test
     fun `a qr payload that is not ours is refused by shape`() {
-        for (bad in listOf("https://example.invalid/", "rime-remote", "rime-remote:not base64", "")) {
+        for (bad in listOf("https://example.invalid/", "apex-remote", "apex-remote:not base64", "")) { // rime-rename: keep (Pairing.SCHEME)
             val e = assertThrows<PairingException>("$bad was accepted") { Pairing.decodeOffer(bad) }
             assertEquals(PairingError.NotAnOffer, e.error, bad)
         }
@@ -105,11 +105,11 @@ class PairingTest {
         val token = Base64Url.encode(ByteArray(32) { 5 })
         val json = """{"v":1,"machine":"l16","key":"$key","token":"$token",""" +
             """"lan":["192.168.1.10:7717","[fd00::1]:7717"],""" +
-            """"relay":"https://rime-relay.andrenijman.com","expires_ms":1757000000000}"""
+            """"relay":"https://apex-relay.andrenijman.com","expires_ms":1757000000000}""" // rime-rename: keep (the deployed relay)
         val decoded = Pairing.decodeOffer(Pairing.SCHEME + Base64Url.encode(json.toByteArray()))
         assertEquals("l16", decoded.machine)
         assertEquals(2, decoded.lan.size)
-        assertEquals("https://rime-relay.andrenijman.com", decoded.relay)
+        assertEquals("https://apex-relay.andrenijman.com", decoded.relay) // rime-rename: keep (the deployed relay)
         assertEquals(1757000000000L, decoded.expiresMs)
     }
 

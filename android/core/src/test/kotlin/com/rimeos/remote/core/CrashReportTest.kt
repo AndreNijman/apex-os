@@ -44,7 +44,7 @@ class CrashReportTest {
         // The user's own words, which is what a reply or a dictated sentence is.
         "delete the staging database",
         // A pairing token, which a parse error over a pairing payload quotes.
-        "rime-remote://pair?k=7QnR3vTgH1sXbZ",
+        "apex-remote://pair?k=7QnR3vTgH1sXbZ", // rime-rename: keep (Pairing.SCHEME)
         // The machine's address.
         "192.168.1.245:7719",
     )

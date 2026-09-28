@@ -10,7 +10,9 @@ object Rendezvous {
      * The domain separator mixed into the hash, so that this hash of a public
      * key can never collide with some other protocol's hash of the same key.
      */
-    private val DOMAIN = "rime-remote/rendezvous/v1".toByteArray(Charsets.US_ASCII)
+    // KEPT through the rebrand: a rendezvous id is this hash, and the desktop
+    // computes the same one, so changing a byte strands every paired phone.
+    private val DOMAIN = "apex-remote/rendezvous/v1".toByteArray(Charsets.US_ASCII) // rime-rename: keep (rendezvous domain separator, wire)
 
     /**
      * The meeting-point name for a machine with this static public key.

@@ -253,7 +253,10 @@ class AppUpdater(private val context: Context, private val repo: String = RIME_O
     }
 
     companion object {
-        const val RIME_OS_REPO = "AndreNijman/rime-os"
+        // The repository under its pre-rebrand name: GitHub's API redirects a
+        // renamed repository's old name, and the new name resolves only once
+        // the rename has happened, so the old one finds releases on both sides.
+        const val RIME_OS_REPO = "AndreNijman/apex-os" // rime-rename: keep (works before and after the GitHub rename)
         private const val WRITE_NAME = "rime-remote.apk"
         private const val MAX_TEXT_BYTES = 2 * 1024 * 1024
     }

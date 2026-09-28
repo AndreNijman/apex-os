@@ -203,9 +203,13 @@ for i, s in enumerate(steps):
         print("REQUIRE_AT=%d" % i)
         print("REQUIRE_IF=%s" % ("yes" if "if" in s else "no"))
         env = s.get("env") or {}
+        # The env name is the script's (RIME_*); the secret it carries kept
+        # its pre-rebrand name (secrets.APEX_*), which cannot be renamed (rime-rename: keep)
+        # because a secret's value cannot be read back to copy it.
         for k in ("RIME_KEYSTORE_BASE64", "RIME_KEYSTORE_PASSWORD",
                   "RIME_KEY_ALIAS", "RIME_KEY_PASSWORD"):
-            if k in env and "secrets." + k in str(env[k]):
+            secret = "APEX_" + k[len("RIME_"):]  # rime-rename: keep (the GitHub secret names)
+            if k in env and "secrets." + secret in str(env[k]):
                 print("REQUIRE_ENV=%s" % k)
     if "verify-signing-identity.sh --published" in r:
         print("PUBLISHED_AT=%d" % i)
@@ -617,7 +621,8 @@ if said "$out" "cannot be read back" || said "$out" "CANNOT BE READ BACK"; then
 else
     bad "the generator does not say that a GitHub secret cannot be read back: $out"
 fi
-if said "$out" "gh secret set RIME_KEYSTORE_BASE64"; then
+# The GitHub secret's real name: secrets.APEX_* kept theirs through the rebrand. (rime-rename: keep)
+if said "$out" "gh secret set APEX_KEYSTORE_BASE64"; then  # rime-rename: keep (the GitHub secret name)
     ok "it prints the exact commands that set the secrets"
 else
     bad "it does not print the gh secret set commands"
