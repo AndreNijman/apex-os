@@ -47,8 +47,15 @@ local failures = {}
 -- than per-load: within a single config pass the cache is what lets
 -- rime/shell-keybinds.lua share the handle table rime/keybindings.lua returns
 -- instead of executing it a second time and double-binding every default.
+--
+-- apex.* too: a module written before the rename (a shell-keybinds.lua, a
+-- user-overrides.lua) can still require its neighbours by the APEX name, and
+-- ~/.config/hypr/apex resolves to rime/ on a machine that was upgraded. Left
+-- cached, that module would be served from the previous pass after a reload
+-- and bind nothing.
 for name in pairs(package.loaded) do
-    if name:sub(1, 5) == "rime." then package.loaded[name] = nil end
+    local prefix = name:sub(1, 5)
+    if prefix == "rime." or prefix == "apex." then package.loaded[name] = nil end  -- rime-rename: keep — APEX-era module names
 end
 
 local function rime(name)

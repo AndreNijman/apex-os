@@ -275,4 +275,20 @@ bind("", "XF86AudioPlay", hl.dsp.exec_cmd("playerctl play-pause"), locked)
 bind("", "XF86AudioNext", hl.dsp.exec_cmd("playerctl next"),       locked)
 bind("", "XF86AudioPrev", hl.dsp.exec_cmd("playerctl previous"),   locked)
 
+-- ── One table under both module names ────────────────────────────────────────
+-- A hyprland.lua seeded by an APEX image is the user's file, so it is never
+-- rewritten, and it still loads this module as `apex.keybindings`: since the
+-- rename ~/.config/hypr/apex is a symlink to rime/. A generated module or a
+-- user-overrides.lua can ask for it under the other name. Two names are two
+-- package.loaded entries, and a `require` under the second one would run this
+-- file again: every default bound twice (both fire), and a disable() that
+-- reaches only one of the two copies.
+--
+-- So whichever name ran it, both names get THIS table, on every run. That is
+-- also what keeps `hyprctl reload` honest: a loader clears only its own prefix
+-- and re-runs this file, and the other name is overwritten here rather than
+-- left serving the previous pass's handles, which Hyprland dropped.
+package.loaded["rime.keybindings"] = M
+package.loaded["apex.keybindings"] = M  -- rime-rename: keep — the module name APEX-seeded configs require
+
 return M
