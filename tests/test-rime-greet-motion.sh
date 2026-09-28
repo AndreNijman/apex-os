@@ -115,5 +115,20 @@ printf '%s\n' "$pw" | grep -qE 'if \(root\.ctx\.hasError && text\.length > 0\) r
     && ok "the error clears when the user types, not when the field is emptied" \
     || bad "clearing the field still clears the error the refusal just set"
 
+# ── §5 the first boot of an upgraded machine ─────────────────────────────────
+# rime-greet-publish runs the helper for every account at boot, before anyone
+# has logged in on this image, so the shell's files are still under the APEX
+# directory names (rime-rename: keep — renamed at the first login). The helper
+# must read those too, or that boot publishes nothing. Asserted on the lists of
+# paths the two loops walk: new name first, the old one second.
+section "§5 the helper reads the shell's files under both directory names"
+walk() { sed -n "/^for $1 in /,/; do/p" "$HELPER" | grep -oE '\.(cache|config)/[a-z]+-shell/[^"]*'; }
+[ "$(walk colors | tr '\n' ' ')" = ".cache/rime-shell/colors.json .cache/apex-shell/colors.json " ] \
+    && ok "the accent is read from rime-shell, then apex-shell" \
+    || bad "the accent is read from rime-shell, then apex-shell (got: $(walk colors | tr '\n' ' '))"
+[ "$(walk settings | tr '\n' ' ')" = ".config/rime-shell/src/user_data/settings.json .config/apex-shell/src/user_data/settings.json " ] \
+    && ok "the motion settings are read from rime-shell, then apex-shell" \
+    || bad "the motion settings are read from rime-shell, then apex-shell (got: $(walk settings | tr '\n' ' '))"
+
 printf '\nrime-greet-motion: %d passed, %d failed\n' "$pass" "$fail"
 [ "$fail" -eq 0 ]

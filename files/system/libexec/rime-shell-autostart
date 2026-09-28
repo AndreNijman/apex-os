@@ -49,7 +49,11 @@ set -uo pipefail
 # is guaranteed to exist before the compositor is ever exec'd. An override is kept
 # for developers running their own checkout:
 #     RIME_SHELL_DIR=~/src/rime-shell /usr/libexec/rime-shell-autostart
-SHELL_DIR="${RIME_SHELL_DIR:-/usr/share/rime-shell}"
+# APEX_SHELL_DIR is the same override under its pre-rename name, which a
+# developer's unit or session environment may still set. `rime shell` reads it
+# the same way (rimed/rime/src/main.rs), and the two must agree: a launcher
+# started from one path and IPC aimed at another is a shell nothing can reach.
+SHELL_DIR="${RIME_SHELL_DIR:-${APEX_SHELL_DIR:-/usr/share/rime-shell}}"  # rime-rename: keep — the override's old name
 ENTRY="${SHELL_DIR}/shell.qml"
 # Was 120s to cover a cold `git clone` over slow DSL. Nothing is downloaded any
 # more, so this is now only a sanity bound on a broken image or a bad override.

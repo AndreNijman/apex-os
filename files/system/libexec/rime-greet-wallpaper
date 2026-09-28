@@ -218,11 +218,20 @@ say "published ${src} -> ${DEST_DIR}/${user}.${ext} (${size} bytes)"
 # ^#[0-9a-fA-F]{6}$ — nothing else in the file is carried over, so there is no
 # JSON parser in root's path and nothing for the greeter to misinterpret.
 ACCENT_DIR="${STATE_DIR}/accents"
-colors="${home}/.cache/rime-shell/colors.json"
-accent="$(setpriv --reuid="${uid}" --regid="${gid}" --clear-groups -- \
-            /usr/bin/head -c 4096 -- "${colors}" 2>/dev/null \
-          | grep -oE '"active"[[:space:]]*:[[:space:]]*"#[0-9a-fA-F]{6}"' \
-          | grep -oE '#[0-9a-fA-F]{6}' | head -n1 || true)"
+# The shell's directories are read under their Rime name and, failing that, the
+# APEX one. rime-greet-publish runs this for every account at boot, and on the
+# first boot of this image nobody has logged in yet, so nothing has renamed
+# ~/.cache/apex-shell (rime-session-migrate does, at the account's first
+# login). Reading only the new name would publish nothing that boot.
+accent=""
+for colors in "${home}/.cache/rime-shell/colors.json" \
+              "${home}/.cache/apex-shell/colors.json"; do  # rime-rename: keep — the directory until the first login migrates it
+    accent="$(setpriv --reuid="${uid}" --regid="${gid}" --clear-groups -- \
+                /usr/bin/head -c 4096 -- "${colors}" 2>/dev/null \
+              | grep -oE '"active"[[:space:]]*:[[:space:]]*"#[0-9a-fA-F]{6}"' \
+              | grep -oE '#[0-9a-fA-F]{6}' | head -n1 || true)"
+    [ -n "${accent}" ] && break
+done
 if [ -n "${accent}" ]; then
     mkdir -p "${ACCENT_DIR}"; chmod 0755 "${ACCENT_DIR}"
     atmp="$(mktemp "${ACCENT_DIR}/.publish.XXXXXX")"
@@ -241,9 +250,19 @@ fi
 # accent: read as the caller, capped, and only three validated lines leave.
 # Rime Shell calls this helper again whenever one of the three changes.
 MOTION_DIR="${STATE_DIR}/motion"
-settings="${home}/.config/rime-shell/src/user_data/settings.json"
-if prefs="$(setpriv --reuid="${uid}" --regid="${gid}" --clear-groups -- \
-                /usr/bin/head -c 16384 -- "${settings}" 2>/dev/null | motion_prefs)"; then
+# Both directory names, for the reason the accent gives. An unreadable file
+# fails the pipeline (pipefail), which is what moves this on to the next name
+# rather than publishing defaults over the user's Reduce Motion.
+prefs=""
+for settings in "${home}/.config/rime-shell/src/user_data/settings.json" \
+                "${home}/.config/apex-shell/src/user_data/settings.json"; do  # rime-rename: keep — as above
+    if prefs="$(setpriv --reuid="${uid}" --regid="${gid}" --clear-groups -- \
+                    /usr/bin/head -c 16384 -- "${settings}" 2>/dev/null | motion_prefs)"; then
+        break
+    fi
+    prefs=""
+done
+if [ -n "${prefs}" ]; then
     mkdir -p "${MOTION_DIR}"; chmod 0755 "${MOTION_DIR}"
     mtmp="$(mktemp "${MOTION_DIR}/.publish.XXXXXX")"
     printf '%s\n' "${prefs}" > "${mtmp}"
