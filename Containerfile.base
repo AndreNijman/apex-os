@@ -1763,6 +1763,12 @@ RUN set -eux; \
 COPY files/system/units/rime-shell-firstrun.service \
      /usr/lib/systemd/user/rime-shell-firstrun.service
 COPY files/system/libexec/rime-shell-firstrun /usr/libexec/rime-shell-firstrun
+# The one-time move of an APEX-era account to its Rime OS names (state, config,
+# data, cache, Hyprland, the shell's own directories, user units). A user unit
+# ordered before basic.target, so it runs before rime-remoted could mint a new
+# identity key (which would unpair every phone) and before the compositor starts.
+COPY --chmod=0755 files/system/libexec/rime-session-migrate /usr/libexec/rime-session-migrate
+COPY files/system/units/rime-session-migrate.service /usr/lib/systemd/user/rime-session-migrate.service
 # Idempotent launcher for hypridle + quickshell. Kept after vendoring because it
 # still owns two things: preferring the user's own ~/.config/hypr/hypridle.conf
 # over the image copy, and refusing to start a second instance (which is what lets
@@ -1943,7 +1949,11 @@ RUN set -eux; \
     rm -rf /tmp/rime-mux-check.tsv /tmp/rime-mux-check.kdl /tmp/rime-zcheck; \
     test ! -e /root/.cache/zellij; \
     echo "context menu + settings generators + agent helpers: installed and self-tested"
-RUN systemctl --global enable rime-shell-firstrun.service
+RUN set -eux; \
+    systemctl --global enable rime-shell-firstrun.service; \
+    python3 -m py_compile /usr/libexec/rime-session-migrate; \
+    systemctl --global enable rime-session-migrate.service; \
+    test -L /etc/systemd/user/basic.target.wants/rime-session-migrate.service
 
 # ── Stage 5d: user packages, WITHOUT breaking OS updates ────────────────────
 # The supported way to add software to a bootc system used to be `rpm-ostree
