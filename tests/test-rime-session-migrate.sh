@@ -515,6 +515,39 @@ run "$F"; rc=$?
 check "a home that was never APEX is left exactly as it is" \
     '[ "$rc" = 0 ] && [ "$(snapshot "$F")" = "$before" ] && [ ! -s "$F.out" ]'
 
+sec "with Rime Shell's own migration in the image"
+# The shell ships src/scripts/rime-shell-migrate.sh, and the shell directories
+# are its business: this script runs it (that is what puts it before firstrun's
+# first mkdir) instead of renaming them itself. Needs a shell tree to take the
+# real script from; the directory-level fallback is what everything above ran.
+SHELL_TREE=""
+for cand in "${RIME_SHELL_TREE:-}" "${ROOT}/../rime-shell" "${ROOT}/../wt-rime-shell" /usr/share/rime-shell; do
+    [ -n "$cand" ] && [ -f "${cand}/src/scripts/rime-shell-migrate.sh" ] && { SHELL_TREE="$cand"; break; }
+done
+if [ -z "$SHELL_TREE" ]; then
+    skip "no rime-shell tree with src/scripts/rime-shell-migrate.sh; the delegation cannot be checked"
+else
+    IMG2="${WORK}/img-shell"; cp -a "$IMG" "$IMG2"
+    cp "${SHELL_TREE}/src/scripts/rime-shell-migrate.sh" "${IMG2}/usr/share/rime-shell/src/scripts/"
+    S="${WORK}/with-shell"; make_home "$S"
+    IMG_SAVE="$IMG"; IMG="$IMG2"; run "$S"; rc=$?; IMG="$IMG_SAVE"
+    check "the migration succeeds with the shell's script doing the shell's part" '[ "$rc" = 0 ]' "$(cat "$S.out")"
+    check "the shell's directories moved, the old names linked" \
+        '[ -L "$S/.config/apex-shell" ] && [ -d "$S/.config/rime-shell" ] && [ -L "$S/.cache/apex-shell" ] && [ -L "$S/.local/state/apex-shell" ]'
+    check "the shell renamed its own files; the old name still resolves for niri" \
+        '[ -f "$S/.config/rime-shell/RimeShellInput.kdl" ] && [ ! -L "$S/.config/rime-shell/RimeShellInput.kdl" ] && [ -L "$S/.config/rime-shell/ApexShellInput.kdl" ]'
+    check "niri includes the moved files by their new names" \
+        'grep -qxF "include \"$S/.config/rime-shell/RimeShellInput.kdl\"" "$S/.config/niri/config.kdl" && grep -q tap "$S/.config/rime-shell/RimeShellInput.kdl"'
+    check "…with no conflict along the way" '! grep -qi conflict "$S.out"' "$(grep -i conflict "$S.out")"
+    if command -v niri >/dev/null 2>&1; then
+        check "niri validates it" 'niri validate --config "$S/.config/niri/config.kdl" >/dev/null 2>&1'
+    fi
+    before="$(snapshot "$S")"
+    IMG="$IMG2"; run "$S"; rc=$?; IMG="$IMG_SAVE"
+    check "a second run changes nothing and says nothing" \
+        '[ "$rc" = 0 ] && [ "$(snapshot "$S")" = "$before" ] && [ ! -s "$S.out" ]' "$(head -3 "$S.out")"
+fi
+
 sec "where it runs"
 FR="${ROOT}/files/system/libexec/rime-shell-firstrun"
 call_line="$(grep -n '^if \[ -x /usr/libexec/rime-session-migrate \]' "$FR" | head -1 | cut -d: -f1)"
@@ -584,7 +617,7 @@ else
     ok "caught: a conflicting new directory merged into (the paired key would be displaced)"
 fi
 mutant "niri includes rewritten without creating their targets" \
-    '            if not os.path.lexists(new_target) and not dry_run:' '            if False:' \
+    '            if (not os.path.lexists(new_target) or placeholder) and not dry_run:' '            if False:' \
     '[ -f "$MH/.config/rime-shell/RimeShellInput.kdl" ]'
 mutant "labwc markers left in their APEX spelling" \
     'new = new.replace(OLD_KB_BEGIN, NEW_KB_BEGIN).replace(OLD_KB_END, NEW_KB_END)' 'pass' \

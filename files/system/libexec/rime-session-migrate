@@ -13,9 +13,13 @@ and leaves the account shaped the way this image expects:
       $XDG_DATA_HOME/apex         -> rime        capsule records (rime env)
       $XDG_CACHE_HOME/apex        -> rime
       ~/.config/hypr/apex         -> rime        the Hyprland modules
-      ~/.config/apex-shell, ~/.cache/apex-shell, ~/.local/state/apex-shell,
-      ~/.local/share/apex-shell   -> rime-shell  directory level ONLY: what is
-                                                 inside belongs to Rime Shell
+      ~/.config/apex-shell, ~/.cache/apex-shell, ~/.local/state/apex-shell
+                                  -> rime-shell  by Rime Shell's own script
+                                                 (src/scripts/rime-shell-migrate.sh
+                                                 in the image), which must run
+                                                 before anything creates the new
+                                                 names; without it, the
+                                                 directory level only
 
     files the image seeded into the account and then gave to the user
       hyprland.lua, hypr/rime/*.lua, hypridle.conf, niri config.kdl, labwc
@@ -325,13 +329,44 @@ def move_dir(parent, old_name, new_name, merge=False):
 
 # ── the steps ────────────────────────────────────────────────────────────────
 
+# Rime Shell's own migration, shipped in the shell tree. Its contract: run it
+# before anything creates ~/.config/rime-shell, ~/.cache/rime-shell or
+# $XDG_STATE_HOME/rime-shell, because once a new directory exists it leaves the
+# old one alone. rime-shell-firstrun creates all three, and it calls this first.
+SHELL_MIGRATE = "/usr/share/rime-shell/src/scripts/rime-shell-migrate.sh"
+
+
 def step_dirs(ctx):
     state, config, data, cache = ctx["state"], ctx["config"], ctx["data"], ctx["cache"]
     # State first: it holds the Remote identity key.
     for base in (state, config, data, cache):
         if os.path.isdir(base):
             move_dir(base, OLD, NEW)
-    for base in (config, cache, state, data):
+
+
+def step_shell_dirs(ctx, image):
+    """The shell's directories: its own script, or the directory level only."""
+    script = image.path(SHELL_MIGRATE)
+    if os.path.isfile(script):
+        if dry_run:
+            say(f"would run {SHELL_MIGRATE}")
+            return
+        env = dict(os.environ, HOME=ctx["home"], XDG_STATE_HOME=ctx["state"])
+        try:
+            r = subprocess.run(["bash", script], env=env, stdout=subprocess.PIPE,
+                               stderr=subprocess.STDOUT, text=True, timeout=60)
+        except (OSError, subprocess.TimeoutExpired) as e:
+            fail(f"{SHELL_MIGRATE}: {e}")
+            return
+        for line in r.stdout.splitlines():
+            if line.strip():
+                say(line)
+        if r.returncode != 0:
+            fail(f"{SHELL_MIGRATE} exited {r.returncode}")
+        return
+    # An image without the shell's script: the same directory-level rename,
+    # which is also exactly what that script does first.
+    for base in (ctx["config"], ctx["cache"], ctx["state"]):
         if os.path.isdir(base):
             move_dir(base, OLD_SHELL, NEW_SHELL)
 
@@ -469,12 +504,17 @@ def step_niri(ctx, image):
                 left_old = True
                 out.append(line)
                 continue
-            if not os.path.lexists(new_target) and not dry_run:
+            # An empty new file is a placeholder (firstrun pre-creates them);
+            # it holds nothing, so the old content still wins.
+            placeholder = (os.path.isfile(new_target) and not os.path.islink(new_target)
+                           and os.path.getsize(new_target) == 0)
+            if (not os.path.lexists(new_target) or placeholder) and not dry_run:
                 try:
-                    if os.path.isfile(old_target):
-                        shutil.copyfile(old_target, new_target)
-                    else:
-                        open(new_target, "a").close()
+                    body = read(old_target) if os.path.isfile(old_target) else ""
+                    # The keybind file names image paths; they move with it.
+                    body = rewrite_text(body or "", image, comment="//", cli=True)
+                    with open(new_target, "w", encoding="utf-8") as fh:
+                        fh.write(body)
                 except OSError as e:
                     fail(f"cannot create {new_target}: {e}")
                     left_old = True
@@ -676,6 +716,7 @@ def main(argv=None):
 
     steps = (
         ("directories", lambda: step_dirs(ctx)),
+        ("shell directories", lambda: step_shell_dirs(ctx, image)),
         ("hyprland", lambda: step_hypr(ctx, image)),
         ("hypridle", lambda: step_hypridle(ctx, image)),
         ("niri", lambda: step_niri(ctx, image)),
