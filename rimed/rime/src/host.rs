@@ -383,20 +383,32 @@ fn ssh_capture(host: &Host, name: &str, command: &str) -> Result<(bool, String)>
 /// the one every machine had before the rename to Rime OS.
 const PEER_CLIS: [&str; 2] = ["rime", "apex"];  // rime-rename: keep (the CLI on peers not yet updated)
 
+/// The remote command that asks a peer to describe itself: each of
+/// [`PEER_CLIS`] in turn, stopping at the first that succeeds. A CLI that is
+/// missing or too old to know the verb exits non-zero with its complaint on
+/// stderr, so stdout carries at most one report.
+fn describe_command() -> String {
+    PEER_CLIS
+        .iter()
+        .map(|cli| remote_sh(&[cli, "host", "describe", "--json"]))
+        .collect::<Vec<_>>()
+        .join(" || ")
+}
+
 /// Probe a host: ask its `rime` first, fall back to the shell probe.
 fn probe(name: &str, host: &Host) -> Result<HostCaps> {
     let now = unix_now();
 
     // Path 1: a Rime peer describes itself. `--json` output is the same struct
     // this deserialises. A peer not yet updated past the rename has the CLI
-    // under its old name, and describes itself just as well.
-    for cli in PEER_CLIS {
-        let describe = remote_sh(&[cli, "host", "describe", "--json"]);
-        if let Ok((ok, out)) = ssh_capture(host, name, &describe) {
-            if ok {
-                if let Some(caps) = parse_describe(&out, now) {
-                    return Ok(caps);
-                }
+    // under its old name, and describes itself just as well; both names are
+    // asked in ONE ssh (the second only if the first fails), so a host with
+    // neither still costs exactly one attempt before the shell probe.
+    let describe = describe_command();
+    if let Ok((ok, out)) = ssh_capture(host, name, &describe) {
+        if ok {
+            if let Some(caps) = parse_describe(&out, now) {
+                return Ok(caps);
             }
         }
     }
@@ -970,6 +982,14 @@ mod tests {
         let mine = serde_json::to_string(&describe_self()).unwrap();
         let parsed = parse_describe(&mine, 1).expect("this machine's own output was rejected");
         assert_eq!(parsed.cpus, describe_self().cpus);
+    }
+
+    #[test]
+    fn the_describe_attempt_asks_the_new_cli_then_the_old_in_one_command() {
+        assert_eq!(
+            describe_command(),
+            "'rime' 'host' 'describe' '--json' || 'apex' 'host' 'describe' '--json'"  // rime-rename: keep
+        );
     }
 
     #[test]
