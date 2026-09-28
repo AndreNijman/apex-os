@@ -119,7 +119,7 @@ jobs:
           if [ "$avail_gb" -lt 150 ]; then
             echo "FATAL: the kernel build tree is ~100 GB and only ${avail_gb} GiB is free."
             echo "       Prune the runner's container storage:"
-            echo "         sudo -u ghrunner XDG_RUNTIME_DIR=/run/rime-runner HOME=/var/lab/runner podman system prune -af"
+            echo "         sudo -u ghrunner XDG_RUNTIME_DIR=/run/apex-runner HOME=/var/lab/runner podman system prune -af"  # rime-rename: keep (katana's real runtime dir)
             exit 1
           fi
 

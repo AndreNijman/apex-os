@@ -17,6 +17,12 @@ on:
     branches: [roadmap/v2.2]
   workflow_dispatch:
 
+# The shell repository under the name that resolves on both sides of the GitHub
+# rename: GitHub redirects a renamed repository's old name, and the new name
+# resolves only once the rename has happened.
+env:
+  SHELL_REPO: https://github.com/AndreNijman/apex-shell  # rime-rename: keep (works before and after the GitHub rename)
+
 permissions:
   contents: read
 
@@ -495,16 +501,16 @@ jobs:
             # conflates "the branch does not exist" with "the network is
             # down", and sends the second one to a silently wrong comparison.
             if git ls-remote --exit-code --heads \
-                 https://github.com/AndreNijman/rime-shell "$cand" >/dev/null 2>&1; then
+                 "$SHELL_REPO" "$cand" >/dev/null 2>&1; then
               shell_ref="$cand"; break
             fi
           done
           if [ -n "$shell_ref" ]; then
             git clone --depth 1 -q --branch "$shell_ref" \
-              https://github.com/AndreNijman/rime-shell /tmp/rime-shell-parity
+              "$SHELL_REPO" /tmp/rime-shell-parity
             echo "input parity: comparing against rime-shell branch '$shell_ref'"
           else
-            git clone --depth 1 -q https://github.com/AndreNijman/rime-shell \
+            git clone --depth 1 -q "$SHELL_REPO" \
               /tmp/rime-shell-parity || true
             echo "::warning::input parity: rime-shell has no '$want' and no roadmap/v2.2; comparing against its default branch"
           fi
@@ -2967,18 +2973,18 @@ jobs:
           for cand in "$want" roadmap/v2.2; do
             [ -n "$cand" ] || continue
             if git ls-remote --exit-code --heads \
-                 https://github.com/AndreNijman/rime-shell "$cand" >/dev/null 2>&1; then
+                 "$SHELL_REPO" "$cand" >/dev/null 2>&1; then
               shell_ref="$cand"; break
             fi
           done
           if [ -n "$shell_ref" ]; then
             echo "keybind model: vendoring rime-shell branch '$shell_ref'"
             git clone --depth 1 --branch "$shell_ref" \
-              https://github.com/AndreNijman/rime-shell.git \
+              "$SHELL_REPO" \
               "${GITHUB_WORKSPACE}/../rime-shell"
           else
             echo "::warning::keybind model: rime-shell has no '$want' and no roadmap/v2.2; using its default branch"
-            git clone --depth 1 https://github.com/AndreNijman/rime-shell.git \
+            git clone --depth 1 "$SHELL_REPO" \
               "${GITHUB_WORKSPACE}/../rime-shell"
           fi
           git -C "${GITHUB_WORKSPACE}/../rime-shell" log -1 --format='vendored rime-shell %h %s'
@@ -3476,18 +3482,18 @@ jobs:
           for cand in "$want" roadmap/v2.2; do
             [ -n "$cand" ] || continue
             if git ls-remote --exit-code --heads \
-                 https://github.com/AndreNijman/rime-shell "$cand" >/dev/null 2>&1; then
+                 "$SHELL_REPO" "$cand" >/dev/null 2>&1; then
               shell_ref="$cand"; break
             fi
           done
           if [ -n "$shell_ref" ]; then
             echo "keybind model: vendoring rime-shell branch '$shell_ref'"
             git clone --depth 1 --branch "$shell_ref" \
-              https://github.com/AndreNijman/rime-shell.git \
+              "$SHELL_REPO" \
               "${GITHUB_WORKSPACE}/../rime-shell"
           else
             echo "::warning::keybind model: rime-shell has no '$want' and no roadmap/v2.2; using its default branch"
-            git clone --depth 1 https://github.com/AndreNijman/rime-shell.git \
+            git clone --depth 1 "$SHELL_REPO" \
               "${GITHUB_WORKSPACE}/../rime-shell"
           fi
           git -C "${GITHUB_WORKSPACE}/../rime-shell" log -1 --format='vendored rime-shell %h %s'
