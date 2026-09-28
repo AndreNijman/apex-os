@@ -157,7 +157,7 @@ EOF
     cat > "$H/.config/hypr/hypridle.conf" <<'EOF'
 # mine
 general {
-    lock_cmd = qs -c /usr/share/apex-shell ipc call lockscreen lock
+    lock_cmd = qs -p ~/.local/share/apex-shell-live ipc call lockscreen lock || qs -c /usr/share/apex-shell ipc call lockscreen lock
 }
 listener { timeout = 600 }
 EOF
@@ -238,6 +238,10 @@ EOF
     printf '[Service]\nEnvironment=FOO=1\n' > "$U/apex-agentd.service.d/override.conf"
     printf '[Service]\nExecStart=%s/.local/bin/apex-wip-snapshot\n' "$H" > "$U/apex-wip-snapshot.service"
     ln -s "$U/apex-wip-snapshot.service" "$U/default.target.wants/apex-wip-snapshot.service"
+    printf '[Timer]\nOnCalendar=*:0/3\n' > "$U/apex-wip-snapshot.timer"
+    ln -s "$U/apex-wip-snapshot.timer" "$U/timers.target.wants/apex-wip-snapshot.timer"
+    mkdir -p "$U/apex-remoted.service.d"
+    printf '[Service]\nEnvironment=RUST_LOG=debug\n' > "$U/apex-remoted.service.d/debug.conf"
     # …and one whose name the image DOES ship a rime- twin of: still the user's.
     printf '[Service]\nExecStart=/bin/true\n' > "$U/apex-storage-notice.service"
     ln -s "$U/apex-storage-notice.service" "$U/default.target.wants/apex-storage-notice.service"
@@ -390,7 +394,11 @@ sec "hypridle, niri, labwc, zsh, starship"
 check "a customised hypridle.conf keeps the user's lines" \
     'grep -qx "# mine" "$H/.config/hypr/hypridle.conf" && grep -q "timeout = 600" "$H/.config/hypr/hypridle.conf"'
 check "…and its lock command reaches the shell this image ships" \
-    'grep -qF "qs -c /usr/share/rime-shell ipc call lockscreen lock" "$H/.config/hypr/hypridle.conf"'
+    'grep -qF "|| qs -c /usr/share/rime-shell ipc call lockscreen lock" "$H/.config/hypr/hypridle.conf"'
+check "…while a path of the user's own on the same line is left as it was" \
+    'grep -qF "lock_cmd = qs -p ~/.local/share/apex-shell-live ipc call lockscreen lock ||" "$H/.config/hypr/hypridle.conf"'
+check "…and the original is kept beside it" \
+    'grep -qF "/usr/share/apex-shell ipc call" "$H/.config/hypr/hypridle.conf.pre-rime.bak"'
 N="$H/.config/niri/config.kdl"
 check "niri includes the new generated files" \
     'grep -qxF "include \"$H/.config/rime-shell/RimeShellInput.kdl\"" "$N" && grep -qxF "include \"$H/.config/rime-shell/RimeShellKeybinds.kdl\"" "$N"'
@@ -440,6 +448,10 @@ check "a masked unit stays masked under its new name" \
     '[ "$(readlink "$U/rime-aid.service")" = /dev/null ]'
 check "the drop-in directory moved, the old name linked" \
     '[ -f "$U/rime-agentd.service.d/override.conf" ] && [ -L "$U/apex-agentd.service.d" ]'
+check "every image unit's drop-in directory moved (rime-remoted's too)" \
+    '[ -f "$U/rime-remoted.service.d/debug.conf" ] && [ -L "$U/apex-remoted.service.d" ]'
+check "the user's own apex-wip-snapshot timer is neither renamed nor disabled" \
+    '[ -L "$U/timers.target.wants/apex-wip-snapshot.timer" ] && [ ! -L "$U/timers.target.wants/rime-wip-snapshot.timer" ] && [ -f "$U/apex-wip-snapshot.timer" ] && [ ! -e "$U/rime-wip-snapshot.timer" ]'
 check "the user's own apex-wip-snapshot unit is not touched" \
     '[ ! -L "$U/default.target.wants/rime-wip-snapshot.service" ] && [ ! -e "$U/rime-wip-snapshot.service" ] && [ -f "$U/apex-wip-snapshot.service" ]'
 check "a user unit named like an image unit is not enabled under the image's new name" \

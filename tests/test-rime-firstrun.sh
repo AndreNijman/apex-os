@@ -342,6 +342,33 @@ else
     grep -qE 'suppressevent|nofocus,' "$mig" \
         && bad "no pre-0.54 spelling survives migration" \
         || ok "no pre-0.54 spelling survives migration"
+
+    # The togglesplit rewrite, every login: once, not once per login. It used
+    # to match its own output and grow a `layoutmsg, ` per login (180 of them,
+    # measured on a real config). A grown line is collapsed back.
+    run_mig() {
+        HOME="${WORK}/mighome" bash -c '
+            set -euo pipefail
+            log() { :; }
+            HYPR_LEGACY_CONF="$2"
+            source "$1"
+        ' -- "${WORK}/hypr-mig-block.sh" "$1" >/dev/null 2>&1 || true
+    }
+    ts="${WORK}/togglesplit.conf"
+    printf 'bind = $mainMod, J, togglesplit\nbind = SUPER, K, layoutmsg, layoutmsg, layoutmsg, togglesplit\n' > "$ts"
+    run_mig "$ts"; run_mig "$ts"; run_mig "$ts"
+    [ "$(grep -c 'layoutmsg, togglesplit$' "$ts")" = 2 ] && ! grep -q 'layoutmsg, layoutmsg' "$ts" \
+        && ok "the togglesplit rewrite happens once, however many logins run it" \
+        || bad "the togglesplit rewrite happens once, however many logins run it ($(tr '\n' '|' < "$ts"))"
+    # The shell's migration leaves the old fragment name as a symlink.
+    mkdir -p "${WORK}/tslink"
+    printf 'bind = SUPER, J, togglesplit\n' > "${WORK}/tslink/RimeShellKeybinds.conf"
+    ln -s RimeShellKeybinds.conf "${WORK}/tslink/ApexShellKeybinds.conf"
+    run_mig "${WORK}/tslink/ApexShellKeybinds.conf"
+    [ -L "${WORK}/tslink/ApexShellKeybinds.conf" ] \
+        && grep -q 'layoutmsg, togglesplit' "${WORK}/tslink/RimeShellKeybinds.conf" \
+        && ok "a symlinked fragment is migrated through the link, which stays a link" \
+        || bad "a symlinked fragment is migrated through the link, which stays a link"
 fi
 
 # ─────────────────────────────────────────────────────────────────────────────
