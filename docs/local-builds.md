@@ -8,15 +8,18 @@ Build on the Katana. Push to GitHub only when the work is finished.
 |---|---|
 | Katana (i7-12700H, 20 threads, 62 GiB) | **3m41s** |
 | GitHub runner, warm cache | 3h16m |
-| GitHub runner, cache miss near the top of the file | **6h+ — killed at the job ceiling** |
+| GitHub runner, cache miss near the top of the file | **6h+, killed at the job ceiling** |
 
-The gap is not mostly CPU. `podman build --cache-to` pushes every intermediate
-layer to ghcr as a separate image, so a CI build pays ~90 registry round trips.
-A local build has no `--cache-to` at all and keeps its layers on disk.
+Most of that gap was registry traffic, not CPU. When those numbers were taken,
+CI ran `podman build --cache-to`, which pushed every intermediate layer to ghcr
+as a separate image: about 90 registry round trips per build. A local build has
+no `--cache-to` at all and keeps its layers on disk. CI has since dropped the
+registry cache and commits `base` once (`docs/ci-release-tiers.md`), so the
+runner rows record that period rather than today's cost.
 
-That difference decides what kind of feedback loop you get. Four real bugs in
-this repo were each found in under four minutes locally, and every one of them
-would have surfaced only as a step exit code hours into a CI run:
+The feedback loop follows from the difference. Four real bugs in this repo each
+took under four minutes to find locally, and each would have surfaced only as a
+step exit code hours into a CI run:
 
 - a `bwrap` smoke test that cannot work under `--isolation=chroot`
 - an assertion sourcing a script that self-gates on a binary copied later
@@ -32,12 +35,17 @@ mkdir -p ~/build && cd ~/build
 git clone https://github.com/AndreNijman/apex-os.git
 ```
 
-`core` is public, so pull it rather than spending 45 minutes rebuilding it:
+`core` is public, so pull it instead of spending 45 minutes rebuilding it:
 
 ```
 sudo podman pull ghcr.io/andrenijman/apex-os-core:latest
 sudo podman tag  ghcr.io/andrenijman/apex-os-core:latest localhost/apex-os-core:latest
 ```
+
+The repository in that block is the legacy name, and it stopped moving when
+every tier moved into `ghcr.io/andrenijman/apex-os`. The current core is the
+`:core` tag there, `ghcr.io/andrenijman/apex-os:core`: pull that one and tag it
+`localhost/apex-os-core:latest` the same way.
 
 `build-local.sh` reuses `localhost/apex-os-core:latest` when it exists.
 
@@ -48,9 +56,9 @@ ssh katana 'cd ~/build/apex-os && git fetch -q && git reset --hard origin/<branc
   && ./build-local.sh --allow-unsigned base'
 ```
 
-`--allow-unsigned` because the MOK key is not on the Katana. Iteration builds do
-not need a signed kernel; the final CI build signs. `build-local.sh` refuses to
-produce an unsigned image without that flag, which is the behaviour to keep.
+Pass `--allow-unsigned` because the MOK key is not on the Katana. Iteration
+builds do not need a signed kernel; the final CI build signs. Keep the refusal:
+without that flag `build-local.sh` will not produce an unsigned image.
 
 Rebuild core locally only when `Containerfile.core` changes:
 
@@ -61,7 +69,7 @@ Rebuild core locally only when `Containerfile.core` changes:
 ## Verify what you built
 
 The build's own assertions are the first check, but they only prove the layers
-succeeded. Look inside:
+built. Look inside:
 
 ```
 sudo podman run --rm localhost/apex-os-base:latest bash -c '
@@ -72,8 +80,8 @@ sudo podman run --rm localhost/apex-os-base:latest bash -c '
 ```
 
 `/dev/kvm` and working cgroups are both present on the Katana, so
-`bootc-image-builder` can produce a qcow2 or an ISO there too — unlike the old
-Void box, where an empty `/sys/fs/cgroup` under runit made that impossible.
+`bootc-image-builder` can produce a qcow2 or an ISO there too. The old Void box
+could not: under runit its `/sys/fs/cgroup` was empty.
 
 ## What a local build cannot tell you
 
@@ -85,5 +93,5 @@ Void box, where an empty `/sys/fs/cgroup` under runit made that impossible.
 - **Anything needing a GPU session.** The image builds; the desktop is not
   running. See `docs/labwc-verification.md`.
 
-So: local for the loop, CI for the artefact. Push when it works, not to find out
-whether it works.
+Iterate locally and push once the build works; CI then produces the signed
+artefact.

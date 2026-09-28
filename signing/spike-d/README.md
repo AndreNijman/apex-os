@@ -1,19 +1,20 @@
-# signing/spike-d — Secure Boot signing-chain proof (M0 Spike D)
+# signing/spike-d: Secure Boot signing-chain proof (M0 Spike D)
 
 Reusable, parameterized scripts that prove the APEX-OS Secure Boot signing
 chain end to end in a QEMU/OVMF VM: our own key signs a kernel that boots under
-**SB enforcing**, while unsigned / foreign-signed kernels are refused by the
-firmware. These are the reference commands for the CI image-signing pipeline
-(M1/M5).
+**SB enforcing**, and the firmware refuses unsigned or foreign-signed kernels.
+These were the reference commands for the CI image-signing pipeline (M1/M5),
+which now lives in `Containerfile.core`.
 
-**No key material lives here.** Scripts write keys/certs to an out-of-tree work
-dir you pass in. `.gitignore` blocks private-key patterns repo-wide.
+**No key material lives here.** The scripts write keys and certificates to an
+out-of-tree work dir you pass in. `.gitignore` blocks private-key patterns
+repo-wide.
 
 ## Scripts
 
 | Script | Purpose |
 |--------|---------|
-| `keygen.sh [OUTDIR]` | Generate the APEX test signing keypair + self-signed cert (PEM + DER). Stands in for the future APEX MOK/db key (HSM/CI secret in production). |
+| `keygen.sh [OUTDIR]` | Generate the APEX test signing keypair + self-signed cert (PEM + DER). Stands in for the APEX MOK/db key, which is a CI secret in production. |
 | `enroll-vars.sh CERT_DER OUT_VARS [TEMPLATE]` | Build an SB-enforcing OVMF varstore with the APEX cert enrolled as PK+KEK+db, SecureBoot ON, no Microsoft keys (headless; no MokManager). `WITH_MICROSOFT=1` also enrolls MS UEFI CA/KEK. |
 | `sign-kernel.sh SRC OUT [KEY CERT]` | `sbsign` a kernel/UKI/EFI app with the APEX key and `sbverify` the result. |
 | `boot-sb-vm.sh --kernel … --initramfs … --loader … --vars … ` | Build a throwaway FAT ESP, boot it under `OVMF_CODE.secure` + the enrolled VARS in QEMU (SMM on, headless), capture serial, hard-timeout. |

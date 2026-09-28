@@ -2780,9 +2780,10 @@ cmd_flatpak_upgrade() {
 # that were installed, and `apex pkg list`, `apex pkg upgrade` and the docs all
 # say so rather than leaving the user to work it out. There is no repository to
 # ask for a newer one — an AppImage comes from a download page — and the
-# alternative is the thing docs/packages.md:320 already named as the reason Zen
-# Browser is a Flatpak: "both would need APEX to write and maintain its own
-# updater". This design does not pay that cost, it declines it, in writing.
+# alternative is the thing docs/packages.md ("Why Zen is a Flatpak") already
+# named as the reason Zen Browser is a Flatpak: "both would need APEX to write
+# and maintain its own updater". This design does not pay that cost, it
+# declines it, in writing.
 #
 # Self-update is not merely forbidden, it is impossible: the app runs out of a
 # root-owned 0755 tree and $APPIMAGE points at a root-owned 0644 file in

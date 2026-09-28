@@ -1,4 +1,4 @@
-# APEX-OS — M2 notes (shell provisioner + edition branding + greeter finalization)
+# APEX-OS M2 notes (shell provisioner + edition branding + greeter finalization)
 
 M2 wires the public **APEX Shell** (`github.com/AndreNijman/apex-shell`) into
 the image as a per-user first-login clone, drives the boot-splash branding from
@@ -6,7 +6,7 @@ the edition stamp, and finalizes the apex-greet display manager's session
 picker.
 
 Everything M2 adds lives in the **flavor** Containerfiles (`Containerfile.daily`
-/ `Containerfile.gaming`) — the shared base is intentionally left untouched so
+/ `Containerfile.gaming`). M2 leaves the shared base untouched on purpose, so
 the base owner can fold in the package additions listed at the bottom without
 conflict. The provisioner + session-curation blocks are byte-identical across
 both flavors; only the Plymouth theme differs per edition.
@@ -29,29 +29,30 @@ both flavors; only the Plymouth theme differs per edition.
 APEX Shell is a **live git checkout** the user updates in place: its own
 auto-updater pulls `~/.local/src/apex-shell`, and Quickshell hot-reloads from
 there. An `/etc/skel` copy would be a detached, non-git snapshot the updater and
-hot-reload could not drive. So every user gets their own clone the first time
-they log in.
+hot-reload could not drive. Every user therefore gets their own clone at first
+login.
 
 ### Why it replicates the shell's install.sh instead of running it
 
 The public repo's `install.sh` (+ `dots-extra/install-arch.sh`, inspected during
 this work) **cannot** run on APEX-OS:
 
-- it `die`s immediately on any non-Arch distro (APEX-OS is `fedora-bootc:43`);
-- step 4 runs `sudo pacman`/AUR installs — impossible from an unprivileged user
-  service, and pointless because every dependency is baked into the image;
+- it `die`s at once on any non-Arch distro (APEX-OS is `fedora-bootc:43`);
+- step 4 runs `sudo pacman`/AUR installs, which an unprivileged user service
+  cannot do and which are pointless because the image already carries every
+  dependency;
 - it requires a **pre-existing** `~/.config/hypr` config (else it `die`s).
 
-So `/usr/libexec/apex-shell-firstrun` reproduces the parts of the installer that
-are per-user *seeding* (not package installation), keeping them faithful so the
-shell's updater + hot-reload keep working:
+`/usr/libexec/apex-shell-firstrun` instead reproduces the installer's per-user
+*seeding* steps (not package installation), and keeps them close to the
+original so the shell's updater + hot-reload keep working:
 
-1. **Wait for network** — polls `git ls-remote` up to ~30 s (first login can beat
-   NetworkManager online). Still offline → exit non-zero, marker NOT written.
+1. **Wait for network**: polls `git ls-remote` for up to ~30 s (first login can
+   beat NetworkManager online). Still offline → exit non-zero, marker NOT written.
 2. **Clone** `https://github.com/AndreNijman/apex-shell` shallow (`--depth 1`)
    into `~/.local/src/apex-shell` (or `fetch`/`reset --hard` an existing clone;
    scrubs a partial dir from a failed prior run).
-3. **Render matugen** — `sed`s `@SRCDIR@`/`@HOME@` in the repo's
+3. **Render matugen**: `sed`s `@SRCDIR@`/`@HOME@` in the repo's
    `src/config/matugen.toml.in` into `~/.config/apex-shell/matugen.toml`
    (matugen needs absolute paths; this is install.sh step 5).
 4. **Seed config dirs/defaults** (install-arch.sh step 6):
@@ -64,11 +65,11 @@ shell's updater + hot-reload keep working:
    `~/.config/hypr/hyprland.conf` exists it seeds one (distro default if present,
    else a minimal usable base), then appends the APEX Shell `exec-once` block
    (guarded by a marker so re-runs never duplicate it).
-6. **niri autostart** (APEX-OS addition — the shell's installer only covers
+6. **niri autostart** (APEX-OS addition: the shell's installer covers only
    Hyprland, but the shell auto-detects niri and the greeter offers it): if niri
    is installed, seed `~/.config/niri/config.kdl` with `spawn-at-startup` for the
    shell.
-7. **Marker** — `touch ~/.config/apex-shell/.provisioned` **only on full
+7. **Marker**: `touch ~/.config/apex-shell/.provisioned` **only on full
    success** (`set -e`). Its presence makes systemd skip the unit on every
    future login.
 
@@ -76,8 +77,8 @@ shell's updater + hot-reload keep working:
 
 - The unit's `ConditionPathExists=!%h/.config/apex-shell/.provisioned` skips the
   whole unit once provisioned.
-- The script no-ops if the marker exists, and every seeding step is guarded
-  (`-n` / marker greps / `|| true` on non-critical copies).
+- The script no-ops if the marker exists, and a guard protects every seeding
+  step (`-n` / marker greps / `|| true` on non-critical copies).
 - A failure (no network, clone error, timeout) leaves the marker **absent**, so
   the next login retries. `Restart=no` + `TimeoutStartSec=300` guarantee a
   failed run can never wedge the session.
@@ -87,26 +88,24 @@ shell's updater + hot-reload keep working:
 `systemctl --global enable apex-shell-firstrun.service` at image-build time
 (in the flavor Containerfiles) symlinks the unit at
 `/usr/lib/systemd/user/apex-shell-firstrun.service` into every user's
-`default.target.wants`. `WantedBy=default.target` (not `graphical-session.target`)
-because default.target is always reached when the user manager starts at login,
-whereas graphical-session.target is not reached under a bare Hyprland/greetd
-session with no uwsm handoff.
+`default.target.wants`. The unit uses `WantedBy=default.target` (not
+`graphical-session.target`) because the user manager always reaches
+default.target when it starts at login, while a bare Hyprland/greetd session
+with no uwsm handoff does not reach graphical-session.target.
 
 ### Known first-login timing caveat
 
-The user manager starts our unit in parallel with the greetd-exec'd compositor;
-there is no ordering guarantee between them. On the **very first** login the
-compositor can start before seeding finishes, so the shell may not autostart that
-first session — it is live from the next login (or immediately if seeding won
-the race). Subsequent logins are unaffected (marker present, config already
-seeded). This is documented rather than fixed because tightening the ordering
-would require coupling to a compositor-specific systemd handoff the base does not
-yet use.
+The user manager starts our unit in parallel with the greetd-exec'd compositor,
+and nothing orders the two. On a user's **first** login the compositor can start
+before seeding finishes, so the shell may not autostart in that session; it runs
+from the next login (or at once if seeding won the race). Later logins are
+unaffected (marker present, config already seeded). We documented this instead
+of fixing it because tightening the ordering would mean coupling to a
+compositor-specific systemd handoff the base does not yet use.
 
 ## 2. Branding flow: VARIANT_ID → Plymouth / greeter / shell
 
-The edition is stamped once, in the flavor image, and everything downstream
-reads it:
+The flavor image stamps the edition once, and everything downstream reads it:
 
 ```
 Containerfile.daily   → /usr/lib/os-release: VARIANT="Daily"  VARIANT_ID=daily
@@ -126,31 +125,31 @@ Containerfile.gaming  → /usr/lib/os-release: VARIANT="Gaming" VARIANT_ID=gamin
               shell   → provisioner copies it into ~/Pictures/Wallpapers
 ```
 
-**apex-greet edition resolution — verified, no change needed.** `GreetContext.qml`
+**apex-greet edition resolution: verified, no change needed.** `GreetContext.qml`
 resolves the edition from `/etc/apex-greet/edition` → `/etc/os-release`
-`VARIANT_ID` → `mono`. The flavor stamps (`VARIANT_ID=daily` / `=gaming`) match
-exactly the strings the greeter special-cases, so the chartreuse/gold spark +
-accent are selected automatically.
+`VARIANT_ID` → `mono`. The flavor stamps (`VARIANT_ID=daily` / `=gaming`) are
+the same strings the greeter special-cases, so the greeter picks the
+chartreuse/gold spark + accent with no extra configuration.
 
 **Plymouth.** Each flavor:
 1. `COPY files/branding/plymouth/apex-os-<color> /usr/share/plymouth/themes/…`
 2. `dnf5 install plymouth plymouth-scripts plymouth-plugin-script` (own layer).
-   `plymouth-plugin-script` is required because the theme's `.plymouth` declares
+   The theme needs `plymouth-plugin-script` because its `.plymouth` declares
    `ModuleName=script`.
 3. `plymouth-set-default-theme apex-os-<color>` (sets the default; **no** `-R`).
-4. **Rebuild the initramfs ourselves** — the bootc-correct step. On bootc the
-   initrd bootc boots from is `/usr/lib/modules/<kver>/initramfs.img`, not a
-   host-side `/boot` initrd, so `-R`'s host dracut path is wrong here. We run
+4. **Rebuild the initramfs ourselves**, the bootc-correct step. bootc boots
+   from `/usr/lib/modules/<kver>/initramfs.img`, not a host-side `/boot`
+   initrd, so `-R`'s host dracut path is wrong here. We run
    `dracut --force --no-hostonly --reproducible --zstd --add plymouth --kver
-   <kver>` (kver from `/usr/lib/apex-cachyos-kver`, stamped by the base),
-   mirroring the base's Stage-1 flags, so the theme is baked into the shipped
-   initramfs. In gaming this is placed **after** the NVIDIA akmod stage so it is
+   <kver>` (kver from `/usr/lib/apex-cachyos-kver`, which the base stamps),
+   mirroring the base's Stage-1 flags, which bakes the theme into the shipped
+   initramfs. In gaming this step sits **after** the NVIDIA akmod stage so it is
    the last initramfs regeneration.
 5. Kernel args: `/usr/lib/bootc/kargs.d/20-apex-plymouth.toml` → `quiet splash`
    (per `files/branding/plymouth/README.md`). **Tradeoff:** `quiet` raises the
    console loglevel, trimming the verbose serial output the base's
    `10-apex-serial.toml` enabled for CI/QEMU observability (warnings/errors still
-   print). Drop `quiet` if noisier boot logs are wanted; bootc merges all
+   print). Drop `quiet` if you want noisier boot logs; bootc merges all
    `kargs.d` files.
 
 ## 3. apex-greet DM finalization (session picker)
@@ -159,32 +158,33 @@ accent are selected automatically.
 `Name` + `Exec`) into the greeter's `‹ Session ›` picker. The task: offer
 **Hyprland + niri only**, never the greeter's own host compositor.
 
-- **greetd as DM + graphical.target default** — done by the base
+- **greetd as DM + graphical.target default**: the base does this
   (`systemctl enable greetd.service` + `set-default graphical.target`); verified,
   no change.
 - **sway / labwc removed as user sessions.** The base installs `sway` + `labwc`
   as the greeter's *host* compositor (see `sway-greet.conf`); both packages also
-  ship a `/usr/share/wayland-sessions/*.desktop`, which would wrongly appear as
+  ship a `/usr/share/wayland-sessions/*.desktop`, which would show up as bogus
   logins. The flavors `rm -f` `sway.desktop` + `labwc.desktop`. (Removing the
   session files does not touch the sway binary the greeter host uses.)
-  > **SUPERSEDED for labwc.** labwc is now offered as a first-class user session
-  > via `apex-labwc.desktop`, with its own APEX config seeded per-user. The
-  > *stock* `labwc.desktop` is still removed for exactly the reason above — it
-  > launches labwc bare, with no APEX Shell — so both statements hold: the stock
-  > entry stays deleted, and a separate APEX entry is added after it.
-- **Hyprland session** — the `hyprland` package ships its own
-  `hyprland.desktop`; the flavors keep it and, defensively, write a minimal one
-  if it is somehow absent.
-- **niri session** — `files/desktop/wayland-sessions/niri.desktop`
-  (`Exec=niri --session`) is copied in. **niri must be added to the base package
-  list** (below) for this session to actually launch; without it the session is
-  offered but fails to start.
+  > **SUPERSEDED for labwc.** The greeter now offers labwc as a first-class user
+  > session via `apex-labwc.desktop`, with its own APEX config seeded per user.
+  > The *stock* `labwc.desktop` still gets removed for the reason above (it
+  > launches labwc bare, with no APEX Shell), so both statements hold: the stock
+  > entry stays deleted, and a separate APEX entry goes in after it.
+- **Hyprland session**: the `hyprland` package ships its own
+  `hyprland.desktop`; the flavors keep it and, as a defence, write a minimal one
+  if it is missing.
+- **niri session**: the flavors copy in `files/desktop/wayland-sessions/niri.desktop`
+  (`Exec=niri --session`). **The base package list must add niri** (below) for
+  this session to launch; without it the greeter offers the session but it
+  fails to start.
 
 ## 4. Base-image package additions the base owner must fold into `Containerfile.base`
 
-M2 does **not** edit the base. These packages are needed for M2 + the shell to
-function and must be added to `Containerfile.base` (each heavy transaction in its
-own `RUN … && dnf5 clean all` layer, per the base's layering discipline):
+M2 does **not** edit the base. M2 and the shell need these packages to
+function, and the base owner must add them to `Containerfile.base` (each heavy
+transaction in its own `RUN … && dnf5 clean all` layer, per the base's layering
+discipline):
 
 ### Required for the M2 deliverables
 
@@ -193,27 +193,30 @@ own `RUN … && dnf5 clean all` layer, per the base's layering discipline):
 | `git-core` | The provisioner clones/fetches APEX Shell at first login. `git-core` is sufficient (no need for the full `git` metapackage). | Fedora |
 | `niri` | The greeter offers a niri session; the binary must exist for it to launch (and for the provisioner to seed niri autostart). Fedora's `niri` also ships its own `/usr/share/wayland-sessions/niri.desktop` (ours overrides it). | Fedora |
 
-`plymouth` / `plymouth-scripts` / `plymouth-plugin-script` are currently
-installed **per-flavor** so the branch builds standalone. They could be hoisted
-into the base to dedupe (both editions install them); if hoisted, keep the
-per-flavor `plymouth-set-default-theme` + initramfs rebuild in the flavors, since
-the theme differs per edition and the initramfs must be regenerated after the
-theme is set.
+For now each flavor installs `plymouth` / `plymouth-scripts` /
+`plymouth-plugin-script` itself (**per-flavor**), so the branch builds
+standalone. The base owner could hoist them into the base to dedupe (both
+editions install them). If you hoist them, keep the per-flavor
+`plymouth-set-default-theme` + initramfs rebuild in the flavors, since the theme
+differs per edition and the initramfs regeneration has to follow the theme
+change.
 
-### Required for APEX Shell to actually run (from the shell's `flake.nix` +
-`dots-extra/install-arch.sh` — the base's desktop stack has `hyprland`,
-`quickshell`, `qt6*`, `foot`, `xwayland-satellite`, `pipewire`/`wireplumber` via
-deps, and fonts, but is otherwise missing the shell's runtime)
+### Required for APEX Shell to run
+
+These come from the shell's `flake.nix` + `dots-extra/install-arch.sh`. The
+base's desktop stack has `hyprland`, `quickshell`, `qt6*`, `foot`,
+`xwayland-satellite`, `pipewire`/`wireplumber` via deps, and fonts, but
+otherwise lacks the shell's runtime.
 
 | Need | Fedora package | Notes |
 |---|---|---|
-| **Matugen** (REQUIRED — theming) | — | **Not in Fedora repos.** Needs a COPR or a built RPM; the shell "will not function correctly without it." The provisioner renders `matugen.toml` but the `matugen` binary must be present. |
-| **Wallpaper daemon** | — | The shell autostarts **`awww-daemon`**. `awww` is not in Fedora (it is a fork of `swww`); either package `awww`, or install `swww` and provide an `awww-daemon` shim, or patch the shell's autostart. **Flag for a decision.** |
+| **Matugen** (REQUIRED, theming) | none | **Not in Fedora repos.** Needs a COPR or a built RPM; the shell "will not function correctly without it." The provisioner renders `matugen.toml` but the `matugen` binary must be present. |
+| **Wallpaper daemon** | none | The shell autostarts **`awww-daemon`**. `awww` is not in Fedora (it is a fork of `swww`); either package `awww`, or install `swww` and provide an `awww-daemon` shim, or patch the shell's autostart. **Flag for a decision.** |
 | Qt theming | `qt6ct` | |
 | Media / MPRIS | `playerctl`, `mpv-mpris`, `mpd-mpris` | `mpd-mpris` may need COPR. |
 | Backlight | `brightnessctl` | |
 | Clipboard / input | `wl-clipboard`, `slurp`, `wtype`, `cliphist` | |
-| XDG | `xdg-user-dirs`, `xdg-desktop-portal-hyprland` | **Checked, and the guess was wrong — see below.** `xdg-user-dirs` is installed explicitly. |
+| XDG | `xdg-user-dirs`, `xdg-desktop-portal-hyprland` | **Checked, and the guess was wrong: see below.** The image installs `xdg-user-dirs` explicitly. |
 | Power / sensors | `upower`, `libnotify`, `lm_sensors`, `rfkill` | |
 | Visualizer | `cava` | |
 | Screen record | `wf-recorder` | |
@@ -221,15 +224,15 @@ deps, and fonts, but is otherwise missing the shell's runtime)
 | Hyprland ecosystem | `hyprlock`, `hypridle`, `hyprsunset`, `hyprland-polkit-agent` (a.k.a. `hyprpolkitagent`) | from `solopasha/hyprland` COPR (already enabled during base build). |
 | Power menu / screenshot | `hyprshutdown`, `grimblast` | AUR-only upstream; need a Fedora build or a substitute (the shell calls these). |
 | Bluetooth | `bluez`, `bluez-tools` | `bluez` likely present. |
-| Laptop/GPU (optional, daily) | `envycontrol`, `auto-cpufreq`, `nbfc-linux` | COPR/pip; optional — the shell degrades without them. |
+| Laptop/GPU (optional, daily) | `envycontrol`, `auto-cpufreq`, `nbfc-linux` | COPR/pip; optional: the shell degrades without them. |
 
-The Nerd Font the shell wants (`JetBrainsMono Nerd Font`) is already installed by
-the base (Stage 3).
+The base already installs the Nerd Font the shell wants
+(`JetBrainsMono Nerd Font`) in Stage 3.
 
-#### `xdg-desktop-portal-hyprland` is NOT pulled in by hyprland
+#### hyprland does NOT pull in `xdg-desktop-portal-hyprland`
 
-This row said "portal likely already pulled by hyprland" and nothing ever
-checked it, which made a guess the only thing behind Hyprland's portal
+The XDG row above used to say "portal likely already pulled by hyprland", and
+nobody ever checked it, so a guess was the only thing behind Hyprland's portal
 support. Measured 2026-09-04, against the package the image itself uses:
 
 ```
@@ -242,25 +245,24 @@ $ rpm -q --whatrequires xdg-desktop-portal-hyprland
 no package requires xdg-desktop-portal-hyprland
 ```
 
-No Requires, no Recommends, and nothing else in the transaction depends on it
-— so `install_weak_deps` does not change the answer either. It is also absent
-from `Containerfile.core`'s desktop-stack install list, so the image does not
-install it any other way. The portals the image DOES get come from elsewhere:
-`labwc` Requires `xdg-desktop-portal-wlr`, and `Containerfile.base` asserts
-`wlr.portal` and `gtk.portal` exist at build time — but it makes no assertion
-about `hyprland.portal`, which is why the absence went unnoticed.
+No Requires, no Recommends, and nothing else in the transaction depends on it,
+so `install_weak_deps` does not change the answer either. `Containerfile.core`'s
+desktop-stack install list does not name it, so the image does not install it
+any other way. The portals the image DOES get come from elsewhere: `labwc`
+Requires `xdg-desktop-portal-wlr`, and `Containerfile.base` asserts that
+`wlr.portal` and `gtk.portal` exist at build time. It makes no assertion about
+`hyprland.portal`, which is why nobody noticed the absence.
 
-Two caveats on the strength of this. The measurement is against the version
-installed on the developer's machine from that COPR, not against a fresh image
-build, so a future package could add the dependency. And what a Hyprland
-session's screen capture actually falls back to without that backend was NOT
-tested here — the claim is only that the package is not being pulled in.
-Whether it should be added is a decision, not a fact, and this note does not
-make it.
+Two caveats limit this. The measurement used the version installed on the
+developer's machine from that COPR, not a fresh image build, so a future package
+could add the dependency. And nobody tested here what a Hyprland session's
+screen capture falls back to without that backend; the claim is only that
+nothing pulls the package in. Adding it is a separate decision, and this note
+does not make it.
 
-## 5. Testing in a VM (best-effort — not run here)
+## 5. Testing in a VM (best-effort, not run here)
 
-No live-desktop changes were made on this host, and no image was built (this
+M2 made no live-desktop changes on this host and built no image (this
 environment has no rootful podman / KVM). The intended verification, following
 the M1 recipe (`docs/m1-notes.md`):
 
@@ -289,7 +291,7 @@ qemu-system-x86_64 -m 4096 -smp 4 -enable-kvm \
   -serial mon:stdio
 ```
 
-What to check in the VM:
+Checks to make in the VM:
 
 - **Plymouth:** the correct spark (chartreuse=daily / gold=gaming) shows during
   boot. `plymouth-set-default-theme --list` inside the image should list
@@ -299,13 +301,13 @@ What to check in the VM:
   picker offers **Hyprland + niri** and **not** sway/labwc.
   > **SUPERSEDED.** The picker now also offers **labwc (APEX)**. sway remains
   > greeter-host only.
-  (The base's open item — live layer-shell render under sway on real GL — is
+  (The base's open item, live layer-shell render under sway on real GL, is
   unchanged and still a HW-verify item; see `docs/m1-notes.md`.)
-- **Provisioner:** on first login `~/.local/src/apex-shell` is cloned,
-  `~/.config/apex-shell/{matugen.toml,.provisioned}` + `~/.config/hypr/
+- **Provisioner:** on first login the provisioner clones `~/.local/src/apex-shell`,
+  and `~/.config/apex-shell/{matugen.toml,.provisioned}` + `~/.config/hypr/
   hyprland.conf` (with the APEX autostart block) exist; `systemctl --user status
-  apex-shell-firstrun` shows a clean oneshot. Log out/in once if the shell did
-  not autostart on the very first session (timing caveat above). Re-login does
+  apex-shell-firstrun` shows a clean oneshot. Log out and in once if the shell
+  did not autostart in the first session (timing caveat above). Re-login does
   no work (Condition gate).
 - **SELinux (carried from apex-greet README):** if `last-user`/`last-session`
   prefill is missing, check `ausearch -m avc -ts recent` for a denied write to
@@ -313,11 +315,12 @@ What to check in the VM:
 
 ### Static validation done on this branch (no image/systemd/GL available here)
 
-- `bash -n files/system/libexec/apex-shell-firstrun` — clean.
+- `bash -n files/system/libexec/apex-shell-firstrun`: clean.
 - `apex-shell-firstrun.service` parsed as INI; `%h` specifier + all
   `[Unit]/[Service]/[Install]` keys intact. (`systemd-analyze verify` was not
-  available on this host — recommend running it in the Fedora build container.)
-- The public `apex-shell` `install.sh` + `dots-extra/install-arch.sh` were cloned
-  shallow and read end-to-end to model the provisioner's seeding faithfully.
-- Plymouth theme dirs, wallpaper, and greeter QML paths cross-checked against the
-  base's `COPY` targets and `GreetContext`/`GreetSurface` QML.
+  available on this host; run it in the Fedora build container.)
+- Cloned the public `apex-shell` shallow and read its `install.sh` +
+  `dots-extra/install-arch.sh` end to end, to model the provisioner's seeding on
+  them.
+- Cross-checked the Plymouth theme dirs, wallpaper, and greeter QML paths
+  against the base's `COPY` targets and `GreetContext`/`GreetSurface` QML.

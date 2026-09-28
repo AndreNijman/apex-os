@@ -1,4 +1,4 @@
-# P2 — progress and resume point
+# P2: progress and resume point
 
 P2 is rows 9 and 10 of the roadmap's §23 implementation order:
 
@@ -21,8 +21,8 @@ image build. P1's build is still unspent, so the first one will carry both.
 
 §23's one-line table says "Boot v2: composefs + systemd-boot + UKIs + measured
 boot", and read alone that sounds like a bootloader swap. §22 itself says the
-opposite, starting with its own title — *"do not switch to Limine as the main
-path"* — and its recommendation is to **keep GRUB for the current APEX
+opposite, starting with its own title (*"do not switch to Limine as the main
+path"*), and its recommendation is to **keep GRUB for the current APEX
 generation**, targeting systemd-boot + signed UKIs "once APEX is ready to move
 to the bootc/composefs path". Its anti-goal is explicit: *do not switch
 bootloaders for aesthetics; change the boot architecture only when it improves
@@ -37,18 +37,18 @@ Its migration sequence is seven numbered steps, and the numbers matter:
 | 3 | Signed UKIs and APEX-owned EFI paths | built |
 | 4 | Boot counting and health-based automatic rollback | built |
 | 5 | Measured boot + TPM-bound unlock **as an opt-in developer feature** | built, opt-in, not defaulted |
-| 6 | Encryption default *once recovery and hardware edge cases are proven* | **not** done — the proof does not exist yet |
+| 6 | Encryption default *once recovery and hardware edge cases are proven* | **not** done: the proof does not exist yet |
 | 7 | Legacy BIOS stays on GRUB | preserved |
 
-So a branch that makes systemd-boot the default for `daily`, `gaming-mesa` or
-`gaming-nvidia` has violated the section it claims to implement, and the Secure
-Boot product invariant in `AGENTS.md` at the same time. The boot-path rules
-added to `AGENTS.md` in `baf25f4` carry this as rule 5.
+A branch that makes systemd-boot the default for `daily`, `gaming-mesa` or
+`gaming-nvidia` has therefore violated the section it claims to implement, and
+the Secure Boot product invariant in `AGENTS.md` at the same time. The
+boot-path rules added to `AGENTS.md` in `baf25f4` carry this as rule 5.
 
 ## Sequencing, and why it is not 9a → 9b → 10
 
-§20's remote compute is three verbs — `apex build --on desktop`,
-`apex ai run --on desktop`, `apex agent run --host desktop claude` — and two of
+§20's remote compute is three verbs (`apex build --on desktop`,
+`apex ai run --on desktop`, `apex agent run --host desktop claude`), and two of
 them are dispatch wrappers over things §14 and P0's agent runtime already own.
 Building `apex ai run` locally first and then adding `--on` means rebuilding its
 argument handling once the transport exists.
@@ -57,21 +57,22 @@ argument handling once the transport exists.
    primitives, capability probe. Nothing above it can be built honestly without
    knowing what a remote host is.
 2. **§14 local AI** on top of that, so `--on` is a target from the start.
-3. **Dispatch** — the three `--on`/`--host` verbs as thin wrappers, plus
+3. **Dispatch:** the three `--on`/`--host` verbs as thin wrappers, plus
    clipboard/file handoff and remote agent status in the shell.
 4. **Boot v2**, independent of all three. Its VM tooling is a prerequisite that
    does not exist on the katana yet, so that install starts early and in the
-   background rather than being discovered at hour six.
+   background instead of the gap turning up at hour six.
 
 ## The katana
 
 20 cores, 62 GB RAM, 108 GB free on `/var`, podman 5.8.4, `/dev/kvm` present,
 RTX 3070 Mobile (`nvidia-smi` available) plus an Alder Lake iGPU. It is the
-build box for images and the host for boot VMs — faster than waiting on GitHub,
-and the one image build reserved for the end is not spent on iteration.
+build box for images and the host for boot VMs. It is faster than waiting on
+GitHub, and using it keeps the one image build reserved for the end from being
+spent on iteration.
 
 It is also a real APEX machine, which is why `AGENTS.md` now has a boot-path
-section. Guest ESPs only.
+section, and why boot work touches guest ESPs only.
 
 ## Status
 
@@ -79,9 +80,9 @@ section. Guest ESPs only.
 | --- | --- |
 | Boot-path rules in `AGENTS.md` | `baf25f4` |
 | This tracker | in progress |
-| 9.1 `apex host` — trust and transport | done — `0650db6`, `e3e742e`, `355c946` |
+| 9.1 `apex host`: trust and transport | done: `0650db6`, `e3e742e`, `355c946` |
 | 9.2 §14 local AI service | in progress |
-| 9.3 §20 dispatch, handoff, remote status | OS side done — `7636431`, `781378a`, `5e42a49`, `5d72b5e`, `fdeef1e`; shell side in progress |
+| 9.3 §20 dispatch, handoff, remote status | OS side done (`7636431`, `781378a`, `5e42a49`, `5d72b5e`, `fdeef1e`); shell side in progress |
 | 10 Boot v2 | in progress |
 
 ## 9.1, and what it decided for everything above it
@@ -92,25 +93,25 @@ argv construction; `apex/src/host.rs` (31 tests) does the I/O;
 `ssh` that records every argv.
 
 **The transport is the user's own ssh configuration.** A host entry names an ssh
-destination, normally an alias already in `~/.ssh/config`. Not for brevity: a
-real entry is often not "a hostname" — the `katana` alias here resolves over the
-LAN when the LAN is up, otherwise a VPS port, otherwise a jump host into a
-reverse tunnel. An `address` field would work at home and fail everywhere else,
-which is exactly when remote compute is worth having. It also means APEX
-generates no key and holds no passphrase, so it cannot produce a credential
-prompt.
+destination, normally an alias already in `~/.ssh/config`. The reason goes
+beyond brevity: a real entry is often something other than "a hostname". The
+`katana` alias here resolves over the LAN when the LAN is up, otherwise a VPS
+port, otherwise a jump host into a reverse tunnel. An `address` field would
+work at home and fail everywhere else, which is exactly when remote compute is
+worth having. It also means APEX generates no key and holds no passphrase, so
+it cannot produce a credential prompt.
 
 Three keys exist only to be refused, so the refusal can say where the setting
-really lives: `identity_file`, `strict_host_key_checking`, `ssh_options`.
+lives: `identity_file`, `strict_host_key_checking`, `ssh_options`.
 
-Verified against the katana over real ssh, not a mock. Its installed apex 0.1.0
-does not know `host describe`, so the live run took the fallback path and read
-20 cpu / 62 GiB / cuda+vulkan / podman off it. The self-describe path was then
-confirmed by running the new binary there, and **its actual output is the
-fixture the parser test uses** — a hand-written fixture would only prove the
+Verified against the katana over real ssh rather than a mock. Its installed apex
+0.1.0 does not know `host describe`, so the live run took the fallback path and
+read 20 cpu / 62 GiB / cuda+vulkan / podman off it. The self-describe path was
+then confirmed by running the new binary there, and **its actual output is the
+fixture the parser test uses**. A hand-written fixture would only prove the
 parser accepts what I imagine the other end sends.
 
-## Where a project is on the far side — the 9.3 decision
+## Where a project is on the far side: the 9.3 decision
 
 §20's `apex build --on desktop` and `apex agent run --host desktop` need the
 project, and the files are on the laptop while the compute is on the desktop.
@@ -122,20 +123,20 @@ Three options were on the table:
 | Locate by git identity, clone on demand | Turns a dispatch into a repository write on the remote; uncommitted work still unhandled. |
 | A configured path map per host | Real config complexity for a case that is usually trivial. |
 
-**Chosen: same absolute path, *verified*, never assumed.** The remote path is
-checked to exist and to be the same repository — `git remote get-url origin`
-compared on both ends — and a mismatch is a refusal naming both values, with
+**Chosen: same absolute path, *verified*, never assumed.** The verb checks that
+the remote path exists and is the same repository (`git remote get-url origin`
+compared on both ends), and a mismatch is a refusal naming both values, with
 `--remote-path` as the explicit override. For one developer with the same
 username on two APEX boxes this needs no configuration, and when the assumption
 is wrong it fails loudly instead of quietly.
 
 **Uncommitted changes are not transferred, and the command says so.** A build on
-the remote runs the remote's committed state; a dirty local worktree is reported
-and needs `--allow-dirty` to proceed. Syncing a working tree would mean this
-tool writing over files on another machine, which is not something a dispatch
-verb should do by default.
+the remote runs the remote's committed state; the command reports a dirty local
+worktree and needs `--allow-dirty` to proceed. Syncing a working tree would mean
+this tool writing over files on another machine, which a dispatch verb should
+not do by default.
 
-## 9.3 — what §20 asked for, and where each piece landed
+## 9.3: what §20 asked for, and where each piece landed
 
 | §20 asks for | verb | state |
 | --- | --- | --- |
@@ -148,39 +149,39 @@ verb should do by default.
 | Show remote agent status in APEX Shell | apex-shell `p2/remote-agent-status` | done |
 
 `apex host run <host> -- <argv>` remains the general escape hatch §24 asks APEX
-to keep, and the specific verbs are thin over it.
+to keep, and the specific verbs are thin wrappers over it.
 
 ### apex open took three attempts, and each fault was invisible in a green test
 
 The first version printed `opened on katana` while **nothing opened**.
 
 1. `setsid --fork` returns 0 the instant it forks, so the exit status proved
-   only that a fork happened. `WAYLAND_DISPLAY` was never set — only
-   `DBUS_SESSION_BUS_ADDRESS` — so the browser had no display to reach, and the
-   output went to `/dev/null` where the evidence died.
+   only that a fork happened. The command set only `DBUS_SESSION_BUS_ADDRESS`
+   and never `WAYLAND_DISPLAY`, so the browser had no display to reach, and the
+   output went to `/dev/null`, which discarded the evidence.
 2. `systemd-run --user --wait` does propagate the real status, but a browser
-   becomes the unit's main process, so it blocked until the browser exited —
+   becomes the unit's main process, so it blocked until the browser exited:
    measured at two minutes and still going.
-3. The backgrounded child's **stdout** has to be redirected, not just its
+3. The backgrounded child's **stdout** has to be redirected as well as its
    stderr. ssh holds the session open while any descendant holds the channel,
    so a successfully launched browser kept the command hanging for a full
    minute *after* it had already worked.
 
-What it does now: launch in the background, then observe. `RUNNING` after 1.5s
-is success for a GUI, `EXIT 0` is success for a hand-off, and anything else —
-including an answer it does not recognise — is a failure. The session probe
-requires a **compositor socket** and not merely the per-user bus, because the
-bus exists for any login including the ssh connection asking the question; a
-machine at its greeter would otherwise report success.
+The current version launches in the background, then observes. `RUNNING` after
+1.5s is success for a GUI, `EXIT 0` is success for a hand-off, and anything
+else, including an answer it does not recognise, is a failure. The session
+probe requires a **compositor socket** rather than only the per-user bus,
+because the bus exists for any login including the ssh connection asking the
+question; a machine at its greeter would otherwise report success.
 
-The socket is matched as `wayland-[0-9]`, not by a `wayland-*` glob with
-`head -1`: the katana's runtime directory holds `wayland-1`,
+The probe matches the socket as `wayland-[0-9]` rather than by a `wayland-*`
+glob with `head -1`: the katana's runtime directory holds `wayland-1`,
 `wayland-1-awww-daemon.sock` and `wayland-1.lock`, and picking the right one by
 sort order is not a reason.
 
-**How it was finally verified:** by killing the firefox that attempt 2 had
-started, so an already-running browser could not let `xdg-open` hand off and
-exit 0. That confound is what made attempt 2 look like it worked.
+**The final verification:** killing the firefox that attempt 2 had started, so
+an already-running browser could not let `xdg-open` hand off and exit 0. That
+confound made attempt 2 look like it worked.
 
 ### Tests
 
@@ -194,10 +195,10 @@ exit 0. That confound is what made attempt 2 look like it worked.
 | `tests/test-apex-dispatch.sh` | 55 |
 
 Both shell suites are shellcheck-clean at `-S warning` and wired into the
-`rust` job of `pr-validation.yml` — that job rather than `static`, because they
-need a toolchain to build the binary they drive. `static` is where a cross-file
-parity check belongs, per the note P1 left after a check in a specialised job
-was skipped by a PR touching only the other side.
+`rust` job of `pr-validation.yml`. They sit there rather than in `static`
+because they need a toolchain to build the binary they drive. `static` is where
+a cross-file parity check belongs, per the note P1 left after a PR touching
+only the other side skipped a check in a specialised job.
 
 ## Independent check of the boot units' inertness, and why the variable matters
 
@@ -216,13 +217,13 @@ Verified directly on both real machines rather than from the code:
 
 **The katana result is the interesting one.** It carries three of systemd-boot's
 variables while still booting GRUB, so a condition written against
-`LoaderInfo` — the obvious "is systemd-boot involved" test — would have fired
+`LoaderInfo` (the obvious "is systemd-boot involved" test) would have fired
 the units on a machine that never boots through systemd-boot.
-`LoaderBootCountPath` is set only when the booted entry actually carries a boot
-counter, which is exactly the state the health gate is about. The choice of
-variable is load-bearing rather than incidental, and this is the evidence.
+`LoaderBootCountPath` is set only when the booted entry carries a boot counter,
+which is exactly the state the health gate is about. The choice of variable is
+load-bearing rather than incidental, and this is the evidence.
 
-## Whole-tree baseline — taken after 9.1 and 9.3 landed
+## Whole-tree baseline, taken after 9.1 and 9.3 landed
 
 | | count | failures |
 | --- | --- | --- |
@@ -237,10 +238,10 @@ Per-suite, all green: blueprint 139, env 253, plugin 117, gaming 113, resolve
 secret-broker 47, privilege-requests 38, labwc-keybinds 37, input 31, display
 26, project-layout 22, labwc-session 18.
 
-**`tests/test-apex-ai.sh` does not exist yet.** §14's shell suite is still owed
-by the branch building it; the 944 Rust tests include its unit tests, but there
-is no artifact-level suite driving `apex ai` as a process the way `host` and
-`dispatch` have. Recorded here rather than left to be noticed.
+**`tests/test-apex-ai.sh` does not exist yet.** The branch building §14 still
+owes its shell suite; the 944 Rust tests include its unit tests, but no
+artifact-level suite drives `apex ai` as a process the way `host` and
+`dispatch` have. Recorded here rather than left for someone to notice.
 
 ## Known rough edge in the dispatch verbs
 
@@ -249,32 +250,32 @@ is no artifact-level suite driving `apex ai` as a process the way `host` and
 from the last published image and the verb is new. The message is truthful and
 comes from the remote, and it resolves as soon as both ends carry this build.
 
-It is not caught locally because the capability check only refuses when the
-cached probe came from an **APEX peer that described itself**. The katana's
-cached probe came from the portable shell fallback, which cannot report an
-`apex_version`, so `is_apex()` is false and the check is skipped — "unknown is
-not absent", by design. The alternative would be refusing dispatch to any host
-whose `apex` is too old to self-describe, which is worse: it would refuse the
-very machines that most need probing again.
+The local side does not catch it, because the capability check only refuses
+when the cached probe came from an **APEX peer that described itself**. The
+katana's cached probe came from the portable shell fallback, which cannot
+report an `apex_version`, so `is_apex()` is false and the check is skipped:
+"unknown is not absent", by design. The alternative would be refusing dispatch
+to any host whose `apex` is too old to self-describe, which is worse: it would
+refuse the machines that most need probing again.
 
 ## Open items found by review, not by a test
 
-Both of these are recorded here so they cannot be quietly forgotten.
+Both are recorded here so they cannot be quietly forgotten.
 
 1. **`docs/boot-v2.md` is a 14-byte placeholder** (`# placeholder`) and
    `Containerfile.base` ships it to `/usr/share/doc/apex/boot-v2.md` while
    claiming, in the comment directly above the `COPY`, that enrollment is "a
    documented, user-initiated procedure in docs/boot-v2.md, not a script".
-   The document is the whole safety argument for the boot work — enrollment
-   being a human procedure rather than a script is *why* it is safe — so a
+   The document is the whole safety argument for the boot work (enrollment
+   being a human procedure rather than a script is *why* it is safe), so a
    placeholder there is a hole in exactly the place where a mistake is
    unrecoverable. `AGENTS.md` also forbids it directly: documentation must
    state current behaviour, not aspiration.
 
 2. ~~`tests/test-apex-ai.sh` does not exist.~~ **Closed** in `f25c8e8`: 43
-   assertions, shellcheck-clean, wired into the `rust` job. Written here rather
-   than by the §14 branch because that branch was interrupted five times by
-   transient API errors and a missing suite was the worse outcome.
+   assertions, shellcheck-clean, wired into the `rust` job. It was written here
+   rather than by the §14 branch because transient API errors interrupted that
+   branch five times and a missing suite was the worse outcome.
 
 ## Independent verification of the boot scripts' safety, done here
 
@@ -285,7 +286,7 @@ than read off the commit messages:
 | --- | --- |
 | `bootctl install/update`, `bootupctl`, `grub2-install`, `grub2-mkconfig`, `efibootmgr` on any executable line of `files/scripts/boot-v2/*` | none |
 | writes to `/boot`, `/boot/efi` or `/efi` on any executable line | none |
-| how a guest ESP is written | `mcopy -i "$ESP"` — mtools into a **FAT image file** |
+| how a guest ESP is written | `mcopy -i "$ESP"`: mtools into a **FAT image file** |
 
 The last one is stronger than the rule required. The rule asked for a
 loopback-mounted image; mtools does not mount anything at all, so there is no
@@ -297,21 +298,21 @@ than a Fedora-named path.
 
 `AGENTS.md` says a `core` rebuild makes the next fleet update multi-gigabyte,
 and that promotion must happen only after verification and signing. A new
-workflow is exactly where that gets broken by accident, so it was checked
+workflow is exactly where someone breaks that by accident, so it was checked
 rather than read off its own header comment:
 
 | requirement | how it holds |
 | --- | --- |
 | must not rebuild `core` | no `Containerfile.core` reference outside a comment |
 | must not publish or promote | no `podman push`, no `ghcr.io`, no `cosign sign` anywhere |
-| least privilege | `permissions: contents: read` — no `packages: write`, no `id-token: write`, so it **cannot** push to GHCR or mint a keyless identity even by mistake |
+| least privilege | `permissions: contents: read`: no `packages: write`, no `id-token: write`, so it **cannot** push to GHCR or mint a keyless identity even by mistake |
 | no unattended runs | triggers are `pull_request` and `workflow_dispatch` only; no `push:` and no `schedule:` |
 
-The permissions line is the load-bearing part. A workflow that merely *does
-not* push today can start pushing with one careless step; one that has no
+The permissions line is the load-bearing part. A workflow that *does not* push
+today can start pushing with one careless step; one that has no
 `packages: write` token cannot.
 
-## 9.3's shell half — apex-shell `p2/remote-agent-status`
+## 9.3's shell half: apex-shell `p2/remote-agent-status`
 
 Four commits off `origin/main` (`6f2e55d`), 10 files, +2718/-8. Pushed, not
 merged. Counts re-run here rather than taken on trust:
@@ -321,44 +322,45 @@ merged. Counts re-run here rather than taken on trust:
 | `remote-agents-test.js` | 89, all pass |
 | `check-remote-agents.sh` | 48 assertions, plus 12 mutants (all confirmed applied) and 13 self-test verdicts |
 | `run-remote-agent-smoke.sh` | 18 |
-| pre-existing suites | 864, unchanged and green — `check-compositor-backends` 28, `check-plugin-platform` 98, `check-blueprint-editor` 75, `check-idle-inhibit` 17 all match |
+| pre-existing suites | 864, unchanged and green; `check-compositor-backends` 28, `check-plugin-platform` 98, `check-blueprint-editor` 75, `check-idle-inhibit` 17 all match |
 
 ### Two defects it avoided that would have shipped quietly
 
 **`apex host list --json` returns an object keyed by host name, not an array.**
-The pattern immediately next door in `AgentService` is
-`if (Array.isArray(fresh))`, used twice. Copying it reflexively would have left
-the remote section permanently empty *with nothing logged* — the worst kind of
-failure, because it looks like "no remote agents". `parseHostList` now rejects a
-top-level array by name, so a future CLI change fails loudly instead.
+The pattern next door in `AgentService` is `if (Array.isArray(fresh))`, used
+twice. Copying it reflexively would have left the remote section permanently
+empty *with nothing logged*, the worst kind of failure, because it looks like
+"no remote agents". `parseHostList` now rejects a top-level array by name, so a
+future CLI change fails loudly instead.
 
 **Reusing `SessionRow` for remote sessions would have killed local agents.** Its
 controls call `AgentService.kill(session.id)`, and a remote id belongs to
-another machine's runtime — so Stop on a remote row would have terminated an
+another machine's runtime, so Stop on a remote row would have terminated an
 unrelated *local* agent. Remote rows are read-only, and the page prints the
 `apex host run -t …` line instead.
 
 ### Where it went, and why not the top bar
 
-The fourth section of the Agent Center, below the local sessions. The argument
-against a bar indicator is a constraint rather than taste: a bar item should
-appear only when there is something to show, but *knowing* whether there is
-costs an ssh — so any always-present indicator must poll at idle, which is the
-defect. Conditional appearance is kept where it is free: the section exists iff
-a device is registered, and reading the registry is a local file read.
+It went into the fourth section of the Agent Center, below the local sessions.
+The argument against a bar indicator is a constraint rather than taste: a bar
+item should appear only when there is something to show, but *knowing* whether
+there is costs an ssh, so any always-present indicator must poll at idle, which
+is the defect. Conditional appearance is kept where it is free: the section
+exists iff a device is registered, and reading the registry is a local file
+read.
 
-**Zero remote queries at idle, measured** — 22 s with the page closed against a
+**Zero remote queries at idle, measured:** 22 s with the page closed against a
 15 s sweep interval produced 0 registry reads and 0 device queries, counted by a
 shim `apex` that logs every invocation. A device whose `caps.agentd` is false,
 and one that has never been probed, were queried 0 times.
 
 ### Stated as reasoned, not observed
 
-Nothing rendered was seen — zero Qt ERROR and zero WARN with every delegate
-instantiated against real `SessionInfo` records is not the same as "the rows
-look right". Real ssh was never exercised either: the shim exits instantly
+Nothing rendered was seen: zero Qt ERROR and zero WARN with every delegate
+instantiated against real `SessionInfo` records falls short of
+"the rows look right". Real ssh was never exercised either: the shim exits instantly
 where a dead host takes ~8 s, so "a dead host delays those behind it" is
-reasoned. Both are the agent's own words, and they are the right words.
+reasoned. Both statements are the agent's own words, and both are accurate.
 
 ## Verification checkpoint
 
@@ -369,7 +371,7 @@ edits could contaminate it), in the `apex-rust` container on the katana:
 cargo clippy --all-targets --locked -- -D warnings
 ```
 
-**Clean** across all six crates — `apexd-core`, `apexd`, `apex`,
+**Clean** across all six crates: `apexd-core`, `apexd`, `apex`,
 `apex-agent-core`, `apex-agentd`, `apex-aid`. That is what CI runs, verbatim.
 
 | | count | failures |
@@ -391,23 +393,22 @@ read-only.
 I read `rust:` as starting at line 348 of `pr-validation.yml` and concluded the
 boot suite's unfiltered half was in the wrong job. Line 348 is a *comment*
 containing the word `rust`; the job starts at 356 and the wiring was correct all
-along. The grep that misled me is the same shape as the one this project has
-been bitten by five times — a pattern satisfied by prose rather than by code —
-and it is worth recording that it catches the person checking for it too.
-Verifying the job boundaries before acting is what kept it from becoming a
-wrong "fix".
+along. The grep that misled me has the same shape as the one that has bitten
+this project five times (a pattern satisfied by prose rather than by code), and
+it catches the person checking for it too. Verifying the job boundaries before
+acting kept it from becoming a wrong "fix".
 
-## Row 10 — Boot v2, and the two firmware traps that would have made it fake
+## Row 10: Boot v2, and the two firmware traps that would have made it fake
 
 Measured on the katana, kernel `7.1.5-cachyos1.fc43.x86_64`.
 
 | step | what was measured |
 | --- | --- |
-| 2, prototype in CI and VMs | a UKI built from the booted APEX deployment — kernel 16,758,856 B, initramfs 386,072,073 B, ~390 MB signed PE — boots under `OVMF_CODE_4M.secboot` with only the ephemeral APEX cert in db. sd-stub printed `Booting initrd of APEX-OS dracut-107-8.fc43`; the real initramfs ran to dracut's `pre-mount` hook and powered off cleanly |
+| 2, prototype in CI and VMs | a UKI built from the booted APEX deployment (kernel 16,758,856 B, initramfs 386,072,073 B, ~390 MB signed PE) boots under `OVMF_CODE_4M.secboot` with only the ephemeral APEX cert in db. sd-stub printed `Booting initrd of APEX-OS dracut-107-8.fc43`; the real initramfs ran to dracut's `pre-mount` hook and powered off cleanly |
 | 3, signed UKIs and APEX EFI paths | unsigned, foreign-signed and one-byte-tampered `.cmdline` UKIs each failed to reach userspace; the foreign one proven *validly* signed by a key not in db. `microcode=embedded-in-initrd`, detected in dracut's leading cpio rather than demanded again |
 | 4, boot counting and rollback | four boots walked `apex-new+3-0.efi` → `+2-1` → `+1-2` → `+0-3`; the fifth selected the unsuffixed `apex-good.efi`; a sixth stayed there. Exact filename pairs asserted at every step |
 | 5, measured boot + TPM LUKS2, opt-in | PCR 11 **changes** between two UKIs signed by the same PCR key and the same keyslot still opens with no re-enrollment; a `.pcrsig` from a different key is refused; the **recovery key unlocks in the same boot that was refused**; a marker written through the mapper in boot 1 is read back in boot 2 |
-| 6, encryption by default | **not done, deliberately** — §22 gates it on recovery and hardware edge cases being proven, and one software TPM in one VM is not that |
+| 6, encryption by default | **not done, deliberately**: §22 gates it on recovery and hardware edge cases being proven, and one software TPM in one VM is not that |
 | 7, legacy BIOS on GRUB | preserved; nothing installs a bootloader |
 
 Reproducibility: same `SOURCE_DATE_EPOCH` gives byte-identical output, a
@@ -416,7 +417,7 @@ different one gives different bytes.
 ### The two findings that would have made every Secure Boot assertion vacuous
 
 **Fedora's 2 MB `OVMF_CODE.secboot.fd` has no TCG2 protocol.** Secure Boot
-enforcement works, so the signing assertions pass — but sd-stub sets no
+enforcement works, so the signing assertions pass. But sd-stub sets no
 `StubPcr*` variables, PCR 11 stays 64 zero bytes, and every TPM unlock fails
 with "No signature for current PCR policy", which reads exactly like a broken
 policy rather than like firmware that cannot measure. Only
@@ -425,7 +426,7 @@ converts the 4 MB pair once and **refuses to fall back**.
 
 **`OVMF_VARS.secboot.fd` ships Red Hat *and Microsoft* certificates
 pre-enrolled**, and `virt-fw-vars --no-microsoft` only means "add no more". A
-varstore built on it leaves the firmware trusting Microsoft's UEFI CA — so
+varstore built on it leaves the firmware trusting Microsoft's UEFI CA, so
 "only APEX-signed images load" becomes **unfalsifiable**: the test passes while
 proving nothing, because a foreign image would have loaded too. Only the
 pristine `OVMF_VARS_4M.qcow2` is correct. This is the most consequential
@@ -436,26 +437,27 @@ Secure Boot product invariant itself.
 
 **Boot counting is not a property of the entry type.** systemd-boot 258 counts
 type #2 UKIs *and* type #1 entries that use the `linux` key, and does **not**
-count type #1 entries that use `efi`. So a fully `/EFI/APEX`-named UKI path is
-possible; type #2 remains the default only because `bootctl list --json` — what
-`apex boot status` reads — reports the tally and `.osrel` title only for entries
-it recognises as UKIs. All three rows are asserted.
+count type #1 entries that use `efi`. A fully `/EFI/APEX`-named UKI path is
+therefore possible; type #2 remains the default only because
+`bootctl list --json` (what `apex boot status` reads) reports the tally and
+`.osrel` title only for entries it recognises as UKIs. All three rows are
+asserted.
 
 ### Bugs the boot assertions caught in their own subjects
 
 Every one had a green-looking symptom:
 
 * `apex-boot-health` was non-executable in the repo, so every exit-code check
-  got 126 and read as "the gate refused". The assertions now demand rc **1**,
-  not merely non-zero — "it failed" was true while "it failed for the reason
-  under test" was not.
+  got 126 and read as "the gate refused". The assertions now demand rc **1**
+  rather than any non-zero code: "it failed" was true while "it failed for the
+  reason under test" was not.
 * `printf | python3 - <<HEREDOC` discards the pipe, so the recovery notice was
   never written.
 * `if ! cmd; then rc=$?` captures the negation rather than exit 10, leaving
   stale notices.
 * A dotted JSON accessor returned `null` for every entry-level check, because
   entry ids contain a literal dot.
-* **The APEX initramfs has `cat` and `tr` but not `dd`** — and `2>/dev/null`
+* **The APEX initramfs has `cat` and `tr` but not `dd`**, and `2>/dev/null`
   turned "command not found" into a written marker, so the probe reported
   success from a missing binary.
 * A 29-byte write to a dm-crypt mapper is `EINVAL`.
@@ -465,23 +467,23 @@ Every one had a green-looking symptom:
 ## Closing the items that were left open
 
 The list of "left undone" items each agent reported was reviewed one at a time.
-Four were closable and are now closed; four are correctly out of scope and the
+Four were closable and are now closed; four are correctly out of scope, and the
 argument for each is below rather than implied.
 
 ### Closed
 
-**§14's parity check is wired into CI.** `files/scripts/check-ai-parity` — 37
+**§14's parity check is wired into CI.** `files/scripts/check-ai-parity` (37
 checks that the daemon, the CLI and the unit agree about socket names, store
-root, protocol version and the TCP refusal, across three languages — now runs
-in the **`static`** job, with `--self-test`. It is in `static` and not `rust`
-because the selectors would skip it: a PR touching only
+root, protocol version and the TCP refusal, across three languages) now runs
+in the **`static`** job, with `--self-test`. It is in `static` rather than
+`rust` because the selectors would skip it there: a PR touching only
 `files/system/units/apex-aid.service` does not set `rust=true`, and that unit
 is one of the files the check reads. Its self-test mutates each constant to
 prove the check catches it *and* asserts a comment mentioning the forbidden
 token does not trip it: 4 mutations caught, 2 comments correctly ignored.
 
-**`boot-v2.yml` now has run on GitHub Actions.** It could not be dispatched —
-`workflow_dispatch` requires the workflow to exist on the default branch — so
+**`boot-v2.yml` now has run on GitHub Actions.** It could not be dispatched
+(`workflow_dispatch` requires the workflow to exist on the default branch), so
 PR #36 was opened, which triggers it through `pull_request:`. Checked first
 that this does not spend the reserved image build: `build-image.yml` fires on
 `push: branches: [main]` and manual dispatch only, so a pull request does not
@@ -492,10 +494,11 @@ build an image.
 Coder 1.5B Instruct Q4_K_M is now in it, with every number read off the file:
 the whole 1,117,320,768 bytes fetched and hashed, and the GGUF v3 header parsed
 for `block_count` 28, `context_length` 32768, `head_count_kv` 2 and
-key/value length 128. `kv_mib_per_1k` is computed from those — 2 × (128+128) × 2
-bytes × 28 = 28,672 per token = 28 MiB per 1024 tokens at f16 — not estimated.
+key/value length 128. `kv_mib_per_1k` is computed from those rather than
+estimated: 2 × (128+128) × 2 bytes × 28 = 28,672 per token = 28 MiB per 1024
+tokens at f16.
 
-**composefs was never actually undone.** Reported as "no composefs work", but
+**composefs was never undone.** It was reported as "no composefs work", but
 §23's row names composefs because it is part of the target architecture, and
 APEX already boots on it. Verified directly: `findmnt -no FSTYPE,SOURCE /`
 returns `overlay composefs` on **both** the laptop and the katana. Nothing
@@ -504,39 +507,39 @@ needed changing, which is different from nothing having been done.
 ### Correctly out of scope, with the argument
 
 **§22 step 6, encryption by default.** §22 gates this itself: *"Make encryption
-default once recovery and hardware edge cases are proven."* What is proven is
+default once recovery and hardware edge cases are proven."* The proof so far is
 one software TPM in one VM. Real firmware updates, real TPM clears, real
 suspend/resume, and machines with no TPM are not covered, and a default that
 fails on any of them costs a user their disk. Doing it would violate the
 section it implements.
 
-**No Secure Boot enrollment script.** `AGENTS.md` boot-path rule 4: keys are
-never generated on, or written to, a real machine's firmware by a script in this
-repository. That is not a gap in the implementation, it is the implementation —
-the safety argument for the whole boot path is that enrollment is a human
-procedure, which is why `docs/boot-v2.md` had to stop being a placeholder.
+**No Secure Boot enrollment script.** `AGENTS.md` boot-path rule 4: no script
+in this repository generates keys on, or writes them to, a real machine's
+firmware. Leaving the script out is the implementation: the safety argument for
+the whole boot path is that enrollment is a human procedure, which is why
+`docs/boot-v2.md` had to stop being a placeholder.
 
 **No NVRAM management.** The lab boots guests through
 `/EFI/BOOT/BOOTX64.EFI`. §22's requirement is a dedicated `/EFI/APEX/`
-*identity*, and that is met — systemd-boot and the UKIs live under `/EFI/APEX/`.
-What is not done is creating a firmware boot *entry*, which needs `efibootmgr`;
-on hardware `bootctl install` does it and the operator runs it.
+*identity*, and that is met: systemd-boot and the UKIs live under `/EFI/APEX/`.
+Creating a firmware boot *entry* is not done; it needs `efibootmgr`, and on
+hardware `bootctl install` does it and the operator runs it.
 
 **Ollama and vLLM are recognised and refused rather than adapted.** §14 says
 "abstract runtimes such as llama.cpp, Ollama, vLLM or future engines", and the
-*abstraction* does accommodate them — `Runtime` is an enum with a launch planner
-per variant. What APEX declines is adopting their model stores, because each owns
-its own and adopting one means two provenance stories for the same weights,
-which is the thing the catalogue exists to prevent. This is a deliberate
-deviation from a literal reading of §14, stated here rather than buried.
+*abstraction* does accommodate them: `Runtime` is an enum with a launch planner
+per variant. APEX declines to adopt their model stores, because each owns its
+own and adopting one means two provenance stories for the same weights, which
+is the thing the catalogue exists to prevent. This is a deliberate deviation
+from a literal reading of §14, stated here rather than buried.
 
 **APU VRAM is under-reported.** `mem_info_vram_total` on an integrated GPU is
-the BIOS carveout, not what the driver can actually allocate — measured on the
-laptop as `1024 MiB total, 0 spendable`. A hardware reporting limitation, not
-something APEX can fix; `plan_fit` planning against *measured free* VRAM is what
-keeps it from becoming a crash.
+the BIOS carveout rather than what the driver can allocate, measured on the
+laptop as `1024 MiB total, 0 spendable`. It is a hardware reporting limitation
+that APEX cannot fix; `plan_fit` planning against *measured free* VRAM keeps it
+from becoming a crash.
 
-## P2 close-out — verified on GitHub, not only on the katana
+## P2 close-out: verified on GitHub, not only on the katana
 
 Both halves are open as pull requests. Neither triggers an image build:
 `build-image.yml` fires on `push: branches: [main]` and manual dispatch only,
@@ -544,30 +547,29 @@ which was checked before opening either.
 
 | | PR | checks |
 | --- | --- | --- |
-| apex-os rows 9 + 10 | **#36** | `pr-validation` green — Static, Select, Rust, Package engine and the aggregate gate |
+| apex-os rows 9 + 10 | **#36** | `pr-validation` green: Static, Select, Rust, Package engine and the aggregate gate |
 | apex-os boot v2 VM job | **#36** | `boot-v2.yml` **success**, 46 passed / 0 failed |
 | apex-shell §20 shell half | **apex-shell #15** | all three jobs green |
 
 **The boot VM job ran accelerated, not emulated.** The workflow warns and falls
 back to TCG when `/dev/kvm` is absent; on the runner it printed
-`/dev/kvm is present; guests run accelerated`. What it proved there, having
-built its own UKI from a Fedora kernel because a runner has no ostree
-deployment:
+`/dev/kvm is present; guests run accelerated`. Having built its own UKI from a
+Fedora kernel, because a runner has no ostree deployment, it proved:
 
-* the signed UKI reached userspace — `APEX-BOOTLAB: userspace-reached`,
+* the signed UKI reached userspace: `APEX-BOOTLAB: userspace-reached`,
   `clean-poweroff`, `StubInfo=systemd-stub`, `LoaderEntrySelected=apex-good.efi`;
-* the unsigned UKI reached nothing — `qemu rc=137`, and the serial log
-  explicitly does *not* contain the userspace marker;
+* the unsigned UKI reached nothing: `qemu rc=137`, and the serial log does
+  *not* contain the userspace marker;
 * the foreign UKI is *validly signed by a key that is not in db* and fails
-  against the APEX certificate — the assertion that would be unfalsifiable on a
-  varstore carrying Microsoft's CA;
+  against the APEX certificate, which is the assertion that would be
+  unfalsifiable on a varstore carrying Microsoft's CA;
 * two identical builds hash identically
   (`ddd3e56f6c2c361f904eb9235a33f9119906fa03ba0ede1c93271382985880f2`) and a
   different `SOURCE_DATE_EPOCH` changes the bytes;
 * the counter walked `apex-new+3-0.efi` → `+2-1` → `+1-2` → `+0-3` and the next
   boot selected `apex-good`.
 
-The katana proved the same chain against the **real APEX image** — a 390 MB
+The katana proved the same chain against the **real APEX image**: a 390 MB
 signed UKI from the booted deployment's own kernel and 386 MB initramfs. CI
 proves it stays true; the katana proves it is true of the thing that ships.
 
@@ -576,12 +578,12 @@ proves it stays true; the katana proves it is true of the thing that ships.
 `test-apex-host.sh` asserted `describe --json` carries `accel` unconditionally.
 `HostCaps` declares `gpus` and `accel` with
 `skip_serializing_if = "Vec::is_empty"`, so a machine with no accelerator omits
-them — intended behaviour, since a host that cannot demonstrate a capability
-reports it absent rather than as an empty list. It passed on the developer's AMD
-laptop, where `/dev/kfd` makes rocm real, and failed on a runner with a
-`hyperv_drm` display and no accelerator at all. That is the whole argument for
-running tests somewhere that is not your own desk, and it is why the PR was
-worth opening rather than trusting a local sweep.
+them. That is intended behaviour, since a host that cannot demonstrate a
+capability reports it absent rather than as an empty list. It passed on the
+developer's AMD laptop, where `/dev/kfd` makes rocm real, and failed on a runner
+with a `hyperv_drm` display and no accelerator at all. That is the whole
+argument for running tests somewhere that is not your own desk, and it is why
+the PR was worth opening rather than trusting a local sweep.
 
 ### Final counts
 
@@ -592,4 +594,4 @@ worth opening rather than trusting a local sweep.
 | `boot-v2.yml` VM scenarios (GitHub, KVM) | 46 | 0 |
 | apex-shell, pre-existing | 864 | 0 |
 | apex-shell, new | 89 + 48 + 18 | 0 |
-| `cargo clippy --all-targets --locked -- -D warnings` | clean, six crates | — |
+| `cargo clippy --all-targets --locked -- -D warnings` | clean, six crates | none |

@@ -1,12 +1,12 @@
 # TUI fixtures
 
 Recorded on 2026-09-12 on the L16, against a real PTY, with
-`android/tools/record-tui-fixture.py`. Nothing here is hand-written: each file
-is the literal byte stream one of the agent CLIs produced in its first few
-seconds on an 80x24 `xterm-256color` PTY with a scratch `HOME`.
+`android/tools/record-tui-fixture.py`. Nobody wrote these by hand: each file is
+the literal byte stream one of the agent CLIs produced in its first few seconds
+on an 80x24 `xterm-256color` PTY with a scratch `HOME`.
 
-* `*-queries.bin` — recorded against a terminal that answered **nothing**.
-* `*-session.bin` — recorded against a terminal that answered the queries, in
+* `*-queries.bin`: recorded against a terminal that answered **nothing**.
+* `*-session.bin`: recorded against a terminal that answered the queries, in
   the shapes xterm uses.
 
 The pair is the evidence for "works with the TUIs without rewriting them".

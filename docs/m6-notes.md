@@ -1,9 +1,9 @@
-# APEX-OS — M6 notes (apexd: real fan control + game orchestration)
+# APEX-OS M6 notes (apexd: real fan control + game orchestration)
 
 M6 turns the two M3 stubs into real implementations: `org.apexos.Apexd1.Fan`
 now enumerates and commands fans, and `org.apexos.Apexd1.GameMode` runs a real
-session — top tier, NVIDIA clock locks, P-core cpuset pinning and IRQ steering —
-that is undone exactly on exit. The frozen M3 member signatures are unchanged;
+session (top tier, NVIDIA clock locks, P-core cpuset pinning and IRQ steering)
+and undoes it exactly on exit. The frozen M3 member signatures are unchanged;
 everything new is additive.
 
 ## What landed
@@ -41,7 +41,7 @@ cargo test                       77 passed; 0 failed   (21 fan + 15 gamemode +
 cargo clippy --all-targets -- -D warnings   clean
 ```
 
-The 17 M3 tests still pass unmodified — M6 actions never enter a tier plan
+The 17 M3 tests still pass unmodified: M6 actions never enter a tier plan
 (`profile_m6::every_shipped_profile_still_loads_and_plans_tiers` asserts it).
 
 ## Interfaces used
@@ -52,7 +52,7 @@ The 17 M3 tests still pass unmodified — M6 actions never enter a tier plan
 | Fan control | `/sys/class/hwmon/hwmon*/pwm*`, `pwm*_enable` | hwmon ABI: `0` = no control (**full speed**), `1` = manual, `2` = firmware automatic |
 | MSI fan RPM | hwmon chip `msi_wmi_platform` | `msi-wmi-platform` registers **4 read-only `fanN_input` channels and no PWM** |
 | MSI fan control | `/sys/devices/platform/msi-ec/fan_mode`, `cooler_boost` | `auto`/`silent`/`basic`/`advanced` and `on`/`off`; **no PWM** |
-| MSI fan speed | `/sys/devices/platform/msi-ec/{cpu,gpu}/realtime_fan_speed` | a **percentage**, not RPM — never reported as `rpm` |
+| MSI fan speed | `/sys/devices/platform/msi-ec/{cpu,gpu}/realtime_fan_speed` | a **percentage**, not RPM; never reported as `rpm` |
 | Curve sensor | `hwmon*/temp*_input` (prefers `coretemp`/`k10temp`/`zenpower`), else `class/thermal/thermal_zone*/temp` | |
 | P/E split | `/sys/devices/cpu_core/cpus` + `/sys/devices/cpu_atom/cpus` | rung 1; then `cpu/types/*/cpulist|cpumap`, `cpu_capacity`, `acpi_cppc/highest_perf`, `cpuinfo_max_freq` |
 | cpuset | cgroup v2: `<cgroup>/cpuset.cpus`, `cpuset.mems`, `cgroup.procs`, parent `cgroup.subtree_control` | default cgroup `/sys/fs/cgroup/apex-game` |
@@ -63,23 +63,23 @@ The 17 M3 tests still pass unmodified — M6 actions never enter a tier plan
 
 ## Fan safety argument
 
-The requirement is that no failure mode leaves a fan stopped. Five independent
-mechanisms, in order of when they apply:
+The requirement: no failure mode leaves a fan stopped. Five independent
+mechanisms enforce it, in the order they apply:
 
 1. **A floor, not a duty cycle.** `plan_mode` clamps every manual/curve duty
    cycle to the profile's `min_pwm` (default 77/255 ≈ 30%, 90 on the Katana).
-   Asking for `0` yields the floor. There is no code path that emits
+   Asking for `0` yields the floor. No code path emits
    `Action::FanPwm { value: 0 }`.
 2. **Snapshot before the first mutation.** `FanController::set_mode` captures
    `pwm*_enable` and `pwm*` (and the msi-ec `fan_mode`/`cooler_boost`) once, on
    the first command, and never overwrites that snapshot. Restore replays it.
 3. **A restore primitive with a fallback ladder.** `Action::FanSafeRestore`
    tries the recorded prior `pwm_enable`, then `2` (firmware automatic), and if
-   both are refused it drives `pwm` to `255` **before** writing `0` (the hwmon
-   ABI's "no control" = full speed). The last rung is a fan at full speed, never
-   a stopped one. Proved by
-   `fan::safe_restore_falls_back_to_full_speed_when_auto_is_refused`, which uses
-   an unwritable `pwm1_enable` to force every rung.
+   both writes fail it drives `pwm` to `255` **before** writing `0` (the hwmon
+   ABI's "no control" = full speed). The last rung leaves the fan at full speed,
+   never stopped.
+   `fan::safe_restore_falls_back_to_full_speed_when_auto_is_refused` proves it,
+   using an unwritable `pwm1_enable` to force every rung.
 4. **Every graceful exit restores.** `main.rs` unwinds in reverse order: leave
    game mode → `fan.restore()` → drop to a non-ryzenadj tier. Mode changes stop
    the curve loop before applying anything new.
@@ -89,7 +89,7 @@ mechanisms, in order of when they apply:
    fans and applies `plan_firmware_restore` **directly to sysfs**, with no bus,
    no daemon and no prior state (`fan::firmware_restore_needs_no_prior_state`
    proves a fan left in manual at duty cycle 0 comes back to `pwm_enable=2`).
-   It deliberately skips the `daemon_running` gate the other mutating verbs use.
+   By design it skips the `daemon_running` gate the other mutating verbs use.
 
 Two further properties: writes go through `SysWriter`, so `APEXD_DRY_RUN=1`
 neutralises all of it, and a machine with no controllable fan reports
@@ -97,39 +97,41 @@ neutralises all of it, and a machine with no controllable fan reports
 
 **Writable is not the same as effective.** Verified on this workstation (the
 L16): `thinkpad_acpi` publishes `pwm1` and `pwm1_enable` at mode 0644 and then
-answers `-EPERM` to every write, because the module was not loaded with
+answers `-EPERM` to every write, because the module loaded without
 `fan_control=1`. Discovery cannot tell the difference from the file mode, so
 `FanController::set_mode` **reads the controls back** after applying and, if
-nothing moved, **replays the snapshot before returning an error** — a plan can
+nothing moved, **replays the snapshot before returning an error**. A plan can
 land its `pwm_enable=1` write and then have its duty-cycle write refused, and
-that half-applied state is precisely the one the safety model must not end in. `apex doctor` phrases its check as
-"fan control channel present, write access unverified" for the same reason.
+the safety model must not end in that half-applied state. `apex doctor` phrases
+its check as "fan control channel present, write access unverified" for the same
+reason.
 
-## The MSI Katana reality (important)
+## The MSI Katana reality
 
-The concurrent hardware research on the target changed the picture, and the code
+Concurrent hardware research on the target changed the picture, and the code
 and profile now reflect it:
 
 * **`msi-ec` will not bind on this board.** The in-tree module in the shipped
   kernel carries a 25-entry EC-firmware allowlist with no `17L3` entry (the
-  Katana GF76 is board **MS-17L3**) and this build exposes no `force`
+  Katana GF76 is board **MS-17L3**), and this build exposes no `force`
   parameter. Consequences:
   * no `fan_mode`, no `cooler_boost` → **apexd reports `Fan.Supported = false`
     on the Katana as shipped** and touches nothing;
   * `/sys/class/power_supply/BAT1/charge_control_*_threshold` do not exist
     either, so the profile's `[charge] 60/80` block is a **silent no-op**. That
     is a pre-existing M3 issue, not an M6 regression; the `SysWriter` skips
-    absent attributes rather than failing. The block is kept (it is correct the
-    moment msi-ec binds) and now carries a comment saying so.
+    absent attributes instead of failing. The profile keeps the block (it is
+    correct the moment msi-ec binds), and the block now carries a comment
+    saying so.
 * **`msi-wmi-platform` is the working lead for readings.** It has a `force`
   module parameter (`module_param_unsafe`, so it taints the kernel) and
   registers an hwmon device named `msi_wmi_platform` with four **read-only**
-  `fanN_input` channels — RPM you can watch, but no PWM and no mode. apexd's
-  generic hwmon leg picks it up automatically; `backend = "msi-wmi"` selects it
-  exclusively.
+  `fanN_input` channels: RPM you can watch, but no PWM and no mode. apexd's
+  generic hwmon leg picks it up on its own; `backend = "msi-wmi"` selects it and
+  nothing else.
 * Discovery **probes, never assumes**: naming a backend in a profile does not
   imply it exists. `fan::a_named_backend_that_is_absent_degrades_to_unsupported`
-  and `fan::an_empty_msi_ec_directory_is_not_a_backend` cover exactly that path.
+  and `fan::an_empty_msi_ec_directory_is_not_a_backend` cover that path.
 
 Probe order for `backend = "auto"`: real hwmon PWM → `msi-wmi-platform` (RPM
 only) → `msi-ec` → unsupported.
@@ -139,21 +141,22 @@ only) → `msi-ec` → unsupported.
 Enter, in order: record prior tier **and disable auto-switch** → apply the
 profile's game tier → apply the profile's fan mode → create the cpuset cgroup
 and move the PIDs in → steer IRQs → lock GPU clocks. Exit runs the inverse,
-from a plan that was **built at enter time out of values read before anything
-was written**.
+from a plan **built at enter time from values read before apexd wrote
+anything**.
 
-Symmetry rules that fixture tests cannot express but matter on real hardware:
+Symmetry rules that fixture tests cannot express but that matter on real
+hardware:
 
-* Prior state is captured only on the 0 → 1 transition; a second
+* apexd captures prior state only on the 0 → 1 transition; a second
   `SetActive(true)` only attaches PIDs, so it can never clobber the restore
   values.
-* Auto-switch is disabled for the session. Without that, an AC/battery
+* apexd disables auto-switch for the session. Without that, an AC/battery
   transition mid-game would re-apply the profile default, clobber the game tier
   and strand the recorded prior tier.
 * IRQ restore writes back each interrupt's exact prior `smp_affinity_list`;
-  interrupts that were already on the target are neither written nor recorded.
-* PIDs are returned to the cgroup `/proc/<pid>/cgroup` reported before the move,
-  not to the root cgroup.
+  apexd neither writes nor records interrupts that were already on the target.
+* apexd returns PIDs to the cgroup `/proc/<pid>/cgroup` reported before the
+  move, not to the root cgroup.
 
 Degradation: a uniform CPU (the L16) pins to all CPUs and therefore steers no
 IRQs; no `nvidia-smi` means no GPU actions at all; a kernel-managed interrupt
@@ -187,12 +190,12 @@ that rejects an affinity write is a logged skip, not a failed session.
   cannot overwrite the recorded prior state, and an exit with no session (or a
   second exit) changes nothing.
 
-**Not verified — no access to the target machines. Honest list:**
+**Not verified (no access to the target machines):**
 
-1. **Everything on the actual Katana.** No MSI hardware was available. Whether
-   `msi-wmi-platform` binds with `force=1` on MS-17L3, what its four fan
-   channels correspond to, and whether any driver can command these fans at all
-   is unconfirmed.
+1. **Everything on the Katana itself.** No MSI hardware was available. Three
+   things remain unconfirmed: whether `msi-wmi-platform` binds with `force=1`
+   on MS-17L3, what its four fan channels correspond to, and whether any driver
+   can command these fans at all.
 2. **msi-ec attribute semantics.** The `fan_mode`/`cooler_boost` values and the
    `cpu|gpu/realtime_fan_speed` percentage come from the upstream driver's
    README, not from a running machine.
@@ -200,27 +203,27 @@ that rejects an affinity write is a logged skip, not a failed session.
    acceptance on an RTX 3070 Laptop, whether `-lmc` is supported on that part,
    and the real `clocks.max.*` values are unverified. The clamp means a wrong
    value cannot exceed what the GPU reports, but "wrong but in range" is
-   possible — in particular the `[1200, 1620]` graphics floor/ceiling in the
-   Katana profile is a design choice, not a measured one.
-4. **cgroup pinning under systemd.** Whether `+cpuset` can be enabled on the
-   root subtree on the shipped image, and whether moving a Steam/Proton PID out
-   of its `user@.slice` scope behaves (and survives systemd re-parenting), is
-   untested on a live system.
-5. **IRQ steering in practice.** Which of the Katana's interrupts accept an
-   affinity write, and whether pinning the NVIDIA IRQ onto the P-cores helps or
-   hurts, needs measurement.
-6. **The D-Bus surface at runtime.** As with M3, no daemon was started and no
-   bus round-trip was performed; the zbus code compiles and the client proxies
-   match, but `Fan.Fans` / `GameMode.Status` have never been marshalled live.
-7. **The `ExecStopPost` hook firing.** The code path it invokes is unit-tested;
-   systemd actually running it after a crash is not.
+   possible. In particular, the `[1200, 1620]` graphics floor/ceiling in the
+   Katana profile is a design choice, not a measurement.
+4. **cgroup pinning under systemd.** Nobody has tested on a live system whether
+   `+cpuset` can be enabled on the root subtree on the shipped image, or whether
+   moving a Steam/Proton PID out of its `user@.slice` scope behaves (and
+   survives systemd re-parenting).
+5. **IRQ steering in practice.** Someone needs to measure which of the Katana's
+   interrupts accept an affinity write, and whether pinning the NVIDIA IRQ onto
+   the P-cores helps or hurts.
+6. **The D-Bus surface at runtime.** As with M3, nobody started the daemon or
+   performed a bus round-trip; the zbus code compiles and the client proxies
+   match, but nothing has marshalled `Fan.Fans` / `GameMode.Status` live.
+7. **The `ExecStopPost` hook firing.** Unit tests cover the code path it
+   invokes, but not systemd running it after a crash.
 8. **Curve mode.** No machine here has a writable `pwm*_enable`, so the curve
    loop has never driven a real fan.
 
 ## IMAGE TODO
 
-Owned by the image agents — `Containerfile.*` and `files/**` were deliberately
-not touched. In rough priority order:
+Owned by the image agents: M6 left `Containerfile.*` and `files/**` untouched
+on purpose. In rough priority order:
 
 1. **`msi-wmi-platform` with `force=1`** (Katana, for fan RPM):
    * `files/system/modules-load.d/apex-msi.conf` → `msi-wmi-platform`
@@ -236,12 +239,12 @@ not touched. In rough priority order:
 3. **`irqbalance` must not fight game mode.** It re-scatters interrupt affinity
    on its own cadence and will undo the steering within seconds.
    **Recommendation: mask it in the gaming image** (`systemctl mask
-   irqbalance.service`) — a static `IRQBALANCE_BANNED_CPULIST` cannot track a
-   cpuset apexd computes at runtime. apexd detects a running irqbalance and
-   reports it in `apex game status`, but does not try to stop it.
-4. **`gamemoded` must not fight apexd for the governor.** No `/etc/gamemode.ini`
-   is shipped today, so gamemoded's default `desiredgov=performance` writes
-   `scaling_governor` behind apexd's back. Ship `/etc/gamemode.ini` with:
+   irqbalance.service`), because a static `IRQBALANCE_BANNED_CPULIST` cannot
+   track a cpuset apexd computes at runtime. apexd detects a running irqbalance
+   and reports it in `apex game status`, but does not try to stop it.
+4. **`gamemoded` must not fight apexd for the governor.** The image ships no
+   `/etc/gamemode.ini` today, so gamemoded's default `desiredgov=performance`
+   writes `scaling_governor` behind apexd's back. Ship `/etc/gamemode.ini` with:
    ```ini
    [general]
    ; apexd owns the governor; do not let gamemoded touch it
@@ -253,9 +256,9 @@ not touched. In rough priority order:
    start=/usr/bin/apex game start
    end=/usr/bin/apex game stop
    ```
-   The `[custom]` hooks are the intended integration: gamemoded becomes the
-   trigger and apexd does the orchestration. They run as the requesting user,
-   which polkit's `allow_active = yes` already permits passwordlessly.
+   The `[custom]` hooks are the intended integration: gamemoded triggers the
+   session and apexd orchestrates it. They run as the requesting user, which
+   polkit's `allow_active = yes` already permits without a password.
 5. **`nvidia-smi` on PATH** in the gaming image (the NVIDIA driver package's
    `/usr/bin/nvidia-smi`), plus the `nvidia` kernel module loaded. Without it
    game mode silently skips all GPU work. `apex doctor` checks for it when an
@@ -263,13 +266,13 @@ not touched. In rough priority order:
 6. **cgroup v2 unified hierarchy** (systemd default) with the `cpuset`
    controller available. apexd enables `+cpuset` on the parent's
    `cgroup.subtree_control` itself, best-effort.
-7. **Optional: dedicated polkit actions.** Fan and game-mode mutations currently
+7. **Optional: dedicated polkit actions.** At M6, fan and game-mode mutations
    reuse `org.apexos.apexd.manage-power` because
    `files/system/polkit-1/actions/org.apexos.apexd.policy` is out of scope. If
-   finer granularity is wanted, add `org.apexos.apexd.manage-fan` and
+   you want finer granularity, add `org.apexos.apexd.manage-fan` and
    `org.apexos.apexd.manage-game` (same `allow_active = yes` shape) and tell me
    to switch the daemon over.
-8. **No Containerfile change is needed for `apexd.service`** — the unit file
-   itself now carries `ProtectControlGroups=no` (required: the default `yes`
-   makes `/sys/fs/cgroup` read-only and silently disables all cpuset pinning)
-   and the `ExecStopPost` fan restore. It installs from the same path as before.
+8. **`apexd.service` needs no Containerfile change.** The unit file itself now
+   carries `ProtectControlGroups=no` (required: the default `yes` makes
+   `/sys/fs/cgroup` read-only and silently disables all cpuset pinning) and the
+   `ExecStopPost` fan restore. It installs from the same path as before.

@@ -1,4 +1,4 @@
-# Validation record — 2026-09-21
+# Validation record, 2026-09-21
 
 Branch `task/windows-installer-2`, worktree from `origin/roadmap/v2.2` at
 `602a8376`. `git fetch origin roadmap/v2.2` succeeded this time; the base is
@@ -10,10 +10,10 @@ deployment, additive bootloader transaction or undo is implemented."*
 
 Of those seven: **disk enumeration and ownership validation now exist and are
 measured on a real Windows.** The **destructive confirmation text** exists,
-is unit-tested and is printed — but nothing prompts for it, because nothing
-would act on the answer. **Locking turned out not to apply** and why is below.
-**The GUI, payload deployment, the bootloader transaction and undo do not
-exist at all.** This file says how each claim that is made was checked.
+has unit tests and is printed, but nothing prompts for it, because nothing
+would act on the answer. **Locking turned out not to apply**, for the reason
+given below. **The GUI, payload deployment, the bootloader transaction and undo
+do not exist at all.** This file says how each claim it makes was checked.
 
 ---
 
@@ -37,7 +37,7 @@ Its partition table, read by `sfdisk` from outside the guest:
 ```
 
 Its firmware variables after Setup, read by `virt-fw-vars` from outside the
-guest — the before-baseline for every claim about the Windows entry:
+guest, are the before-baseline for every claim about the Windows entry:
 
 ```
 Boot0005  title="Windows Boot Manager" devpath=Partition(nr=1)/FilePath(\EFI\Microsoft\Boot\bootmgfw.efi)
@@ -56,7 +56,7 @@ fixture-b  NVMe, serial FIXB00000002
 ```
 
 17 GiB and not something convenient, because the tool refuses anything under
-16 decimal GB — the number `installer/apex-install` refuses too. Fixtures small
+16 decimal GB, the number `installer/apex-install` refuses too. Fixtures small
 enough to be quick would have exercised every rule except the one that fires in
 real life. The images are sparse.
 
@@ -113,7 +113,7 @@ two Windows guest boots:
   - the basic-data refusal carries a `diskpart set id=` remedy and states that
     the program will not retype a partition itself;
   - the confirmation text contains model, serial and partition GUID and
-    **contains no device index** — the load-bearing negative;
+    **contains no device index**, the load-bearing negative;
   - everything the program prints is ASCII.
 - `windows-installer/build-windows.sh`: produces
   `PE32+ executable for MS Windows 5.02 (console), x86-64`.
@@ -121,7 +121,7 @@ two Windows guest boots:
   ways, because one is not enough. A **denylist of names** (`GENERIC_WRITE`,
   `WriteFile`, `SetFirmwareEnvironmentVariable`, `SetEndOfFile`, `DeleteFile`,
   `MoveFile`, `CreateDirectory`, …) catches the obvious. But `DeviceIoControl`
-  takes an arbitrary `u32` and the control codes are hand-written hex —
+  takes an arbitrary `u32` and the control codes are hand-written hex:
   `IOCTL_DISK_SET_DRIVE_LAYOUT_EX` is `0x0007C054`, a number no name-based grep
   will ever see. So there is also an **allowlist**: every `IOCTL_`/`FSCTL_`
   constant declared in the source must be one of the five read-side codes, and
@@ -148,23 +148,23 @@ eight partitions. Verbatim from the guest's own output:
 - **Both readings of every partition table agreed.** Windows'
   `IOCTL_DISK_GET_DRIVE_LAYOUT_EX` and this crate's own GPT parse of the same
   handle: `AGREE` on all four disks, `DISAGREE` on none.
-- **The ESP was refused** — `in use by Windows`, `no drive letter or mount
+- **The ESP was refused**: `in use by Windows`, `no drive letter or mount
   point -- FAT32, label "SYSTEM"`.
-- **The Microsoft reserved partition was refused** — `protected partition
+- **The Microsoft reserved partition was refused**: `protected partition
   type`.
-- **C: was refused** — `in use by Windows … mounted at C:\ -- NTFS, label
+- **C: was refused**: `in use by Windows … mounted at C:\ -- NTFS, label
   "Windows"`.
-- **The NTFS fixture partition was refused** and the letter named — `mounted at
+- **The NTFS fixture partition was refused** and the letter named: `mounted at
   E:\ -- NTFS, label "WINDATA"`.
-- **The zeroed basic-data fixture was refused** — and for a stronger reason
+- **The zeroed basic-data fixture was refused**, and for a stronger reason
   than its type: `mounted at F:\ -- unrecognised filesystem`. Windows had
   already given a RAW basic-data partition a drive letter. That is the design's
   claim about basic-data partitions, demonstrated rather than argued.
 - **The eligible partition was read to the last byte**:
   `exclusivity no volume object covers this partition, re-checked against a
   fresh volume enumeration`, then
-  `ALL-ZERO CONTENT: 18253611008/18253611008 bytes read.` — 17 GiB, through a
-  `\\.\PhysicalDriveN` handle, not an image file.
+  `ALL-ZERO CONTENT: 18253611008/18253611008 bytes read.` That is 17 GiB,
+  read through a `\\.\PhysicalDriveN` handle, not an image file.
 - **The confirmation named the disk by `FIXA00000001`** and contains no
   `PhysicalDrive` and no disk number.
 - **The firmware variables were byte-identical before and after**, compared by
@@ -218,8 +218,8 @@ console is not UTF-8, and every em dash in the program's output arrived as
 - **No destructive confirmation prompt.** `inspect` prints the text and stops.
   Nothing asks for consent because nothing would act on it.
 - **There is no volume lock, by construction rather than by omission.**
-  Windows creates no volume object for a Linux-filesystem-type partition —
-  measured on both eligible fixtures — and a partition that does have one has
+  Windows creates no volume object for a Linux-filesystem-type partition
+  (measured on both eligible fixtures), and a partition that does have one has
   already been refused, because an overlapping volume is what "in use by
   Windows" means. An earlier draft carried an `FSCTL_LOCK_VOLUME` call that
   could not be reached on any input; it was removed rather than left in place,
