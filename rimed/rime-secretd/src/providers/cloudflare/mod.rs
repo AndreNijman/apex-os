@@ -2970,9 +2970,9 @@ fn usage_metadata(req: &Bind<'_>) -> String {
         .filter(|name| !name.is_empty())
         .unwrap_or_else(|| "project".to_string());
     serde_json::json!({
-        "rime_audit": req.audit_id,
-        "rime_project": project,
-        "rime_operation": req.operation.id,
+        "apex_audit": req.audit_id,  // rime-rename: keep (key in the owner's AI Gateway logs; queries over past logs use it)
+        "apex_project": project,  // rime-rename: keep (key in the owner's AI Gateway logs)
+        "apex_operation": req.operation.id,  // rime-rename: keep (key in the owner's AI Gateway logs)
     })
     .to_string()
 }

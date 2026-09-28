@@ -3071,12 +3071,12 @@ fn a_gatewayed_run_is_tagged_with_this_task_and_not_with_this_machine_s_paths() 
     assert!(object.values().all(|v| v.is_string() || v.is_number() || v.is_boolean()), "{raw}");
 
     assert_eq!(
-        object.get("rime_operation").and_then(|v| v.as_str()),
+        object.get("apex_operation").and_then(|v| v.as_str()),  // rime-rename: keep (gateway metadata key)
         Some("cloudflare.ai-gateway.run")
     );
     // The audit id is a real one from this request, and it is what joins the
     // far side's log to this machine's trail.
-    let audit = object.get("rime_audit").and_then(|v| v.as_str()).expect("no audit id");
+    let audit = object.get("apex_audit").and_then(|v| v.as_str()).expect("no audit id");  // rime-rename: keep (gateway metadata key)
     assert!(!audit.is_empty() && audit != "test", "{raw}");
     assert!(f.trail().contains(audit), "the id sent is not one this trail holds: {audit}");
 
@@ -3101,7 +3101,7 @@ fn a_gatewayed_run_is_tagged_with_this_task_and_not_with_this_machine_s_paths() 
         .take(48)
         .collect();
     assert_eq!(
-        object.get("rime_project").and_then(|v| v.as_str()),
+        object.get("apex_project").and_then(|v| v.as_str()),  // rime-rename: keep (gateway metadata key)
         Some(expected.as_str()),
         "{raw}"
     );
@@ -3114,7 +3114,7 @@ fn a_gatewayed_run_is_tagged_with_this_task_and_not_with_this_machine_s_paths() 
         "the project's path was sent with its separators stripped: {raw}"
     );
     assert!(
-        object.get("rime_project").and_then(|v| v.as_str()).is_some_and(|p| !p.contains('/')),
+        object.get("apex_project").and_then(|v| v.as_str()).is_some_and(|p| !p.contains('/')),  // rime-rename: keep (gateway metadata key)
         "{raw}"
     );
 }
@@ -3284,7 +3284,7 @@ fn a_header_this_build_composes_can_never_carry_a_second_line() {
     // line — which is a second header, or an option. Every composed value is
     // held to printable ASCII before it gets there.
     assert!(api::printable("rime-gateway"));
-    assert!(api::printable(r#"{"rime_audit":"1a0-1","rime_project":"demo"}"#));
+    assert!(api::printable(r#"{"apex_audit":"1a0-1","apex_project":"demo"}"#));  // rime-rename: keep (gateway metadata keys)
     for evil in [
         "one\ntwo",
         "one\r\nheader: two",
