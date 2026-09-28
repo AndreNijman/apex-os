@@ -4023,8 +4023,11 @@ fn layout_open(
         );
     };
 
+    // `APEX_MUX` is the preference's name before the rename; a profile that
+    // still exports it keeps choosing the same multiplexer.
     let preferred = requested_mux
-        .or_else(|| std::env::var("RIME_MUX").ok())
+        .or_else(|| std::env::var("RIME_MUX").ok().filter(|m| !m.is_empty()))
+        .or_else(|| std::env::var("APEX_MUX").ok())  // rime-rename: keep (the preference's name before the rename)
         .filter(|m| !m.is_empty());
     let backend = mux::choose_backend(preferred.as_deref(), |n| which(n).is_some())
         .map_err(|e| anyhow!(e))?;

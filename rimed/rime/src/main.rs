@@ -2438,11 +2438,14 @@ const SHELL_DIR_DEFAULT: &str = "/usr/share/rime-shell";
 /// `RIME_SHELL_DIR` overrides it, matching the convention
 /// /usr/libexec/rime-shell-autostart already uses. That is what makes it
 /// possible to drive a working-tree checkout during development instead of only
-/// the copy baked into the image.
+/// the copy baked into the image. `APEX_SHELL_DIR`, the variable's name before
+/// the rename, is read when the new one is unset, so a session environment or
+/// a unit that still sets it keeps addressing the shell it launched.
 fn shell_dir() -> String {
-    std::env::var("RIME_SHELL_DIR")
-        .ok()
-        .filter(|s| !s.trim().is_empty())
+    ["RIME_SHELL_DIR", "APEX_SHELL_DIR"]  // rime-rename: keep (the override's name before the rename)
+        .iter()
+        .filter_map(|name| std::env::var(name).ok())
+        .find(|s| !s.trim().is_empty())
         .unwrap_or_else(|| SHELL_DIR_DEFAULT.to_string())
 }
 
