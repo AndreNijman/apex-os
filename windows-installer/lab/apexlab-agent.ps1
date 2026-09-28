@@ -1,5 +1,5 @@
 # ─────────────────────────────────────────────────────────────────────────────
-#  rimelab-agent.ps1 — the guest half of the lab, and the only thing baked into
+#  apexlab-agent.ps1 — the guest half of the lab, and the only thing baked into  (rime-rename: keep)
 #  the golden image.
 #
 #  It runs from an ON-START scheduled task as SYSTEM, so there is no logon
@@ -7,14 +7,14 @@
 #  matters: every one of those is a thing that can fail to happen on a headless
 #  guest and leave the harness waiting on a timeout with nothing to read.
 #
-#  The contract with the host is one FAT volume labelled RIMELAB:
+#  The contract with the host is one FAT volume labelled APEXLAB:  (rime-rename: keep)
 #
 #      run.ps1      the host puts the work here; absent means "just boot"
 #      result.txt   the guest writes everything here, host reads it after
 #      status.txt   a single word, so a truncated result.txt is not mistaken
 #                   for a pass
 #
-#  If there is no RIMELAB volume the agent exits and leaves the machine up.
+#  If there is no APEXLAB volume the agent exits and leaves the machine up.  (rime-rename: keep)
 #  That is the maintenance path: the golden image has to remain bootable by
 #  hand, and an agent that powers the machine off unconditionally makes that
 #  impossible.
@@ -27,7 +27,7 @@ function Find-LabVolume {
     # host attached no transport disk", and those are different situations.
     for ($i = 0; $i -lt 120; $i++) {
         $v = Get-Volume -ErrorAction SilentlyContinue |
-             Where-Object { $_.FileSystemLabel -eq 'RIMELAB' -and $_.DriveLetter }
+             Where-Object { $_.FileSystemLabel -eq 'APEXLAB' -and $_.DriveLetter }  # rime-rename: keep (the golden image has this agent baked in)
         if ($v) { return ($v | Select-Object -First 1) }
         Start-Sleep -Seconds 1
     }
@@ -42,7 +42,7 @@ $result = Join-Path $root 'result.txt'
 $status = Join-Path $root 'status.txt'
 $runner = Join-Path $root 'run.ps1'
 
-"RIMELAB-AGENT-START $(Get-Date -Format o)"      | Out-File -FilePath $result -Encoding ascii
+"APEXLAB-AGENT-START $(Get-Date -Format o)"      | Out-File -FilePath $result -Encoding ascii  # rime-rename: keep (the golden image has this agent baked in)
 "computer: $env:COMPUTERNAME"                     | Out-File -FilePath $result -Encoding ascii -Append
 "identity: $([Security.Principal.WindowsIdentity]::GetCurrent().Name)" |
     Out-File -FilePath $result -Encoding ascii -Append
@@ -58,14 +58,14 @@ if (Test-Path $runner) {
         "AGENT-EXCEPTION: $_" | Out-File -FilePath $result -Encoding ascii -Append
         $rc = 199
     }
-    "RIMELAB-RUN-EXIT $rc" | Out-File -FilePath $result -Encoding ascii -Append
+    "APEXLAB-RUN-EXIT $rc" | Out-File -FilePath $result -Encoding ascii -Append  # rime-rename: keep (the golden image has this agent baked in)
     if ($rc -eq 0) { 'PASS' | Out-File -FilePath $status -Encoding ascii }
     else           { "FAIL $rc" | Out-File -FilePath $status -Encoding ascii }
 } else {
     'NORUNNER' | Out-File -FilePath $status -Encoding ascii
 }
 
-"RIMELAB-AGENT-END $(Get-Date -Format o)" | Out-File -FilePath $result -Encoding ascii -Append
+"APEXLAB-AGENT-END $(Get-Date -Format o)" | Out-File -FilePath $result -Encoding ascii -Append  # rime-rename: keep (the golden image has this agent baked in)
 
 # Flush before the power goes. A FAT volume the host is about to read with
 # mtools does not forgive a lazy writer.

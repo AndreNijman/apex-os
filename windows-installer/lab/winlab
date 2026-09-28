@@ -31,7 +31,7 @@
 #     starts over, forever.
 #  4. Nothing is asked of the guest over a network or a shared folder, because
 #     Windows Setup media carries no virtio driver. The transport is a FAT disk
-#     labelled RIMELAB that the host writes with mtools and the guest reads as
+#     labelled APEXLAB that the host writes with mtools and the guest reads as  (rime-rename: keep)
 #     an ordinary drive letter. Everything comes back the same way.
 #
 #  ═══ THE MACHINE ═══
@@ -63,10 +63,13 @@ set -uo pipefail
 
 HERE="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
 DIR="${RIME_WINLAB_DIR:-/var/lab-scratch/winlab}"
-IMAGE="${RIME_WINLAB_IMAGE:-localhost/rime-winlab:latest}"
+# The lab keeps its APEX-era names wherever an artifact already built under  (rime-rename: keep)
+# them depends on them: the podman image, the remastered media, and the
+# APEXLAB transport volume the golden image's baked agent looks for.  (rime-rename: keep)
+IMAGE="${RIME_WINLAB_IMAGE:-localhost/apex-winlab:latest}"  # rime-rename: keep (an existing lab artifact carries this name)
 
 ISO="$DIR/ws2022-eval.iso"
-MEDIA="$DIR/rime-winsetup.iso"
+MEDIA="$DIR/apex-winsetup.iso"  # rime-rename: keep (an existing lab artifact carries this name)
 GOLDEN="$DIR/golden.raw"
 GOLDVARS="$DIR/golden-VARS.fd"
 
@@ -152,24 +155,24 @@ cmd_media() {
         test -s /w/isoroot/sources/install.wim
         chmod -R u+w /w/isoroot
         cp /lab/autounattend.xml     /w/isoroot/autounattend.xml
-        cp /lab/rimelab-agent.ps1    /w/isoroot/rimelab-agent.ps1
+        cp /lab/apexlab-agent.ps1    /w/isoroot/apexlab-agent.ps1  # rime-rename: keep (an existing lab artifact carries this name)
         echo "splitting install.wim (4.34 GB does not fit an ISO-9660 file) …"
         wimsplit /w/isoroot/sources/install.wim /w/isoroot/sources/install.swm 3800 >/dev/null
         rm -f /w/isoroot/sources/install.wim
         ls -l /w/isoroot/sources/install*.swm
         echo "authoring …"
-        rm -f /w/rime-winsetup.iso
+        rm -f /w/apex-winsetup.iso  # rime-rename: keep (an existing lab artifact carries this name)
         xorriso -as mkisofs \
             -iso-level 3 -J -joliet-long -V RIME_WINSETUP \
             -e efi/microsoft/boot/efisys_noprompt.bin -no-emul-boot \
-            -o /w/rime-winsetup.iso /w/isoroot 2>&1 | tail -8
+            -o /w/apex-winsetup.iso /w/isoroot 2>&1 | tail -8  # rime-rename: keep (an existing lab artifact carries this name)
         rm -rf /w/isoroot
-        ls -l /w/rime-winsetup.iso
+        ls -l /w/apex-winsetup.iso  # rime-rename: keep (an existing lab artifact carries this name)
         echo "--- the produced media, as the firmware will see it ---"
-        xorriso -indev /w/rime-winsetup.iso -report_el_torito plain 2>&1 |
+        xorriso -indev /w/apex-winsetup.iso -report_el_torito plain 2>&1 |  # rime-rename: keep (an existing lab artifact carries this name)
             grep -E "El Torito (boot img|images|catalog)"
         echo "--- autounattend.xml is in the root, and it is ours ---"
-        7z l /w/rime-winsetup.iso 2>/dev/null | grep -iE "autounattend|rimelab-agent" | head
+        7z l /w/apex-winsetup.iso 2>/dev/null | grep -iE "autounattend|apexlab-agent" | head  # rime-rename: keep (an existing lab artifact carries this name)
     ' || die "remaster failed"
     say "media: $MEDIA"
 }
@@ -190,8 +193,8 @@ qemu_run() {
     local cdidx=2 dkidx=1
     [ "$first" = cd ] && { cdidx=1; dkidx=2; }
     local cd=()
-    if [ "$first" = cd ] && [ -f /w/rime-winsetup.iso ]; then
-        cd=(-drive "id=cd,file=/w/rime-winsetup.iso,format=raw,if=none,media=cdrom,readonly=on"
+    if [ "$first" = cd ] && [ -f /w/apex-winsetup.iso ]; then  # rime-rename: keep (an existing lab artifact carries this name)
+        cd=(-drive "id=cd,file=/w/apex-winsetup.iso,format=raw,if=none,media=cdrom,readonly=on"  # rime-rename: keep (an existing lab artifact carries this name)
             -device "ide-cd,drive=cd,bus=ahci.4,bootindex=$cdidx")
     fi
     rm -f "$MON"
@@ -241,13 +244,13 @@ cmd_golden() {
         # "DiskID 0, WillWipeDisk true" cannot possibly address anything else.
         mkfs_transport() {
             qemu-img create -f raw /w/transport.raw 64M >/dev/null
-            printf "label: gpt\nsize=60MiB, type=EBD0A0A2-B9E5-4433-87C0-68B6B72699C7, name=RIMELAB\n" |
+            printf "label: gpt\nsize=60MiB, type=EBD0A0A2-B9E5-4433-87C0-68B6B72699C7, name=APEXLAB\n" |  # rime-rename: keep (the baked agent looks for APEXLAB)
                 sfdisk /w/transport.raw >/dev/null 2>&1
-            mformat -i /w/transport.raw@@1048576 -F -v RIMELAB ::
+            mformat -i /w/transport.raw@@1048576 -F -v APEXLAB ::  # rime-rename: keep (the baked agent looks for APEXLAB)
             # The agent rides in on the transport, not on the install CD: the
             # CD is detached after the first Setup phase and a copy from it
             # silently finds nothing.
-            mcopy -i /w/transport.raw@@1048576 /lab/rimelab-agent.ps1 ::/
+            mcopy -i /w/transport.raw@@1048576 /lab/apexlab-agent.ps1 ::/  # rime-rename: keep (the name the autounattend.xml on the media copies)
         }
 
         phase=1
@@ -434,9 +437,9 @@ cmd_run() {
         # Fresh transport every run: a stale result.txt from a previous run is
         # indistinguishable from a run that produced one.
         qemu-img create -f raw /w/run-transport.raw 256M >/dev/null
-        printf "label: gpt\nsize=250MiB, type=EBD0A0A2-B9E5-4433-87C0-68B6B72699C7, name=RIMELAB\n" |
+        printf "label: gpt\nsize=250MiB, type=EBD0A0A2-B9E5-4433-87C0-68B6B72699C7, name=APEXLAB\n" |  # rime-rename: keep (the baked agent looks for APEXLAB)
             sfdisk /w/run-transport.raw >/dev/null
-        mformat -i /w/run-transport.raw@@1048576 -F -v RIMELAB ::
+        mformat -i /w/run-transport.raw@@1048576 -F -v APEXLAB ::  # rime-rename: keep (the baked agent looks for APEXLAB)
         mcopy -i /w/run-transport.raw@@1048576 /job/* ::/ 
         [ -f /w/rime-windows-installer.exe ] &&
             mcopy -i /w/run-transport.raw@@1048576 /w/rime-windows-installer.exe ::/

@@ -152,7 +152,7 @@
         </SynchronousCommand>
         <SynchronousCommand wcm:action="add" xmlns:wcm="http://schemas.microsoft.com/WMIConfig/2002/State">
           <Order>2</Order>
-          <!-- The agent is fetched from the RIMELAB transport volume, by
+          <!-- The agent is fetched from the APEXLAB transport volume, by (rime-rename: keep)
                LABEL, not from the install media and not by walking drive
                letters. Both of the obvious alternatives were wrong: the
                install CD is detached after Setup's first phase, so a copy
@@ -161,8 +161,8 @@
                perfectly and then does nothing at all, with no error anywhere.
                A drive-letter loop has the same failure whenever the letters
                land somewhere the loop did not guess. -->
-          <CommandLine>powershell -NoProfile -ExecutionPolicy Bypass -Command "$v = Get-Volume | Where-Object { $_.FileSystemLabel -eq 'RIMELAB' -and $_.DriveLetter }; if ($v) { Copy-Item -Force ($v[0].DriveLetter + ':\rimelab-agent.ps1') 'C:\rimelab\agent.ps1' }"</CommandLine>
-          <Description>copy the lab agent off the RIMELAB transport volume</Description>
+          <CommandLine>powershell -NoProfile -ExecutionPolicy Bypass -Command "$v = Get-Volume | Where-Object { $_.FileSystemLabel -eq 'APEXLAB' -and $_.DriveLetter }; if ($v) { Copy-Item -Force ($v[0].DriveLetter + ':\apexlab-agent.ps1') 'C:\rimelab\agent.ps1' }"</CommandLine> <!-- rime-rename: keep: the golden image and its media carry this name -->
+          <Description>copy the lab agent off the APEXLAB transport volume</Description> <!-- rime-rename: keep: the golden image and its media carry this name -->
         </SynchronousCommand>
         <SynchronousCommand wcm:action="add" xmlns:wcm="http://schemas.microsoft.com/WMIConfig/2002/State">
           <Order>3</Order>
@@ -171,12 +171,12 @@
         </SynchronousCommand>
         <SynchronousCommand wcm:action="add" xmlns:wcm="http://schemas.microsoft.com/WMIConfig/2002/State">
           <Order>4</Order>
-          <!-- The completion marker goes on the RIMELAB transport volume, not
+          <!-- The completion marker goes on the APEXLAB transport volume, not (rime-rename: keep)
                on C:. The harness reads it from outside with mtools between
                boots; reading it out of NTFS would mean parsing NTFS from the
                host to answer "did Setup finish", which is a lot of machinery
                for a yes/no. -->
-          <CommandLine>powershell -NoProfile -ExecutionPolicy Bypass -Command "$v = Get-Volume | Where-Object { $_.FileSystemLabel -eq 'RIMELAB' -and $_.DriveLetter }; if ($v) { Set-Content -Path ($v[0].DriveLetter + ':\golden.txt') -Value $(if (Test-Path 'C:\rimelab\agent.ps1') { 'GOLDEN-READY' } else { 'GOLDEN-BROKEN-NO-AGENT' }) }"</CommandLine>
+          <CommandLine>powershell -NoProfile -ExecutionPolicy Bypass -Command "$v = Get-Volume | Where-Object { $_.FileSystemLabel -eq 'APEXLAB' -and $_.DriveLetter }; if ($v) { Set-Content -Path ($v[0].DriveLetter + ':\golden.txt') -Value $(if (Test-Path 'C:\rimelab\agent.ps1') { 'GOLDEN-READY' } else { 'GOLDEN-BROKEN-NO-AGENT' }) }"</CommandLine> <!-- rime-rename: keep: the golden image and its media carry this name -->
           <Description>mark the golden image complete</Description>
         </SynchronousCommand>
         <SynchronousCommand wcm:action="add" xmlns:wcm="http://schemas.microsoft.com/WMIConfig/2002/State">

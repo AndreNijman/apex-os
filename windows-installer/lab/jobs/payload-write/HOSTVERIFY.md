@@ -17,7 +17,10 @@ later run recreates `run-fixture-a.qcow2`, so copy it aside first:
     podman run --rm \
       -v /var/lab-scratch/winlab:/w:z \
       -v /var/lab-scratch/<your-slug>:/o:z \
-      localhost/rime-winlab:latest bash /o/hostverify.sh
+      localhost/apex-winlab:latest bash /o/hostverify.sh
+
+(`localhost/apex-winlab` is the lab image's real name: it was built before the <!-- rime-rename: keep -->
+rebrand, and `winlab` keeps using it.)
 
 It asserts each of the following, and fails loudly on any violation:
 

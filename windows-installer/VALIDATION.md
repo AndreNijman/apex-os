@@ -24,7 +24,7 @@ There is one. `windows-installer/lab/winlab` builds it end to end:
 | artefact | what it is |
 | --- | --- |
 | `ws2022-eval.iso` | Windows Server 2022 Evaluation, **5044094976 bytes**, from Microsoft's own `https://go.microsoft.com/fwlink/p/?LinkID=2195280`. Size checked against that constant on every fetch. |
-| `rime-winsetup.iso` | the same media re-authored: `autounattend.xml` and `rimelab-agent.ps1` in the root, EFI El Torito image replaced with `efisys_noprompt.bin`, `install.wim` split into `install.swm` + `install2.swm`. |
+| `apex-winsetup.iso` | the same media re-authored: `autounattend.xml` and `apexlab-agent.ps1` in the root, EFI El Torito image replaced with `efisys_noprompt.bin`, `install.wim` split into `install.swm` + `install2.swm`. | <!-- rime-rename: keep: the lab artifact names -->
 | `golden.raw` + `golden-VARS.fd` | Windows Server 2022 Standard (Core), installed **headlessly in 3 qemu phases, about 150 seconds**. |
 | `fixture-a.raw`, `fixture-b.raw` | the target disks. |
 
