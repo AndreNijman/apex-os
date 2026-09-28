@@ -421,6 +421,16 @@ pub fn wrap(rime: &Path, name: &str, command: &str, args: &[String]) -> (String,
     (rime.to_string_lossy().into_owned(), wrapped)
 }
 
+/// Whether a program's file name is this runtime's CLI.
+///
+/// `apex` as well as `rime`: definitions `rime mcp confine` and `rime mcp
+/// connect` wrote into `~/.claude.json` before the rename to Rime OS name the
+/// CLI by its old name. They are still this runtime's wrappers, and reading
+/// them as somebody else's server would wrap a wrapper.
+pub fn is_cli_name(program: &str) -> bool {
+    program == "rime" || program == "apex"  // rime-rename: keep (the CLI's name in definitions written before the rename)
+}
+
 /// The server an `rime mcp run <name> -- …` definition confines, and the
 /// command it confines.
 ///
@@ -428,7 +438,7 @@ pub fn wrap(rime: &Path, name: &str, command: &str, args: &[String]) -> (String,
 /// program that merely has `rime` in its name is not mistaken for the wrapper.
 pub fn unwrap_wrapped(command: &str, args: &[String]) -> Option<(String, Vec<String>)> {
     let program = Path::new(command).file_name()?.to_str()?;
-    if program != "rime" {
+    if !is_cli_name(program) {
         return None;
     }
     let mut rest = args.iter();
@@ -1282,9 +1292,16 @@ mod tests {
                 ]
             ))
         );
+        // A wrapper written before the rename names the CLI `apex`, and is
+        // still this runtime's wrapper.
+        assert_eq!(
+            unwrap_wrapped("/usr/bin/apex", &args).map(|(name, _)| name).as_deref(),  // rime-rename: keep
+            Some("memory")
+        );
         // Not the wrapper: a program whose name merely contains rime, and a
         // wrapper with nothing after the separator.
         assert_eq!(unwrap_wrapped("rime-shim", &args), None);
+        assert_eq!(unwrap_wrapped("apex-shim", &args), None);  // rime-rename: keep
         assert_eq!(
             unwrap_wrapped(
                 "rime",

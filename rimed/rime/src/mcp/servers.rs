@@ -492,7 +492,7 @@ fn credential_of(
 /// with `rime` in its name.
 pub fn bridged_service(command: &str, args: &[String]) -> Option<String> {
     let program = Path::new(command).file_name()?.to_str()?;
-    if program != "rime" {
+    if !mcpconf::is_cli_name(program) {
         return None;
     }
     let mut rest = args.iter();
@@ -834,6 +834,11 @@ mod tests {
         );
         assert_eq!(
             bridged_service("/usr/bin/rime", &args(&["mcp", "bridge", "memory"])).as_deref(),
+            Some("memory")
+        );
+        // A definition written before the rename names the CLI `apex`.
+        assert_eq!(
+            bridged_service("/usr/bin/apex", &args(&["mcp", "bridge", "memory"])).as_deref(),  // rime-rename: keep
             Some("memory")
         );
         // The failure the argv match prevents: a server that merely runs
