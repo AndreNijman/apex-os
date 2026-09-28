@@ -24,9 +24,21 @@ and leaves the account shaped the way this image expects:
     files the image seeded into the account and then gave to the user
       hyprland.lua, hypr/rime/*.lua, hypridle.conf, niri config.kdl, labwc
       rc.xml/menu.xml/autostart, ~/.zshrc (two seeded lines), starship.toml
-      -> image paths that moved (/usr/libexec/apex-*, /usr/share/apex-shell,
-         /usr/share/apex/...) point at the new ones, but only where the new
-         path exists in this image; generated markers get their new spelling
+      -> an image path that moved (/usr/libexec/apex-*, /usr/share/apex/...)
+         or the `apex` command points at the new one, but only once this image
+         no longer answers to the old name. Release B still does (the aliases
+         install-rename-compat makes), so on B these lines stay as they are and
+         keep working on this image AND on a rollback to APEX; the release that
+         drops an alias rewrites the lines that use it at the next login.
+      -> a quickshell IPC call (`qs -p /usr/share/apex-shell ipc …`) points at
+         /usr/share/rime-shell now: quickshell finds an instance by the path
+         as given, so the alias cannot carry it. In hypridle.conf, whose
+         commands run through sh, the old call stays and the new one is added
+         after `||`, so the idle lock works on both images. Anywhere else (a
+         labwc keybind, a niri spawn) there is no fallback to add, and a
+         rollback leaves that bind pointing at a shell APEX does not have.
+      -> generated markers get their new spelling (the Rime generators read
+         both, and an APEX one that finds none appends its block again)
 
     per-user systemd units
       <target>.wants/apex-X -> image unit  gains rime-X beside it (the old link
@@ -151,11 +163,17 @@ class Image:
         return os.path.lexists(self.path(p))
 
     def moved(self, token):
-        """The new spelling of an image path, when the image has it; else None."""
+        """The new spelling of an image path, once the old one is gone; else None.
+
+        Not while this image still has the old path (an alias): the line then
+        works as it is, here and on a rollback to APEX, which has no new path.
+        """
         if not re.search(OLD, token, re.I):
             return None
         mapped = "/".join(map_component(c) for c in token.split("/"))
         if mapped == token:
+            return None
+        if self.exists(token.rstrip("/") or "/"):
             return None
         return mapped if self.exists(mapped.rstrip("/") or "/") else None
 
@@ -182,14 +200,63 @@ CLI_FORMS = (
 
 
 def rewrite_cli(line, image):
-    if not image.exists("/usr/bin/rime"):
+    # /usr/bin/apex is the image's wrapper for the old command: while it is
+    # there, `apex shell …` works here and on a rollback, and stays.
+    if not image.exists("/usr/bin/rime") or image.exists(f"/usr/bin/{OLD}"):
         return line
     for rx in CLI_FORMS:
         line = rx.sub(r"\1rime", line)
     return line
 
 
-def rewrite_text(text, image, comment=None, cli=False, only=None):
+# The shell's directory as a quickshell IPC target. quickshell finds a running
+# instance by the path it is given, not the canonical one (measured, 0.3.1:
+# "No running instances" through the image's /usr/share/apex-shell alias), so
+# these must name the new path while every other old path may stay.
+OLD_SHELL_SHARE = f"/usr/share/{OLD_SHELL}"
+NEW_SHELL_SHARE = f"/usr/share/{NEW_SHELL}"
+_QS_FLAG = r"(?:-p|-c|--path|--config)"
+IPC_FORMS = (
+    # a command line: lock_cmd, a labwc Execute, a Hyprland exec_cmd
+    re.compile(r"(\bqs\s+" + _QS_FLAG + r"(?:\s+|=))" + re.escape(OLD_SHELL_SHARE) + r"(?=[\s\"'/]|$)"),
+    # niri's argv form: spawn "qs" "-p" "/usr/share/apex-shell" …
+    re.compile(r'("qs"\s+"' + _QS_FLAG + r'"\s+")' + re.escape(OLD_SHELL_SHARE) + r'(?=[/"])'),
+    # the shell's generated Hyprland module: local shell = "/usr/share/apex-shell"
+    re.compile(r'(\blocal\s+shell\s*=\s*")' + re.escape(OLD_SHELL_SHARE) + r'(?=")'),
+)
+
+
+def rewrite_ipc(line, image):
+    if not image.exists(f"{NEW_SHELL_SHARE}/shell.qml"):
+        return line
+    for rx in IPC_FORMS:
+        line = rx.sub(lambda m: m.group(1) + NEW_SHELL_SHARE, line)
+    return line
+
+
+# One `qs <flag> /usr/share/apex-shell …` command inside a hypridle command,
+# up to the next shell operator or the end of the hyprlang value.
+_QS_SEGMENT = re.compile(
+    r"(\bqs\s+" + _QS_FLAG + r"(?:\s+|=))" + re.escape(OLD_SHELL_SHARE)
+    + r"(?=[\s/]|$)([^|;&}#\n]*?)(?=\s*(?:\|\||&&|;|}|#|$))")
+
+
+def chain_ipc(line, image):
+    """Keep the old IPC call and add the new one after it: `old || new`.
+
+    For hypridle, whose commands run through sh. APEX's first, so a rollback
+    locks at once and APEX's firstrun (which checks the first `qs -c` path of
+    lock_cmd) finds its own shell; on Rime the first call fails in about 30 ms
+    ("No running instances") and the second locks.
+    """
+    if NEW_SHELL_SHARE in line or not image.exists(f"{NEW_SHELL_SHARE}/shell.qml"):
+        return line
+    return _QS_SEGMENT.sub(
+        lambda m: f"{m.group(1)}{OLD_SHELL_SHARE}{m.group(2)} || {m.group(1)}{NEW_SHELL_SHARE}{m.group(2)}",
+        line)
+
+
+def rewrite_text(text, image, comment=None, cli=False, only=None, ipc=True):
     """Rewrite moved image paths on every line that is not a comment."""
     out = []
     for line in text.split("\n"):
@@ -200,6 +267,8 @@ def rewrite_text(text, image, comment=None, cli=False, only=None):
             out.append(line)
             continue
         new = rewrite_tokens(line, image)
+        if ipc:
+            new = rewrite_ipc(new, image)
         if cli:
             new = rewrite_cli(new, image)
         out.append(new)
@@ -439,7 +508,14 @@ def step_hypridle(ctx, image):
     text = read(conf)
     if text is None:
         return
-    new = rewrite_text(text, image, comment="#")
+    # Every hypridle command runs through sh, so an IPC call keeps its APEX
+    # form and gains the Rime one after `||`; a line that now names the new
+    # shell is left out of the path rewrite, which would turn the APEX half
+    # into a second copy of the Rime one once the alias is gone.
+    chained = "\n".join(line if re.match(r"\s*#", line) else chain_ipc(line, image)
+                        for line in text.split("\n"))
+    new = rewrite_text(chained, image, comment="#", ipc=False,
+                       only=lambda l: NEW_SHELL_SHARE not in l)
     if new == text:
         return
     # A copy firstrun manages (it still matches the checksum firstrun recorded

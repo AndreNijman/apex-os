@@ -1198,27 +1198,57 @@ fi
 # point at a shell that actually exists. A stale lock_cmd means the machine stops
 # locking on idle and NOTHING says so — the failure mode is silent and it is a
 # security one, so it gets an explicit check rather than trust.
+#
+# Every quickshell call in lock_cmd counts, not only the first. Since the rename
+# a customised copy carries two, `qs -c /usr/share/apex-shell … || qs -c  (rime-rename: keep)
+# /usr/share/rime-shell …` (rime-session-migrate), so a rollback to APEX still  (rime-rename: keep)
+# locks. On this image the first names the image's own ALIAS of the shell: it
+# has a shell.qml and reaches nothing, because quickshell finds an instance by
+# the path it is given, not the canonical one. So a path counts only when it
+# has a shell.qml and is not a link to ${SRC_DIR}.
+#
+# Prints the paths it read. Returns 1 when there were some and none counts; 0
+# when one counts, or when lock_cmd calls no quickshell at all (nothing to check).
+lock_cmd_reaches_shell() {
+    local conf="$1" cmd paths p qml ok=0
+    cmd="$(sed -n 's/^[[:space:]]*lock_cmd[[:space:]]*=[[:space:]]*//p' "${conf}" | head -1)"
+    paths="$(printf '%s\n' "${cmd}" \
+        | grep -oE '(^|[^[:alnum:]_.-])qs[[:space:]]+(-p|-c|--path|--config)[[:space:]=]+[^[:space:]|;&}#]+' \
+        | sed -E 's/^.*[[:space:]](-p|-c|--path|--config)[[:space:]=]+//' || true)"
+    printf '%s' "${paths}" | tr '\n' ' '
+    [ -n "${paths}" ] || return 0
+    while IFS= read -r p; do
+        # A leading ~ must be expanded by hand (rime-logs 14). "${p}/shell.qml"
+        # keeps the tilde LITERAL inside the quotes, so the -s test resolved a
+        # relative path named "~" and failed for every tilde-spelled lock_cmd —
+        # reporting a broken lock screen on machines whose lock screen was fine,
+        # while the genuinely stale path went unnoticed underneath the noise.
+        # shellcheck disable=SC2088  # these are `case` PATTERNS, matching the two
+        # literal characters `~/` at the start of a path read out of hypridle.conf.
+        # This is the code that expands the tilde; if the pattern expanded to
+        # $HOME first there would be nothing left to match and the branch would
+        # be dead.
+        case "${p}" in
+            "~")   p="${HOME}" ;;
+            "~/"*) p="${HOME}/${p#\~/}" ;;
+        esac
+        qml="${p}"; [ -d "${p}" ] && qml="${p}/shell.qml"
+        [ -s "${qml}" ] || continue
+        # This image's shell reached through another name (the alias, or a
+        # file inside it) does not count; only its own name does.
+        case "$(readlink -f -- "${p}")/" in
+            "$(readlink -f -- "${SRC_DIR}")"/*)
+                case "${p}/" in "${SRC_DIR}"/*) ;; *) continue ;; esac
+                ;;
+        esac
+        ok=1
+    done <<< "${paths}"
+    [ "${ok}" = 1 ]
+}
 _idle_conf="${SRC_DIR}/src/config/hypridle.conf"
 [ -f "${HOME}/.config/hypr/hypridle.conf" ] && _idle_conf="${HOME}/.config/hypr/hypridle.conf"
-if [ -f "${_idle_conf}" ]; then
-    _lock_target="$(sed -n 's/^[[:space:]]*lock_cmd[[:space:]]*=[[:space:]]*qs -c \([^ ]*\).*/\1/p' \
-        "${_idle_conf}" | head -1)"
-    # A leading ~ must be expanded by hand (rime-logs 14). "${_lock_target}/shell.qml"
-    # keeps the tilde LITERAL inside the quotes, so the -s test resolved a relative
-    # path named "~" and failed for every tilde-spelled lock_cmd — reporting a broken
-    # lock screen on machines whose lock screen was fine, while the genuinely stale
-    # path went unnoticed underneath the noise.
-    # shellcheck disable=SC2088  # these are `case` PATTERNS, matching the two
-    # literal characters `~/` at the start of a path read out of hypridle.conf.
-    # This is the code that expands the tilde; if the pattern expanded to $HOME
-    # first there would be nothing left to match and the branch would be dead.
-    case "${_lock_target}" in
-        "~")   _lock_target="${HOME}" ;;
-        "~/"*) _lock_target="${HOME}/${_lock_target#\~/}" ;;
-    esac
-    if [ -n "${_lock_target}" ] && [ ! -s "${_lock_target}/shell.qml" ]; then
-        fail_check "hypridle lock_cmd points at '${_lock_target}', which has no shell.qml — the session would stop locking on idle"
-    fi
+if [ -f "${_idle_conf}" ] && ! _lock_paths="$(lock_cmd_reaches_shell "${_idle_conf}")"; then
+    fail_check "hypridle lock_cmd reaches no shell (${_lock_paths% }): none has a shell.qml, or it names ${SRC_DIR} only through a link — the session would stop locking on idle"
 fi
 
 # hypridle ignores -c (see the long note above), so a config under $HOME is the

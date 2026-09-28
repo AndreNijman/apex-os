@@ -2165,6 +2165,10 @@ jobs:
         if: ${{ !cancelled() }}
         run: ./tests/test-rime-session-migrate.sh
 
+      - name: Run firstrun's check that the idle lock reaches a shell
+        if: ${{ !cancelled() }}
+        run: ./tests/test-rime-lock-cmd-check.sh
+
       - name: Run the boot splash accent read from a pre-rename credential
         if: ${{ !cancelled() }}
         run: ./tests/test-rime-plymouth-accent-legacy.sh

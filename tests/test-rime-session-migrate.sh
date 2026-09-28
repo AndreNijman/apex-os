@@ -395,6 +395,8 @@ check "a customised hypridle.conf keeps the user's lines" \
     'grep -qx "# mine" "$H/.config/hypr/hypridle.conf" && grep -q "timeout = 600" "$H/.config/hypr/hypridle.conf"'
 check "…and its lock command reaches the shell this image ships" \
     'grep -qF "|| qs -c /usr/share/rime-shell ipc call lockscreen lock" "$H/.config/hypr/hypridle.conf"'
+check "…after APEX's, which stays for a rollback" \
+    'grep -qF "|| qs -c /usr/share/apex-shell ipc call lockscreen lock || qs -c /usr/share/rime-shell" "$H/.config/hypr/hypridle.conf"'
 check "…while a path of the user's own on the same line is left as it was" \
     'grep -qF "lock_cmd = qs -p ~/.local/share/apex-shell-live ipc call lockscreen lock ||" "$H/.config/hypr/hypridle.conf"'
 check "…and the original is kept beside it" \
@@ -560,6 +562,78 @@ else
         '[ "$rc" = 0 ] && [ "$(snapshot "$S")" = "$before" ] && [ ! -s "$S.out" ]' "$(head -3 "$S.out")"
 fi
 
+sec "Release B: the image still answers to the APEX names"
+# What install-rename-compat puts in the real image: the old command, the
+# /usr/libexec helpers and the /usr/share trees under their APEX names, as
+# links to the new ones. A user's line that names them then works as it is,
+# here AND after a rollback to APEX, which has none of the new names; only
+# what an alias cannot carry is rewritten: a quickshell IPC call, because
+# quickshell finds an instance by the path it is given.
+IMGB="${WORK}/img-b"; cp -a "$IMG" "$IMGB"
+ln -s rime "${IMGB}/usr/bin/apex"   # rime-rename: keep — the image's alias
+for b in shell-autostart open-browser screen-reader desktop-menu; do
+    ln -s "rime-$b" "${IMGB}/usr/libexec/apex-$b"   # rime-rename: keep — the image's aliases
+done
+ln -s rime-shell "${IMGB}/usr/share/apex-shell"; ln -s rime "${IMGB}/usr/share/apex"   # rime-rename: keep
+B="${WORK}/release-b"; make_home "$B"; BB="${WORK}/release-b.before"; cp -a "$B" "$BB"
+IMG_SAVE="$IMG"; IMG="$IMGB"; run "$B"; rc=$?; IMG="$IMG_SAVE"
+same() { cmp -s "$BB/$1" "$B/$1"; }
+check "the migration succeeds" '[ "$rc" = 0 ]' "$(cat "$B.out")"
+check "~/.zshrc is not touched: its paths resolve through the aliases" \
+    'same .zshrc && [ ! -e "$B/.zshrc.pre-rime.bak" ]'
+check "labwc's menu and autostart are not touched" \
+    'same .config/labwc/menu.xml && same .config/labwc/autostart'
+check "labwc keybinds keep the apex command and the old helper path" \
+    'grep -qF "command=\"apex shell launcher\"" "$B/.config/labwc/rc.xml" && grep -qF "/usr/libexec/apex-open-browser" "$B/.config/labwc/rc.xml"'
+check "…but a quickshell IPC call names the new shell" \
+    'grep -qF "command=\"qs -p /usr/share/rime-shell ipc call lockscreen lock\"" "$B/.config/labwc/rc.xml"'
+check "niri still starts the shell through the old launcher name" \
+    'grep -qxF "spawn-at-startup \"/usr/libexec/apex-shell-autostart\"" "$B/.config/niri/config.kdl"'
+check "hyprland.lua: only the cache clear changed" \
+    'diff <(grep -vF "name:sub(1, 5)" "$BB/.config/hypr/hyprland.lua") <(grep -vF "name:sub(1, 5)" "$B/.config/hypr/hyprland.lua") >/dev/null'
+check "the shell's generated module reaches the running shell" \
+    'grep -qF "qs -p /usr/share/rime-shell ipc call launcher toggle" "$B/.config/hypr/rime/shell-keybinds.lua"'
+HI="$B/.config/hypr/hypridle.conf"
+check "hypridle's lock command still reaches APEX's shell" \
+    'grep -qF "|| qs -c /usr/share/apex-shell ipc call lockscreen lock ||" "$HI"'
+check "…and then this image's" \
+    'grep -qF "|| qs -c /usr/share/rime-shell ipc call lockscreen lock" "$HI"'
+before="$(snapshot "$B")"
+IMG="$IMGB"; run "$B"; rc=$?; IMG="$IMG_SAVE"
+check "a second run changes nothing and says nothing" \
+    '[ "$rc" = 0 ] && [ "$(snapshot "$B")" = "$before" ] && [ ! -s "$B.out" ]' "$(head -3 "$B.out")"
+
+# A hypridle.conf customised elsewhere, with the lock command APEX shipped.
+P="${WORK}/release-b-plain"; make_home "$P"
+printf 'general {\n    lock_cmd = qs -c /usr/share/apex-shell ipc call lockscreen lock\n}\nlistener { timeout = 900 }\n' \
+    > "$P/.config/hypr/hypridle.conf"
+IMG="$IMGB"; run "$P"; IMG="$IMG_SAVE"
+# APEX's firstrun postcondition, verbatim (795a1face:files/system/libexec/apex-shell-firstrun):
+# after a rollback it fails every login unless the FIRST `qs -c` path of
+# lock_cmd holds a shell.qml on the APEX image.
+apex_target="$(sed -n 's/^[[:space:]]*lock_cmd[[:space:]]*=[[:space:]]*qs -c \([^ ]*\).*/\1/p' \
+    "$P/.config/hypr/hypridle.conf" | head -1)"
+check "APEX's firstrun check, read off the migrated file, finds APEX's shell" \
+    '[ "$apex_target" = /usr/share/apex-shell ]' "got '$apex_target'"
+# And the command itself, through sh as hypridle runs it, with a qs that has
+# one running shell and answers "No running instances" (255) for any other.
+mkdir -p "${WORK}/qsbin"
+cat > "${WORK}/qsbin/qs" <<'EOF'
+#!/bin/sh
+printf '%s\n' "$2" >> "${QS_LOG:?}"
+[ "$2" = "${QS_RUNNING:?}" ] && exit 0
+echo "No running instances for \"$2\"" >&2
+exit 255
+EOF
+chmod +x "${WORK}/qsbin/qs"
+lock_cmd="$(sed -n 's/^[[:space:]]*lock_cmd[[:space:]]*=[[:space:]]*//p' "$P/.config/hypr/hypridle.conf")"
+for running in /usr/share/rime-shell /usr/share/apex-shell; do
+    : > "${WORK}/qs.log"
+    PATH="${WORK}/qsbin:$PATH" QS_LOG="${WORK}/qs.log" QS_RUNNING="$running" sh -c "$lock_cmd" 2>/dev/null; rc=$?
+    check "the lock command locks with $running running" \
+        '[ "$rc" = 0 ] && [ "$(tail -1 "${WORK}/qs.log")" = "$running" ]' "rc=$rc, called: $(tr '\n' ' ' < "${WORK}/qs.log")"
+done
+
 sec "where it runs"
 FR="${ROOT}/files/system/libexec/rime-shell-firstrun"
 call_line="$(grep -n '^if \[ -x /usr/libexec/rime-session-migrate \]' "$FR" | head -1 | cut -d: -f1)"
@@ -653,6 +727,26 @@ if cmp -s "$MH/.config/hypr/hypridle.conf" "${IMG}/usr/share/rime-shell/src/conf
 else
     ok "caught: a managed hypridle.conf patched instead of refreshed (firstrun would freeze it)"
 fi
+
+# Release B's decisions, judged on the image with the aliases.
+IMG_SAVE="$IMG"; IMG="$IMGB"
+mutant "an image path rewritten while the image still has the old one" \
+    '        if self.exists(token.rstrip("/") or "/"):' '        if False:' \
+    'grep -qF "/usr/libexec/apex-open-browser" "$MH/.config/labwc/rc.xml"'
+mutant "the apex command rewritten while its wrapper is in the image" \
+    ' or image.exists(f"/usr/bin/{OLD}"):' ':' \
+    'grep -qF "command=\"apex shell launcher\"" "$MH/.config/labwc/rc.xml"'
+mutant "a quickshell IPC call left on the alias" \
+    '            new = rewrite_ipc(new, image)' '            pass' \
+    'grep -qF "qs -p /usr/share/rime-shell ipc call lockscreen lock" "$MH/.config/labwc/rc.xml"'
+mutant "hypridle's IPC call not chained" \
+    'else chain_ipc(line, image)' 'else line' \
+    'grep -qF "|| qs -c /usr/share/rime-shell ipc call lockscreen lock" "$MH/.config/hypr/hypridle.conf"'
+mutant "hypridle's chain with the Rime call first" \
+    '{m.group(1)}{OLD_SHELL_SHARE}{m.group(2)} || {m.group(1)}{NEW_SHELL_SHARE}{m.group(2)}' \
+    '{m.group(1)}{NEW_SHELL_SHARE}{m.group(2)} || {m.group(1)}{OLD_SHELL_SHARE}{m.group(2)}' \
+    'grep -qF "|| qs -c /usr/share/apex-shell ipc call lockscreen lock ||" "$MH/.config/hypr/hypridle.conf"'
+IMG="$IMG_SAVE"
 
 printf '\nrime-session-migrate: %d passed, %d failed, %d skipped\n' "$pass" "$fail" "$skipped"
 [ "$fail" -eq 0 ]
