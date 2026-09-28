@@ -112,6 +112,18 @@ readonly EXT_NAME=rime-user
 # so the directory form is a first-class fallback rather than a hard failure.
 readonly EXT_IMAGE="${EXT_DIR}/${EXT_NAME}.raw"
 readonly EXT_TREE="${EXT_DIR}/${EXT_NAME}"
+# The extension every machine built before the rename, still merged at boot:
+# systemd merges an image only under the name its extension-release file
+# carries, and inside this one it is `extension-release.apex-user`, so the
+# file cannot simply be renamed. It is the CURRENT extension until the next
+# rebuild writes ${EXT_NAME}.raw beside it and retires it into the rollback
+# slot under its own name, where `rime pkg rollback` can still merge it.
+readonly LEGACY_EXT_NAME=apex-user   # rime-rename: keep (the name inside every pre-rename extension)
+readonly LEGACY_EXT_IMAGE="${EXT_DIR}/${LEGACY_EXT_NAME}.raw"
+readonly LEGACY_EXT_TREE="${EXT_DIR}/${LEGACY_EXT_NAME}"
+# Where a merged extension's release file appears. A constant so a suite can
+# point it at a fixture (tests/test-rime-pkg-legacy-ext.sh).
+readonly SYSEXT_RELEASE_DIR=/usr/lib/extension-release.d
 readonly REQUESTED="${PKG_ROOT}/requested"
 readonly STATE="${PKG_ROOT}/state.json"
 # Local .rpm files the user installed by path, kept as <NAME>.rpm so the
@@ -2102,7 +2114,26 @@ current_payload() {
         printf '%s' "$EXT_IMAGE"
     elif [ -d "$EXT_TREE" ]; then
         printf '%s' "$EXT_TREE"
+    elif [ -f "$LEGACY_EXT_IMAGE" ]; then
+        printf '%s' "$LEGACY_EXT_IMAGE"
+    elif [ -d "$LEGACY_EXT_TREE" ]; then
+        printf '%s' "$LEGACY_EXT_TREE"
     fi
+}
+
+# Every payload name there can be, in either slot. Removing the extension, or
+# emptying the rollback slot, has to reach the pre-rename name too, or a stale
+# apex-user.raw would be merged on top of whatever replaced it.
+all_payloads_in() {
+    local d="$1"
+    printf '%s\n' "${d}/${EXT_NAME}.raw" "${d}/${EXT_NAME}" \
+                   "${d}/${LEGACY_EXT_NAME}.raw" "${d}/${LEGACY_EXT_NAME}"
+}
+remove_payloads_in() {
+    local d="$1" p
+    while IFS= read -r p; do
+        rm -rf "${p:?}"
+    done < <(all_payloads_in "$d")
 }
 
 payload_bytes() {
@@ -2322,7 +2353,8 @@ post_merge() {
 # The extension-release file exists ONLY inside the image, so seeing it at its
 # merged path in /usr is proof the overlay is live — no parsing, no version skew.
 merged() {
-    [ -f "/usr/lib/extension-release.d/extension-release.${EXT_NAME}" ]
+    [ -f "${SYSEXT_RELEASE_DIR}/extension-release.${EXT_NAME}" ] \
+        || [ -f "${SYSEXT_RELEASE_DIR}/extension-release.${LEGACY_EXT_NAME}" ]
 }
 
 # Cached local RPMs whose package is no longer requested are MOVED into the
@@ -2388,12 +2420,27 @@ restore_local_cache() {
 }
 
 restore_previous() {
-    rm -rf "$EXT_IMAGE" "$EXT_TREE"
+    remove_payloads_in "$EXT_DIR"
+    # Back under the name it was saved with: a pre-rename extension merges only
+    # as apex-user.
     if [ -e "${ROLLBACK_DIR}/${EXT_NAME}.raw" ]; then
         mv -f "${ROLLBACK_DIR}/${EXT_NAME}.raw" "$EXT_IMAGE"
     elif [ -e "${ROLLBACK_DIR}/${EXT_NAME}" ]; then
         mv -f "${ROLLBACK_DIR}/${EXT_NAME}" "$EXT_TREE"
+    elif [ -e "${ROLLBACK_DIR}/${LEGACY_EXT_NAME}.raw" ]; then
+        mv -f "${ROLLBACK_DIR}/${LEGACY_EXT_NAME}.raw" "$LEGACY_EXT_IMAGE"
+    elif [ -e "${ROLLBACK_DIR}/${LEGACY_EXT_NAME}" ]; then
+        mv -f "${ROLLBACK_DIR}/${LEGACY_EXT_NAME}" "$LEGACY_EXT_TREE"
     fi
+}
+
+# Is there a previous extension in the rollback slot, under either name?
+have_previous() {
+    local p
+    while IFS= read -r p; do
+        [ -e "$p" ] && return 0
+    done < <(all_payloads_in "$ROLLBACK_DIR")
+    return 1
 }
 
 activate_payload() {
@@ -2403,12 +2450,17 @@ activate_payload() {
     # packages to install nothing.
     [ -n "$new" ] && [ -e "$new" ] || die "internal error: no extension payload at '${new}'"
     mkdir -p "$EXT_DIR" "$ROLLBACK_DIR"
-    rm -rf "${ROLLBACK_DIR:?}/${EXT_NAME}.raw" "${ROLLBACK_DIR:?}/${EXT_NAME}"
-    if [ -f "$EXT_IMAGE" ]; then
-        mv -f "$EXT_IMAGE" "${ROLLBACK_DIR}/${EXT_NAME}.raw"
-    elif [ -d "$EXT_TREE" ]; then
-        mv -f "$EXT_TREE" "${ROLLBACK_DIR}/${EXT_NAME}"
+    remove_payloads_in "$ROLLBACK_DIR"
+    # The installed extension becomes the rollback copy under the name it has,
+    # and a pre-rename one is retired here: this is the rebuild that replaces
+    # apex-user.raw with rime-user.raw. Only one may stay in EXT_DIR, or both
+    # would be merged over /usr.
+    local cur
+    cur="$(current_payload)"
+    if [ -n "$cur" ]; then
+        mv -f "$cur" "${ROLLBACK_DIR}/${cur##*/}"
     fi
+    remove_payloads_in "$EXT_DIR"
     if [ -f "$STATE" ]; then
         cp -a "$STATE" "${ROLLBACK_DIR}/state.json"
     fi
@@ -2568,7 +2620,7 @@ rebuild_extension() {
 
     if [ "${#want[@]}" -eq 0 ]; then
         msg "no packages requested — removing the extension"
-        rm -rf "$EXT_IMAGE" "$EXT_TREE"
+        remove_payloads_in "$EXT_DIR"
         systemd-sysext refresh >&2 || true
         install_etc ""
         install_var_dirs /dev/null
@@ -4067,9 +4119,7 @@ cmd_verify() {
 cmd_rollback() {
     need_root pkg
     take_lock
-    if [ ! -e "${ROLLBACK_DIR}/${EXT_NAME}.raw" ] && [ ! -e "${ROLLBACK_DIR}/${EXT_NAME}" ]; then
-        die "no previous extension to roll back to"
-    fi
+    have_previous || die "no previous extension to roll back to"
     restore_previous
     # The previous requested list is about to come back, so the cached local
     # RPMs it names have to come back with it.
