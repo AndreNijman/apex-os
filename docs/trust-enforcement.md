@@ -276,13 +276,32 @@ or the kernel.
 SHA-256 fingerprint, so a wrong or corrupt root fails the build instead of
 refusing every machine's next update.
 
+## The rename to Rime OS
+
+APEX becomes Rime OS, and the repository moves from `AndreNijman/apex-os` to
+`AndreNijman/rime-os`. A Sigstore identity names the repository, so every image
+built after the rename carries a new signer. `apex` accepts both identities by
+default (`EXPECTED_SIGNER` and `RENAMED_SIGNER` in `apexd/apex/src/trust.rs`),
+and it learned the new one a release before the rename. A machine that updated
+to that release keeps updating across the rename. An image signed before it,
+and a rollback to one, still verifies.
+
+The image name moves too, and GHCR does not redirect a renamed package. Every
+published build goes out under both `ghcr.io/andrenijman/apex-os` and
+`ghcr.io/andrenijman/rime-os`, with the same digest, a signature and attestation
+made under each name, and the same tags. On `apex update`, a machine that tracks
+a tag of the old name checks whether the new name serves that tag. If it does,
+the update runs `bootc switch` to it after the gate verifies the new name. If
+the switch fails, the update checks the old name and upgrades under it instead.
+A digest pin or a fork's image never moves.
+
 ## A fork that publishes its own images
 
 Three optional image-owned files, all under `/usr/share/apex-os/trust/`:
 
 | file | replaces |
 |---|---|
-| `expected-signer` | the certificate identity to expect |
+| `expected-signer` | the certificate identities to expect (one per line, any of them accepted) |
 | `expected-issuer` | the OIDC issuer to expect |
 | `fulcio-root.pem` | the root that identity's certificate must chain to |
 

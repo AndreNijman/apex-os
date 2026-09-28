@@ -447,6 +447,53 @@ has 'attacker/apex-os' "$TMP/all" "the refusal names who actually signed"
 has 'AndreNijman/apex-os' "$TMP/all" "and who this machine expected"
 [[ "$rc" == 1 ]] && ok "apex update exits 1" || bad "apex update exited $rc"
 
+sec "the renamed repository's identity is accepted, and so is the old one"
+# The repository moves from AndreNijman/apex-os to AndreNijman/rime-os, and a
+# Sigstore identity names the repository. A machine that knew only the old name
+# would refuse every image built after the rename, under signature=enforce, and
+# never update again. So the binary accepts both by default: these fixtures
+# drop the expected-signer override to exercise the defaults themselves.
+RENAMED='https://github.com/AndreNijman/rime-os/.github/workflows/build-image.yml@refs/heads/main'
+R="$(crypto_fixture renamed 'signature=enforce' '' "$RENAMED")"
+rm -f "$R/usr/share/apex-os/trust/expected-signer"
+rc="$(gate "$R")"
+both
+has "verified — signed by $RENAMED" "$TMP/all" "a signature from the renamed repository verifies by default"
+[[ "$rc" == 0 ]] && ok "apex update proceeds on it" || { bad "apex update exited $rc on the renamed identity"; sed 's/^/       /' "$TMP/all" >&2; }
+
+R="$(crypto_fixture oldname 'signature=enforce')"
+rm -f "$R/usr/share/apex-os/trust/expected-signer"
+rc="$(gate "$R")"
+both
+has "verified — signed by $SIGNER" "$TMP/all" "a signature from the old repository still verifies by default"
+[[ "$rc" == 0 ]] && ok "so images signed before the rename, and a rollback to one, still deploy" \
+    || bad "apex update exited $rc on the old identity with no override"
+
+R="$(crypto_fixture impostordefault 'signature=enforce' '' 'https://github.com/attacker/rime-os/.github/workflows/build-image.yml@refs/heads/main')"
+rm -f "$R/usr/share/apex-os/trust/expected-signer"
+rc="$(gate "$R")"
+both
+has 'attacker/rime-os' "$TMP/all" "a third identity is still refused under the defaults"
+has 'AndreNijman/apex-os' "$TMP/all" "and the refusal names the old accepted identity"
+has 'AndreNijman/rime-os' "$TMP/all" "and the new one"
+[[ "$rc" == 1 ]] && ok "apex update exits 1" || bad "apex update exited $rc"
+
+# An override still REPLACES the defaults, so a fork that names its own signer
+# does not also accept AndreNijman's.
+R="$(crypto_fixture narrowed 'signature=enforce' '' "$RENAMED")"
+rc="$(gate "$R")"
+both
+has 'this machine expects' "$TMP/all" "an override naming only the old identity refuses the renamed one"
+[[ "$rc" == 1 ]] && ok "the override narrows the set" || bad "apex update exited $rc with a one-identity override"
+
+# And an override may list several, one per line, with comments.
+R="$(crypto_fixture listed 'signature=enforce' '' "$RENAMED")"
+printf '# accepted signers\n%s\n\n%s\n' "$SIGNER" "$RENAMED" > "$R/usr/share/apex-os/trust/expected-signer"
+rc="$(gate "$R")"
+both
+has "verified — signed by $RENAMED" "$TMP/all" "a multi-line override accepts any identity it lists"
+[[ "$rc" == 0 ]] && ok "apex update proceeds" || bad "apex update exited $rc with a two-identity override"
+
 sec "an unreachable registry is never refused as unsigned"
 # The rule this unit must not break. `CouldNotRun` is neither a pass nor a
 # failure, and under `warn` an offline machine must still be able to update —
@@ -529,7 +576,9 @@ if printf '%s' "$guard" | grep -q 'opts.force'; then
 else
     ok "the trust gate is not guarded on --force"
 fi
-if printf '%s' "$guard" | grep -q 'trust_gate(opts.allow_unverified)'; then
+# The second argument is the image the update moves to (the rename), so the
+# escape is matched as the FIRST argument rather than as the whole call.
+if printf '%s' "$guard" | grep -qE 'trust_gate\(opts\.allow_unverified[,)]'; then
     ok "it takes its own escape, --allow-unverified"
 else
     bad "the trust gate does not take opts.allow_unverified"
