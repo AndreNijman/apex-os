@@ -166,7 +166,17 @@ const ENV_BASE: &[&str] = &[
 /// Binding any of these read-write would hand back everything the tmpfs masks
 /// (`$HOME`), or make the image-owned base mutable (`/usr`, `/etc`), which is
 /// the one thing an atomic OS must not allow a confined process to do.
-const NEVER_WRITABLE: &[&str] = &["/", "/usr", "/etc", "/boot", "/sysroot", "/var/lib/rime"];
+/// `/var/lib/apex` is the same state under its name before the rename, which a
+/// machine can still carry, or carry as a link to the new one.
+const NEVER_WRITABLE: &[&str] = &[
+    "/",
+    "/usr",
+    "/etc",
+    "/boot",
+    "/sysroot",
+    "/var/lib/rime",
+    "/var/lib/apex",  // rime-rename: keep (the pre-rename state directory)
+];
 
 /// The runtime directory masked for every confined session.
 const RUN_DIR: &str = "/run";
@@ -1101,6 +1111,10 @@ mod tests {
         for path in [
             "/var/lib/rime-secretd",
             "/home/tester/.local/state/rime/agent/secrets",
+            // The same two under their names before the rename, which an
+            // upgraded machine can still carry.
+            "/var/lib/apex-secretd",  // rime-rename: keep
+            "/home/tester/.local/state/apex/agent/secrets",  // rime-rename: keep
             "/home/tester/.local/state",
         ] {
             assert!(!a.contains(path), "{path} must not be bound: {a}");
@@ -1562,7 +1576,16 @@ mod tests {
 
     #[test]
     fn writable_binds_that_would_defeat_the_policy_are_refused() {
-        for bad in ["/", "/usr", "/etc", "/boot", "/usr/", "/home/tester"] {
+        for bad in [
+            "/",
+            "/usr",
+            "/etc",
+            "/boot",
+            "/usr/",
+            "/home/tester",
+            "/var/lib/rime",
+            "/var/lib/apex",  // rime-rename: keep (the pre-rename state directory)
+        ] {
             let mut s = spec();
             s.rw = vec![PathBuf::from(bad)];
             let err = build_argv(&s, "claude", &[]).unwrap_err();
