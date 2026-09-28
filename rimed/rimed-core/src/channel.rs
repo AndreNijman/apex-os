@@ -145,12 +145,14 @@ impl std::str::FromStr for Channel {
     }
 }
 
-/// The four tags that predate channels.
+/// The tags that predate channels.
 ///
-/// They are not editions any more — they are four names for one digest, kept
-/// alive because they are what installed machines track. All four move on every
+/// They are not editions any more — they are names for one digest, kept alive
+/// because they are what installed machines track. All of them move on every
 /// successful build of `main`, so a machine following one of them is on edge.
-pub const LEGACY_TAGS: [&str; 4] = ["rime", "daily", "gaming-mesa", "gaming-nvidia"];
+/// `apex` is the name the fleet was installed under and keeps it; `rime` is the
+/// same digest under the new name, published beside it from the rename on.
+pub const LEGACY_TAGS: [&str; 5] = ["apex", "rime", "daily", "gaming-mesa", "gaming-nvidia"];  // rime-rename: keep (apex is a tag machines track)
 
 /// What a machine is following.
 #[derive(Debug, Clone, PartialEq, Eq)]
@@ -269,7 +271,7 @@ pub const FULL_ROLLOUT: u8 = 100;
 pub const ROLLOUT_TAG: &str = "rollout";
 
 /// The media type of the document layer inside that object.
-pub const ROLLOUT_MEDIA_TYPE: &str = "application/vnd.rimeos.rollout.v1+json";
+pub const ROLLOUT_MEDIA_TYPE: &str = "application/vnd.apexos.rollout.v1+json";  // rime-rename: keep (media type Release A clients and promote-channel.yml agree on)
 
 /// The schema this build understands. A document declaring a higher one is
 /// ignored whole rather than read in part.
@@ -756,9 +758,9 @@ mod tests {
     #[test]
     fn a_tag_nobody_recognises_is_answered_rather_than_refused() {
         // A revision tag, a fork, somebody's local build. All legitimate.
-        let t = from_tag("ghcr.io/andrenijman/rime-os:rime-57f593a");
+        let t = from_tag("ghcr.io/andrenijman/rime-os:apex-57f593a");  // rime-rename: keep (a per-SHA tag old builds published)
         assert_eq!(t.channel, None);
-        assert_eq!(t.tag, "rime-57f593a");
+        assert_eq!(t.tag, "apex-57f593a");  // rime-rename: keep
         assert_eq!(t.alias, None);
     }
 
@@ -1250,7 +1252,7 @@ mod tests {
         // The writer is a workflow in another file and the reader is this
         // crate; a spelling that drifts is a pointer nobody fetches.
         assert_eq!(ROLLOUT_TAG, "rollout");
-        assert_eq!(ROLLOUT_MEDIA_TYPE, "application/vnd.rimeos.rollout.v1+json");
+        assert_eq!(ROLLOUT_MEDIA_TYPE, "application/vnd.apexos.rollout.v1+json");  // rime-rename: keep (ROLLOUT_MEDIA_TYPE)
         assert_eq!(ROLLOUT_SCHEMA, 1);
     }
 

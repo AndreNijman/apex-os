@@ -1315,7 +1315,7 @@ mod rename_tests {
 
     #[test]
     fn a_tag_of_the_old_name_moves_to_the_same_tag_of_the_new_one() {
-        for tag in ["rime", "daily", "gaming-mesa", "gaming-nvidia", "edge"] {
+        for tag in ["apex", "rime", "daily", "gaming-mesa", "gaming-nvidia", "edge"] {  // rime-rename: keep (apex is a tag machines track)
             assert_eq!(
                 renamed_reference(&format!("ghcr.io/andrenijman/apex-os:{tag}")).as_deref(),  // rime-rename: keep
                 Some(format!("ghcr.io/andrenijman/rime-os:{tag}").as_str())

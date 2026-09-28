@@ -2150,14 +2150,14 @@ mod tests {
 
     #[test]
     fn the_four_rime_tags_all_bind_because_the_tag_is_not_compared() {
-        // `rime`, `daily`, `gaming-mesa` and `gaming-nvidia` are four aliases
-        // for ONE digest that moves on every successful main build, so a tag
-        // comparison would refuse an image that is genuinely the right one.
-        // cosign records the repository; that is what is compared.
+        // `apex`, `rime`, `daily`, `gaming-mesa` and `gaming-nvidia` are
+        // aliases for ONE digest that moves on every successful main build, so
+        // a tag comparison would refuse an image that is genuinely the right
+        // one. cosign records the repository; that is what is compared.
         let payload = format!(
             r#"{{"critical":{{"identity":{{"docker-reference":"{REPO}"}},"image":{{"docker-manifest-digest":"{DIGEST}"}}}}}}"#
         );
-        for tag in ["rime", "daily", "gaming-mesa", "gaming-nvidia"] {
+        for tag in rimed_core::channel::LEGACY_TAGS {
             simple_signing_binds(&payload, &format!("{REPO}:{tag}"), DIGEST)
                 .unwrap_or_else(|e| panic!("{tag}: {e}"));
         }
