@@ -450,14 +450,14 @@ const TARGETS: &[Target] = &[
     // under this directory, and listed at all because an upgraded machine that
     // has not yet run rime-hypr-migrate still has them.
     Target {
-        rel: ".config/hypr/rime-input.conf",
+        rel: ".config/hypr/apex-input.conf",  // rime-rename: keep (the retired fragment's name on disk; nothing wrote it after the rename)
         kind: Kind::File,
         how: Disposition::Truncate,
         scope: ResetScope::Desktop,
         what: "the retired hyprlang input overrides",
     },
     Target {
-        rel: ".config/hypr/rime-display.conf",
+        rel: ".config/hypr/apex-display.conf",  // rime-rename: keep (the retired fragment's name on disk; nothing wrote it after the rename)
         kind: Kind::File,
         how: Disposition::Truncate,
         scope: ResetScope::Desktop,
