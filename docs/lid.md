@@ -5,18 +5,18 @@
 > running, also staying with the vpn — like if i close my laptop at school and
 > codex is running (which needs vpn to work) it keeps working."*
 
-That is the whole feature, and this page is what it actually does on your
-machine. Roadmap P1-063.
+That request is the whole feature. This page describes what APEX does with it
+on your machine. Roadmap P1-063.
 
 ## The short version
 
 A laptop with live work in it keeps working when you shut the lid. A laptop
-with nothing running suspends exactly as it always did. You do not switch
-between those — the machine measures which one it is.
+with nothing running suspends as it always has. You do not switch between the
+two: the driver measures which case applies.
 
-Three things can still take the machine down while the lid is shut, and each of
-them says which one fired: it got too hot, the battery hit the floor, or you
-told it to. The first two checkpoint your work first.
+Three things can still take the machine down while the lid is shut, and each
+one says that it fired: the machine got too hot, the battery hit the floor, or
+you told it to. The first two checkpoint your work first.
 
 ```
 apex lid status          # what the policy sees, and what it would do now
@@ -29,44 +29,45 @@ apex lid pin off         # always suspend on a close
 apex lid pin auto        # hand the decision back to the measurement
 ```
 
-`apex lid` on its own is `apex lid status`.
+`apex lid` on its own runs `apex lid status`.
 
-Every one of those reading verbs takes `--json`, and the JSON is the same
-measurement the text is rendered from, not a summary of it.
+Each of the reading verbs takes `--json`, which prints the full measurement the
+text output is built from.
 
 ## What "live work" means
 
-An agent session. `apex lid status` counts them, and that is the input that
-decides an automatic close:
+An agent session. `apex lid status` counts them, and that count decides an
+automatic close:
 
-* **Sessions, one or more** — there is work; the lid stays awake.
-* **Sessions, zero** — a real measurement of nothing running. The machine
+* **One or more sessions:** there is work, and the machine stays awake with the
+  lid shut.
+* **Zero sessions:** a real measurement of nothing running. The machine
   suspends.
-* **Unreadable** — the agent runtime could not be asked. It is not enabled, its
-  socket is absent, or the query failed.
+* **Unreadable:** the driver could not ask the agent runtime. The runtime is
+  not enabled, its socket is absent, or the query failed.
 
-The third is not folded into the second, and the direction it falls matters. A
-machine that cannot tell whether anything is running suspends, because a laptop
-that stays awake on an unanswered question is a laptop that cooks in a bag. The
-reason is printed rather than swallowed, and `apex lid pin on` is the override
-for a machine where you know better.
+The policy keeps the third case apart from the second, and the direction it
+falls matters. A machine that cannot tell whether anything is running
+suspends, because a laptop that stays awake on an unanswered question cooks in
+a bag. `apex lid status` prints the reason, and `apex lid pin on` overrides it
+on a machine where you know better.
 
-Codex is an agent session, so the case in the quote at the top is covered
-without anyone having to remember anything.
+Codex runs as an agent session, so the case in the quote at the top needs
+nothing from you.
 
 ## The primitive, and why it is not a settings change
 
-The driver holds a logind `handle-lid-switch` **block inhibitor** for exactly
-as long as the policy says to, and drops it the moment it does not.
+The driver holds a logind `handle-lid-switch` **block inhibitor** for as long
+as the policy says to, and drops it as soon as the policy stops saying so.
 
 Nothing edits `HandleLidSwitch=`. A static `ignore` applies to a machine with
-nothing running as readily as to one mid-build, and it survives a crash of
-whatever set it — which is how a laptop bag becomes an oven. The inhibitor is a
+nothing running as much as to one mid-build, and it survives a crash of
+whatever set it, which is how a laptop bag becomes an oven. The inhibitor is a
 child of `apex-lid.service` and dies with it, so a machine whose driver crashed
-suspends on a lid close exactly as a stock install does. That is the failure
-direction that does not cook a laptop.
+suspends on a lid close as a stock install does. That failure direction does
+not cook a laptop.
 
-You can see who holds one at any time:
+You can see who holds an inhibitor at any time:
 
 ```
 systemd-inhibit --list
@@ -74,9 +75,9 @@ systemd-inhibit --list
 
 ## The guards
 
-The decision is not made once at the lid edge. A bag heats up and a battery
-drains, so the guards are re-asked for the whole closed period — every 30
-seconds by default.
+The policy does not decide once, at the moment the lid closes. A bag heats up
+and a battery drains, so the driver re-checks the guards for the whole closed
+period, every 30 seconds by default.
 
 | Guard | Fires when |
 |---|---|
@@ -86,48 +87,48 @@ seconds by default.
 | `battery` | charge reached the floor |
 | `battery-unreadable` | the battery is there and would not say how full it is |
 
-All five checkpoint live sessions before the machine suspends. "It kept working
-until it died" is a worse outcome than suspending, and the difference between
-this feature and a crash is that the work is written down first.
+All five checkpoint live sessions before the machine suspends. A laptop that
+kept working until it died is a worse outcome than a suspend, and the
+checkpoint is what separates this feature from a crash: the driver saves the
+work before the machine goes down.
 
-The thermal rule is built on the firmware's own number rather than an invented
-one: a machine already publishes what temperature is dangerous for its silicon,
-and `thermal_headroom_c` is how close to that it may get. The absolute
-`thermal_ceiling_c` is only consulted for a sensor that declares no critical
-trip at all.
+The thermal rule uses the firmware's own number instead of inventing one. A
+machine already publishes the temperature that is dangerous for its silicon,
+and `thermal_headroom_c` sets how close to it a sensor may get. The driver
+consults the absolute `thermal_ceiling_c` only for a sensor that declares no
+critical trip.
 
 ## What gets powered down, and what does not
 
-A keep-working close is not "stay fully on". Everything that is useless with
-the lid shut goes off and comes back on reopen:
+A keep-working close does not keep everything on. The driver turns off what is
+useless with the lid shut and turns it back on when you reopen:
 
 * the panel;
 * the keyboard backlight, restored to the value it had;
-* Bluetooth, soft-blocked — and restored **only if this policy blocked it**, so
-  a machine that had it off already gets it left off;
+* Bluetooth, soft-blocked and restored **only if this policy blocked it**, so a
+  machine that already had it off keeps it off;
 * periodic maintenance timers that have no deadline and would otherwise wake
-  the machine — update and cache-refresh timers, `raid-check`, `updatedb`.
+  the machine: update and cache-refresh timers, `raid-check`, `updatedb`.
 
-Only units that were actually running when the lid shut are stopped, so the
-restore is exact. Nothing interactive is touched, and explicitly not the shell
-or the agent runtime.
+The driver stops only units that were running when the lid shut, so the
+restore is exact. It touches nothing interactive, and never the shell or the
+agent runtime.
 
 `apex lid plan` prints that list for your machine and applies nothing. It also
-prints what it *cannot* do and why, which is worth reading once before you rely
-on any of it.
+prints what it *cannot* do and why; read that once before you rely on any of
+it.
 
 ### Wi-Fi power saving goes OFF, and that costs you
 
-This is the one item that spends power rather than saving it, and it is on by
-default.
+This item spends power instead of saving it, and it is on by default.
 
-The VPN is the load-bearing half of the request, not a detail. If the machine
-never suspends, NetworkManager never gets the sleep signal and the tunnel
-simply stays up — but aggressive 802.11 power saving is a well-known way to
-lose a long-lived tunnel with no suspend involved at all. So power save is
-turned off for the closed period.
+The VPN is the load-bearing half of the request. If the machine never
+suspends, NetworkManager never gets the sleep signal and the tunnel stays up.
+Aggressive 802.11 power saving can still drop a long-lived tunnel with no
+suspend involved at all, so the driver turns power save off for the closed
+period.
 
-The cost is recorded in `apex lid report` rather than hidden.
+`apex lid report` records what that costs.
 
 ## After you reopen
 
@@ -135,13 +136,13 @@ The cost is recorded in `apex lid report` rather than hidden.
 apex lid report
 ```
 
-How long it stayed up, why it stayed up, which guard ended it if one did, the
-peak temperature, what was powered down, what could not be done and why, and
-the VPN timeline sampled across the whole period — including whether the tunnel
-actually held, which is asserted rather than assumed.
+The report shows how long the machine stayed up and why, which guard ended the
+period if one did, the peak temperature, what was powered down, what could not
+be done and why, and the VPN timeline sampled across the whole period. Whether
+the tunnel held comes from those samples.
 
-The same summary goes to the journal under `apex-lid`, so the report is not the
-only place it exists:
+The driver also writes the summary to the journal under `apex-lid`, so the
+report is not the only copy:
 
 ```
 journalctl -t apex-lid
@@ -149,7 +150,7 @@ journalctl -t apex-lid
 
 ### Three answers, and "nothing yet" is only one of them
 
-`apex lid report` distinguishes a machine whose lid has never been shut from a
+`apex lid report` tells a machine whose lid has never been shut apart from a
 record it could not read, and the exit status says which:
 
 | what happened | `--json` | exit |
@@ -158,29 +159,30 @@ record it could not read, and the exit status says which:
 | a real period | `{"period":{…},"summary":…,"vpn_held":…}` | 0 |
 | the record is there and could not be read | `{"period":null,"error":"…"}` | 1 |
 
-The third used to print *"no lid-closed period has been recorded on this machine
-yet"* — the same sentence as the first — for a file that was unreadable, and for
-one truncated by a crash mid-write. Anything reading this (the shell's Closing
-the Lid page does) may say "nothing yet" only for exit 0 with no `error` key.
+The third case used to print *"no lid-closed period has been recorded on this
+machine yet"*, the same sentence as the first, for an unreadable file and for
+one a crash had truncated mid-write. Anything that reads this output (the
+shell's Closing the Lid page does) may say "nothing yet" only for exit 0 with
+no `error` key.
 
-That third case is reachable rather than theoretical. `apex-lid.service` sets
+You can reach that third case in practice. `apex-lid.service` sets
 `StateDirectory=apex/lid` with no `StateDirectoryMode` and no `UMask`, so
-`/var/lib/apex/lid/last.json` is 0644 and an ordinary user can read it. **Adding
-`UMask=0077` to that unit would make every unprivileged `apex lid report` answer
-"could not be read"** — which is at least honest now, where before it would have
-answered "nothing has happened".
+`/var/lib/apex/lid/last.json` is 0644 and an ordinary user can read it.
+**Adding `UMask=0077` to that unit would make every unprivileged `apex lid
+report` answer "could not be read".** That answer is at least honest now;
+before the fix it would have said "nothing has happened".
 
-The record is written to a sibling and renamed, so an interrupted write costs
-the new record rather than truncating the last good one.
+The driver writes the record to a sibling file and renames it into place, so an
+interrupted write loses the new record and leaves the last good one intact.
 
 ## Configuration
 
-`~/.config/apex/lid.toml` for you, `/etc/apex/lid.toml` for the machine. Yours
-wins where both exist, and `apex lid status` names which file it used.
+`~/.config/apex/lid.toml` is yours and `/etc/apex/lid.toml` is the machine's.
+Yours wins where both exist, and `apex lid status` names the file it used.
 
-The pin is deliberately **not** root-owned. Taking the inhibitor needs no
-privilege, so a root-owned pin would buy nothing except a password prompt every
-time the shell tile was toggled.
+The pin is **not** root-owned, by design. Taking the inhibitor needs no
+privilege, so a root-owned pin would buy nothing but a password prompt each
+time you toggled the shell tile.
 
 ```toml
 enabled            = true      # false makes the feature inert; stock behaviour
@@ -200,17 +202,24 @@ stop_user_units     = ["claude-desktop-update.timer"]
 stop_system_units   = ["fwupd-refresh.timer", "dnf-makecache.timer"]
 ```
 
-`battery_floor_pct` is 20 rather than 5 on purpose. The point of a floor is to
-checkpoint and suspend with enough charge left to resume and finish, not to
-squeeze out the last watt and hand you a dead laptop and a half-written file.
+The example shortens `stop_system_units`. The shipped default stops seven
+system timers: `apex-storage-notice.timer`, `fwupd-refresh.timer`,
+`dnf-makecache.timer`, `flatpak-system-update.timer`,
+`podman-auto-update.timer`, `raid-check.timer` and `mlocate-updatedb.timer`.
 
-A file that exists and cannot be read is reported every time, never skipped —
-a silently ignored pin is a machine doing the opposite of what you asked.
+`battery_floor_pct` is 20 rather than 5 on purpose. A floor is there to
+checkpoint and suspend with enough charge left to resume and finish, instead of
+squeezing out the last watt and handing you a dead laptop and a half-written
+file.
+
+The driver reports a config file that exists and cannot be read on every run
+and never skips it: a pin ignored in silence is a machine doing the opposite of
+what you asked.
 
 ## The driver
 
-`apex-lid.service` runs `apex lid watch`. It is enabled with the image; you
-should not need to touch it.
+`apex-lid.service` runs `apex lid watch`. The image enables it, and you should
+not need to touch it.
 
 ```
 systemctl status apex-lid.service
@@ -223,21 +232,21 @@ To see what it would decide without letting it act:
 apex lid watch --once --dry-run
 ```
 
-`--once` evaluates and acts exactly once and exits, which is what the test
-suite drives. `--interval` overrides `poll_secs` for one run.
+`--once` evaluates and acts once, then exits; the test suite drives that mode.
+`--interval` overrides `poll_secs` for one run.
 
 A desktop has no lid. `apex lid watch` says so on stderr and exits 0, and the
-unit is `Restart=on-failure` precisely so that answer is not polled every 30
-seconds for the life of the machine.
+unit uses `Restart=on-failure` so that systemd does not poll the same answer
+every 30 seconds for the life of the machine.
 
 ## Checking it without a lid
 
 `tests/test-apex-lid.sh` drives the whole driver against a fixture tree. With
-`APEX_LID_ROOT` set, every path is re-rooted into that tree and **no external
-program is executed at all** — `systemctl`, `rfkill`, `iw`, `nmcli`,
-`systemd-inhibit` and `runuser` are appended to a command log argv by argv
-instead. The suite asserts the exact argv the driver would have run, and that
-the command log is the only thing that moved.
+`APEX_LID_ROOT` set, the driver re-roots every path into that tree and
+**executes no external program at all**: it appends each `systemctl`,
+`rfkill`, `iw`, `nmcli`, `systemd-inhibit` and `runuser` call to a command log,
+argv by argv. The suite asserts the exact argv the driver would have run, and
+that the command log is the only thing that changed.
 
 That is stronger than putting fakes first on `$PATH`, which an absolute-path
 invocation walks straight past.
@@ -245,16 +254,16 @@ invocation walks straight past.
 ## What has NOT been measured: that it draws less
 
 The acceptance criterion says the machine *"draws measurably less than it does
-with the lid open"*, and that number does not exist yet. No fixture can produce
-it: what a panel, a keyboard backlight and a Bluetooth radio draw is a physical
-measurement, and the only way to take it is to apply the real power-down to a
-real machine somebody is using.
+with the lid open"*, and nobody has that number yet. No fixture can produce
+it: the draw of a panel, a keyboard backlight and a Bluetooth radio is a
+physical measurement, and the only way to take it is to apply the real
+power-down to a real machine somebody is using.
 
-Two preconditions, not one, and the second is the one that gets forgotten:
+There are two preconditions, and the second is the one people forget:
 
 1. **Undocked.** With an external display connected, logind consults
    `HandleLidSwitchDocked` (default `ignore`) before any inhibitor, so the lid
-   close being measured is not the one this feature controls.
+   close you measure is not one this feature controls.
 2. **On battery.** `/sys/class/power_supply/BAT*/power_now` reads CHARGING power
    while the machine is on mains, so a run on AC measures the charger.
 
@@ -271,13 +280,13 @@ c=$(cat /sys/class/power_supply/BAT0/energy_now); sleep 600
 d=$(cat /sys/class/power_supply/BAT0/energy_now)   # closed: c - d
 ```
 
-`energy_now` deltas over a fixed window rather than instantaneous `power_now`,
-because `power_now` swings with whatever the CPU happened to be doing in the
-second it was sampled. `apex lid report` already records the charge at close and
-the charge last seen, so the closed half of that measurement is taken by the
-driver itself — what is missing is the open-lid baseline to compare it against.
+Use `energy_now` deltas over a fixed window, not an instantaneous `power_now`
+reading: `power_now` swings with whatever the CPU was doing in the second you
+sampled it. `apex lid report` already records the charge at close and the last
+charge seen, so the driver takes the closed half of the measurement itself.
+The open-lid baseline is the missing half.
 
 ## See also
 
-* `docs/agent-runtime.md` — what an agent session is, and `apex agent list`
-* `docs/update-cost.md` — the update timers this feature stops for a close
+* `docs/agent-runtime.md`: what an agent session is, and `apex agent list`
+* `docs/update-cost.md`: the update timers this feature stops for a close

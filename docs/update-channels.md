@@ -8,8 +8,8 @@ Roadmap §26.
 apex channel status
 ```
 
-If your machine was installed before this existed, the answer will look like
-this, and it is worth reading rather than skipping:
+If your machine was installed before channels existed, the answer looks like
+this. Read it:
 
 ```
   following    : daily
@@ -18,14 +18,14 @@ this, and it is worth reading rather than skipping:
 ```
 
 `apex`, `daily`, `gaming-mesa` and `gaming-nvidia` are four names for one image,
-and CI moves all four on every successful build of `main`. That is the
-definition of an edge channel. Every APEX machine in existence has been on edge
-since it was installed, and until now nothing said so.
+and `build-image.yml` moves all four, with `edge`, on every successful build of
+`main`. That is the definition of an edge channel. Every APEX machine has been
+on edge since it was installed, and before §26 nothing said so.
 
-Those four tags keep working and keep moving. They are not deprecated aliases to
-be cleaned up: they are what installed machines point `bootc` at, and a tag that
-stops moving does not produce an error — `bootc upgrade` reports "no update
-available" forever, and that machine quietly stops receiving security updates.
+Those four tags keep working and keep moving, because installed machines point
+`bootc` at them. Do not clean them up as deprecated aliases. A tag that stops
+moving produces no error: `bootc upgrade` reports "no update available" forever,
+and that machine stops receiving security updates without a word.
 
 ## The four channels
 
@@ -40,10 +40,9 @@ apex channel list
 | `candidate` | a build being considered for stable | a longer wait |
 | `stable` | only builds that have been through the other three | the fewest updates, and the longest wait for a fix |
 
-That last row is enforced in CI rather than promised in prose: a promotion
-refuses a digest that is not already on the channel above the one being moved,
-and it refuses a digest that is not cosign-signed by this repository's build
-workflow on `main`.
+CI enforces that last row. A promotion refuses a digest that is not already on
+the channel above the one being moved, and it refuses a digest that is not
+cosign-signed by this repository's build workflow on `main`.
 
 ## Moving
 
@@ -56,23 +55,23 @@ sudo apex update
 `set` writes the deployment origin through `bootc switch`, so it needs root.
 `status`, `list` and `report` do not: the channel comes out of the deployment's
 own origin file and `/etc/machine-id`, both world-readable. A command that
-answers "which channel am I on" must not want a password, because the moment
-somebody asks that is usually the moment something has gone wrong.
+answers "which channel am I on" must not ask for a password: people usually ask
+that question when something has gone wrong.
 
 ### Moving toward stable is a downgrade, and it says so
 
 Going from `edge` to `stable` usually deploys an **older** image. Two things
 happen, and `set` prints both before it does anything:
 
-**The current deployment is pinned first.** bootc keeps the booted deployment
+**`set` pins the current deployment first.** bootc keeps the booted deployment
 and one more, so switching backwards and then updating once can evict the
 deployment you would want to return to. `ostree admin pin 0` runs before the
 switch, and if the pin fails the switch does not happen.
 
-**Your saved settings do not go back with the image.** `/usr` is replaced;
-`/etc`, `/var` and your home are not. An older APEX reading a config a newer one
-migrated is exactly what `docs/state-migration.md` is about, so `set` prints
-each store's answer:
+**Your saved settings do not go back with the image.** The switch replaces
+`/usr` and leaves `/etc`, `/var` and your home as they are.
+`docs/state-migration.md` covers an older APEX reading a config a newer one
+migrated, and `set` prints each store's answer:
 
 ```
   blueprint        an older APEX refuses it by name and says so; nothing is
@@ -100,11 +99,10 @@ Take it anyway with `sudo apex update --force`.
 ```
 
 The verdict comes from the same probes `apex recover status` uses, plus
-`systemctl --failed`. It does **not** come from `/var/lib/apex/boot/last-health.json`:
-that file is written by a unit conditioned on systemd-boot's
-`LoaderBootCountPath`, every published APEX image boots GRUB, and so the unit has
-never run on any machine. A verdict built on it would be permanently empty and
-permanently green.
+`systemctl --failed`. It does **not** come from `/var/lib/apex/boot/last-health.json`.
+A unit conditioned on systemd-boot's `LoaderBootCountPath` writes that file,
+every published APEX image boots GRUB, and so the unit has never run on any
+machine. A verdict built on it would stay empty and green forever.
 
 Four things count as a regression, and what does not count is the more important
 half:
@@ -115,8 +113,8 @@ half:
   problem the update did not cause, and refusing the update because the wifi is
   off strands you on the release that broke you.
 - **does not count, and is still said**: a row that could not be measured. That
-  is a fact about the reader, not about the machine, so it is reported —
-  "so this verdict is partial" — without failing the gate.
+  describes the reader and not the machine, so the verdict reports it ("so this
+  verdict is partial") without failing the gate.
 
 ## Staged rollout
 
@@ -134,10 +132,10 @@ staging.
 
 ### Where the percentage lives, and why it is not a label
 
-A ramp — 1%, then 5%, then 25% — needs a number that changes **between** builds.
-An OCI label is baked once per image, so a label cannot be it. That observation
-held this item open for a while, and the conclusion drawn from it ("so a staged
-rollout needs a server") was the wrong one.
+A ramp (1%, then 5%, then 25%) needs a number that changes **between** builds.
+CI bakes an OCI label once per image, so a label cannot hold that number. The
+observation held this item open for a while, and the conclusion drawn from it
+("so a staged rollout needs a server") was wrong.
 
 The number lives in a **signed rollout document**: one small JSON object
 published at `ghcr.io/andrenijman/apex-os:rollout`, in the same repository as
@@ -163,11 +161,10 @@ apex channel rollout          # fetch it, verify it, and say what it means here
 apex channel rollout --offline  # decide on the last one this machine accepted
 ```
 
-**Why a registry object rather than an endpoint.** Three things were on the
-table: a fleet endpoint APEX would run, a separately-updatable object in the
-registry, and a signed JSON on a static host. The registry object was chosen
-and the reasons are worth writing down because they are what makes this
-optional:
+**Why a registry object rather than an endpoint.** The candidates were a fleet
+endpoint APEX would run, a separately updatable object in the registry, and a
+signed JSON on a static host. APEX chose the registry object, and these reasons
+are what make the rollout optional:
 
 - **No server.** There is nothing to run, nothing to keep up, and nothing whose
   outage stops machines updating. A first-party endpoint would make APEX
@@ -175,20 +172,20 @@ optional:
   would be a single point of failure for every machine's update path.
 - **No new name to trust.** The machine already contacts this registry on every
   update and already verifies cosign signatures from it, with a Fulcio root
-  pinned in the image. The document reuses that verification whole — see
-  `apexd/apex/src/verify.rs`, which is the same code that checks the image.
+  pinned in the image. The document reuses that verification whole:
+  `apexd/apex/src/verify.rs` is the same code that checks the image.
 - **No new fact about the machine.** An endpoint learns which machines asked and
   when, which is a liveness map of everybody who installed APEX. A registry pull
   the machine was making anyway reveals nothing the update did not already.
-- **One number of infrastructure, and it is zero.** Publishing is a
-  `workflow_dispatch`, and the object is about 400 bytes.
+- **No infrastructure.** Publishing is a `workflow_dispatch`, and the object is
+  about 400 bytes.
 
-**What it costs, stated rather than buried:**
+**What it costs:**
 
 - **A document in a registry is a broadcast.** A ramp is per-channel and never
   per-machine. There is no way to say "these fifty machines first" without
-  something that knows which machine is asking — which is a fleet, which is
-  `docs/fleet.md`, which is optional and which nobody is enrolled in.
+  something that knows which machine is asking. That is a fleet
+  (`docs/fleet.md`), which is optional, and no machine is enrolled in one.
 - **There is no back channel.** Nobody learns how the rollout is going except
   from the opt-in health report below, which is off by default and which APEX
   operates no endpoint for. A ramp published here is a decision made on
@@ -200,25 +197,25 @@ optional:
 
 ### What the client does with it
 
-In this order, and no other:
+In this order:
 
 1. Resolve `…:rollout` to a digest.
-2. Verify the cosign signature over that digest, under the **rollout identity** —
-   `…/promote-channel.yml@refs/heads/main`, derived from the image signer by
-   swapping the workflow filename. The image's own identity is deliberately not
-   accepted: the document has to be publishable between builds, so it cannot
-   carry the build's signature.
-3. Only then read the bytes — and read the object whose signature was checked,
-   not whatever the tag answers on the second round trip. The manifest fetched
-   has to hash to the digest step 1 resolved, or nothing is read. Without that,
-   the sequence would be "verify one object, read another", and a tag that moved
-   in between would put a signature over one document behind the bytes of a
-   different one. A document whose signature does not verify is not a document
-   with a problem — it is not a document, and nothing in it reaches the
-   decision.
+2. Verify the cosign signature over that digest, under the **rollout identity**:
+   `…/promote-channel.yml@refs/heads/main`, which the client derives from the
+   image signer by swapping the workflow filename. The client refuses the
+   image's own identity here: the document has to be publishable between builds,
+   so it cannot carry the build's signature.
+3. Only then read the bytes, from the object whose signature was checked and not
+   from whatever the tag answers on a second round trip. The fetched manifest has
+   to hash to the digest step 1 resolved, or the client reads nothing. Without
+   that check the sequence would be "verify one object, read another", and a tag
+   that moved in between would put one document's signature behind a different
+   document's bytes. The client treats a document whose signature does not
+   verify as no document at all, and nothing in it reaches the decision.
 
-Then the entry for this machine's channel is applied, if it is usable. Each of
-these makes it unusable, and each one is said out loud rather than swallowed:
+Then the client applies the entry for this machine's channel, if the entry is
+usable. Each of these makes it unusable, and the client reports each one instead
+of swallowing it:
 
 | what | why it is refused |
 |---|---|
@@ -230,16 +227,16 @@ these makes it unusable, and each one is said out loud rather than swallowed:
 | `repository` is not this machine's | a document lifted from one repository and served from another |
 | `schema` is higher than this build reads | read whole or not at all; half a policy is not a policy |
 
-Everything else admits. A machine that cannot reach the registry, cannot resolve
-its tag, or is on a tag that is not a channel updates exactly as it does today —
-and that costs nothing, because a machine that could not resolve the tag could
-not pull the image either.
+Any other entry applies. A machine that cannot reach the registry, cannot
+resolve its tag, or is on a tag that is not a channel updates exactly as it does
+today. That costs nothing, because a machine that cannot resolve the tag cannot
+pull the image either.
 
-The last accepted document is cached at `/var/lib/apex/channel/rollout.json`.
-That is not for speed: without it, blocking the `rollout` tag would defeat a
-halt — the fetch fails, no document applies, and the machine takes the release
-the publisher stopped. A halt anybody can undo with a firewall rule is not a
-halt.
+The client caches the last accepted document at
+`/var/lib/apex/channel/rollout.json` so that blocking the `rollout` tag cannot
+defeat a halt. Without the cache the fetch fails, no document applies, and the
+machine takes the release the publisher stopped: anybody with a firewall rule
+could undo the halt.
 
 ### What a hold looks like
 
@@ -249,9 +246,9 @@ apex: machines. This one is slot 60 of 100, so it is not its turn yet — nothin
 apex: is wrong with it. Try again later, or `sudo apex update --force` to take it now.
 ```
 
-`apex update` exits **0** for this, and goes on to update packages, flatpaks and
-firmware. A machine outside a ramp is not broken and has nothing to fix; a
-staged rollout is about the OS image and nothing else.
+`apex update` exits **0** here and goes on to update packages, flatpaks and
+firmware. A machine outside a ramp has nothing to fix, and a staged rollout
+covers the OS image only.
 
 A halt reads differently, because the cause is different:
 
@@ -264,22 +261,24 @@ apex: A later build will supersede it. `sudo apex update --force` takes it anywa
 ### What is still not built
 
 - **Nothing has published a rollout document yet.** `promote-channel.yml` has
-  the steps and has never been run; the client half is exercised end to end
-  against real cryptography by `tests/test-apex-rollout.sh`, which builds its
-  fixture by *running the workflow's own python* rather than copying it.
-- **The halt is a publisher decision, not an automatic one.** Nothing counts
-  health reports and halts a release by itself, because nothing receives health
-  reports — see the next section. The loop is closed by a person reading
-  evidence and dispatching a halt.
-- **The four channel tags do not exist in the registry.** Measured 2026-09-22:
-  `:stable`, `:candidate`, `:beta` and `:edge` all answer `manifest unknown`.
-  Only `apex`, `daily`, `gaming-mesa` and `gaming-nvidia` resolve, to one digest
-  whose `org.opencontainers.image.revision` is `57f593ad` — `main`'s tip from
-  2026-09-05. The workflow step that creates `edge` and the promotion workflow
-  are both on `roadmap/v2.2` and have never run on `main`, which is what
-  publishes. Until a build of `main` carries them, `apex channel set beta` would
-  point a machine at a tag the registry does not serve, so `set` resolves the
-  target first and refuses:
+  the steps and has never run (checked 2026-09-28: the workflow has no runs, and
+  `:rollout` answers `manifest unknown`). `tests/test-apex-rollout.sh` exercises
+  the client half end to end against real cryptography, and builds its fixture
+  by *running the workflow's own python* rather than copying it.
+- **A person halts a release; nothing halts one automatically.** Nothing counts
+  health reports, because nothing receives them (see the next section). A
+  person closes the loop by reading evidence and dispatching a halt.
+- **Three of the four channel tags do not exist in the registry.** Measured
+  2026-09-28: `:edge` resolves to the same digest as `apex`, `daily`,
+  `gaming-mesa` and `gaming-nvidia` (`sha256:8601baab…`, whose
+  `org.opencontainers.image.revision` is `1094c432`), because `build-image.yml`
+  moves it with them on every build of `main`. `:stable`, `:candidate` and
+  `:beta` still answer `manifest unknown`: only `promote-channel.yml` creates
+  them, and it has never run. (On 2026-09-22 `:edge` answered `manifest unknown`
+  too, and the four resolved to `57f593ad`, `main`'s tip from 2026-09-05. The
+  step that creates `edge` was then only on `roadmap/v2.2`.) Until a promotion
+  runs, `apex channel set beta` would point a machine at a tag the registry does
+  not serve, so `set` resolves the target first and refuses:
 
   ```
   apex: ghcr.io/andrenijman/apex-os:beta does not resolve: manifest unknown
@@ -289,10 +288,10 @@ apex: A later build will supersede it. `sudo apex update --force` takes it anywa
   ```
 
   `--force` overrides it. A registry that cannot be reached at all does not
-  block the switch: that is a fact about the network, not about the tag, and the
-  two are told apart by what the registry said rather than by whether it
-  answered. A machine that switches unchecked is told so, in those words, so the
-  user knows which of the two happened.
+  block the switch, because that describes the network and not the tag. `set`
+  tells the two apart by what the registry said, not by whether it answered, and
+  when it switches unchecked it says so in those words, so you know which of the
+  two happened.
 
 ## What is sent, and to whom
 
@@ -316,9 +315,9 @@ payload is five fields:
 ```
 
 Not in it: the machine id, the rollout slot, the hostname, the hardware, the
-installed packages, the user, the network. The rollout slot is left out
-deliberately — one of a hundred values derived from the machine id is a weak
-identifier and a health report has no use for it.
+installed packages, the user, the network. The report leaves out the rollout
+slot on purpose: one of a hundred values derived from the machine id is a weak
+identifier, and a health report has no use for it.
 
 The opt-in is `~/.config/apex/channel.toml`:
 
@@ -327,10 +326,10 @@ report = true
 endpoint = "https://example.invalid/apex-health"
 ```
 
-The file does not exist by default and the default is off. A file that cannot be
-read is also off: a consent that fails open is not consent.
+The file does not exist by default, and reporting is off. A file that cannot be
+read also counts as off, so consent cannot fail open.
 
 Turning it on and pointing it at an endpoint still sends nothing in this build.
-The transmitter is the piece of §26 that is not implemented, and there is no
-first-party endpoint to point it at. That is stated here rather than solved with
-a URL, because writing one into the source would not create a service behind it.
+The transmitter is the piece of §26 that is not implemented, and APEX runs no
+first-party endpoint to point it at. A URL written into the source would not
+create a service behind it, so this document says so instead.

@@ -3,8 +3,8 @@
 `apexd` exposes a single service on the **system bus**. This document is the
 frozen interface contract: the apex-shell `PowerProfileService`, the `apex`
 CLI, and any Grafana/metrics consumers depend on it. Changes after M3 are
-additive only (new members / new interfaces); existing signatures and the
-tier IDs never change.
+additive only (new members, new interfaces); existing signatures and the tier
+IDs never change.
 
 - **Bus name:** `org.apexos.Apexd1`
 - **Object path:** `/org/apexos/Apexd1`
@@ -70,10 +70,10 @@ apex metrics --stream 0.5           # ... every 500ms
 apex metrics --json --stream 1      # JSON Lines, flushed per sample
 ```
 
-Read-only, so it needs no root. Keys the machine cannot report (no battery, no
-hwmon power source) are omitted rather than rendered empty, and a one-shot read
-exits non-zero if the daemon is unreachable while `--stream` keeps retrying so a
-daemon restart does not end a long-running collector.
+It only reads, so it needs no root. Keys the machine cannot report (no battery,
+no hwmon power source) are left out instead of rendered empty. A one-shot read
+exits non-zero if the daemon is unreachable, while `--stream` keeps retrying, so
+a daemon restart does not end a long-running collector.
 
 ## `org.apexos.Apexd1.Fan` (real since M6)
 
@@ -81,8 +81,8 @@ daemon restart does not end a long-running collector.
 
 | Member | Kind | Signature | Notes |
 |---|---|---|---|
-| `Mode` | property (r) | `s` | `auto` \| `max` \| `manual` \| `curve`. Stays `auto` on a machine with no controllable fan — see `Supported` |
-| `Supported` | property (r) | `b` | True when a fan knob was discovered (hwmon `pwm*`, or msi-ec `fan_mode`/`cooler_boost`) |
+| `Mode` | property (r) | `s` | `auto` \| `max` \| `manual` \| `curve`. Stays `auto` on a machine with no controllable fan (see `Supported`) |
+| `Supported` | property (r) | `b` | True when apexd discovered a fan knob (hwmon `pwm*`, or msi-ec `fan_mode`/`cooler_boost`) |
 | `Modes` | property (r) | `as` | The mode keywords this hardware accepts; empty when unsupported |
 | `Pwm` | property (r) | `y` | Duty cycle apexd last commanded (0 outside manual/curve) |
 | `Fans` | property (r) | `aa{sv}` | Per fan: `id`(s), `chip`(s), `rpm`(u, hwmon only), `percent`(y, msi-ec only), `pwm`(y), `controllable`(b) |
@@ -91,8 +91,8 @@ daemon restart does not end a long-running collector.
 | `RestoreFirmware` | method | `() → ()` | Hand the fans back to firmware control now; polkit `manage-power` |
 
 `rpm` and `percent` are independently optional: hwmon reports RPM, the MSI
-embedded controller reports a percentage, and neither is ever synthesised from
-the other. Fan writes go through the same `SysWriter` as everything else, so
+embedded controller reports a percentage, and apexd never synthesises one from
+the other. Fan writes go through the same `SysWriter` as every other write, so
 `APEXD_DRY_RUN=1` neutralises them.
 
 ## `org.apexos.Apexd1.GameMode` (real since M6)
@@ -103,7 +103,7 @@ the other. Fan writes go through the same `SysWriter` as everything else, so
 |---|---|---|---|
 | `Active` | property (r) | `b` | A session is running |
 | `Supported` | property (r) | `b` | The active profile permits game mode |
-| `Status` | property (r) | `a{sv}` | `active`(b), `supported`(b), `tier`(s), `cgroup`(s), `cpuset_policy`(s), `irq_policy`(s); while active also `cpus`(s), `core_source`(s), `prior_tier`(s), `irqs_steered`(u), `irqs_attempted`(u), `irqs_refused`(u), `gpus_locked`(au), `gpus_lock_attempted`(au), `scx_requested`(s), `scx_state`(s), `scx_detail`(s), `scx_btf`(s), `pids`(au), `notes`(as), `owner_pid`(u); while idle also `pcores`(s), `ecores`(s), `nvidia_smi`(b), `scx_requested`(s), `scx_state`(s), `scx_detail`(s), `scx_btf`(s) |
+| `Status` | property (r) | `a{sv}` | `active`(b), `supported`(b), `tier`(s), `cgroup`(s), `cpuset_policy`(s), `irq_policy`(s); while active also `cpus`(s), `core_source`(s), `prior_tier`(s), `irqs_steered`(u), `irqs_attempted`(u), `irqs_refused`(u), `gpus_locked`(au), `gpus_lock_attempted`(au), `scx_requested`(s), `scx_state`(s), `scx_detail`(s), `scx_btf`(s), `pids`(au), `notes`(as), `owner_pid`(u); while idle also `cpus`(s, empty), `core_source`(s), `pcores`(s), `ecores`(s), `nvidia_smi`(b), `scx_requested`(s), `scx_state`(s), `scx_detail`(s), `scx_btf`(s) |
 | `SetActive` | method | `b → ()` | Enter/leave; idempotent both ways; polkit `manage-power` |
 | `StartForPid` | method | `u → ()` | Enter and pin a PID (its children inherit the cgroup); polkit `manage-power` |
 | `AttachPid` | method | `u → ()` | Attach another PID to a running session; `Failed` when inactive; polkit `manage-power` |
@@ -111,53 +111,54 @@ the other. Fan writes go through the same `SysWriter` as everything else, so
 | `ActiveChanged` | signal | `b` | Emitted on every entry and exit |
 
 Entering also moves the tier (to the profile's `[gamemode] tier`) and disables
-auto-switching for the duration; both are restored on exit, and `Power.Tier` +
-`TierChanged` are emitted so `.Power` consumers stay in step.
+auto-switching for the duration. Exit restores both, and apexd emits
+`Power.Tier` + `TierChanged` so `.Power` consumers stay in step.
 
 `StartOwnedBy` exists because a Gaming Mode session **could not release
 itself**. The session script's `EXIT` trap calls `SetActive(false)`, which is
-`manage-power` and therefore `allow_active = yes`; the instant logind stops
-calling that session active — a greetd restart, a VT switch, any logind-driven
-teardown — its own release is refused. Measured on katana 2026-09-19: the
-machine sat on a p-core cpuset with steered IRQs and the `performance` tier for
-75 minutes with nothing able to undo it.
+`manage-power` and therefore `allow_active = yes`. The instant logind stops
+calling that session active (a greetd restart, a VT switch, any logind-driven
+teardown), polkit refuses the session's own release. Measured on katana
+2026-09-19: the machine sat on a p-core cpuset with steered IRQs and the
+`performance` tier for 75 minutes with nothing able to undo it.
 
 > **That account named `scx_lavd` as a fourth thing left running, and it was
-> wrong** — corrected 2026-09-20, because the correction is the point. No
-> scheduler was running, then or on any other boot: `apex game status` said one
-> was, `scxctl` had refused every call, and the status surface was repeating the
-> plan. The three things above were real. See the `scx_*` keys below.
+> wrong.** Corrected 2026-09-20, and the correction is recorded because it
+> matters: no scheduler was running, then or on any boot before the
+> correction. `apex game status` said one was, `scxctl` had refused every call,
+> and the status surface was repeating the plan. The three things above were
+> real. See the `scx_*` keys below.
 
-The daemon takes the job instead: `StartOwnedBy(pid)` records the PID **and
+The daemon takes the job instead. `StartOwnedBy(pid)` records the PID **and
 its `/proc` start time**, a 2 s watch reads `/proc/<pid>/stat`, and when the
 owner is gone apexd calls the same `game_exit()` and emits the same
 `ActiveChanged` / `Status` / `Power.TierChanged` set a method call would. It is
-the *same* polkit action — entering game mode is exactly as restricted as it
-was, and no new operation is available to any new caller. The owner is
-**watched, not pinned**; `StartForPid`/`AttachPid` remain the way to put a PID
-in the cpuset. `owner_pid` in `Status` is `0` for a session nothing is
-watching. A `/proc` that cannot be read is a third answer and never a release.
+the *same* polkit action: entering game mode is exactly as restricted as it
+was, and no new caller gains a new operation. apexd **watches the owner and
+does not pin it**; `StartForPid`/`AttachPid` remain the way to put a PID in the
+cpuset. `owner_pid` in `Status` is `0` for a session nothing is watching. A
+`/proc` that cannot be read is a third answer and never a release.
 `docs/gaming-and-sessions.md` §5a has the full argument, including why the
-polkit rule was not loosened instead.
+polkit rule stayed as it is.
 
 `irqs_steered` counts the affinity writes the **kernel accepted**, not the ones
 the plan contained. It carried the plan's number until it was corrected, which
-made it a lie on any machine that refuses affinity writes — kernel-managed
-MSI-X queues answer `-EIO`, so a session could report "12 IRQs steered" having
+made it false on any machine that refuses affinity writes: kernel-managed MSI-X
+queues answer `-EIO`, so a session could report "12 IRQs steered" having
 steered none. The plan's number now has its own key, `irqs_attempted`, and
-`irqs_refused` is the difference; a partial result is the normal case on real
+`irqs_refused` is the difference. A partial result is the normal case on real
 hardware, and `notes` carries the kernel's reason when there is one. Consumers
 that render `irqs_steered` need no change and now render a measurement.
 
-`gpus_locked` had the identical defect and the identical fix: it was the list
-of GPUs the plan MEANT to lock, so a card whose clock lock `nvidia-smi`
-rejected was still reported as locked. It now holds the GPUs every one of whose
-lock writes landed, with `gpus_lock_attempted` beside it.
+`gpus_locked` had the same defect and the same fix: it was the list of GPUs the
+plan MEANT to lock, so a card whose clock lock `nvidia-smi` rejected was still
+reported as locked. It now holds the GPUs whose lock writes all landed, with
+`gpus_lock_attempted` beside it.
 
-`scx_state` is **`loaded`, `not loaded`, `unknown` or `not requested`**, and
-the three that are not `not requested` are three different facts that this
+`scx_state` is **`loaded`, `not loaded`, `unknown` or `not requested`**. The
+three that are not `not requested` are three different facts, which this
 surface used to collapse into one. Before 2026-09-20 there was no sched-ext key
-at all: the only thing reported was a `notes` line reading `sched-ext: scx_lavd
+at all: the only report was a `notes` line reading `sched-ext: scx_lavd
 for the session`, copied out of the plan, printed on machines where the switch
 had refused every call since the feature landed.
 
@@ -167,65 +168,66 @@ had refused every call since the feature landed.
   changes nothing reports `not loaded`.
 * **`not loaded`** covers both "nothing attached" and "this kernel has no
   `CONFIG_SCHED_CLASS_EXT`", because both are definite.
-* **`unknown`** is the third answer and is never rounded to either of the
+* **`unknown`** is the third answer, and apexd never rounds it to either of the
   others: `state` unreadable, or mid-transition (`enabling`/`disabling`).
-* `scx_detail` names both halves — what `scxctl` said and what the kernel says
-  — so a disagreement is visible rather than resolved in silence. It also
-  flags a scheduler that attached but is not the one that was asked for.
-  Note the kernel's `root/ops` publishes the **struct_ops** name, which drops
-  the prefix: `scx_lavd` reads as `lavd`.
+* `scx_detail` names both halves (what `scxctl` said and what the kernel says),
+  so a disagreement shows up instead of being resolved in silence. It also
+  flags a scheduler that attached but is not the one that was asked for. The
+  kernel's `root/ops` publishes the **struct_ops** name, which drops the
+  prefix: `scx_lavd` reads as `lavd`.
 
-`scx_btf` is the **fourth** key, added 2026-09-20, and it answers the question
-`scx_state` structurally cannot: whether a scheduler could EVER attach to this
-kernel. It is a reading of `/sys/kernel/btf/vmlinux` taken by `apexd` itself.
+`scx_btf` is the **fourth** key, added 2026-09-20. It answers the question
+`scx_state` cannot: whether a scheduler could EVER attach to this kernel. It is
+a reading of `/sys/kernel/btf/vmlinux` taken by `apexd` itself.
 
-* **`ok`** — the sched-ext kfunc prototypes are the shape a BPF scheduler
+* **`ok`**: the sched-ext kfunc prototypes are the shape a BPF scheduler
   expects.
-* **`implicit-args`** — one or more `scx_bpf_*` kfuncs still carry the
+* **`implicit-args`**: one or more `scx_bpf_*` kfuncs still carry the
   verifier's implicit `struct bpf_prog_aux *` argument in their public
   prototype, so `libbpf` rejects every scheduler with `func_proto incompatible
   with vmlinux`. **No sched-ext scheduler can load on such a kernel**, and no
-  APEX setting changes that. This is the reading every APEX image has given so
-  far; `docs/gaming-and-sessions.md` §5d has the measurement.
-* **`no-sched-ext`** — the BTF parsed and carries no `scx_bpf_*` kfunc at all.
-* **`absent`** — `/sys/kernel/btf/vmlinux` is not there.
-* **`unreadable`** — it is there and could not be read or parsed. Deliberately
-  **not** folded into `absent`: a probe that could not look has not looked and
+  APEX setting changes that. Every APEX image gave this reading until APEX
+  began building its own kernel (`Containerfile.kernel`, pahole 1.32), whose
+  build gate refuses a kernel with the defect. `docs/gaming-and-sessions.md`
+  §5d has the measurement, and §5e what followed once a scheduler could load.
+* **`no-sched-ext`**: the BTF parsed and carries no `scx_bpf_*` kfunc at all.
+* **`absent`**: `/sys/kernel/btf/vmlinux` is not there.
+* **`unreadable`**: it is there and could not be read or parsed. Kept
+  **separate** from `absent`: a probe that could not look has not looked and
   found nothing wrong.
-* `not probed` — nothing asked for a scheduler, the same shape as
+* `not probed`: nothing asked for a scheduler, the same shape as
   `scx_requested` being empty.
 
 When `scx_btf` blocks loading **and** the kernel did not end up with a
-scheduler attached, its sentence is appended to `scx_detail`. A session that
+scheduler attached, apexd appends its sentence to `scx_detail`. A session that
 reports `loaded` is not argued with, and a kernel with nothing wrong with it
-earns no clause — so the presence of the clause is itself information.
+earns no clause, so the clause's presence is itself information.
 
 The four `scx_*` keys are also present **while game mode is off**, reporting
-the live reading. That is deliberate: on katana `sched_ext/state` read
-`disabled` before, during and after a session, so quoting it as a release
-discriminator proved nothing, and the surface should make that legible rather
-than leave a reader to infer it. It matters more for `scx_btf`: a user should
-be able to learn that no Gaming Mode session can carry a scheduler **without
-starting one**.
+the live reading. On katana `sched_ext/state` read `disabled` before, during
+and after a session, so quoting it as a release discriminator proved nothing,
+and the surface makes that visible instead of leaving a reader to infer it. It
+matters more for `scx_btf`: you can learn that no Gaming Mode session can carry
+a scheduler **without starting one**.
 
 ## Authorization
 
 The D-Bus system policy (`org.apexos.Apexd1.conf`) lets only root own the name
 and lets any local user *send* to the service. Reads are unrestricted;
-**mutating methods are gated by polkit inside the daemon**:
+**polkit gates the mutating methods inside the daemon**:
 
 - `SetTier`, `SetAutoSwitch` → action `org.apexos.apexd.manage-power`
 - `SetChargeThresholds`, `SetTravelMode`, `Calibrate` → action `org.apexos.apexd.manage-battery`
 - M6: `Fan.SetMode`, `Fan.SetPwm`, `Fan.RestoreFirmware`, `GameMode.SetActive`,
   `GameMode.StartForPid`, `GameMode.AttachPid`, `GameMode.StartOwnedBy` → action
-  `org.apexos.apexd.manage-power` (deliberately reusing the shipped action
-  rather than adding new ones to the polkit policy; see the IMAGE TODO in
-  `docs/m6-notes.md` if finer granularity is wanted)
+  `org.apexos.apexd.manage-power` (reusing the shipped action instead of adding
+  new ones to the polkit policy; see the IMAGE TODO in `docs/m6-notes.md` if
+  finer granularity is wanted)
 
 Both actions ship `allow_active = yes` (the logged-in local user acts
-**passwordless**), `allow_inactive`/`allow_any = auth_admin`. The daemon calls
-`org.freedesktop.PolicyKit1.Authority.CheckAuthorization` with the caller's
-`system-bus-name` and **fails closed** if polkit is unreachable.
+**passwordless**) and `allow_inactive`/`allow_any = auth_admin`. The daemon
+calls `org.freedesktop.PolicyKit1.Authority.CheckAuthorization` with the
+caller's `system-bus-name` and **fails closed** if polkit is unreachable.
 
 ## Metrics HTTP endpoint
 
@@ -241,8 +243,8 @@ apexd_battery_uwh                        <microwatt-hours>  (if BAT*/energy_now 
 apexd_temp_celsius{zone="<thermal-zone-type>"}  <celsius>  (per thermal zone)
 ```
 
-All metric sources are best-effort and read-only; a missing source omits its
-line rather than erroring.
+Every metric source is best-effort and read-only; a missing source leaves its
+line out instead of raising an error.
 
 ## Install paths (image)
 

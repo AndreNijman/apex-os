@@ -5,10 +5,10 @@ of every other theme: `Containerfile.apex` installs it plus the 24
 `apex-os-accent-NN` themes (one per 15° of hue), and the initramfs starts the
 splash in the one matching the owner's matugen accent
 (`files/dracut/apex-plymouth-accent`). `apex-os-gold` is source art for the
-other colourway and is installed by nothing; it dates from when Gaming was a
+other colourway and nothing installs it; it dates from when Gaming was a
 separate edition.
 
-**Animation -- "Focus":** on a plain black screen the spark comes into focus
+**Animation: "Focus".** On a plain black screen the spark comes into focus
 out of a soft glow of its own light (a wide blur, a closer blur, then the sharp
 logo), a halo blooms behind it and settles, and the tracked-out `APEX OS`
 wordmark fades in beneath. While the machine boots, the halo breathes on a
@@ -16,16 +16,16 @@ wordmark fades in beneath. While the machine boots, the halo breathes on a
 the first frame. At a LUKS prompt the splash dims, the wordmark gives way to
 the prompt, each typed character adds an accent-coloured dot (the row
 re-centres on a quick spring) and messages such as the keyboard layout appear
-under the dots. Typed characters are never drawn.
+under the dots. The splash never draws a typed character.
 
-Why it is built the way it is -- measured, not assumed, in a real `plymouthd`
-(x11 renderer in a private Xvfb, an LD_PRELOAD frame probe): plymouth has no
-vsync, truncates sprite positions to whole pixels, re-samples an image on
-every `Image.Scale`/`Rotate`, and redraws a sprite only when its opacity moves
-by more than 0.01. So every image is scaled once when the script starts,
-nothing moves, and the refresh only changes opacities, on curves of real
-elapsed time that start and end at rest. The header of `apex-os.script` has the
-numbers for the "Convergence" animation this replaces.
+The design follows from how a real `plymouthd` behaves, measured with its x11
+renderer in a private Xvfb and an LD_PRELOAD frame probe: plymouth has no
+vsync, truncates sprite positions to whole pixels, re-samples an image on every
+`Image.Scale`/`Rotate`, and redraws a sprite only when its opacity moves by more
+than 0.01. The script therefore scales every image once when it starts, nothing
+moves, and each refresh (60 Hz, set by the script) only changes opacities, on
+curves of real elapsed time that start and end at rest. The header of
+`apex-os.script` has the numbers for the "Convergence" animation this replaces.
 
 ## Files
 
@@ -58,7 +58,7 @@ full-rate version:
 ./render-preview.py apex-os-chartreuse /path/to/out --mode shutdown
 ```
 
-Needs python3 with numpy and Pillow, and ffmpeg. Never test a splash with
+It needs python3 with numpy and Pillow, and ffmpeg. Never test a splash with
 `plymouthd` on the machine you are using: it takes over the VT and the DRM
 device. Render it offline, or run `plymouthd` with its x11 renderer inside a
 container with its own Xvfb and no access to `/dev/dri` or the host's display.
@@ -67,8 +67,9 @@ container with its own Xvfb and no access to `/dev/dri` or the host's display.
 
 `Containerfile.apex` copies the themes into `/usr/share/plymouth/themes/`,
 sets `apex-os-chartreuse` as the default and rebuilds the initramfs with
-`--add "plymouth apex-plymouth-accent"`; kernel args need `quiet splash`.
-Text (the prompt, messages) needs `plymouth-plugin-label`; the build asserts
-`label-freetype.so` and `Plymouth.ttf` reach the initramfs, and if they ever do
-not, the script shows a pre-rendered "Enter passphrase to unlock" instead of
-an invisible prompt.
+`--add "plymouth apex-plymouth-accent"`. The splash needs the `quiet splash`
+kernel args, which the same file writes to
+`/usr/lib/bootc/kargs.d/20-apex-plymouth.toml`. Text (the prompt, messages)
+needs `plymouth-plugin-label`; the build asserts `label-freetype.so` and
+`Plymouth.ttf` reach the initramfs, and if they ever do not, the script shows a
+pre-rendered "Enter passphrase to unlock" instead of an invisible prompt.

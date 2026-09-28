@@ -1,5 +1,5 @@
-> **⏸ PAUSED / ARCHIVED — 2026-09-21.** Development of the Windows app is
-> stopped by Andre's decision, not by any blocker. Nothing here is broken or
+> **⏸ PAUSED / ARCHIVED, 2026-09-21.** Andre stopped development of the
+> Windows app by decision; no blocker stopped it. Nothing here is broken or
 > half-finished. **Read `windows-installer/PAUSED.md` before resuming or
 > building on this**, and do not resume without Andre asking. Several findings
 > in it are facts about Windows and bootc that outlive this tool.
@@ -7,22 +7,22 @@
 # Portable Windows installer
 
 Status: **surveys real Windows disks; installs nothing.** It opens
-`\\.\PhysicalDriveN` read-only, reads the partition table twice — once through
-Windows and once off the disk itself — asks Windows what it is using, reads
+`\\.\PhysicalDriveN` read-only, reads the partition table twice (once through
+Windows and once off the disk itself), asks Windows what it is using, reads
 every byte of a candidate partition, and prints the confirmation a user would
-have to accept. There is no write path: no handle is opened for writing, and
-`tests/test-windows-installer.sh` greps the source for every write API to keep
-that true rather than asserted.
+have to accept. There is no write path: the program opens no handle for
+writing, and `tests/test-windows-installer.sh` greps the source for every write
+API so that stays checked instead of asserted.
 
 Read `ARCHITECTURE.md` first. It answers the question that decides the whole
-design — a Windows program cannot run `bootc install`, so what does "install
-APEX from Windows" mean — and gives the measured facts that decided it.
+design (a Windows program cannot run `bootc install`, so what does "install
+APEX from Windows" mean?) and gives the measured facts that decided it.
 
 **There is a Windows virtual machine, and it is part of the deliverable.**
 `lab/winlab` builds one from Microsoft's evaluation media: Windows Server 2022
 installs itself headlessly in about two and a half minutes onto a GPT disk with
-a 100 MB ESP, and the installer is then pointed at fixture disks carrying the
-partition layouts that matter. Everything below that says "measured" was
+a 100 MB ESP, and the lab then points the installer at fixture disks carrying
+the partition layouts that matter. Everything below that says "measured" was
 measured there. Nothing in this program has ever touched a physical disk.
 
 ## Toolchain decision
@@ -30,14 +30,14 @@ measured there. Nothing in this program has ever touched a physical disk.
 Rust, edition 2024; intended release target `x86_64-pc-windows-msvc`, static CRT.
 This produces a native portable executable without MSI, installer, .NET runtime,
 WebView runtime, or a system service. Rust makes bounded byte parsing and owned
-handles practical; future Windows bindings should isolate the small unsafe API
-boundary. C# NativeAOT is plausible but brings an additional interop/AOT surface;
-C++ makes this parser and handle ownership harder to audit. The present crate
-uses only std, so its content checks run offline on Linux and Windows. A native
-Windows front end can be added after the safety backend is proven.
+handles practical, and `src/windows.rs` keeps the unsafe Windows API boundary
+small. C# NativeAOT is plausible but brings an additional interop/AOT surface;
+C++ makes this parser and handle ownership harder to audit. The crate uses only
+std, so its content checks run offline on Linux and Windows. A native Windows
+front end can come after the safety backend is proven.
 
 The executable is a single file; a future install still needs several GB of
-verified OS/staging payload and temporary workspace. “Portable” does not mean
+verified OS/staging payload and temporary workspace. "Portable" does not mean
 that Linux bootc runs natively under Windows or that the OS payload fits in RAM.
 
 Build/test on Linux:
@@ -53,10 +53,11 @@ cargo run --offline --locked -- lab /absolute/path/to/test-disk.img
 
 The command lists partitions and requests an exact GUID on stdin. It reports
 size, GPT name (escaped), type, attributes, extent and GPT disk identity. It
-explicitly reports model/serial unavailable and filesystem label not probed;
-a GPT name is **not** a filesystem label. Unknown selections fail. No default
-selection is made. All-zero content is success for this diagnostic only; refusal
-returns exit code 1. It never offers to erase signatures to make a target pass.
+reports model/serial as unavailable and the filesystem label as not probed; a
+GPT name is **not** a filesystem label. Unknown selections fail. The program
+makes no default selection. All-zero content is success for this diagnostic
+only; refusal returns exit code 1. It never offers to erase signatures to make
+a target pass.
 
 Intended Windows build, in a Windows x64 MSVC developer environment with Rust:
 
@@ -66,13 +67,16 @@ cargo build --release --locked --offline --target x86_64-pc-windows-msvc
 # target/x86_64-pc-windows-msvc/release/apex-windows-installer.exe
 ```
 
-This command is a build recipe, **not a verified Windows artifact**. This session
-has Linux Rust 1.98; Windows target/linker and rustfmt are unavailable. Windows
-compilation, executable imports, startup on a clean Windows VM, and reparse-point
-guards still need validation. The integration runner currently targets the Linux
-binary. No release artifact or Authenticode signing is provided.
+This MSVC command is a build recipe, **not a verified Windows artifact**: nobody
+has run it. The `.exe` that does exist comes from `build-windows.sh`, which
+cross-compiles the GNU target in a Fedora container; `tests/test-windows-installer.sh`
+runs it under wine and, with `APEX_WINLAB_GUEST=1`, on the Windows Server 2022
+guest (`VALIDATION.md` has the transcript). `tests/image_lab.py` runs the Linux
+debug binary. Executable imports, startup on a clean Windows install, and
+reparse-point guards still need validation. No release artifact or Authenticode
+signing exists.
 
-## What “empty” means here
+## What "empty" means here
 
 1. Open a regular `.img` file read-only. Reject device/network/verbatim paths on
    Windows, symlinks, reparse points and nonregular files. This lab guard is not
@@ -98,16 +102,16 @@ btrfs backup superblocks, LUKS headers, RAID metadata, nested MBR/GPT, arbitrary
 old data, and backup signatures at the last byte all fail if any nonzero byte
 survives **inside the extent**. A quick format with no user files fails. Reading
 zeroes through a sparse-file hole succeeds; it says nothing about the storage
-medium's remanence or TRIM behavior. No secure-erasure claim is made.
+medium's remanence or TRIM behavior. This tool makes no secure-erasure claim.
 
 The outer GPT is expected to exist: it defines the partition the user already
 created. A zeroed Linux-type extent behind a valid but historically stale active
 GPT entry will pass the lab content check. Bytes cannot establish why an entry
 exists or who owns it. A stale *unused* entry with residual fields fails; a
-protected type fails; a mismatched primary/backup table fails. Other partitions
-and unallocated gaps are not scanned for content. Full Windows eligibility must
-also prove ownership, non-use, stable identity and exclusive access. Until then,
-**all installation is disabled**, even following an all-zero report.
+protected type fails; a mismatched primary/backup table fails. The tool scans no
+other partition and no unallocated gap for content. Full Windows eligibility
+must also prove ownership, non-use, stable identity and exclusive access. Until
+then, **all installation is disabled**, even following an all-zero report.
 
 ## Reference behavior and required adaptation
 
@@ -115,7 +119,7 @@ Read `installer/apex-install` before this design. It validates the selected disk
 parent/partition relationships, minimum capacity (16 decimal GB), mounted state,
 container membership, ESP type/parent, accounts and filesystem tooling. Partition
 mode formats only the target (btrfs default), mounts the root and existing ESP,
-checks roughly 40 MiB ESP free space, and calls privileged Linux
+checks for about 40 MiB of ESP free space, and calls privileged Linux
 `bootc install to-filesystem`. Post-install creates the account in the ostree
 deployment, sets hostname/locale/keymap, carries network settings, relabels with
 the target SELinux policy, and handles Secure Boot/MOK enrollment.
@@ -123,11 +127,13 @@ the target SELinux policy, and handles Secure Boot/MOK enrollment.
 Do not invoke that engine from Windows or copy its bootloader side effects:
 its `EFI/fedora` updates and possible `EFI/BOOT/BOOTX64.EFI` replacement conflict
 with this task's additive-only rule. Its whole-disk mounted guard also cannot
-simply apply to a Windows system disk. `installer/**` remains untouched; ongoing
-LUKS changes must be reconciled before implementing deployment. Existing LUKS
-headers are never overwritten. This prototype detects them as nonzero content.
+apply to a Windows system disk as it stands. `installer/**` remains untouched.
+The Linux installer has since gained LUKS2 (on by default for whole-disk
+installs; a partition install cannot be encrypted), and deployment must be
+reconciled with it before anyone implements it. Existing LUKS headers are never
+overwritten. This prototype detects them as nonzero content.
 
-## Proposed deployment architecture — not implemented
+## Proposed deployment architecture (not implemented)
 
 Use an isolated Linux appliance to create a target-sized filesystem image with
 bootc and a **private synthetic ESP**. The appliance gets only scratch images,
@@ -138,12 +144,13 @@ resizing and free-space budgets need a proof of concept before choosing a VM
 runtime. Alternatively a signed build-produced root image may reduce local work,
 but exact geometry and per-machine configuration still need proof.
 
-Resolve `ghcr.io/andrenijman/apex-os` for the chosen Daily/Gaming flavor to one
-immutable digest; validate the repository's cosign identity, source SHA,
-architecture and kernel/module signatures before any target writes. Per-SHA tags
-are traceability inputs, not substitutes for digest verification. Floating tags
-move only on main builds; never resolve them twice during a transaction. Preserve
-the correct flavor's update origin so bootc upgrade/rollback stays image-based.
+Resolve `ghcr.io/andrenijman/apex-os:apex` (there is one image; `:daily`,
+`:gaming-mesa` and `:gaming-nvidia` resolve to the same digest) to one immutable
+digest; validate the repository's cosign identity, source SHA, architecture and
+kernel/module signatures before any target writes. Per-SHA tags are
+traceability inputs, not substitutes for digest verification. Floating tags
+move only on main builds; never resolve them twice during a transaction.
+Preserve the `:apex` update origin so bootc upgrade/rollback stays image-based.
 No parallel Windows updater for image-owned components.
 
 Configure the staged deployment using the target's tools and SELinux policy:
@@ -172,51 +179,52 @@ A future elevated writer accepts an immutable plan, not a drive number. It must:
 - Show a plain-language review identifying size, filesystem label (verified
   absent for all-zero content), GPT name, model, serial, GUID and extent. Include
   an independently identified shared Windows ESP and an exact list of new files
-  and boot variables. Example: “Write the verified APEX Daily filesystem to the
+  and boot variables. Example: "Write the verified APEX-OS filesystem to the
   selected 100 GB partition, filesystem label: none, on MODEL / SERIAL. Add the
-  listed APEX boot files to this shared Windows ESP. Windows remains the default.”
+  listed APEX boot files to this shared Windows ESP. Windows remains the default."
   The real values, byte counts, digest and paths must replace every placeholder.
-- Require explicit final confirmation tied to the plan and fresh all-zero scan
+- Require explicit final confirmation tied to the plan and a fresh all-zero scan
   under the held handle/lock. A changed identity, layout or precondition
   invalidates consent. No API accepts a reusable `is_empty=true` boolean.
 - Confine writes to that one verified root extent; validate every offset/length,
-  never rewrite GPT/MBR, flush and read back the deployed image. Partial failure
-  is reported as incomplete; retries cannot bypass emptiness by assuming old
+  never rewrite GPT/MBR, flush and read back the deployed image. Report a
+  partial failure as incomplete; retries cannot bypass emptiness by assuming old
   writes are ours. Recovery needs a separately reviewed transaction protocol.
 
 ### Shared Windows ESP: separate, narrow exception
 
 The root emptiness rule never makes an ESP eligible as a root target. The only
-proposed exception to “do not touch other partitions” is the explicitly reviewed,
+proposed exception to "do not touch other partitions" is the explicitly reviewed,
 additive boot-file transaction on the shared Windows ESP required by this task.
 No ESP formatting, shrinking, cleanup, fallback replacement, or Microsoft writes.
 
 Stage bootc output privately, then add only verified files in a fresh unique
 `EFI/APEX-<transaction-id>/` namespace using create-new semantics. The shim/GRUB
-chain must first be proven to work there under Secure Boot; copying or renaming
-`EFI/fedora` is **not** assumed sufficient. If it cannot, implementation stops.
-Do not write `EFI/Microsoft`, `EFI/fedora`, `EFI/BOOT`, Windows BCD, or existing
-files even if their hashes match. Check FAT space and preserve hashes of every
-preexisting file. ESP absence/ambiguity, naming collisions or concurrent changes
-refuse. Never assume the ESP is on the root disk.
+chain must first be proven to work there under Secure Boot; do **not** assume
+that copying or renaming `EFI/fedora` is sufficient. If it cannot work there,
+implementation stops. Do not write `EFI/Microsoft`, `EFI/fedora`, `EFI/BOOT`,
+Windows BCD, or existing files even if their hashes match. Check FAT space and
+preserve hashes of every preexisting file. ESP absence/ambiguity, naming
+collisions or concurrent changes refuse. Never assume the ESP is on the root
+disk.
 
-Before mutation persist a durable transaction journal in explicitly approved
+Before mutation, persist a durable transaction journal in explicitly approved
 application storage, with exact ESP identity, new path/hash pairs, firmware
-variable names/attributes/bytes and preconditions. Journal must survive power
-loss; design crash recovery before enabling writes. The default is no NVRAM
-change until a separately reviewed boot-entry step. That step may create one
-unused Boot#### and append its ID at the end of BootOrder, preserving every
-existing ID's position and the Windows default. No BootNext change, no reordering,
-no replacing a prior APEX entry. Read back and verify all firmware state. If
-firmware unexpectedly reorders entries, do not claim success; recovery must be
-proven in VM firmware before this code can ship.
+variable names/attributes/bytes and preconditions. The journal must survive
+power loss; design crash recovery before enabling writes. The default is no
+NVRAM change until a separately reviewed boot-entry step. That step may create
+one unused Boot#### and append its ID at the end of BootOrder, preserving every
+existing ID's position and the Windows default. No BootNext change, no
+reordering, no replacing a prior APEX entry. Read back and verify all firmware
+state. If firmware unexpectedly reorders entries, do not claim success; recovery
+must be proven in VM firmware before this code can ship.
 
 Rollback deletes only journal-owned files/variables whose identities and hashes
 still match and removes only the appended ID when the expected BootOrder matches.
 Never restore an old entire ESP snapshot over later Windows changes. Preserve
 Windows bootability at every interrupted stage; the root partition may remain
-incomplete. Firmware writes are not atomic with FAT writes—this is a release
-blocker requiring fault-injection tests, not something an “undo” button solves.
+incomplete. Firmware writes are not atomic with FAT writes. That is a release
+blocker requiring fault-injection tests, and an "undo" button does not solve it.
 
 ## Review gates before hardware support
 
@@ -233,9 +241,9 @@ blocker requiring fault-injection tests, not something an “undo” button solv
 - [ ] Fuzz/corpus review of GPT parsing, huge/overflowing ranges and concurrent
       modification; supported layouts expanded only with tests.
 - [ ] Verified all-byte scan and explicit consent immediately before bounded
-      writes; no disk-index authority or automatic “make empty” operation.
+      writes; no disk-index authority or automatic "make empty" operation.
 - [ ] Signed immutable payload, geometry, capacity and SELinux/account setup;
-      bootc first boot, upgrade and rollback in a VM, all three flavors.
+      bootc first boot, upgrade and rollback in a VM, on the one APEX-OS image.
 - [ ] Secure Boot/MOK and isolated bootloader namespace proven; all preexisting
       ESP bytes and Windows entry/order preserved through success and failures.
 - [ ] Durable journal, additive-only rollback, cancellation/power-loss recovery

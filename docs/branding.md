@@ -2,8 +2,8 @@
 
 ## The mark: "spark"
 
-APEX-OS uses a single logomark — the **spark** — rendered in edition-specific
-colorways. The wordmark is the letterspaced "APEX OS".
+APEX-OS uses a single logomark, the **spark**, drawn in several colorways. The
+wordmark is the letterspaced "APEX OS".
 
 ## Color semantics
 
@@ -11,16 +11,20 @@ colorways. The wordmark is the letterspaced "APEX OS".
 |----------|-----------------|----------|------------|
 | **Chartreuse** | `#D9F99D` | APEX-OS | Everyday |
 | **Gold** | `#FDE047` | legacy Gaming accent | Power |
-| **Mono (black)** | — | neutral | Light backgrounds, print, single-color contexts |
-| **Mono (white)** | — | neutral | Dark backgrounds, single-color contexts |
+| **Mono (black)** | n/a | neutral | Light backgrounds, print, single-color contexts |
+| **Mono (white)** | n/a | neutral | Dark backgrounds, single-color contexts |
 
-APEX publishes ONE image, so chartreuse is the colour of the product: the boot
-splash and the greeter accent. There is no edition for gold to denote any more.
+APEX publishes ONE image, so chartreuse is the colour of the product: the
+default for the boot splash and the greeter. Both follow the owner's own accent
+once one is known. The greeter reads it from `/var/lib/apex-greet/accents/<user>`,
+and the initramfs starts the splash in the matching one of 24 accent themes
+derived from chartreuse (`files/dracut/apex-plymouth-accent`). There is no
+edition left for gold to denote.
 
-Gold is retained for one reason, and only that reason: a machine still booting a
-pre-merge image reports `VARIANT_ID=gaming`, and apex-greet maps that to the gold
-accent and `spark-gold.png` so it keeps its identity until it updates. New
-artwork should not use gold to mean anything.
+Gold survives for one reason: a machine still booting a pre-merge image reports
+`VARIANT_ID=gaming`, and apex-greet maps that to the gold accent and
+`spark-gold.png` so the machine keeps its identity until it updates. New artwork
+should not use gold to mean anything.
 
 The mono variants exist for any context that needs a neutral, single-color mark.
 
@@ -28,29 +32,35 @@ The mono variants exist for any context that needs a neutral, single-color mark.
 
 All assets live under `files/branding/`.
 
-### Logos — `files/branding/logos/<colorway>/`
+### Logos: `files/branding/logos/<colorway>/`
 
 Colorways: `gold/`, `chartreuse/`, `mono-black/`, `mono-white/`.
 
 Each colorway provides:
 
-- `apex-spark-<colorway>.svg` — vector source (512×512 viewBox)
-- `apex-spark-<colorway>.png` — 512×512 base raster
-- `apex-spark-<colorway>-{16,32,64,128,256,512,1024}.png` — icon sizes
+- `apex-spark-<colorway>.svg`: vector source (512×512 viewBox)
+- `apex-spark-<colorway>.png`: 512×512 base raster
+- `apex-spark-<colorway>-{16,32,64,128,256,512,1024}.png`: icon sizes
 
 (Mono files use the suffix `black` / `white`, e.g. `apex-spark-black-256.png`.)
 
-### Plymouth boot themes — `files/branding/plymouth/`
+### Plymouth boot themes: `files/branding/plymouth/`
 
-**One theme ships.** `Containerfile.apex` copies `apex-os-chartreuse` and runs
-`plymouth-set-default-theme apex-os-chartreuse`; nothing installs the gold
-theme, because there is no second image to install it into.
+**One splash ships, in 25 themes.** `Containerfile.apex` copies
+`apex-os-chartreuse` and the 24 `apex-os-accent-NN` themes (one per 15° of hue),
+runs `plymouth-set-default-theme apex-os-chartreuse`, and rebuilds the initramfs
+with `--add "plymouth apex-plymouth-accent"` so the splash can start in the
+owner's accent. Nothing installs the gold theme, because there is no second
+image to install it into.
 
-- `apex-os-chartreuse/` — the boot splash, on every machine
-- `apex-os-gold/` — source art only. NOT installed by any Containerfile. Kept
-  because it is the same animation in the other colourway and deleting
-  commissioned art to tidy a build is not a trade worth making; do not read its
-  presence as evidence that a second image exists.
+- `apex-os-chartreuse/`: the default splash, and the source of every accent
+  theme
+- `apex-os-accent-00/` to `apex-os-accent-23/`: chartreuse hue-rotated by
+  `make-accent-themes.sh`
+- `apex-os-gold/`: source art only, installed by no Containerfile. It is the
+  same animation in the other colourway, kept because deleting commissioned art
+  to tidy a build is a bad trade. Its presence is not evidence that a second
+  image exists.
 
 Each theme contains its `.plymouth` descriptor, the shared `apex-os.script`
 (identical in every theme but for its highlight colour), and the images the
@@ -62,26 +72,31 @@ the password dot (`bullet.png`, `bullet-hd.png`), the wordmark
 `make-splash-art.sh` draws them for a colourway; `make-accent-themes.sh`
 derives the 24 accent themes from chartreuse.
 
-**Animation — "Focus":** on plain black, the spark comes into focus out of a
+**Animation: "Focus".** On plain black, the spark comes into focus out of a
 soft glow of its own light, a halo blooms behind it and settles, and the
 `APEX OS` wordmark fades in; the halo then breathes slowly while the machine
-boots. Nothing moves: every image is scaled once, and each frame only changes
-opacities along curves of real elapsed time, because plymouth truncates sprite
-positions to whole pixels and has no vsync (the "Convergence" comet animation
-this replaced was choppy for exactly those reasons; `apex-os.script` records
-the measurements). LUKS prompts are handled (the splash dims, the prompt takes
-the wordmark's place, typed characters show as dots, never as text); shutdown
-and reboot show the settled splash.
+boots. Nothing moves: the script scales every image once, and each frame only
+changes opacities along curves of real elapsed time, at 60 Hz rather than
+plymouth's default 50. Plymouth truncates sprite positions to whole pixels and
+has no vsync, and the "Convergence" comet animation this replaced was choppy
+for exactly those reasons (`apex-os.script` records the measurements). The
+splash handles a LUKS prompt: it dims, the prompt takes the wordmark's place,
+and typed characters show as dots, never as text. Shutdown, reboot and update
+modes show the settled splash.
 
-Install (inside the image build):
+The generic install, as on a mutable Fedora system:
 
 ```sh
 cp -r apex-os-chartreuse /usr/share/plymouth/themes/
 plymouth-set-default-theme -R apex-os-chartreuse   # -R rebuilds the initramfs
 ```
 
-Kernel args need `quiet splash`. See
-`files/branding/plymouth/README.md` for install/test details.
+The image build differs: it copies the accent themes too, runs
+`plymouth-set-default-theme` without `-R`, and runs dracut itself with
+`--add "plymouth apex-plymouth-accent"`, because a bootc image regenerates its
+initramfs at build time. Kernel args need `quiet splash`, which the image sets
+in `/usr/lib/bootc/kargs.d/20-apex-plymouth.toml`. See
+`files/branding/plymouth/README.md` for install and test details.
 
 ### Previews
 
@@ -99,35 +114,35 @@ cd files/branding/plymouth
 MP4, a contact sheet and per-frame metrics. It needs python3 with numpy and
 Pillow, and ffmpeg.
 
-### Wallpaper — `files/branding/wallpapers/`
+### Wallpaper: `files/branding/wallpapers/`
 
-`apex-wallpaper-default.jpg` — the default desktop wallpaper (3258×2160).
+`apex-wallpaper-default.jpg`: the default desktop wallpaper (3258×2160).
 
 ---
 
-# Distro identity — de-branding Fedora / CachyOS
+# Distro identity: de-branding Fedora / CachyOS
 
-APEX-OS is built `FROM quay.io/fedora/fedora-bootc:43` and swaps in the CachyOS
-performance kernel from the `bieszczaders` COPR. Both upstreams leave their name
+APEX-OS is built `FROM quay.io/fedora/fedora-bootc:43` and swaps in a CachyOS
+performance kernel, which APEX now compiles itself from pinned CachyOS source
+(`Containerfile.kernel`, `kernel/kernel.pin`). Both upstreams leave their name
 in places the user can see. **No user-visible surface may say "Fedora" or
-"CachyOS".** This section is the complete inventory: every surface, what it said,
-what it says now, and where the fix lives.
+"CachyOS".** This section is the complete inventory: every surface, what it
+said, what it says now, and where the fix lives.
 
-Three surfaces genuinely cannot be changed. They are listed honestly at the
-bottom rather than papered over.
+Some surfaces cannot be changed; the last table lists each one with its
+reason.
 
 ## Where each surface is fixed
 
 Fixes land in one of two places:
 
-- **image** — `Containerfile.core` for OS-level branding (os-release,
+- **image**: `Containerfile.core` for OS-level branding (os-release,
   fedora-release, issue), `Containerfile.base` for anything COPY'd out of
-  `files/`. Applies to every
-  deployment created from a newly built image.
-- **runtime** — `files/scripts/apex-debrand-runtime.sh`. Applies to a system that
+  `files/`. Applies to every deployment created from a newly built image.
+- **runtime**: `files/scripts/apex-debrand-runtime.sh`. Applies to a system that
   is **already installed**. Three of these surfaces live *outside* the ostree
   deployment (EFI NVRAM, `/boot/loader/entries`, a local `/etc` modification), so
-  `bootc upgrade` will never replace them no matter how good the image gets.
+  `bootc upgrade` never replaces them, however good the image gets.
 
 ## The inventory
 
@@ -135,24 +150,24 @@ Fixes land in one of two places:
 |---|---------|-----|--------|----------|-------|
 | 1 | GRUB boot menu entry (`/boot/loader/entries/*.conf` → `title`) | `Fedora Linux 43 (Forty Three) (ostree:0)` | `APEX-OS (ostree:0)` | image **+** runtime | ostree derives the title from the deployment's os-release `PRETTY_NAME`; `Containerfile.core` sets it. Existing entries: `apex-debrand-runtime.sh` |
 | 2 | Firmware boot entry label (`efibootmgr`) | `Boot0002* Fedora` | `Boot####* APEX-OS` | image **+** runtime | bootupd's `get_product_name()` reads `/etc/system-release`; `Containerfile.core` rewrites `/usr/lib/fedora-release`. Existing NVRAM: `apex-debrand-runtime.sh` |
-| 3 | `os-release` `NAME` / `PRETTY_NAME` | `Fedora Linux` / `Fedora Linux 43 (Forty Three)` | `APEX-OS` / `APEX-OS` | image | `Containerfile.base` os-release `sed` |
+| 3 | `os-release` `NAME` / `PRETTY_NAME` | `Fedora Linux` / `Fedora Linux 43 (Forty Three)` | `APEX-OS` / `APEX-OS` | image | `Containerfile.core` os-release `sed` |
 | 4 | `os-release` `VERSION` | `43 (Forty Three)` (Fedora codename) | `43` | image | same `sed` |
 | 5 | `os-release` `LOGO` | `fedora-logo-icon` | `apex-os-logo` | image | same `sed`; the icon itself is installed into `hicolor` from `files/branding/logos/chartreuse/` |
 | 6 | `os-release` `CPE_NAME` | `cpe:/o:fedoraproject:fedora:43` | `cpe:/o:apexos:apex_os:43` | image | same `sed`, plus `/usr/lib/system-release-cpe` |
 | 7 | `os-release` `DOCUMENTATION_URL` / `SUPPORT_URL` | `docs.fedoraproject.org` / `ask.fedoraproject.org` | the apex-os GitHub repo | image | same `sed` |
 | 8 | `os-release` `REDHAT_BUGZILLA_*` / `REDHAT_SUPPORT_*` | `"Fedora"` ×4 | deleted | image | `sed -e '/^REDHAT_/d'` |
 | 9 | `os-release` `ANSI_COLOR`, `DEFAULT_HOSTNAME`, `HOME_URL`, `BUG_REPORT_URL` | Fedora blue / `fedora` / fedoraproject.org / bugzilla | APEX chartreuse / `apex` / apex-os repo | image | same `sed` (pre-existing) |
-| 10 | `/etc/system-release`, `/etc/redhat-release`, `/etc/fedora-release` (all → `/usr/lib/fedora-release`) | `Fedora release 43 (Forty Three)` | `APEX-OS release 43` | image | `Containerfile.core`. **Content only — the file is NOT renamed**, the symlink chain and `[ -f /etc/fedora-release ]` probes must keep working, and this is the string bootupd turns into the firmware label. The image now **re-creates** those three links itself (plus `os-release`, the CPE and `issue{,.net}`) rather than inheriting them from the base layer, and asserts the branded string *through `/etc`*: writing only `/usr/lib` and trusting an inherited hardlinked symlink is what failed every weekly `core` build from 2026-08-17 on |
-| 11 | VT login banner `/etc/issue`, `/etc/issue.net` (→ `/usr/lib/issue*`) | `\S` + `Kernel \r on \m (\l)` → printed `7.1.3-cachyos1.fc43.x86_64` | `\S` only → prints `APEX-OS` | image | `Containerfile.base`. `\S` is expanded by agetty from `PRETTY_NAME`. Writing `/usr/lib/issue` (not `/etc/issue`) keeps the symlink intact |
-| 12 | `fastfetch` kernel line | `Linux 7.1.3-cachyos1.fc43.x86_64` | `7.1.3` | image | `files/system/fastfetch/config.jsonc` — the `kernel` module replaced by a `command` module running `uname -r \| cut -d- -f1` |
+| 10 | `/etc/system-release`, `/etc/redhat-release`, `/etc/fedora-release` (all → `/usr/lib/fedora-release`) | `Fedora release 43 (Forty Three)` | `APEX-OS release 43` | image | `Containerfile.core`. **Content only: the file is NOT renamed**, the symlink chain and `[ -f /etc/fedora-release ]` probes must keep working, and this is the string bootupd turns into the firmware label. The image now **re-creates** those three links itself (plus `os-release`, the CPE and `issue{,.net}`) rather than inheriting them from the base layer, and asserts the branded string *through `/etc`*: writing only `/usr/lib` and trusting an inherited hardlinked symlink is what failed every weekly `core` build from 2026-08-17 on |
+| 11 | VT login banner `/etc/issue`, `/etc/issue.net` (→ `/usr/lib/issue*`) | `\S` + `Kernel \r on \m (\l)` → printed `7.1.3-cachyos1.fc43.x86_64` | `\S` only → prints `APEX-OS` | image | `Containerfile.core`. agetty expands `\S` from `PRETTY_NAME`. Writing `/usr/lib/issue` (not `/etc/issue`) keeps the symlink intact |
+| 12 | `fastfetch` kernel line | `Linux 7.1.3-cachyos1.fc43.x86_64` | `7.1.3` | image | `files/system/fastfetch/config.jsonc`: the `kernel` module replaced by a `command` module running `uname -r \| cut -d- -f1` |
 | 13 | `fastfetch` OS line + ASCII logo | Fedora `F` logo (auto-detected from `ID`) | APEX spark + `APEX-OS 43` | image (pre-existing) | `config.jsonc` pins `logo.source` to `/etc/fastfetch/apex-logo.txt`; bare `fastfetch` picks up `/etc/fastfetch/config.jsonc`, verified |
-| 14 | Kernel-version stamp file | `/usr/lib/apex-cachyos-kver` | `/usr/lib/apex-kver` | image | `Containerfile.base` / `.daily` / `.gaming` |
+| 14 | Kernel-version stamp file | `/usr/lib/apex-cachyos-kver` | `/usr/lib/apex-kver` | image | `Containerfile.core` writes it; `Containerfile.apex` and `Containerfile.release` read it |
 | 15 | Installer completion screen | *"look for \"Fedora\" / \"APEX\""* | *"pick it from the one-time boot menu (F12 on ThinkPads)"* | image | `installer/apex-install` |
 | 16 | Live-ISO GRUB menu | already `Install APEX-OS` | unchanged | image (pre-existing) | `installer/build-live-iso.sh` |
 | 17 | Plymouth boot splash | `apex-os-chartreuse` and its 24 accent themes (gold is source art only), wordmark `APEX OS` | unchanged | image (pre-existing) | `files/branding/plymouth/` |
 | 18 | Greeter (`apex-greet`) | no distro string at all | unchanged | n/a | verified clean |
-| 18a | `hostnamectl` "Operating System" | `Fedora Linux 43 (Forty Three)` | `APEX-OS` | image | reads os-release `PRETTY_NAME`; covered by surface 3. Its "Kernel:" line still shows the CachyOS release string — see the unfixable table |
-| 18b | `neofetch` / `screenfetch` / `lsb_release` | — | — | n/a | **not installed** in the image (verified). `fastfetch` is the only fetch tool, and it is handled by surfaces 12–13. If one is ever layered in, it will auto-detect the Fedora logo from `ID` exactly as bare `fastfetch` would, and needs the same `logo.source` pin |
+| 18a | `hostnamectl` "Operating System" | `Fedora Linux 43 (Forty Three)` | `APEX-OS` | image | reads os-release `PRETTY_NAME`; covered by surface 3. Its "Kernel:" line still shows the CachyOS release string; see the unfixable table |
+| 18b | `neofetch` / `screenfetch` / `lsb_release` | n/a | n/a | n/a | **not installed** in the image (verified). `fastfetch` is the only fetch tool, and it is handled by surfaces 12–13. If one is ever layered in, it will auto-detect the Fedora logo from `ID` exactly as bare `fastfetch` would, and needs the same `logo.source` pin |
 | 19 | Local `/etc/os-release` override on installed systems | a hand-written file with `VERSION="43 (Forty Three)"`, `LOGO=fedora-logo-icon`, `REDHAT_*`, fedora URLs | branded, and removed entirely once the image's own os-release is branded | **runtime** | `apex-debrand-runtime.sh`. See the warning below |
 
 ### The `/etc/os-release` trap (surface 19)
@@ -161,9 +176,9 @@ On the running install `/etc/os-release` is a **regular file**, not the image's
 symlink into `/usr/lib`. On ostree, that is a local `/etc` modification, and
 ostree **3-way-merges `/etc` forward into every future deployment**. So the
 override outlives the image fix: after upgrading to a branded image it keeps
-shadowing `/usr/lib/os-release` — pinning the stale `VERSION="43 (Forty Three)"`,
-the Fedora `LOGO`/URLs, and worst, pinning `VERSION_ID=43` across a future rebase
-to an F44 base (which would break `$releasever`).
+shadowing `/usr/lib/os-release`. It pins the stale `VERSION="43 (Forty Three)"`
+and the Fedora `LOGO`/URLs, and, worst of all, it pins `VERSION_ID=43` across a
+future rebase to an F44 base (which would break `$releasever`).
 
 `apex-debrand-runtime.sh` handles both states:
 
@@ -175,13 +190,13 @@ to an F44 base (which would break `$releasever`).
 
 ## Why `ID=fedora` stays
 
-`ID` and `VERSION_ID` are the only os-release keys left un-branded, and that is
-deliberate. They are **machine-facing** — nothing that renders on screen reads
-them (the boot menu, Plymouth, the greeter, fastfetch's `{name}`, and agetty's
-`\S` all read `PRETTY_NAME`).
+`ID` and `VERSION_ID` are the only os-release keys left un-branded, on purpose.
+They are **machine-facing**: nothing that renders on screen reads them (the boot
+menu, Plymouth, the greeter, fastfetch's `{name}`, and agetty's `\S` all read
+`PRETTY_NAME`).
 
-The textbook derivative pattern is `ID=apex` + `ID_LIKE="fedora"`. It was tested
-and it **breaks the build**. `dnf copr` derives its chroot name from
+The textbook derivative pattern is `ID=apex` + `ID_LIKE="fedora"`. Tested, it
+**breaks the build**. `dnf copr` derives its chroot name from
 `ID`-`VERSION_ID`-`arch`, and `ID_LIKE` does not help:
 
 ```
@@ -193,18 +208,21 @@ You can choose one of the available chroots explicitly:
  fedora-43-x86_64
 ```
 
-That is three COPRs in the build path (`bieszczaders/kernel-cachyos`,
-`bieszczaders/kernel-cachyos-addons`, `xxmitsu/mesa-git`) plus any COPR a user
-enables later. `$releasever` was checked separately and is safe — it comes from
-`VERSION_ID`, not `ID` (`dnf5 --dump-variables` → `releasever = 43` with
-`ID=apex`), but that only narrows the blast radius, it does not remove it.
+The test above hit `bieszczaders/kernel-cachyos`, which the build no longer
+uses now that APEX compiles its own kernel. The build path still enables seven
+COPRs (`bieszczaders/kernel-cachyos-addons`, `ublue-os/akmods`,
+`ublue-os/packages`, `shdwchn10/xpadneo`, `sdegler/hyprland`,
+`errornointernet/quickshell`, `zeno/scrcpy`), and a user can enable more later.
+`$releasever` is safe, checked separately: it comes from `VERSION_ID`, not `ID`
+(`dnf5 --dump-variables` → `releasever = 43` with `ID=apex`). That narrows the
+blast radius without removing it.
 
 Verdict: **`ID=fedora` and `VERSION_ID=43` stay.** The user-visible mandate is
-fully met without them. If this is ever revisited, every `dnf copr enable` call
-site must be given an explicit `fedora-43-x86_64` chroot argument first, and the
-whole build re-run.
+met without them. Before anybody revisits this, every `dnf copr enable` call
+site needs an explicit `fedora-43-x86_64` chroot argument, and the whole build
+has to run again.
 
-`Containerfile.base` asserts this invariant at build time — the branding step
+`Containerfile.core` asserts this invariant at build time: the branding step
 fails the build if any line other than `ID=fedora` still matches `fedora`:
 
 ```sh
@@ -216,9 +234,9 @@ grep -qx 'ID=fedora' /usr/lib/os-release
 
 | Surface | Shows | Why it cannot change |
 |---------|-------|----------------------|
-| `uname -r`, `/usr/lib/modules/<kver>/`, `/usr/src/kernels/<kver>/`, `/usr/share/licenses/kernel-cachyos-core/`, `/proc/version` | `7.1.3-cachyos1.fc43.x86_64` | The release string is compiled into the kernel package (`CONFIG_LOCALVERSION` + the RPM dist tag). Renaming it means building the kernel from source, which is out of scope. **Mitigated**: it is hidden from the boot menu (BLS `title` never contains the kernel version), from the VT login banner (surface 11) and from fastfetch (surface 12). It remains visible to anyone who runs `uname -r`. |
-| The ESP directory `EFI/fedora/` | `\EFI\fedora\shimx64.efi`, `/boot/efi/EFI/fedora/` | The path is **hardcoded inside Fedora's signed `grubx64.efi`** (its build-time prefix) and in `shim`'s fallback CSV. Renaming the directory breaks the Secure Boot chain — grub would not find its config and the machine would not boot. Only the **NVRAM label** can change, and it does (surface 2). Also note `installer/apex-install` deliberately keeps its "a Fedora-family install already uses `\EFI\fedora`" warning: that text is about a genuine neighbouring Fedora install and a genuine path, and making it say APEX would be a lie. |
-| `os-release` `ID` / `VERSION_ID` | `fedora` / `43` | See "Why `ID=fedora` stays" above — verified build breakage. |
+| `uname -r`, `/usr/lib/modules/<kver>/`, `/usr/src/kernels/<kver>/`, `/usr/share/licenses/kernel-cachyos-core/`, `/proc/version` | `7.1.3-cachyos1.fc43.x86_64` | The release string is compiled into the kernel package (`CONFIG_LOCALVERSION` + the RPM dist tag). APEX now builds that kernel from source itself (`Containerfile.kernel`), and the release still reads `…-cachyos1.apex1.fc43…`: nobody has changed the kernel tier's release naming. **Mitigated**: it is hidden from the boot menu (BLS `title` never contains the kernel version), from the VT login banner (surface 11) and from fastfetch (surface 12). It remains visible to anyone who runs `uname -r`. |
+| The ESP directory `EFI/fedora/` | `\EFI\fedora\shimx64.efi`, `/boot/efi/EFI/fedora/` | The path is **hardcoded inside Fedora's signed `grubx64.efi`** (its build-time prefix) and in `shim`'s fallback CSV. Renaming the directory breaks the Secure Boot chain: grub would not find its config and the machine would not boot. Only the **NVRAM label** can change, and it does (surface 2). Also note `installer/apex-install` deliberately keeps its "a Fedora-family install already uses `\EFI\fedora`" warning: that text is about a genuine neighbouring Fedora install and a genuine path, and making it say APEX would be a lie. |
+| `os-release` `ID` / `VERSION_ID` | `fedora` / `43` | See "Why `ID=fedora` stays" above: verified build breakage. |
 | `/etc/yum.repos.d/fedora*.repo`, `rpmfusion-*.repo`, `_copr:…kernel-cachyos*.repo` (left behind, `enabled=0`, by `dnf copr disable`), `rpm -E %fedora`, `%dist_vendor` | `Fedora`, `cachyos` | Package-manager plumbing pointing at real Fedora / COPR repositories. Renaming would break package resolution, and none of it is user-visible. |
 | Engineering comments in `Containerfile.*`, `installer/build-live-iso.sh`, `apex-greet/README.md`, `mpv.conf` | `Fedora`, `CachyOS` | Load-bearing rationale ("Fedora ships crippled ffmpeg", "Fedora's signed grub has prefix /EFI/fedora"). These are developer-facing and accurate; scrubbing them would destroy the reasoning. |
 
@@ -226,9 +244,9 @@ grep -qx 'ID=fedora' /usr/lib/os-release
 
 Do the boot-menu change and the NVRAM change as **separate steps**, in this
 order. The BLS rewrite has been tested against a copy of the real entries; the
-NVRAM write has not (there is no way to dry-run firmware). Keeping them apart
-means that if the firmware misbehaves on the relabel, you are already booted
-through a verified-good boot menu instead of debugging two changes at once.
+NVRAM write has not (there is no way to dry-run firmware). With the two apart,
+if the firmware misbehaves on the relabel, you are already booted through a
+verified-good boot menu instead of debugging two changes at once.
 
 ```sh
 # 1. See what would change — writes nothing.
@@ -256,27 +274,27 @@ sudo /usr/libexec/apex-debrand-runtime --apply --skip-bls --skip-efi
 ```
 
 Safety properties (all exercised against a copy of the real
-`/boot/loader/entries`, see the script header):
+`/boot/loader/entries`; see the script header):
 
 - dry-run by default; `--apply` is required to write anything;
-- an entry is validated before it is touched — exactly one `title` line, a
-  `linux` line, and the referenced vmlinuz/initramfs must exist. A broken entry
-  is skipped loudly and left untouched, and the exit code is non-zero;
-- **only the `title` line is rewritten**; the rewrite is rejected unless every
-  other line is byte-for-byte identical. `options`, `linux`, `initrd` and
-  `version` are never reformatted;
-- written with `cat >` (not `mv`), so inode, mode, owner and SELinux label are
-  preserved;
-- backups go to `/var/lib/apex-debrand/<timestamp>/`, deliberately **not** next
-  to the entries — grub's `blscfg` globs `*.conf` and an in-place backup would
-  show up as a phantom boot menu entry;
-- `/boot` is remounted rw only if it is mounted ro, and restored on exit
-  including on failure;
-- `grubenv` is checked for a `saved_entry` that names a title (none on the
+- the script validates an entry before touching it: exactly one `title` line,
+  a `linux` line, and the referenced vmlinuz/initramfs must exist. It skips a
+  broken entry loudly, leaves it untouched, and exits non-zero;
+- **only the `title` line is rewritten**; the script rejects the rewrite unless
+  every other line is byte-for-byte identical, and never reformats `options`,
+  `linux`, `initrd` or `version`;
+- it writes with `cat >` (not `mv`), which preserves inode, mode, owner and
+  SELinux label;
+- backups go to `/var/lib/apex-debrand/<timestamp>/`, on purpose **not** next to
+  the entries: grub's `blscfg` globs `*.conf`, and an in-place backup would show
+  up as a phantom boot menu entry;
+- it remounts `/boot` rw only if it is mounted ro, and restores the mount on
+  exit, failure included;
+- it checks `grubenv` for a `saved_entry` that names a title (none on the
   current installs; the script prints the exact `grub2-editenv` fix if one
   appears);
 - the EFI step creates and **verifies** the new entry (same ESP PARTUUID, same
   loader) *before* deleting the old one, and restores `BootOrder` with the new
   entry in the old entry's position. If any step fails, the original entry is
   left alone and the machine still boots;
-- idempotent — a second run reports "already branded" and writes nothing.
+- idempotent: a second run reports "already branded" and writes nothing.

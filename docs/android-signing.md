@@ -1,14 +1,13 @@
 # Signing the Android app
 
-The APK on the Releases page is signed by one key, and that key decides
-something no server can undo later: whether a phone with APEX Remote on it can
-ever move to a newer build. Android installs an update only if it is signed by
-the same key as the version already there. Different key, no update, no
-override, no appeal — the owner's only way forward is to uninstall, and
-uninstalling destroys this app's paired device key and everything behind it.
+One key signs the APK on the Releases page, and that key decides something no
+server can undo later: whether a phone with APEX Remote on it can ever move to a
+newer build. Android installs an update only if the same key signed it as the
+version already there. A different key means no update, no override and no
+appeal: the owner's only way forward is to uninstall, and uninstalling destroys
+this app's paired device key and everything behind it.
 
-So this page is not really about cryptography. It is about where one file
-lives.
+So this page is about where one file lives more than it is about cryptography.
 
 ## The decision
 
@@ -24,46 +23,45 @@ Concretely:
    one of them not network-attached.**
 3. **Mechanically it follows the Secure Boot key**: a base64 repository secret,
    decoded into `$RUNNER_TEMP` at 0600 for the length of the job, `shred`ed
-   afterwards in an `if: always()` step. That pattern is proven here — see
-   `.github/workflows/build-image.yml` — and consistency is worth more than
-   novelty.
+   afterwards in an `if: always()` step. `.github/workflows/build-image.yml`
+   has proven that pattern here, and consistency is worth more than novelty.
 4. **Its backup posture does NOT follow the Secure Boot key**, because the
    failure modes are not comparable. Lose the Secure Boot key and future images
    ship unsigned kernels; users re-enrol and life goes on. Lose the APK key and
    *every existing install can never be upgraded*, with uninstall-and-lose-your-
    data as the only remedy. Same mechanism, far worse blast radius.
-5. **Ship nothing rather than ship wrongly signed.** No secret, no release —
-   loudly, naming the missing secret. No fallback to a debug key or a throwaway
-   one: an APK signed by a key nobody keeps, reaching even one phone, creates
-   exactly the lock-in this whole arrangement exists to avoid.
-6. **The certificate fingerprint is published** — in this file, in the README's
+5. **Ship nothing rather than ship wrongly signed.** No secret, no release,
+   refused loudly and naming the missing secret. No fallback to a debug key or a
+   throwaway one: an APK signed by a key nobody keeps, reaching even one phone,
+   creates the lock-in this whole arrangement exists to avoid.
+6. **The certificate fingerprint is published**: in this file, in the README's
    phone section, and in `android/signing-certificate.sha256`, which the release
    checks the key against.
 7. **Rotation is the safety net, and it is written down now**, while nothing has
-   shipped, because it is worth nothing written down after the key is lost.
+   shipped, because written down after the key is lost it is worth nothing.
 
 ### Why the backup clause is the one that matters
 
 **A GitHub secret cannot be read back.** Once set it is write-only to everybody,
-including the person who set it — there is no API, no UI and no support ticket
-that returns the value.
+including the person who set it: no API, no UI and no support ticket returns the
+value.
 
 That single fact is why "it's also in GitHub" is not a backup. If the local copy
-is lost, the GitHub copy goes on signing releases perfectly well, for years,
-while being permanently unreadable. It has the shape of redundancy without being
-redundancy, and the day something needs the key outside Actions — a rotation, a
-different CI, a Play listing, a signature checked by hand — the answer is that
-nobody has it. That is the failure that would actually happen here, so it is
-written in those terms rather than as "keep a backup".
+is lost, the GitHub copy goes on signing releases for years while being
+permanently unreadable. It looks like redundancy and gives none, and the day
+something needs the key outside Actions (a rotation, a different CI, a Play
+listing, a signature checked by hand), nobody has it. That is the failure that
+would happen here, so this page states it in those terms instead of "keep a
+backup".
 
 ### Why the passwords are not `apex-secretd`
 
 `apex-secretd` protects secrets *on a booted APEX machine*, for things the
-machine itself needs at runtime. This key is needed by a GitHub runner and by
-Andre, and neither is an APEX machine. Adding a dependency on the desktop's
-secret service would mean the release could only be cut from a working APEX
-install — one more way to be unable to ship. The passwords live where the
-keystore lives: in the backup directory, and in a repository secret.
+machine itself needs at runtime. A GitHub runner and Andre need this key, and
+neither is an APEX machine. A dependency on the desktop's secret service would
+mean the release could only be cut from a working APEX install: one more way to
+be unable to ship. The passwords live where the keystore lives:
+in the backup directory, and in a repository secret.
 
 ## Making the key
 
@@ -88,15 +86,15 @@ exact `gh secret set` commands. It refuses to run in CI, refuses to write a key
 under `/tmp` (which is RAM here), and refuses to write one inside a git
 checkout.
 
-**The password is never printed.** Terminal scrollback is a file too.
+**The script never prints the password.** Terminal scrollback is a file too.
 
 ### Then, in this order
 
-1. **Back up `~/apex-android-signing`** — all four files together — to two
+1. **Back up `~/apex-android-signing`**, all four files together, to two
    places that are not GitHub, at least one of them not network-attached. Do
    this before step 2, not after.
-2. Set the four secrets. Reading from files, so no password is ever typed into
-   a shell and thence into its history:
+2. Set the four secrets. The commands read from files, so you never type a
+   password into a shell and from there into its history:
 
    ```
    gh secret set APEX_KEYSTORE_BASE64   -R AndreNijman/apex-os < ~/apex-android-signing/keystore.base64
@@ -107,23 +105,23 @@ checkout.
 
    `APEX_KEY_PASSWORD` is the same value as `APEX_KEYSTORE_PASSWORD` on purpose.
    Measured with OpenJDK 21's keytool: a PKCS12 keystore cannot hold two
-   different passwords — *"Different store and key passwords not supported for
-   PKCS12 KeyStores"*, and it ignores the one you gave it.
+   different passwords (*"Different store and key passwords not supported for
+   PKCS12 KeyStores"*), and it ignores the one you gave it.
 
-   The files have no trailing newline, and that is deliberate: `gh secret set
-   NAME < file` stores the bytes it is handed, and a trailing newline becomes
-   part of the password. The keystore then refuses to open with a password that
-   looks correct everywhere a human can see it.
+   The files have no trailing newline, on purpose: `gh secret set NAME < file`
+   stores the bytes it is handed, and a trailing newline becomes part of the
+   password. The keystore then refuses to open with a password that looks
+   correct everywhere a human can see it.
    `android/tools/require-signing-secrets.sh` catches that case and says so.
 3. Commit the fingerprint files.
-4. Dry-run the release before ever cutting one:
+4. Dry-run the release before you ever cut one:
 
    ```
    gh workflow run release-android.yml -R AndreNijman/apex-os -f dry_run=true
    ```
 
-   Everything runs — version gate, signed build, signature verification,
-   checksum, metadata — and no release is created.
+   Everything runs (version gate, signed build, signature verification,
+   checksum, metadata), and the workflow creates no release.
 
 ## The certificate
 
@@ -143,32 +141,32 @@ also in `android/signing-certificate.sha256`, which is what the release itself
 checks: `android/tools/verify-signing-identity.sh` compares the keystore against
 it *before* the build and the built APK against it *after*, so a keystore secret
 replaced by a different key stops the release instead of shipping an APK nobody
-can upgrade to. `UNSET` above means no key exists yet, and while it says that no
-release can be cut.
+can upgrade to. If the value above ever reads `UNSET`, no key exists, and while
+it says that no release can be cut.
 
 ## What happens with no key
 
-Nothing ships, loudly.
+Nothing ships, and the release says why.
 
 * `release-android.yml` refuses in its first minute.
   `android/tools/require-signing-secrets.sh` names each missing secret
-  individually — "signing is not configured" would send somebody to check four
-  things — and `verify-signing-identity.sh --published` refuses while the
-  fingerprint is `UNSET`. Neither step carries an `if:`, because a skipped step
-  counts as success in this repository and has six times.
+  individually, because "signing is not configured" would send somebody to
+  check four things, and `verify-signing-identity.sh --published` refuses while
+  the fingerprint is `UNSET`. Neither step carries an `if:`, because a skipped
+  step counts as success in this repository, and that has bitten six times.
 * `release-artifacts.sh` refuses on a missing keystore, a keystore that will not
-  open, and a key that is not the published one — all before Gradle starts.
+  open, and a key that is not the published one, all before Gradle starts.
 * `pr-validation.yml` builds the release target on every Android change, without
-  a key, and asserts the APK is named `unsigned`. That is a compile check, not a
-  release, and it says so in its own log.
+  a key, and asserts the APK is named `unsigned`. That is a compile check and
+  not a release, and it says so in its own log.
 
-There is deliberately no fallback. The debug keystore's password is the word
+There is no fallback, on purpose. The debug keystore's password is the word
 `android` and every Android developer on earth has a copy; an APK signed with it
 would install, and would then be un-upgradable forever.
 
-## Rotation — the safety net, while the key still exists
+## Rotation: the safety net, while the key still exists
 
-A signing key can be replaced **only while the old one is still available**.
+You can replace a signing key **only while the old one is still available**.
 `apksigner rotate` writes a `SigningCertificateLineage` that proves the old key
 authorised the new one, and this app already enables the v3 signature scheme
 that carries it. Once the old key is gone, so is this option.
@@ -181,7 +179,7 @@ apksigner rotate --out lineage.bin \
   --new-signer --ks new.jks --ks-key-alias <new alias>
 ```
 
-Then every subsequent build must be signed with **both** keys and the lineage:
+Then you must sign every subsequent build with **both** keys and the lineage:
 
 ```
 apksigner sign \
@@ -192,35 +190,35 @@ apksigner sign \
   --out signed.apk unsigned.apk
 ```
 
-Three things that will bite whoever does this:
+Three things will bite whoever does this:
 
 * **Signing with `--lineage` and only the new key fails**, with *"v2 signing
   enabled but the oldest signer in the SigningCertificateLineage is missing"*.
   The old key is not optional at signing time; it is an input to every build
   from then on.
 * **A rotated APK carries two certificates.** `apksigner verify --print-certs`
-  prints one line per signer with the SDK range it covers — measured here, the
+  prints one line per signer with the SDK range it covers. Measured here: the
   new key for `minSdkVersion=33` upwards and the old key for `24..32`. Both
   fingerprints therefore go into `android/signing-certificate.sha256`, in the
   same commit as the rotation, or the release refuses: the identity check
   requires the APK's signers and the published set to be the same set.
 * **AGP does not do this.** `signingConfigs` has no lineage support, so a
   rotated release is an `apksigner` step outside the Gradle build, and
-  `lineage.bin` becomes a permanent build input — a fifth secret, backed up
-  exactly like the keystore. Nothing in this repository implements that step
-  yet; it is written here so the option is known to exist, not because the
-  pipeline can do it today.
+  `lineage.bin` becomes a permanent build input: a fifth secret, backed up
+  like the keystore. Nothing in this repository implements that step yet; this
+  page records it so you know the option exists, and the pipeline cannot do it
+  today.
 
-Rotation is not a substitute for the backup. It needs the old key, so it only
-helps while the thing being protected has not already been lost.
+Rotation is not a substitute for the backup. It needs the old key, so it helps
+only while the thing being protected has not already been lost.
 
 ## If the key is lost anyway
 
-Say so publicly rather than quietly shipping a new one. A new key means every
-installed copy is stranded: those users must uninstall — losing the pairing and
-having to scan a fresh QR code from the desktop — and then install the new APK.
-The Releases page has to say that in those words, because from the phone's side
-the failure looks like the app being broken.
+Say so publicly instead of quietly shipping a new one. A new key strands every
+installed copy: those users must uninstall, losing the pairing and having to
+scan a fresh QR code from the desktop, and then install the new APK. The
+Releases page has to say that in those words, because from the phone's side the
+failure looks like the app being broken.
 
 Nothing here can prevent that. It can only make it unlikely, and make it obvious
 when it has happened: that is what the published fingerprint is for.
