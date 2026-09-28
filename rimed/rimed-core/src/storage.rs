@@ -1437,7 +1437,7 @@ mod tests {
     const ROOT: Reading<u32> = Reading::Known(0);
 
     /// What `/dev/loop0` is really attached to on the development machine.
-    const SYSEXT: &str = "/lib/extensions/rime-user.raw";
+    const SYSEXT: &str = "/lib/extensions/apex-user.raw";  // rime-rename: keep (captured from the development machine)
 
     /// The L16 exactly: `/` is composefs on `overlay`, the operating system
     /// lives on `nvme0n1p5`, `p1` is an unmounted ESP carrying the type GUID
