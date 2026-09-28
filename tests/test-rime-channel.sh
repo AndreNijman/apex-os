@@ -80,13 +80,15 @@ printf '%s\n' "$readback" > "$TMP/readback"
 has 'edge' "$TMP/readback" "the read-back loop includes edge"
 # The four migration tags must still be there. They are what every machine in
 # the field tracks, and a tag that stops moving does not error.
-for t in rime daily gaming-mesa gaming-nvidia; do
+# `apex` is the one the rebrand could have dropped: machines installed before (rime-rename: keep)
+# it track that tag by name. `rime` is the alias published beside it.
+for t in apex rime daily gaming-mesa gaming-nvidia; do  # rime-rename: keep (apex is a tag machines track)
     has "$t" "$TMP/readback" "the read-back loop still includes $t"
 done
 
 sec "a promotion cannot point a channel at an unsigned or skipped build"
 has 'cosign verify' "$PROMOTE" "the promotion verifies a signature"
-has 'build-image.yml@refs/heads/main' "$PROMOTE" "against this repository's build workflow on main"
+has 'build-image\.yml@refs/heads/main$' "$PROMOTE" "against this repository's build workflow on main"
 has 'already be on the channel above' "$PROMOTE" "a promotion refuses a build that skipped a channel"
 for pair in 'beta)      above=edge' 'candidate) above=beta' 'stable)    above=candidate'; do
     has "$pair" "$PROMOTE" "the ladder step '$pair' is declared"
@@ -98,7 +100,8 @@ if grep -qE '^  (push|pull_request|schedule):' "$PROMOTE"; then
 else
     ok "promote-channel.yml is workflow_dispatch only"
 fi
-has 'group: rime-image-publish' "$PROMOTE" "it shares build-image.yml's concurrency group"
+group="$(sed -n 's/^  group: \([^ ]*\).*/\1/p' "$BUILD" | head -1)"
+has "group: $group" "$PROMOTE" "it shares build-image.yml's concurrency group ($group)"
 
 sec "the rollout stop is wired into the update path, not just available"
 # A gate nobody's update consults is a report. `ops::update` is the only place

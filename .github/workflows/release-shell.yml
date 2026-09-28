@@ -18,7 +18,7 @@ on:
         default: ""
 
 concurrency:
-  group: rime-image-publish
+  group: apex-image-publish  # rime-rename: keep (build-image.yml's group; see there)
   cancel-in-progress: false
 
 permissions:
@@ -28,6 +28,12 @@ permissions:
 
 env:
   IMAGE: ghcr.io/andrenijman/rime-os
+  # Every release is ALSO published under the pre-rebrand name, as
+  # build-image.yml's last step does: machines that have not moved yet pull it.
+  OLD_IMAGE: ghcr.io/andrenijman/apex-os  # rime-rename: keep (machines that have not moved pull this)
+  # The shell repository under the name that resolves on both sides of the
+  # GitHub rename (the old name redirects; the new one exists only after).
+  SHELL_REPO: AndreNijman/apex-shell  # rime-rename: keep (works before and after the GitHub rename)
   REGISTRY: ghcr.io
 
 jobs:
@@ -45,14 +51,14 @@ jobs:
           set -euo pipefail
           sha="$REQUESTED"
           if [ -z "$sha" ]; then
-            sha="$(gh api repos/AndreNijman/rime-shell/commits/main --jq .sha)"
+            sha="$(gh api "repos/$SHELL_REPO/commits/main" --jq .sha)"
             strict=1
           else
             strict=0
           fi
           [[ "$sha" =~ ^[0-9a-f]{40}$ ]] || { echo "::error::shell_ref must resolve to a full commit SHA"; exit 1; }
           # Ensure a typo cannot produce a delayed clone failure in every matrix leg.
-          gh api "repos/AndreNijman/rime-shell/commits/$sha" --silent
+          gh api "repos/$SHELL_REPO/commits/$sha" --silent
           echo "sha=$sha" >> "$GITHUB_OUTPUT"
           echo "strict=$strict" >> "$GITHUB_OUTPUT"
           echo "Releasing rime-shell $sha"
@@ -89,16 +95,21 @@ jobs:
           platform="$IMAGE:platform-rime"
 
           # One-time migration: snapshot the last green user image. Future full
-          # platform builds refresh this tag explicitly. `:rime` is new, so fall
-          # back to `:daily` — the pre-collapse name for the same content — and
-          # then to the current `:rime` user tag.
+          # platform builds refresh this tag explicitly. `platform-rime` is new
+          # with the rebrand, so fall back to `platform-apex` (the same full (rime-rename: keep)
+          # build under its pre-rebrand tag), then `platform-daily`, then the
+          # user tags.
           if ! skopeo inspect --creds "$creds" "docker://$platform" >/dev/null 2>&1; then
-            kind_label='{{ index .Labels "org.rimeos.release.kind" }}'
+            # Both spellings: an image built before the rebrand carries
+            # org.apexos.release.kind, and reading only the new label would (rime-rename: keep)
+            # take a shell release for a platform and stack shell layers.
+            kind_label='{{ index .Labels "org.rimeos.release.kind" }}|{{ index .Labels "org.apexos.release.kind" }}'  # rime-rename: keep (read both label spellings)
             seed=""
-            for cand in "$IMAGE:platform-daily" "$IMAGE:rime" "$IMAGE:daily"; do
+            for cand in "$IMAGE:platform-apex" "$IMAGE:platform-daily" "$IMAGE:apex" "$IMAGE:daily"; do  # rime-rename: keep (pre-rebrand tags)
               skopeo inspect --creds "$creds" "docker://$cand" >/dev/null 2>&1 || continue
               existing_kind="$(skopeo inspect --creds "$creds" --format "$kind_label" \
                 "docker://$cand" 2>/dev/null || true)"
+              case "$existing_kind" in *shell*) existing_kind=shell ;; esac
               if [ "$existing_kind" = shell ]; then
                 echo "::warning::$cand is already a shell release; not seeding from it"
                 continue
@@ -115,8 +126,12 @@ jobs:
           fi
           digest="$(skopeo inspect --creds "$creds" --format '{{.Digest}}' "docker://$platform")"
           test -n "$digest"
+          # Either repository name: a platform signed before the GitHub rename
+          # names apex-os, one signed after it rime-os. Anchored both ends, and  (rime-rename: keep)
+          # nothing but that one workflow on main matches.
+          signer_re='^https://github\.com/AndreNijman/(apex|rime)-os/\.github/workflows/build-image\.yml@refs/heads/main$'  # rime-rename: keep (accepts the pre-rename repository)
           cosign verify \
-            --certificate-identity "https://github.com/AndreNijman/rime-os/.github/workflows/build-image.yml@refs/heads/main" \
+            --certificate-identity-regexp "$signer_re" \
             --certificate-oidc-issuer "https://token.actions.githubusercontent.com" \
             "$IMAGE@$digest" >/dev/null
           echo "digest=$digest" >> "$GITHUB_OUTPUT"
@@ -166,9 +181,12 @@ jobs:
             fi
           done
 
-          label='{{ index .Labels "org.rimeos.rime-shell.ref" }}'
+          # Either spelling of the label, whichever Containerfile.release writes.
+          label='{{ index .Labels "org.rimeos.rime-shell.ref" }}|{{ index .Labels "org.apexos.apex-shell.ref" }}'  # rime-rename: keep (read both label spellings)
           got="$(skopeo inspect --creds "$creds" --format "$label" "docker://$IMAGE@$digest")"
-          test "$got" = "${{ needs.resolve.outputs.shell_sha }}"
+          want_sha="${{ needs.resolve.outputs.shell_sha }}"
+          [ "${got%%|*}" = "$want_sha" ] || [ "${got#*|}" = "$want_sha" ] \
+            || { echo "::error::the image's shell-ref label is '$got', not $want_sha"; exit 1; }
 
           new_bytes="$(jq --argjson n "${#platform_layers[@]}" \
             '[.layers[$n:][]?.size] | add // 0' <<<"$final_json")"
@@ -181,18 +199,45 @@ jobs:
           # every installed machine on the previous signed image.
           cosign sign --yes "$IMAGE@$digest"
           # EVERY user-facing name, or the machines still tracking an old one
-          # stop updating. See build-image.yml's promotion step.
-          for t in rime daily gaming-mesa gaming-nvidia; do
+          # stop updating. See build-image.yml's promotion step. `apex` is the (rime-rename: keep)
+          # tag machines installed before the rebrand track; `rime` an alias.
+          TAGS="apex rime daily gaming-mesa gaming-nvidia"  # rime-rename: keep (apex is a tag machines track)
+          for t in $TAGS; do
             skopeo copy --retry-times 3 \
               --src-creds "$creds" --dest-creds "$creds" \
               "docker://$IMAGE@$digest" "docker://$IMAGE:$t"
           done
           # Read them back. skopeo exiting zero is not evidence a tag resolves.
           fail=0
-          for t in rime daily gaming-mesa gaming-nvidia; do
+          for t in $TAGS; do
             got="$(skopeo inspect --creds "$creds" --format '{{.Digest}}' "docker://$IMAGE:$t" 2>/dev/null || echo MISSING)"
             [ "$got" = "$digest" ] && { echo "  ok   :$t"; continue; }
             echo "::error::tag :$t resolves to '$got', expected '$digest'"
+            fail=1
+          done
+          [ "$fail" = 0 ] || exit 1
+
+          # And under the pre-rebrand name, for every machine that has not
+          # moved: the same digest (--preserve-digests, or the copy fails),
+          # signed under that name (a cosign signature names its repository),
+          # the same tags, read back. After the new name, so a failure here
+          # leaves the machines that have moved updated and the run red.
+          skopeo copy --retry-times 3 --preserve-digests \
+            --src-creds "$creds" --dest-creds "$creds" \
+            "docker://$IMAGE@$digest" "docker://$OLD_IMAGE:rime-release-${{ github.run_id }}"
+          got="$(skopeo inspect --creds "$creds" --format '{{.Digest}}' \
+                   "docker://$OLD_IMAGE:rime-release-${{ github.run_id }}" 2>/dev/null || echo MISSING)"
+          [ "$got" = "$digest" ] || { echo "::error::$OLD_IMAGE copy is '$got', not $digest"; exit 1; }
+          cosign sign --yes "$OLD_IMAGE@$digest"
+          for t in $TAGS; do
+            skopeo copy --retry-times 3 --preserve-digests \
+              --src-creds "$creds" --dest-creds "$creds" \
+              "docker://$IMAGE@$digest" "docker://$OLD_IMAGE:$t"
+          done
+          for t in $TAGS; do
+            got="$(skopeo inspect --creds "$creds" --format '{{.Digest}}' "docker://$OLD_IMAGE:$t" 2>/dev/null || echo MISSING)"
+            [ "$got" = "$digest" ] && { echo "  ok   $OLD_IMAGE:$t"; continue; }
+            echo "::error::$OLD_IMAGE:$t resolves to '$got', expected '$digest' — machines still on the old name would stop updating"
             fail=1
           done
           [ "$fail" = 0 ] || exit 1
@@ -208,4 +253,4 @@ jobs:
             echo "- Final image: \`$digest\`"
           } >> "$GITHUB_STEP_SUMMARY"
           echo "digest=$digest" >> "$GITHUB_OUTPUT"
-          echo "rime released at $digest (also tagged daily, gaming-mesa, gaming-nvidia)"
+          echo "released at $digest as $TAGS, under $IMAGE and $OLD_IMAGE"

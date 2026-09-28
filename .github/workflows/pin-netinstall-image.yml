@@ -31,7 +31,7 @@ on:
         required: true
 
 concurrency:
-  group: rime-image-publish
+  group: apex-image-publish  # rime-rename: keep (build-image.yml's group; see there)
   cancel-in-progress: false
 
 permissions:
@@ -81,12 +81,15 @@ jobs:
           DIGEST: ${{ inputs.digest }}
         run: |
           set -euo pipefail
-          IDENTITY="https://github.com/${{ github.repository }}/.github/workflows/build-image.yml@refs/heads/main"
+          # This repository under either name: a build signed before the GitHub
+          # rename names apex-os, one signed after it rime-os. Anchored both
+          # ends, so no other repository, workflow or ref matches.
+          IDENTITY_RE='^https://github\.com/AndreNijman/(apex|rime)-os/\.github/workflows/build-image\.yml@refs/heads/main$'  # rime-rename: keep (accepts the pre-rename repository)
           cosign verify \
-            --certificate-identity "$IDENTITY" \
+            --certificate-identity-regexp "$IDENTITY_RE" \
             --certificate-oidc-issuer https://token.actions.githubusercontent.com \
             "$IMAGE@$DIGEST" > /dev/null
-          echo "signed by $IDENTITY"
+          echo "$IMAGE@$DIGEST is signed by build-image.yml on main"
 
       - name: Tag it netinstall-<release> (write-once)
         env:

@@ -89,7 +89,7 @@ on:
         default: ""
 
 concurrency:
-  group: rime-image-publish
+  group: apex-image-publish  # rime-rename: keep (build-image.yml's group; see there)
   cancel-in-progress: false
 
 permissions:
@@ -99,12 +99,36 @@ permissions:
 
 env:
   REGISTRY: ghcr.io
-  IMAGE: ghcr.io/andrenijman/rime-os
 
 jobs:
   promote:
-    name: ${{ inputs.mode }} ${{ inputs.channel }}
+    name: ${{ inputs.mode }} ${{ inputs.channel }} (${{ matrix.image }})
     runs-on: ubuntu-24.04
+    # ═══ BOTH NAMES, ONE AFTER THE OTHER ═══
+    #
+    # The rebrand (2026-09-28). build-image.yml publishes every build under the
+    # new name AND the pre-rebrand one, because GHCR does not redirect a
+    # renamed package and a machine keeps following the name in its origin
+    # until `rime update` moves it. A channel tag is what such a machine
+    # follows, so every promotion is made under both, each leg complete: the
+    # signature checked under that name, the ladder checked under that name,
+    # the tag moved and read back, and a rollout document of that name's own
+    # (the client refuses a document whose `repository` is not the one it
+    # follows, so one document cannot serve both).
+    #
+    # max-parallel 1 with fail-fast runs the new name first and never starts
+    # the old one if the new one failed, so a half-done promotion is always
+    # "the new name moved, the old one did not": machines on the old name stay
+    # on the previous channel build, and a re-run finishes the job.
+    strategy:
+      max-parallel: 1
+      fail-fast: true
+      matrix:
+        image:
+          - ghcr.io/andrenijman/rime-os
+          - ghcr.io/andrenijman/apex-os  # rime-rename: keep (machines that have not moved follow this name)
+    env:
+      IMAGE: ${{ matrix.image }}
     steps:
       - name: Install cosign
         uses: sigstore/cosign-installer@v3
@@ -169,12 +193,15 @@ jobs:
           DIGEST: ${{ inputs.digest }}
         run: |
           set -euo pipefail
-          IDENTITY="https://github.com/${{ github.repository }}/.github/workflows/build-image.yml@refs/heads/main"
+          # This repository under either name: a build signed before the GitHub
+          # rename names apex-os, one signed after it rime-os. Anchored both (rime-rename: keep)
+          # ends, so no other repository, workflow or ref matches.
+          IDENTITY_RE='^https://github\.com/AndreNijman/(apex|rime)-os/\.github/workflows/build-image\.yml@refs/heads/main$'  # rime-rename: keep (accepts the pre-rename repository)
           cosign verify \
-            --certificate-identity "$IDENTITY" \
+            --certificate-identity-regexp "$IDENTITY_RE" \
             --certificate-oidc-issuer https://token.actions.githubusercontent.com \
             "$IMAGE@$DIGEST" > /dev/null
-          echo "signed by $IDENTITY"
+          echo "$IMAGE@$DIGEST is signed by build-image.yml on main"
 
       - name: The digest must already be on the channel above this one
         if: inputs.mode == 'promote'
@@ -260,7 +287,9 @@ jobs:
           import json, os, shutil, sys
           D = os.environ.get("ROLLOUT_DIR", "/tmp")
           m = json.load(open(f"{D}/rollout-old/manifest.json"))
-          want = "application/vnd.rimeos.rollout.v1+json"
+          # The pre-rebrand media type, KEPT: every client in the field looks
+          # for exactly this string (rimed-core's ROLLOUT_MEDIA_TYPE).
+          want = "application/vnd.apexos.rollout.v1+json"  # rime-rename: keep (a wire format fielded clients parse)
           # The layer the manifest NAMES, never "the first file in the
           # directory": `skopeo copy … dir:` writes the config blob beside it,
           # and taking the wrong one would reset the serial to zero — the one
@@ -366,14 +395,16 @@ jobs:
           json.dump({
               "schemaVersion": 2,
               "mediaType": "application/vnd.oci.image.manifest.v1+json",
-              "artifactType": "application/vnd.rimeos.rollout.v1+json",
+              # KEPT under its pre-rebrand name: every client in the field
+              # finds the document by this media type (ROLLOUT_MEDIA_TYPE).
+              "artifactType": "application/vnd.apexos.rollout.v1+json",  # rime-rename: keep (wire format)
               "config": {
                   "mediaType": "application/vnd.oci.empty.v1+json",
                   "digest": "sha256:" + ch,
                   "size": len(cfg),
               },
               "layers": [{
-                  "mediaType": "application/vnd.rimeos.rollout.v1+json",
+                  "mediaType": "application/vnd.apexos.rollout.v1+json",  # rime-rename: keep (wire format)
                   "digest": "sha256:" + bh,
                   "size": len(body),
               }],
