@@ -579,10 +579,12 @@ no_edid="$(printf '%s' "$state" | jqp '[o["hdr"] for o in d["outputs"] if o["nam
 # keyed on the connector hands the second monitor the first one's profile.
 id_edp="$(printf '%s' "$state" | jqp '[o["device"] for o in d["outputs"] if o["name"]=="eDP-1"][0]')"
 id_hdmi="$(printf '%s' "$state" | jqp '[o["device"] for o in d["outputs"] if o["name"]=="HDMI-A-1"][0]')"
-[ "$id_edp" = "rime-display-APX-PANEL-SDR-SN0001" ] \
+# rime-rename: keep — the colord device id prefix (colord stores assignments by it)
+[ "$id_edp" = "apex-display-APX-PANEL-SDR-SN0001" ] \
     && ok "the colord device id is built from the EDID" \
     || bad "the colord device id is built from the EDID (got $id_edp)"
-[ "$id_hdmi" = "rime-display-HDMI-A-1" ] \
+# rime-rename: keep — the colord device id prefix (colord stores assignments by it)
+[ "$id_hdmi" = "apex-display-HDMI-A-1" ] \
     && ok "with no EDID the id falls back to the connector" \
     || bad "with no EDID the id falls back to the connector (got $id_hdmi)"
 
@@ -628,10 +630,12 @@ grep -qE 'create-device|make-profile-default' "${CM_STATE}.calls" \
 
 out="$(colour Hyprland color-assign eDP-1 icc-with 2>&1)"; rc=$?
 [ "$rc" -eq 0 ] && ok "color-assign succeeds" || bad "color-assign succeeds (rc=$rc)"
-grep -qx "rime-display-APX-PANEL-SDR-SN0001" "${CM_STATE}.devices" \
+# rime-rename: keep — the colord device id prefix (colord stores assignments by it)
+grep -qx "apex-display-APX-PANEL-SDR-SN0001" "${CM_STATE}.devices" \
     && ok "the output was registered with colord under its EDID id" \
     || bad "the output was registered with colord under its EDID id"
-grep -q "device-make-profile-default rime-display-APX-PANEL-SDR-SN0001 icc-with" "${CM_STATE}.calls" \
+# rime-rename: keep — the colord device id prefix (colord stores assignments by it)
+grep -q "device-make-profile-default apex-display-APX-PANEL-SDR-SN0001 icc-with" "${CM_STATE}.calls" \
     && ok "the profile was made the device default" \
     || bad "the profile was made the device default"
 

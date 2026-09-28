@@ -902,19 +902,24 @@ def device_id(name, raw):
     EDID first, connector second. A connector name is a slot on the graphics
     card: unplug a calibrated monitor from DP-1 and plug a different one in, and
     an id keyed on the connector hands the second monitor the first one's
-    profile. The EDID travels with the panel. `rime-display-` prefixed because
+    profile. The EDID travels with the panel. `apex-display-` prefixed because
     nothing else on this image creates colord devices, so there is nothing to
     collide with and everything to explain.
+
+    The prefix keeps its APEX spelling on purpose (rime-rename: keep). colord
+    remembers which profile is the default for a device BY THIS ID, in its own
+    database, across reboots; renaming it would drop every ICC assignment a
+    user made before the rename, with nothing on screen saying so.
     """
     mfg, model, serial = edid_identity(raw)
     parts = [p for p in (mfg, model, serial) if p]
     if not parts:
-        return "rime-display-" + name
+        return "apex-display-" + name  # rime-rename: keep — colord's stored device id
     ident = "-".join(parts)
     ident = "".join(c if c.isalnum() or c == "-" else "-" for c in ident)
     while "--" in ident:
         ident = ident.replace("--", "-")
-    return "rime-display-" + ident.strip("-")
+    return "apex-display-" + ident.strip("-")  # rime-rename: keep — colord's stored device id
 
 
 def curve_verdict(which):
