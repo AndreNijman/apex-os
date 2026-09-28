@@ -240,7 +240,8 @@ fi
 
 # ids are the load-bearing half and must NOT have moved with the wording.
 ids="$(printf '%s\n' "$out" | awk -F'\t' '{ print $1 }' | sort | tr '\n' ' ')"
-is "the ids behind those names are unchanged" "rime-labwc hyprland niri " "$ids"
+# (Sorted: since the rename rime-labwc sorts after the others.)
+is "the ids behind those names are unchanged" "hyprland niri rime-labwc " "$ids"
 
 # The default session is named, not positional, and it is named by id.
 want_default="$(grep -oE 'defaultSession: "[^"]*"' "$GREETER" | head -n1 | cut -d'"' -f2)"
@@ -538,6 +539,17 @@ else
     # decision this function invented.
     got4="$(node "$SEL_JS" '[["nosuchsession",["zzz-only"]]]' 2>/dev/null | tr -d '[]" ')"
     is "an unknown default selects nothing rather than guessing" "zzz-only" "$got4"
+
+    # A memory written by an APEX greeter names the session by its APEX id
+    # (rime-rename: keep — the ids in /var/lib/rime-greet/last-session on
+    # upgraded machines). It must still select that session under its new id,
+    # and one that is not installed must still fall back to the default.
+    got5="$(node "$SEL_JS" "[[\"apex-labwc\",$INSTALLED],[\"apex-gaming\",$NOGAMING]]" 2>/dev/null)"
+    got5a="$(printf '%s' "$got5" | sed 's/.*\[//;s/\].*//' | cut -d, -f1 | tr -d '" ')"
+    got5b="$(printf '%s' "$got5" | sed 's/.*\[//;s/\].*//' | cut -d, -f2 | tr -d '" ')"
+    is "a session remembered by its APEX id is selected under its new one" "rime-labwc" "$got5a"
+    is "…and a remembered APEX id that is not installed falls back to the default" \
+       "$sel_default" "$got5b"
 fi
 fi
 

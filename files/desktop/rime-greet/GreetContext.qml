@@ -143,9 +143,19 @@ Item {
         // sorts first — rime-labwc on a built image — and the named default
         // they would otherwise have landed on was never consulted, because the
         // protection below was only ever wired to the empty-memory path.
+        //
+        // A memory written before the rename names the session by its APEX id
+        // (apex-labwc, apex-gaming): last-session lives in /var/lib and outlives
+        // the image that wrote it. The entries are rime-* now, so an apex-* id
+        // is also tried under its new name — otherwise everyone who used
+        // Floating would land on the default at their first Rime login.
         if (ctx._wantSession !== "") {
-            for (var i = 0; i < ctx.sessions.length; i++)
-                if (ctx.sessions[i].id === ctx._wantSession) { ctx.sessionIndex = i; return }
+            var wants = [ctx._wantSession]
+            if (ctx._wantSession.indexOf("apex-") === 0)  // rime-rename: keep — ids remembered before the rename
+                wants.push("rime-" + ctx._wantSession.slice(5))
+            for (var w = 0; w < wants.length; w++)
+                for (var i = 0; i < ctx.sessions.length; i++)
+                    if (ctx.sessions[i].id === wants[w]) { ctx.sessionIndex = i; return }
             // Remembered but no longer installed: fall through to the default.
         }
         // Otherwise fall back to the named default rather than glob position.
