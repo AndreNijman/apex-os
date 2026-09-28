@@ -57,6 +57,15 @@ use std::path::{Path, PathBuf};
 /// generalises the rest of it.
 pub const PROJECT_FILE: &str = "rime.toml";
 
+/// The name the project file had before the rename to Rime OS.
+///
+/// A project is a git repository: the file is committed, cloned onto other
+/// machines and pushed to colleagues, so nothing on this machine can rename it
+/// everywhere. It is read when [`PROJECT_FILE`] is absent, and never when
+/// [`PROJECT_FILE`] exists, so a project that has moved to the new name is not
+/// also bound by a stale copy under the old one.
+pub const LEGACY_PROJECT_FILE: &str = "apex.toml";  // rime-rename: keep (committed in users' repositories)
+
 /// Largest project file this will read, in bytes.
 pub const MAX_PROJECT_FILE: u64 = 64 * 1024;
 
@@ -404,10 +413,34 @@ pub struct ProjectConfig {
 }
 
 impl ProjectConfig {
-    /// Read and parse `<root>/rime.toml`.
+    /// Read and parse `<root>/rime.toml`, or `<root>/apex.toml` when a project
+    /// still carries only the file's old name.
+    ///
+    /// Only an absent `rime.toml` falls back. Any other refusal — a symlink, a
+    /// file owned by somebody else, one too big — is returned as it is: the
+    /// file is there and says something, and reading a different one instead
+    /// would be how a project got bound by the wrong file. When neither name
+    /// exists the error names `rime.toml`, the one to create.
     pub fn read(root: &Path, owner_uid: u32, owner_name: &str) -> Result<ProjectConfig, ProjectError> {
-        let bytes = read_file(root, PROJECT_FILE, owner_uid, owner_name, MAX_PROJECT_FILE)?;
-        let path = root.join(PROJECT_FILE);
+        match ProjectConfig::read_named(root, PROJECT_FILE, owner_uid, owner_name) {
+            Err(ProjectError::Absent { path }) => {
+                match ProjectConfig::read_named(root, LEGACY_PROJECT_FILE, owner_uid, owner_name) {
+                    Err(ProjectError::Absent { .. }) => Err(ProjectError::Absent { path }),
+                    other => other,
+                }
+            }
+            other => other,
+        }
+    }
+
+    fn read_named(
+        root: &Path,
+        file: &str,
+        owner_uid: u32,
+        owner_name: &str,
+    ) -> Result<ProjectConfig, ProjectError> {
+        let bytes = read_file(root, file, owner_uid, owner_name, MAX_PROJECT_FILE)?;
+        let path = root.join(file);
         let text = String::from_utf8(bytes).map_err(|_| ProjectError::Malformed {
             path: path.clone(),
             line: 0,
@@ -702,6 +735,58 @@ mod tests {
             Some("acme")
         );
         assert_eq!(cfg.path(), dir.0.join("rime.toml"));
+    }
+
+    #[test]
+    fn a_project_that_still_carries_the_old_file_name_is_read() {
+        // Projects are repositories, committed and cloned elsewhere; the
+        // rename cannot reach every copy of the file.
+        let dir = scratch("legacy");
+        write(&dir.0, LEGACY_PROJECT_FILE, "[identity.cloudflare]\naccount = \"acme\"\n");
+        let (uid, name) = me();
+        let cfg = ProjectConfig::read(&dir.0, uid, &name).expect("read");
+        assert_eq!(
+            cfg.string(&["identity", "cloudflare", "account"]).unwrap(),
+            Some("acme")
+        );
+        // Every refusal names the file that was actually read.
+        assert_eq!(cfg.path(), dir.0.join(LEGACY_PROJECT_FILE));
+    }
+
+    #[test]
+    fn the_new_file_name_wins_over_the_old_one() {
+        let dir = scratch("both");
+        write(&dir.0, PROJECT_FILE, "[identity.cloudflare]\naccount = \"new\"\n");
+        write(&dir.0, LEGACY_PROJECT_FILE, "[identity.cloudflare]\naccount = \"old\"\n");
+        let (uid, name) = me();
+        let cfg = ProjectConfig::read(&dir.0, uid, &name).expect("read");
+        assert_eq!(cfg.string(&["identity", "cloudflare", "account"]).unwrap(), Some("new"));
+        assert_eq!(cfg.path(), dir.0.join(PROJECT_FILE));
+    }
+
+    #[test]
+    fn a_project_with_neither_file_is_absent_under_the_new_name() {
+        let dir = scratch("neither");
+        let (uid, name) = me();
+        match ProjectConfig::read(&dir.0, uid, &name) {
+            Err(ProjectError::Absent { path }) => assert_eq!(path, dir.0.join(PROJECT_FILE)),
+            other => panic!("expected Absent, got {other:?}"),
+        }
+    }
+
+    #[test]
+    fn a_refused_new_file_does_not_fall_back_to_the_old_one() {
+        // The fallback is for a file that is not there. One that is there and
+        // refused must not be quietly replaced by a different file.
+        let dir = scratch("refused");
+        write(&dir.0, "real.toml", "[cloudflare]\nzone = \"example.com\"\n");
+        symlink("real.toml", dir.0.join(PROJECT_FILE)).expect("symlink");
+        write(&dir.0, LEGACY_PROJECT_FILE, "[identity.cloudflare]\naccount = \"old\"\n");
+        let (uid, name) = me();
+        assert!(matches!(
+            ProjectConfig::read(&dir.0, uid, &name),
+            Err(ProjectError::Symlink { .. })
+        ));
     }
 
     #[test]
