@@ -21,6 +21,15 @@ use crate::paths;
 /// of them.
 pub const WORKTREE_DIR: &str = ".rime/worktrees";
 
+/// Where agent worktrees were made before the rename to Rime OS.
+///
+/// A worktree that already exists stays where git checked it out: moving it
+/// would mean rewriting git's own worktree records in every project, with
+/// sessions possibly working inside. So an existing tree under the old
+/// directory is still found, reused and removed by name, and every new one is
+/// made under [`WORKTREE_DIR`].
+pub const LEGACY_WORKTREE_DIR: &str = ".apex/worktrees";  // rime-rename: keep (existing agent worktrees are checked out there)
+
 /// Branch prefix for agent worktrees, matching the roadmap's `agent/issue-217`.
 pub const BRANCH_PREFIX: &str = "agent";
 
@@ -78,9 +87,25 @@ impl Project {
         Path::new(&self.root).join(WORKTREE_DIR)
     }
 
+    /// Where agent worktrees made before the rename live. See
+    /// [`LEGACY_WORKTREE_DIR`].
+    pub fn legacy_worktree_root(&self) -> PathBuf {
+        Path::new(&self.root).join(LEGACY_WORKTREE_DIR)
+    }
+
     /// The path a named worktree gets.
+    ///
+    /// The old directory's copy when that one exists and the new one does
+    /// not, so `--worktree issue-217` reattaches to a tree made before the
+    /// rename instead of failing on a branch that is already checked out there.
     pub fn worktree_path(&self, name: &str) -> PathBuf {
-        self.worktree_root().join(git::slugify(name))
+        let slug = git::slugify(name);
+        let path = self.worktree_root().join(&slug);
+        let legacy = self.legacy_worktree_root().join(&slug);
+        if !path.exists() && legacy.is_dir() {
+            return legacy;
+        }
+        path
     }
 
     /// The branch a named worktree gets.
@@ -357,10 +382,12 @@ pub struct AgentWorktree {
 pub fn worktrees(project: &Project) -> Result<Vec<AgentWorktree>> {
     let root = Path::new(&project.root);
     let wt_root = project.worktree_root();
+    let legacy_root = project.legacy_worktree_root();
     Ok(git::worktrees(root)?
         .into_iter()
         .map(|w| {
-            let is_agent = !w.is_main && w.path.starts_with(&wt_root);
+            let is_agent = !w.is_main
+                && (w.path.starts_with(&wt_root) || w.path.starts_with(&legacy_root));
             let name = if is_agent {
                 w.path
                     .file_name()
@@ -597,6 +624,36 @@ mod tests {
             path.display()
         );
         assert!(!path.to_string_lossy().contains(".."));
+    }
+
+    #[test]
+    fn a_worktree_made_before_the_rename_is_found_where_it_is() {
+        let dir = std::env::temp_dir().join(format!(
+            "rime-project-legacy-wt-{}-{:?}",
+            std::process::id(),
+            std::thread::current().id()
+        ));
+        let _ = std::fs::remove_dir_all(&dir);
+        let mut p = project();
+        p.root = dir.to_string_lossy().into_owned();
+
+        // Nothing on disk: a new tree goes under the new directory.
+        assert_eq!(p.worktree_path("issue-217"), dir.join(WORKTREE_DIR).join("issue-217"));
+
+        // A tree under the old directory is reused by name.
+        std::fs::create_dir_all(dir.join(LEGACY_WORKTREE_DIR).join("issue-217")).unwrap();
+        assert_eq!(
+            p.worktree_path("issue-217"),
+            dir.join(LEGACY_WORKTREE_DIR).join("issue-217")
+        );
+        // Other names are unaffected.
+        assert_eq!(p.worktree_path("other"), dir.join(WORKTREE_DIR).join("other"));
+
+        // Once the new directory has the name, it wins.
+        std::fs::create_dir_all(dir.join(WORKTREE_DIR).join("issue-217")).unwrap();
+        assert_eq!(p.worktree_path("issue-217"), dir.join(WORKTREE_DIR).join("issue-217"));
+
+        let _ = std::fs::remove_dir_all(&dir);
     }
 
     #[test]
