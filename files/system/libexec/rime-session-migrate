@@ -557,6 +557,39 @@ NIRI_OLD_INCLUDE = re.compile(
     r'^(\s*include\s+")[^"]*/\.config/apex-shell/ApexShell(Input|Keybinds)\.kdl(".*)$')  # rime-rename: keep — include lines on disk
 
 
+def drop_reappended_niri_block(text):
+    """Remove an APEX include block when the Rime one is already there.
+
+    A rollback runs the APEX shell's firstrun, which finds no block under its
+    own marker (this migration renamed it) and appends one; the next Rime login
+    would rename that into a second Rime block, and every round trip would add
+    another. The Rime block already includes the same generated files (the old
+    names are links to the new), so the appended one is dropped instead: at
+    most one APEX block exists, and only while APEX is the image running.
+    Only a block of exactly the marker, its comment lines and matching include
+    lines is removed; anything else under the marker leaves the file alone.
+    """
+    if NEW_NIRI_INC not in text or OLD_NIRI_INC not in text:
+        return text
+    lines = text.split("\n")
+    start = next((i for i, l in enumerate(lines) if l == OLD_NIRI_INC), None)
+    if start is None:
+        return text
+    end = start + 1
+    while end < len(lines) and lines[end].lstrip().startswith("//"):
+        end += 1
+    first_include = end
+    while end < len(lines) and NIRI_OLD_INCLUDE.match(lines[end]):
+        end += 1
+    if end == first_include:
+        return text
+    if end < len(lines) and lines[end].strip():
+        return text
+    if start > 0 and not lines[start - 1].strip():
+        start -= 1
+    return "\n".join(lines[:start] + lines[end:])
+
+
 def step_niri(ctx, image):
     conf = os.path.join(ctx["config"], "niri", "config.kdl")
     if os.path.islink(conf) and not os.path.exists(conf):
@@ -565,7 +598,7 @@ def step_niri(ctx, image):
     if text is None:
         return
     shell_cfg = os.path.join(ctx["home"], ".config", NEW_SHELL)
-    lines = text.split("\n")
+    lines = drop_reappended_niri_block(text).split("\n")
     out, rewrote_include, left_old = [], False, False
     for line in lines:
         m = NIRI_OLD_INCLUDE.match(line)
