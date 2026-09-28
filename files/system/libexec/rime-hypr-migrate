@@ -6,10 +6,13 @@ Hyprland 0.55 deprecated hyprlang and gave it "1-2 releases starting from
 ever seeded is one release from not loading. This converts one.
 
     ~/.config/hypr/hyprland.conf                 ~/.config/hypr/hyprland.lua
-    ~/.config/hypr/rime-input.conf         ──►   ~/.config/hypr/rime/input.lua
-    ~/.config/hypr/rime-display.conf             ~/.config/hypr/rime/monitors.lua
-    ~/.config/rime-shell/RimeShellKeybinds.conf  ~/.config/hypr/rime/shell-keybinds.lua
+    ~/.config/hypr/apex-input.conf         ──►   ~/.config/hypr/rime/input.lua
+    ~/.config/hypr/apex-display.conf             ~/.config/hypr/rime/monitors.lua
+    ~/.config/rime-shell/ApexShellKeybinds.conf  ~/.config/hypr/rime/shell-keybinds.lua
                                                  ~/.config/hypr/rime/user-overrides.lua
+
+The left column keeps its APEX names on purpose (rime-rename: keep): every
+hyprlang config was seeded by an APEX image, and those are the files on disk.
 
 ## The rule that matters
 
@@ -64,10 +67,13 @@ BANNER = "Converted from hyprlang by rime-hypr-migrate"
 # Values that have stood in for these variables across image generations.
 RIME_VARS = {
     "terminal":    {"alacritty"},
-    "browser":     {"/usr/libexec/rime-open-browser", "firefox", "zen"},
+    "browser":     {"/usr/libexec/rime-open-browser", "firefox", "zen",
+                    "/usr/libexec/apex-open-browser"},  # rime-rename: keep — the APEX-era value on disk
     "fileManager": {"thunar"},
-    "shellDir":    {"/usr/share/rime-shell"},
-    "qsIpc":       {"qs -p /usr/share/rime-shell ipc call"},
+    "shellDir":    {"/usr/share/rime-shell",
+                    "/usr/share/apex-shell"},  # rime-rename: keep — the APEX-era value on disk
+    "qsIpc":       {"qs -p /usr/share/rime-shell ipc call",
+                    "qs -p /usr/share/apex-shell ipc call"},  # rime-rename: keep — the APEX-era value on disk
     "mainMod":     {"SUPER"},
 }
 
@@ -83,6 +89,14 @@ RIME_DEFAULT_BINDS = {
     ("SUPER", "L", "exec", "rime shell lock"),
     ("", "PRINT", "exec", "bash /usr/share/rime-shell/src/scripts/screenshot.sh area"),
     ("SUPER", "PRINT", "exec", "bash /usr/share/rime-shell/src/scripts/screenshot.sh screen"),
+    # Every hyprland.conf this converts was seeded by an APEX image, so the
+    # spellings actually on disk are these. Without them each of the four binds
+    # reads as a user edit and lands in user-overrides.lua on top of the default
+    # it duplicates: two binds on one combo, both firing.
+    ("SUPER", "W", "exec", "/usr/libexec/apex-open-browser"),  # rime-rename: keep — APEX-era default
+    ("SUPER", "L", "exec", "apex shell lock"),  # rime-rename: keep — APEX-era default
+    ("", "PRINT", "exec", "bash /usr/share/apex-shell/src/scripts/screenshot.sh area"),  # rime-rename: keep — APEX-era default
+    ("SUPER", "PRINT", "exec", "bash /usr/share/apex-shell/src/scripts/screenshot.sh screen"),  # rime-rename: keep — APEX-era default
     ("SUPER", "F", "fullscreen", "0"),
     ("SHIFT+SUPER", "SPACE", "togglefloating", None),
     ("SUPER", "P", "pseudo", None),
@@ -149,6 +163,7 @@ RIME_DEFAULT_ENV = {
 RIME_DEFAULT_EXEC_ONCE = {
     "awww-daemon",
     "/usr/libexec/rime-shell-autostart",
+    "/usr/libexec/apex-shell-autostart",  # rime-rename: keep — the APEX-era autostart on disk
     "/usr/libexec/polkit-mate-authentication-agent-1",
     "wl-paste --type text --watch cliphist store",
     "wl-paste --type image --watch cliphist store",
@@ -173,7 +188,39 @@ RIME_MARKERS = (
     "rime-shell-autostart",
     "RimeShellKeybinds",
     "/usr/share/rime-shell",
+    # What an APEX image seeded, which is every hyprland.conf there is: the Lua
+    # config predates the rename, so no Rime image ever wrote a hyprlang one.
+    "APEX-OS",  # rime-rename: keep — marker in configs APEX seeded
+    "apex-shell-autostart",  # rime-rename: keep — marker in configs APEX seeded
+    "ApexShellKeybinds",  # rime-rename: keep — marker in configs APEX seeded
+    "/usr/share/apex-shell",  # rime-rename: keep — marker in configs APEX seeded
 )
+
+# The three hyprlang fragments the generators used to write, by the names an
+# APEX image gave them. They are what `source =` lines in a seeded config name.
+LEGACY_FRAGMENTS = (
+    "apex-input.conf",  # rime-rename: keep — file name on disk
+    "apex-display.conf",  # rime-rename: keep — file name on disk
+    "ApexShellKeybinds.conf",  # rime-rename: keep — file name on disk
+    "rime-input.conf", "rime-display.conf", "RimeShellKeybinds.conf",
+)
+
+
+def first_existing(*paths):
+    """The first path that exists, else the first one named.
+
+    The shell's config directory moved from ~/.config/apex-shell to
+    ~/.config/rime-shell (rime-session-migrate renames it and leaves the old
+    name as a symlink), and the file inside kept its APEX name. Listing one
+    path per module rather than every spelling matters: two spellings of one
+    file would be converted twice and renamed twice, and the second rename
+    fails on a file the first one already moved.
+    """
+    for path in paths:
+        if os.path.exists(path):
+            return path
+    return paths[0]
+
 
 # hyprlang bind verbs and the Lua bind options they become.
 BIND_VERBS = {
@@ -480,8 +527,7 @@ def convert(text, variables=None, source="hyprland.conf"):
 
         if name == "source":
             # The three Rime fragments are migrated by their own converters.
-            if any(marker in value for marker in
-                   ("rime-input.conf", "rime-display.conf", "RimeShellKeybinds.conf")):
+            if any(marker in value for marker in LEGACY_FRAGMENTS):
                 result.dropped += 1
             else:
                 result.note(d, "a `source` of a file Rime does not manage; "
@@ -730,9 +776,14 @@ def migrate(home, dry_run=False, force=False):
     # settings page, and until then the session would be missing every popup
     # keybind, every saved monitor and every input override.
     generated = [
-        (os.path.join(hypr, "rime-input.conf"), "input"),
-        (os.path.join(hypr, "rime-display.conf"), "monitors"),
-        (os.path.join(home, ".config/rime-shell/RimeShellKeybinds.conf"), "shell-keybinds"),
+        (first_existing(os.path.join(hypr, "apex-input.conf"),  # rime-rename: keep — file name on disk
+                        os.path.join(hypr, "rime-input.conf")), "input"),
+        (first_existing(os.path.join(hypr, "apex-display.conf"),  # rime-rename: keep — file name on disk
+                        os.path.join(hypr, "rime-display.conf")), "monitors"),
+        (first_existing(
+            os.path.join(home, ".config/rime-shell/ApexShellKeybinds.conf"),  # rime-rename: keep — file name on disk
+            os.path.join(home, ".config/apex-shell/ApexShellKeybinds.conf"),  # rime-rename: keep — file name on disk
+            os.path.join(home, ".config/rime-shell/RimeShellKeybinds.conf")), "shell-keybinds"),
     ]
 
     modules = {}
@@ -848,16 +899,22 @@ def migrate(home, dry_run=False, force=False):
 
 
 # ── self-test ────────────────────────────────────────────────────────────────
+# The sample is spelled the way the configs this converts are spelled: every
+# hyprland.conf in the field was seeded by an APEX image. A sample in the new
+# names would pass while every real config was refused (no marker) or had its
+# defaults duplicated (no match), which is what the rename did to this file.
 SAMPLE = """\
-# Rime OS — default Hyprland config
+# APEX-OS — default Hyprland config  # rime-rename: keep — an APEX-seeded config
 $mainMod = SUPER
 $terminal = alacritty
 $browser = firefox
+$shellDir = /usr/share/apex-shell  # rime-rename: keep — APEX-era value
 monitor = , preferred, auto, 1.0
 monitor = eDP-1, 2560x1600@165, 0x0, 1.5
 env = XCURSOR_SIZE,24
 env = MOZ_ENABLE_WAYLAND,1
 exec-once = awww-daemon
+exec-once = /usr/libexec/apex-shell-autostart  # rime-rename: keep — APEX-era default
 exec-once = my-own-daemon --flag
 input {
     kb_layout = us
@@ -883,6 +940,9 @@ input {
 }
 bind = $mainMod, T, exec, $terminal
 bind = $mainMod, Q, killactive
+bind = $mainMod, W, exec, /usr/libexec/apex-open-browser  # rime-rename: keep — APEX-era default
+bind = $mainMod, L, exec, apex shell lock  # rime-rename: keep — APEX-era default
+bind = , Print, exec, bash $shellDir/src/scripts/screenshot.sh area
 bind = $mainMod, T, exec, kitty
 bind = $mainMod, G, exec, gimp
 bind = $mainMod SHIFT, left, movewindow, l
@@ -894,7 +954,7 @@ bindl = , XF86AudioPlay, exec, playerctl play-pause
 windowrule = suppress_event maximize, match:class .*
 windowrule = float, match:class ^(pavucontrol)$
 bezier = mine, 0.1, 0.2, 0.3, 0.4
-source = /home/u/.config/hypr/rime-input.conf
+source = /home/u/.config/hypr/apex-input.conf  # rime-rename: keep — APEX-era fragment
 source = /home/u/.config/hypr/my-extra.conf
 gesture = 3, horizontal, workspace
 gesture = 4, vertical, special
@@ -938,6 +998,17 @@ def self_test():
           'direction = "horizontal"' not in text)
     check("the Rime window rule is dropped",
           "suppress_event" not in text)
+    check("the APEX-era browser bind is dropped as a default",
+          "open-browser" not in text)
+    check("the APEX-era lock bind is dropped as a default",
+          "shell lock" not in text)
+    check("the APEX-era screenshot bind is dropped as a default",
+          "screenshot.sh" not in text)
+    check("the APEX-era shell autostart is dropped as a default",
+          "shell-autostart" not in text)
+    check("...so no default is disabled and rebound on top of itself",
+          'defaults.disable("SUPER", "W")' not in text
+          and 'defaults.disable("SUPER", "L")' not in text)
 
     # User overrides survive.
     check("a user monitor is converted",
@@ -996,8 +1067,8 @@ def self_test():
     # what they wrote, and it repairs a line that had silently done nothing.
     check("a nested one-line block is parsed rather than mangled",
           "middle_button_emulation = true," in text)
-    check("the Rime source lines are NOT reported",
-          "rime-input.conf" not in raws)
+    check("the APEX-era source line is NOT reported",
+          "input.conf" not in raws)
 
     valid = validate_lua("selftest", text)
     if valid is None:
@@ -1011,8 +1082,29 @@ def self_test():
         conf = os.path.join(home, ".config/hypr/hyprland.conf")
         with open(conf, "w", encoding="utf-8") as fh:
             fh.write(SAMPLE)
+        # The generated fragments, under the names an APEX image wrote them:
+        # apex-input.conf beside the config, and the shell's keybind fragment
+        # inside the shell's config directory, which rime-session-migrate has
+        # renamed to rime-shell by the time this runs.
+        frag_in = os.path.join(home, ".config/hypr/apex-input.conf")  # rime-rename: keep — file name on disk
+        with open(frag_in, "w", encoding="utf-8") as fh:
+            fh.write("input {\n    sensitivity = -0.25\n}\n")
+        os.makedirs(os.path.join(home, ".config/rime-shell"))
+        os.symlink("rime-shell", os.path.join(home, ".config/apex-shell"))  # rime-rename: keep — the compat link
+        frag_kb = os.path.join(home, ".config/rime-shell/ApexShellKeybinds.conf")  # rime-rename: keep — file name on disk
+        with open(frag_kb, "w", encoding="utf-8") as fh:
+            fh.write("bind = SUPER, F9, exec, my-shell-thing\n")
         code, _ = migrate(home)
         check("a first migration succeeds", code == 0)
+        check("the APEX-era input fragment becomes rime/input.lua",
+              "sensitivity = -0.25" in (read(os.path.join(home, ".config/hypr/rime/input.lua")) or ""))
+        check("...and is renamed away", not os.path.exists(frag_in))
+        check("the APEX-era shell keybind fragment becomes rime/shell-keybinds.lua",
+              "my-shell-thing" in (read(os.path.join(home, ".config/hypr/rime/shell-keybinds.lua")) or ""))
+        check("...converted once, through one of its two names",
+              not os.path.exists(frag_kb)
+              and len([f for f in os.listdir(os.path.join(home, ".config/rime-shell"))
+                       if f.endswith(".conf") or ".pre-lua." in f]) == 1)
         check("hyprland.conf is renamed away",
               not os.path.exists(conf))
         backups = [f for f in os.listdir(os.path.join(home, ".config/hypr"))
