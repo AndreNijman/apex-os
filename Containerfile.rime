@@ -340,6 +340,47 @@ RUN set -eux; \
     printf 'kargs = ["quiet", "splash"]\n' \
         > /usr/lib/bootc/kargs.d/20-rime-plymouth.toml
 
+# ── The APEX-OS names, kept working for a release or two ─────────────────── (rime-rename: keep)
+# Andre: "keep `apex` working for a release or two". Existing machines name the
+# old spellings where no update rewrites them: units a person enabled
+# (`systemctl --user enable apex-agentd`), labwc/Hyprland/niri configs seeded
+# into home directories, an edited /etc/greetd/config.toml, MCP entries in
+# ~/.claude.json that launch `apex mcp run`. So:
+#   * /usr/bin/apex runs rime, with one line on stderr and nothing on stdout
+#     (stdio MCP servers speak on stdout);
+#   * every unit, /usr/libexec helper and /usr/share tree the old image
+#     shipped keeps its old name as a relative link to the new one
+#     (files/scripts/install-rename-compat has the lists and the reasons).
+# Here, at the very end, because the gaming-session helpers above are among
+# the targets and a link to a file that is not there yet fails the build.
+# tests/test-rime-rename-compat.sh runs the installer on a fixture root.
+COPY --chmod=0755 files/system/compat/apex /usr/bin/apex
+COPY --chmod=0755 files/scripts/install-rename-compat /tmp/install-rename-compat
+RUN set -eux; \
+    bash /tmp/install-rename-compat /; \
+    rm -f /tmp/install-rename-compat; \
+    : 'rime-rename: keep: the lines below check the old names on purpose'; \
+    test "$(/usr/bin/apex --help 2>/dev/null)" = "$(/usr/bin/rime --help)" \
+        || { echo "FATAL: /usr/bin/apex does not print exactly what rime prints"; exit 1; }; \
+    test "$(/usr/bin/apex --help 2>&1 >/dev/null)" = 'apex: this command is now `rime`' \
+        || { echo "FATAL: /usr/bin/apex must say one line on stderr"; exit 1; }; \
+    test "$(readlink /usr/lib/systemd/user/apex-agentd.service)" = rime-agentd.service; \
+    test "$(readlink /usr/lib/systemd/system/apexd.service)" = rimed.service; \
+    test -x /usr/libexec/apex-greet-session; \
+    test -x /usr/libexec/apex-shell-autostart; \
+    test -f /usr/share/apex-shell/shell.qml; \
+    test -f /usr/share/apex-greet/sway-greet.conf; \
+    # systemd must read each one as an alias of a real unit. A link it took for
+    # a unit of its own would be a second copy with the old name's state.
+    for scope in "" --global; do \
+        n="$(systemctl $scope list-unit-files --no-legend --no-pager 'apex*' | wc -l)"; \
+        test "$n" -gt 0; \
+        if systemctl $scope list-unit-files --no-legend --no-pager 'apex*' | awk '$2 != "alias"' | grep -q .; then \
+            echo "FATAL: an old-name unit is not an alias:"; \
+            systemctl $scope list-unit-files --no-legend --no-pager 'apex*'; exit 1; \
+        fi; \
+    done
+
 # Informational lint.
 RUN bootc container lint || true
 
