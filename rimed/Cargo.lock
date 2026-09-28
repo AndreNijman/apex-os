@@ -94,176 +94,6 @@ source = "registry+https://github.com/rust-lang/crates.io-index"
 checksum = "330a5ed07fa54e4702c9d6c4174f74427fc0ef6e214bbd677ae50a5099946470"
 
 [[package]]
-name = "rime"
-version = "0.1.0"
-dependencies = [
- "anyhow",
- "rime-agent-core",
- "rime-backup-core",
- "rime-perm-core",
- "rime-remote-core",
- "rime-secret-core",
- "rimed-core",
- "clap",
- "libc",
- "serde",
- "serde_json",
- "tokio",
- "toml",
- "zbus",
- "zvariant",
-]
-
-[[package]]
-name = "rime-agent-core"
-version = "0.1.0"
-dependencies = [
- "anyhow",
- "libc",
- "serde",
- "serde_json",
-]
-
-[[package]]
-name = "rime-agentd"
-version = "0.1.0"
-dependencies = [
- "anyhow",
- "rime-agent-core",
- "rime-remote-core",
- "rime-secret-core",
- "libc",
- "rustls",
- "rustls-native-certs",
- "rustls-pki-types",
- "serde",
- "serde_json",
-]
-
-[[package]]
-name = "rime-aid"
-version = "0.1.0"
-dependencies = [
- "anyhow",
- "rimed-core",
- "libc",
- "serde",
- "serde_json",
-]
-
-[[package]]
-name = "rime-backup-core"
-version = "0.1.0"
-dependencies = [
- "anyhow",
- "rime-secret-core",
- "chacha20poly1305",
- "data-encoding",
- "getrandom 0.2.17",
- "libc",
- "serde",
- "serde_json",
- "sha2",
- "tempfile",
- "toml",
- "x25519-dalek",
- "zeroize",
-]
-
-[[package]]
-name = "rime-perm-core"
-version = "0.1.0"
-dependencies = [
- "serde",
- "serde_json",
-]
-
-[[package]]
-name = "rime-remote-core"
-version = "0.1.0"
-dependencies = [
- "anyhow",
- "rime-agent-core",
- "chacha20poly1305",
- "data-encoding",
- "libc",
- "rand 0.9.5",
- "rustls",
- "rustls-native-certs",
- "rustls-pki-types",
- "serde",
- "serde_json",
- "sha1",
- "sha2",
- "snow",
-]
-
-[[package]]
-name = "rime-remoted"
-version = "0.1.0"
-dependencies = [
- "anyhow",
- "rime-agent-core",
- "rime-remote-core",
- "libc",
- "rustls",
- "rustls-pki-types",
- "serde",
- "serde_json",
-]
-
-[[package]]
-name = "rime-secret-core"
-version = "0.1.0"
-dependencies = [
- "anyhow",
- "libc",
- "serde",
- "serde_json",
- "tempfile",
- "toml",
-]
-
-[[package]]
-name = "rime-secretd"
-version = "0.1.0"
-dependencies = [
- "anyhow",
- "rime-secret-core",
- "hmac",
- "libc",
- "rustls",
- "rustls-native-certs",
- "rustls-pki-types",
- "serde",
- "serde_json",
- "sha2",
- "tempfile",
-]
-
-[[package]]
-name = "rimed"
-version = "0.1.0"
-dependencies = [
- "anyhow",
- "rimed-core",
- "serde",
- "tokio",
- "zbus",
- "zvariant",
-]
-
-[[package]]
-name = "rimed-core"
-version = "0.1.0"
-dependencies = [
- "anyhow",
- "serde",
- "serde_json",
- "toml",
-]
-
-[[package]]
 name = "async-broadcast"
 version = "0.7.2"
 source = "registry+https://github.com/rust-lang/crates.io-index"
@@ -1141,6 +971,176 @@ source = "registry+https://github.com/rust-lang/crates.io-index"
 checksum = "76afc826de14238e6e8c374ddcc1fa19e374fd8dd986b0d2af0d02377261d83c"
 dependencies = [
  "getrandom 0.3.4",
+]
+
+[[package]]
+name = "rime"
+version = "0.1.0"
+dependencies = [
+ "anyhow",
+ "clap",
+ "libc",
+ "rime-agent-core",
+ "rime-backup-core",
+ "rime-perm-core",
+ "rime-remote-core",
+ "rime-secret-core",
+ "rimed-core",
+ "serde",
+ "serde_json",
+ "tokio",
+ "toml",
+ "zbus",
+ "zvariant",
+]
+
+[[package]]
+name = "rime-agent-core"
+version = "0.1.0"
+dependencies = [
+ "anyhow",
+ "libc",
+ "serde",
+ "serde_json",
+]
+
+[[package]]
+name = "rime-agentd"
+version = "0.1.0"
+dependencies = [
+ "anyhow",
+ "libc",
+ "rime-agent-core",
+ "rime-remote-core",
+ "rime-secret-core",
+ "rustls",
+ "rustls-native-certs",
+ "rustls-pki-types",
+ "serde",
+ "serde_json",
+]
+
+[[package]]
+name = "rime-aid"
+version = "0.1.0"
+dependencies = [
+ "anyhow",
+ "libc",
+ "rimed-core",
+ "serde",
+ "serde_json",
+]
+
+[[package]]
+name = "rime-backup-core"
+version = "0.1.0"
+dependencies = [
+ "anyhow",
+ "chacha20poly1305",
+ "data-encoding",
+ "getrandom 0.2.17",
+ "libc",
+ "rime-secret-core",
+ "serde",
+ "serde_json",
+ "sha2",
+ "tempfile",
+ "toml",
+ "x25519-dalek",
+ "zeroize",
+]
+
+[[package]]
+name = "rime-perm-core"
+version = "0.1.0"
+dependencies = [
+ "serde",
+ "serde_json",
+]
+
+[[package]]
+name = "rime-remote-core"
+version = "0.1.0"
+dependencies = [
+ "anyhow",
+ "chacha20poly1305",
+ "data-encoding",
+ "libc",
+ "rand 0.9.5",
+ "rime-agent-core",
+ "rustls",
+ "rustls-native-certs",
+ "rustls-pki-types",
+ "serde",
+ "serde_json",
+ "sha1",
+ "sha2",
+ "snow",
+]
+
+[[package]]
+name = "rime-remoted"
+version = "0.1.0"
+dependencies = [
+ "anyhow",
+ "libc",
+ "rime-agent-core",
+ "rime-remote-core",
+ "rustls",
+ "rustls-pki-types",
+ "serde",
+ "serde_json",
+]
+
+[[package]]
+name = "rime-secret-core"
+version = "0.1.0"
+dependencies = [
+ "anyhow",
+ "libc",
+ "serde",
+ "serde_json",
+ "tempfile",
+ "toml",
+]
+
+[[package]]
+name = "rime-secretd"
+version = "0.1.0"
+dependencies = [
+ "anyhow",
+ "hmac",
+ "libc",
+ "rime-secret-core",
+ "rustls",
+ "rustls-native-certs",
+ "rustls-pki-types",
+ "serde",
+ "serde_json",
+ "sha2",
+ "tempfile",
+]
+
+[[package]]
+name = "rimed"
+version = "0.1.0"
+dependencies = [
+ "anyhow",
+ "rimed-core",
+ "serde",
+ "tokio",
+ "zbus",
+ "zvariant",
+]
+
+[[package]]
+name = "rimed-core"
+version = "0.1.0"
+dependencies = [
+ "anyhow",
+ "serde",
+ "serde_json",
+ "toml",
 ]
 
 [[package]]

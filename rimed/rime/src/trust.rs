@@ -1318,7 +1318,7 @@ mod tests {
         // attached to sha256:308127d9…, the image the L16 is booted on.
         let text = "        X509v3 extensions:\n\
                     \x20           X509v3 Subject Alternative Name: critical\n\
-                    \x20               URI:https://github.com/AndreNijman/apex-os/.github/workflows/build-image.yml@refs/heads/main\n\  // rime-rename: keep
+                    \x20               URI:https://github.com/AndreNijman/apex-os/.github/workflows/build-image.yml@refs/heads/main\n\
                     \x20           1.3.6.1.4.1.57264.1.1:\n";
         assert_eq!(san_uri(text).as_deref(), Some(EXPECTED_SIGNER));
         assert_eq!(san_uri("no san here"), None);

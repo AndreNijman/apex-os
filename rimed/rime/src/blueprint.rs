@@ -1763,7 +1763,7 @@ mod tests {
             // Not a .desktop: must be ignored, not offered as a session.
             .write("usr/share/wayland-sessions/README", "");
         let obs = f.host().observe();
-        assert_eq!(obs.sessions_available, ["rime-labwc", "hyprland", "niri"]);
+        assert_eq!(obs.sessions_available, ["hyprland", "niri", "rime-labwc"]);
         assert!(!obs.has_gaming_session());
     }
 
@@ -1803,7 +1803,7 @@ mod tests {
             )
             .write("usr/bin/gamescope", "");
         let obs = f.host().observe();
-        assert_eq!(obs.sessions_available, ["rime-gaming", "hyprland"]);
+        assert_eq!(obs.sessions_available, ["hyprland", "rime-gaming"]);
         assert!(obs.has_gaming_session());
     }
 
