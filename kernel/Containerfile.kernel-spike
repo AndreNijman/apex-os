@@ -1,6 +1,6 @@
-# APEX-OS — M0 Spike B: CachyOS kernel swap + DIY NVIDIA akmod on fedora-bootc
+# Rime OS — M0 Spike B: CachyOS kernel swap + DIY NVIDIA akmod on fedora-bootc
 #
-# This is a THROWAWAY spike image, not a production APEX-OS image. It exists to
+# This is a THROWAWAY spike image, not a production Rime OS image. It exists to
 # de-risk the Phase-A kernel path:
 #   1. swap Fedora's kernel for the CachyOS-for-Fedora COPR kernel in a bootc
 #      image (initramfs regenerated into /usr/lib/modules/<kver>/ as bootc needs)
@@ -10,13 +10,13 @@
 #   4. leave the image inspectable for the kernel config + layering checks
 #
 # The NVIDIA akmod step is capture-and-continue: a build failure is recorded to
-# /usr/lib/apex-nvidia-akmod-status with the compiler log rather than aborting
+# /usr/lib/rime-nvidia-akmod-status with the compiler log rather than aborting
 # the whole image, so the other spike checks (config table, layering, VM boot)
 # still run. Read that file (and the build log) for the akmod verdict.
 #
 # Build:
 #   sudo podman build -f kernel/Containerfile.kernel-spike \
-#     -t localhost/apex-kernel-spike:latest .
+#     -t localhost/rime-kernel-spike:latest .
 
 ARG BASE_IMAGE=quay.io/fedora/fedora-bootc:42
 FROM ${BASE_IMAGE}
@@ -57,7 +57,7 @@ RUN set -eux; \
     fi; \
     test -s "/usr/lib/modules/${KVER}/initramfs.img"; \
     test -s "/usr/lib/modules/${KVER}/vmlinuz"; \
-    printf '%s\n' "${KVER}" > /usr/lib/apex-cachyos-kver; \
+    printf '%s\n' "${KVER}" > /usr/lib/rime-cachyos-kver; \
     ls -la "/usr/lib/modules/${KVER}/"
 
 # ---------------------------------------------------------------------------
@@ -65,7 +65,7 @@ RUN set -eux; \
 #    RPMFusion free+nonfree -> akmod-nvidia (source) -> akmods compiles the
 #    module for the exact CachyOS kver -> install the produced kmod RPM ->
 #    verify `modinfo nvidia` resolves against the CachyOS kernel.
-#    Capture-and-continue: records PASS/FAIL to /usr/lib/apex-nvidia-akmod-status.
+#    Capture-and-continue: records PASS/FAIL to /usr/lib/rime-nvidia-akmod-status.
 # ---------------------------------------------------------------------------
 RUN set -eux; \
     dnf5 -y install \
@@ -75,8 +75,8 @@ RUN set -eux; \
     dnf5 clean all
 
 RUN set -eux; \
-    KVER="$(cat /usr/lib/apex-cachyos-kver)"; \
-    STATUS=/usr/lib/apex-nvidia-akmod-status; \
+    KVER="$(cat /usr/lib/rime-cachyos-kver)"; \
+    STATUS=/usr/lib/rime-nvidia-akmod-status; \
     NVIDIA_VER="$(rpm -q --qf '%{VERSION}' akmod-nvidia 2>/dev/null || echo unknown)"; \
     echo "akmod-nvidia driver version: ${NVIDIA_VER}"; \
     echo "target kernel: ${KVER}"; \
@@ -114,8 +114,8 @@ RUN set -eux; \
 RUN set -eux; \
     dnf5 -y install scx-scheds scx-tools; \
     dnf5 clean all; \
-    rpm -q scx-scheds scx-tools > /usr/lib/apex-scx-versions 2>&1 || true; \
-    cat /usr/lib/apex-scx-versions
+    rpm -q scx-scheds scx-tools > /usr/lib/rime-scx-versions 2>&1 || true; \
+    cat /usr/lib/rime-scx-versions
 
 # ---------------------------------------------------------------------------
 # 5. Serial console kargs so the headless QEMU boot test can read the console
@@ -124,7 +124,7 @@ RUN set -eux; \
 RUN set -eux; \
     mkdir -p /usr/lib/bootc/kargs.d; \
     printf 'kargs = ["console=ttyS0,115200", "console=tty0"]\n' \
-        > /usr/lib/bootc/kargs.d/10-apex-serial.toml
+        > /usr/lib/bootc/kargs.d/10-rime-serial.toml
 
 # ---------------------------------------------------------------------------
 # 6. bootc lint (informational — do not fail the spike on lint).

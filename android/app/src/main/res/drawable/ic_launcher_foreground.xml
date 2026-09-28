@@ -1,6 +1,6 @@
 <?xml version="1.0" encoding="utf-8"?>
 <!--
-  The APEX mark: a chevron over a horizon line. Drawn as a vector rather than
+  The Rime mark: a chevron over a horizon line. Drawn as a vector rather than
   shipped as five PNG densities because it is two paths, and because the
   `monochrome` layer in the adaptive icon needs the same shape again — one
   source is one shape that cannot drift from itself.

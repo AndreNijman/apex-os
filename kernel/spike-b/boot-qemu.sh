@@ -1,9 +1,9 @@
 #!/bin/bash
 # Boot the spike qcow2 headless under QEMU+KVM, capture the serial console.
-# The baked-in apex-bootcheck.service prints the running kernel + nvidia module
+# The baked-in rime-bootcheck.service prints the running kernel + nvidia module
 # state to ttyS0 and powers off, so we just capture serial and grep it.
 set -uo pipefail
-WORK=/home/andre/apex-os-m0-work/spike-b
+WORK=/home/andre/rime-os-m0-work/spike-b
 QCOW="$WORK/bib-output/qcow2/disk.qcow2"
 SERIAL="$WORK/serial.log"
 : > "$SERIAL"
@@ -21,4 +21,4 @@ timeout 300 qemu-system-x86_64 \
   >/dev/null 2>&1
 echo "QEMU exited rc=$?"
 echo "===== serial.log key lines ====="
-grep -aE "Linux version|APEX-BOOTCHECK|APEX uname|APEX system-running|APEX nvidia-ko|Reached target Multi-User|Kernel panic|not syncing" "$SERIAL" | head -40
+grep -aE "Linux version|RIME-BOOTCHECK|Rime uname|Rime system-running|Rime nvidia-ko|Reached target Multi-User|Kernel panic|not syncing" "$SERIAL" | head -40

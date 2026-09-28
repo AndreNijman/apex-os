@@ -1,5 +1,5 @@
 # ─────────────────────────────────────────────────────────────────────────────
-#  APEX Windows installer lab
+#  Rime Windows installer lab
 #
 #  A disk-writing tool that has never written a disk is not finished, and there
 #  is no Windows machine in this program that may be written to. So the tool's
@@ -8,7 +8,7 @@
 #
 #  WHY A CONTAINER AND NOT THE HOST
 #
-#  The development host is APEX: bootc, read-only, `dnf install` refused. The
+#  The development host is Rime: bootc, read-only, `dnf install` refused. The
 #  qemu/OVMF/mtools stack cannot live next to the source. This mirrors
 #  `bootlab/Containerfile`, which exists for the same reason and which this
 #  deliberately does NOT extend — bootlab belongs to the boot-v2 units, and

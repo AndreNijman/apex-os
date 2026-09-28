@@ -1,6 +1,6 @@
 #!/usr/bin/env bash
 # ─────────────────────────────────────────────────────────────────────────────
-#  `apex secret migrate` against a fixture home (P0-003).
+#  `rime secret migrate` against a fixture home (P0-003).
 #
 #  The migration reads a value, stores it somewhere else, and deletes the
 #  original. That order is the whole safety argument, and it is what this
@@ -25,7 +25,7 @@ set -uo pipefail
 set +e
 
 ROOT="$(cd "$(dirname "${BASH_SOURCE[0]}")/.." && pwd)"
-WORK="$(mktemp -d -p /var/tmp apex-migrate-XXXXXX)"
+WORK="$(mktemp -d -p /var/tmp rime-migrate-XXXXXX)"
 
 pass=0; fail=0
 ok()  { printf 'PASS  %s\n' "$1"; pass=$((pass + 1)); }
@@ -52,21 +52,21 @@ for tool in cargo python3 curl; do
 done
 
 section "the binaries"
-if ! cargo build --manifest-path "${ROOT}/apexd/Cargo.toml" \
-        --bin apex --bin apex-secretd >/dev/null 2>&1; then
-    bad "apex and apex-secretd build"
+if ! cargo build --manifest-path "${ROOT}/rimed/Cargo.toml" \
+        --bin rime --bin rime-secretd >/dev/null 2>&1; then
+    bad "rime and rime-secretd build"
     printf '\nmigrate: %d passed, %d failed\n' "$pass" "$fail"
     exit 1
 fi
-ok "apex and apex-secretd build"
-BIN="${CARGO_TARGET_DIR:-${ROOT}/apexd/target}/debug"
-APEX="${BIN}/apex"
-SECRETD="${BIN}/apex-secretd"
+ok "rime and rime-secretd build"
+BIN="${CARGO_TARGET_DIR:-${ROOT}/rimed/target}/debug"
+Rime="${BIN}/rime"
+SECRETD="${BIN}/rime-secretd"
 
 # Two obvious fakes. Every assertion below is that one of these is somewhere or
 # — much more often — that it is not.
-FAKE_PAT="ghp-apex-migrate-fixture-pat-do-not-use"
-FAKE_BEARER="apex-migrate-fixture-bearer-do-not-use"
+FAKE_PAT="ghp-rime-migrate-fixture-pat-do-not-use"
+FAKE_BEARER="rime-migrate-fixture-bearer-do-not-use"
 
 # ── the fixture ──────────────────────────────────────────────────────────────
 section "a fixture home with plaintext credentials in it"
@@ -96,11 +96,11 @@ class H(http.server.BaseHTTPRequestHandler):
             f.write((auth or "<none>") + "\n")
         if not auth:
             self.send_response(401)
-            self.send_header("WWW-Authenticate", 'Basic realm="apex-test"')
+            self.send_header("WWW-Authenticate", 'Basic realm="rime-test"')
             self.send_header("Content-Length", "0")
             self.end_headers(); return
         body = (pkt(b"# service=git-upload-pack\n") + b"0000"
-                + pkt(b"0" * 40 + b" capabilities^{}\x00agent=apex-test\n") + b"0000")
+                + pkt(b"0" * 40 + b" capabilities^{}\x00agent=rime-test\n") + b"0000")
         self.send_response(200)
         self.send_header("Content-Type", "application/x-git-upload-pack-advertisement")
         self.send_header("Content-Length", str(len(body)))
@@ -162,13 +162,13 @@ ok "the fixture home has a PAT in settings.json and a bearer token in .claude.js
 
 # ── the secret service, on a private socket and store ────────────────────────
 section "a private secret service"
-export APEX_SECRETD_SOCKET="${WORK}/secretd.sock"
-export APEX_SECRETD_STORE="${WORK}/store"
-"$SECRETD" --socket "$APEX_SECRETD_SOCKET" --store "$APEX_SECRETD_STORE" \
+export RIME_SECRETD_SOCKET="${WORK}/secretd.sock"
+export RIME_SECRETD_STORE="${WORK}/store"
+"$SECRETD" --socket "$RIME_SECRETD_SOCKET" --store "$RIME_SECRETD_STORE" \
     > "${WORK}/secretd.log" 2>&1 &
 SECRETD_PID=$!
-for _ in $(seq 1 100); do [ -S "$APEX_SECRETD_SOCKET" ] && break; sleep 0.1; done
-[ -S "$APEX_SECRETD_SOCKET" ] && ok "the secret service came up on a private socket" \
+for _ in $(seq 1 100); do [ -S "$RIME_SECRETD_SOCKET" ] && break; sleep 0.1; done
+[ -S "$RIME_SECRETD_SOCKET" ] && ok "the secret service came up on a private socket" \
     || { bad "the secret service came up"; cat "${WORK}/secretd.log"; exit 1; }
 
 # A project, because a capability is granted per project and verification is a
@@ -187,8 +187,8 @@ git -C "$PROJ" remote add origin "http://127.0.0.1:${PORT}/demo.git"
 # own. It said a real migration belongs with P0-003. This is that, and the
 # fixture is the shape the old broker actually wrote — metadata and the token in
 # one 0600 JSON file, with the grants in a second one beside it.
-FAKE_LEGACY="apex-migrate-fixture-legacy-do-not-use"
-OLD="${XDG_STATE_HOME}/apex/agent/secrets"
+FAKE_LEGACY="rime-migrate-fixture-legacy-do-not-use"
+OLD="${XDG_STATE_HOME}/rime/agent/secrets"
 mkdir -p "$OLD"
 cat > "${OLD}/legacy-git.json" <<JSON
 {"service": "legacy-git", "host": "127.0.0.1", "scheme": "http",
@@ -203,14 +203,14 @@ cat > "${OLD}/legacy-keyring.json" <<'JSON'
  "username": "x-access-token", "backend": "keyring", "added": 1}
 JSON
 chmod 0600 "${OLD}/legacy-keyring.json"
-cat > "${XDG_STATE_HOME}/apex/agent/secret-grants.json" <<JSON
+cat > "${XDG_STATE_HOME}/rime/agent/secret-grants.json" <<JSON
 {"projects": {"${PROJ}": ["legacy-git:git-ls-remote", "legacy-git:git-fetch"]}}
 JSON
 ok "the old broker's store has one file credential, one keyring record and two grants"
 
 # ── dry run ──────────────────────────────────────────────────────────────────
 section "a dry run says what it would do and writes nothing"
-out="$(cd "$PROJ" && "$APEX" secret migrate --dry-run 2>&1)"
+out="$(cd "$PROJ" && "$Rime" secret migrate --dry-run 2>&1)"
 printf '%s\n' "$out" | sed 's/^/      | /'
 printf '%s' "$out" | grep -q "would  store github" \
     && ok "the dry run found the PAT in settings.json" \
@@ -233,25 +233,25 @@ printf '%s' "$out" | grep -q "ACME_API_KEY .*nothing here knows which host" \
 grep -q "$FAKE_PAT" "${HOME}/.claude/settings.json" \
     && ok "the dry run wrote nothing to settings.json" \
     || bad "the dry run changed settings.json"
-"$APEX" secret list --json 2>/dev/null | grep -q "fixture-memory" \
+"$Rime" secret list --json 2>/dev/null | grep -q "fixture-memory" \
     && bad "the dry run stored something" \
     || ok "the dry run stored nothing"
 
 # ── the real run ─────────────────────────────────────────────────────────────
 section "the migration"
-out="$(cd "$PROJ" && "$APEX" secret migrate 2>&1)"
+out="$(cd "$PROJ" && "$Rime" secret migrate 2>&1)"
 printf '%s\n' "$out" | sed 's/^/      | /'
 
 # Both credentials are stored, whatever happened to the originals: store comes
 # first, and it is the step that must never be skipped.
-list="$("$APEX" secret list --json 2>/dev/null)"
+list="$("$Rime" secret list --json 2>/dev/null)"
 printf '%s' "$list" | grep -q '"fixture-memory"' \
     && ok "the MCP credential is in the store" || bad "the MCP credential is in the store"
 printf '%s' "$list" | grep -q '"github"' \
     && ok "the GitHub credential is in the store" || bad "the GitHub credential is in the store"
 printf '%s' "$list" | grep -q "$FAKE_BEARER\|$FAKE_PAT" \
-    && bad "apex secret list printed a credential" \
-    || ok "apex secret list printed neither credential"
+    && bad "rime secret list printed a credential" \
+    || ok "rime secret list printed neither credential"
 
 # The MCP one had no grant on this first run, so it was stored and KEPT. That
 # is the discipline working, not a failure.
@@ -272,9 +272,9 @@ printf '%s' "$out" | grep -q "grant(s) from the old broker" \
 # P1-001's registry canonicalises an old spelling as it goes in — so this
 # asserts the stronger thing the migration actually does: it arrives, and it
 # arrives spelled the one way the trail and the grant table use from now on.
-"$APEX" secret grants 2>/dev/null | grep -q "legacy-git:git.ls-remote" \
+"$Rime" secret grants 2>/dev/null | grep -q "legacy-git:git.ls-remote" \
     && ok "and the secret service now holds them, under the canonical name" \
-    || { bad "and the secret service now holds them, under the canonical name"; "$APEX" secret grants; }
+    || { bad "and the secret service now holds them, under the canonical name"; "$Rime" secret grants; }
 grep -q "Basic" "${WORK}/seen" \
     && ok "the legacy credential was verified against the fixture server" \
     || { bad "the legacy credential was verified against the fixture server"; cat "${WORK}/seen" 2>/dev/null; }
@@ -293,8 +293,8 @@ fi
 
 # ── grant, then migrate again ────────────────────────────────────────────────
 section "with a grant, the second run verifies and removes"
-(cd "$PROJ" && "$APEX" secret grant fixture-memory mcp-request >/dev/null 2>&1)
-out="$(cd "$PROJ" && "$APEX" secret migrate 2>&1)"
+(cd "$PROJ" && "$Rime" secret grant fixture-memory mcp-request >/dev/null 2>&1)
+out="$(cd "$PROJ" && "$Rime" secret migrate 2>&1)"
 printf '%s\n' "$out" | sed 's/^/      | /'
 
 grep -q "Bearer ${FAKE_BEARER}" "${WORK}/seen" \
@@ -308,7 +308,7 @@ import json, sys
 d = json.load(open(sys.argv[1]))
 s = d["mcpServers"]["fixture-memory"]
 assert s["type"] == "stdio", s
-assert s["command"] == "apex", s
+assert s["command"] == "rime", s
 assert s["args"] == ["mcp", "bridge", "fixture-memory"], s
 assert d["machineID"] == "fixture", "the rest of the document was damaged"
 assert d["mcpServers"]["local-tool"]["command"] == "npx", "an untouched server was changed"
@@ -329,7 +329,7 @@ grep -q "$FAKE_PAT" "${HOME}/.claude/settings.json" \
 
 # ── idempotence ──────────────────────────────────────────────────────────────
 section "running it again changes nothing"
-out="$(cd "$PROJ" && "$APEX" secret migrate 2>&1)"
+out="$(cd "$PROJ" && "$Rime" secret migrate 2>&1)"
 printf '%s' "$out" | grep -q "fixture-memory" \
     && bad "a migrated credential was found again" \
     || ok "a migrated credential is not found a second time"
@@ -365,14 +365,14 @@ if grep -rqE "$FAKE_BEARER|$FAKE_LEGACY" "${WORK}/secretd.log" 2>/dev/null; then
 else
     ok "the daemon logged no credential"
 fi
-if grep -qE "$FAKE_BEARER|$FAKE_LEGACY" "${APEX_SECRETD_STORE}/audit.jsonl" 2>/dev/null; then
+if grep -qE "$FAKE_BEARER|$FAKE_LEGACY" "${RIME_SECRETD_STORE}/audit.jsonl" 2>/dev/null; then
     bad "the audit trail carries the credential"
 else
     ok "the audit trail carries no credential"
 fi
 # `mcp.request` for the same reason: `mcp-request` is an alias the daemon
 # accepts and never a spelling it writes.
-grep -q "mcp.request" "${APEX_SECRETD_STORE}/audit.jsonl" 2>/dev/null \
+grep -q "mcp.request" "${RIME_SECRETD_STORE}/audit.jsonl" 2>/dev/null \
     && ok "the audit trail records the brokered request" \
     || bad "the audit trail records the brokered request"
 

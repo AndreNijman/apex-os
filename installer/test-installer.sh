@@ -5,8 +5,8 @@
 #
 #  (Renamed from test-engine-guards.sh when the GUI half was added. That file
 #  in turn replaced test-interactive.sh, which drove the whiptail TUI with
-#  canned answers — the TUI no longer exists: apex-install is engine-only now,
-#  spoken to as `apex-install --headless ANSWERS` by the GTK installer, and
+#  canned answers — the TUI no longer exists: rime-install is engine-only now,
+#  spoken to as `rime-install --headless ANSWERS` by the GTK installer, and
 #  the text UI people kept getting stranded in has been deleted.)
 #
 #  ── Half 1: the engine refuses bad input BEFORE it wipes ────────────────────
@@ -31,7 +31,7 @@
 #  its buttons land off-screen, the user is stranded with no fallback — and a
 #  syntax-clean file proves nothing about either. So every page named in the
 #  GUI's own registry is rendered headless (cage + wlroots-headless + grim in
-#  the apex-guitest container) and the screenshot is measured, not just stat'd:
+#  the rime-guitest container) and the screenshot is measured, not just stat'd:
 #  a produced PNG is NOT a pass — a blank or single-colour frame means the page
 #  did not draw. Pages render at 1024x600 and 1366x768, the realistic
 #  worst-case laptop panels; one page already clipped its action row at 720 px
@@ -44,7 +44,7 @@
 #  inline below. No disk, real or virtual, is enumerated (lsblk is stubbed
 #  inside the container), let alone touched.
 #
-#  PASS = every engine case prints its expected APEX-INSTALL-FAILED reason and
+#  PASS = every engine case prints its expected RIME-INSTALL-FAILED reason and
 #         never "Unexpected error on line" (that string means the ERR trap
 #         fired, which is always a bug in the installer), and every GUI page
 #         passes every render check at every size.
@@ -56,14 +56,14 @@
 set -uo pipefail
 cd "$(dirname "$0")"
 
-ENGINE=./apex-install
-ANS=$(mktemp /tmp/apex-test-answers.XXXXXX)
+ENGINE=./rime-install
+ANS=$(mktemp /tmp/rime-test-answers.XXXXXX)
 
 # ── Getting the engine as far as its own guards ──────────────────────────────
 #
 # Every case below feeds the engine an answers file and expects a named refusal.
-# None of them could reach one. apex-install:353 refuses to continue unless the
-# APEX-OS image is present in ROOT podman storage, and that check runs BEFORE
+# None of them could reach one. rime-install:353 refuses to continue unless the
+# Rime OS image is present in ROOT podman storage, and that check runs BEFORE
 # argument parsing — so on any machine that is not the ISO build box the engine
 # died at preflight and every case in the three engine sections reported the
 # same "image is not present" text instead of the guard under test.
@@ -71,19 +71,19 @@ ANS=$(mktemp /tmp/apex-test-answers.XXXXXX)
 # That was not a regression. `git log -S` puts the image check in dddabd6f
 # (2026-07-23) and these cases in 33b744d5, five days later: they were written
 # against an engine that already refused them, and only ever passed where root
-# podman storage happened to hold localhost/apex-os:daily. pr-validation.yml
+# podman storage happened to hold localhost/rime-os:daily. pr-validation.yml
 # runs this suite on a bare ubuntu-24.04 runner, so they were dead in CI too.
 # The tell that needs no theory: the "no arguments" case asserts exit 2, and
 # preflight's die() exits 1.
 #
-# apex-install:56 is IMAGE="${APEX_IMAGE:-localhost/apex-os:${EDITION}}", with
-# the comment "override with APEX_IMAGE=... for testing". An empty tar imported
+# rime-install:56 is IMAGE="${RIME_IMAGE:-localhost/rime-os:${EDITION}}", with
+# the comment "override with RIME_IMAGE=... for testing". An empty tar imported
 # by podman is a valid image with no layers — no network, no build, removed
 # again on exit, so the suite does not depend on the ambient store either.
 #
-# sudo's env_reset strips APEX_* from the caller's environment, so this must be
-# passed as `sudo -n APEX_IMAGE=...` on each invocation and cannot be exported.
-SCRATCH_IMAGE="localhost/apex-engine-probe:test"
+# sudo's env_reset strips RIME_* from the caller's environment, so this must be
+# passed as `sudo -n RIME_IMAGE=...` on each invocation and cannot be exported.
+SCRATCH_IMAGE="localhost/rime-engine-probe:test"
 ENGINE_IMAGE=""
 scratch_made=0
 BUILD_CTX=""
@@ -103,10 +103,10 @@ chmod 600 "$ANS"
 ensure_engine_image() {
     command -v podman >/dev/null 2>&1 || return 1
     sudo -n true 2>/dev/null || return 1
-    if sudo -n podman image exists localhost/apex-os:daily 2>/dev/null; then
-        ENGINE_IMAGE="localhost/apex-os:daily"; return 0
+    if sudo -n podman image exists localhost/rime-os:daily 2>/dev/null; then
+        ENGINE_IMAGE="localhost/rime-os:daily"; return 0
     fi
-    local t; t=$(mktemp /tmp/apex-empty.XXXXXX.tar) || return 1
+    local t; t=$(mktemp /tmp/rime-empty.XXXXXX.tar) || return 1
     tar -cf "$t" -T /dev/null 2>/dev/null \
         && sudo -n podman import -q "$t" "$SCRATCH_IMAGE" >/dev/null 2>&1
     local rc=$?
@@ -126,7 +126,7 @@ pass=0; fail=0
 ENGINE_RUNNABLE=1
 if ! ensure_engine_image; then
     ENGINE_RUNNABLE=0
-    echo "SKIP: the engine half cannot run here — preflight needs an APEX-OS image in"
+    echo "SKIP: the engine half cannot run here — preflight needs a Rime OS image in"
     echo "      ROOT podman storage and neither one nor passwordless podman is available."
 fi
 
@@ -137,7 +137,7 @@ check() {
         printf 'SKIP  %-30s no engine image\n' "$name"; return
     fi
     printf '%s\n' "$body" > "$ANS"
-    out=$(sudo -n APEX_IMAGE="$ENGINE_IMAGE" APEX_DRY_RUN=1 "$ENGINE" --headless "$ANS" 2>&1 </dev/null)
+    out=$(sudo -n RIME_IMAGE="$ENGINE_IMAGE" RIME_DRY_RUN=1 "$ENGINE" --headless "$ANS" 2>&1 </dev/null)
 
     if grep -q 'Unexpected error on line' <<<"$out"; then
         printf 'FAIL  %-30s ERR TRAP FIRED\n' "$name"; fail=$((fail+1)); return
@@ -146,7 +146,7 @@ check() {
         printf 'PASS  %-30s\n' "$name"; pass=$((pass+1))
     else
         printf 'FAIL  %-30s expected %q\n      got: %s\n' \
-            "$name" "$want" "$(grep -m1 APEX-INSTALL-FAILED <<<"$out" || echo '<no sentinel>')"
+            "$name" "$want" "$(grep -m1 RIME-INSTALL-FAILED <<<"$out" || echo '<no sentinel>')"
         fail=$((fail+1))
     fi
 }
@@ -160,10 +160,10 @@ check() {
 # installer/test-installer-luks.sh is the suite that asserts that. Without
 # it every case below would stop at the encryption question instead of the
 # guard it is actually testing.
-BASE=$'mode=disk\ndisk=/dev/zzz-does-not-exist\npassword=pw\nhostname=apex\nencrypt=no'
+BASE=$'mode=disk\ndisk=/dev/zzz-does-not-exist\npassword=pw\nhostname=rime\nencrypt=no'
 
 echo "── argument handling ──────────────────────────────────────────────────"
-out=$(sudo -n APEX_IMAGE="$ENGINE_IMAGE" "$ENGINE" </dev/null 2>&1); rc=$?
+out=$(sudo -n RIME_IMAGE="$ENGINE_IMAGE" "$ENGINE" </dev/null 2>&1); rc=$?
 if [ "$ENGINE_RUNNABLE" != 1 ]; then
     printf 'SKIP  %-30s no engine image\n' "no arguments"
 elif [ "$rc" = 2 ] && grep -q 'not a user interface' <<<"$out"; then
@@ -180,13 +180,13 @@ check "hostname: underscore"  "Invalid hostname 'my_host'"    $'mode=disk\ndisk=
 
 echo "── answers-file handling ──────────────────────────────────────────────"
 check "unknown key"           "unknown key in answers file"   "$BASE"$'\nusername=bob\nbogus=1'
-check "missing password"      "password missing"              $'mode=disk\ndisk=/dev/zzz-does-not-exist\nusername=bob\nhostname=apex'
-check "bad mode value"        "bad mode"                      $'mode=wipeitall\ndisk=/dev/zzz-does-not-exist\nusername=bob\npassword=pw\nhostname=apex'
+check "missing password"      "password missing"              $'mode=disk\ndisk=/dev/zzz-does-not-exist\nusername=bob\nhostname=rime'
+check "bad mode value"        "bad mode"                      $'mode=wipeitall\ndisk=/dev/zzz-does-not-exist\nusername=bob\npassword=pw\nhostname=rime'
 check "valid input reaches disk check" "is not a block device" "$BASE"$'\nusername=bob'
 
 # The parser splits on '=' with IFS, so a password containing '=' is a real
 # risk: everything after the first '=' must survive intact.
-printf 'username=bob\npassword=a=b=c\nhostname=apex\n' > "$ANS"
+printf 'username=bob\npassword=a=b=c\nhostname=rime\n' > "$ANS"
 got=$(while IFS='=' read -r k v || [ -n "$k" ]; do [ "$k" = password ] && printf '%s' "$v"; done < "$ANS")
 if [ "$got" = 'a=b=c' ]; then
     printf 'PASS  %-30s\n' "password containing '='"; pass=$((pass+1))
@@ -209,21 +209,21 @@ echo "── partition mode: the two most destructive mistakes ─────�
 # These need devices that exist for the guard to be reached. Read-only: both
 # cases are refused by the guard under test, long before any write.
 if [ -b /dev/sda ] && [ -b /dev/sdb ] && [ -b /dev/sda2 ] && [ -b /dev/sdb1 ]; then
-    check "target == ESP"     "same device"                   $'mode=partition\ndisk=/dev/sda\ntarget=/dev/sda2\nesp=/dev/sda2\nusername=bob\npassword=pw\nhostname=apex\nencrypt=no'
-    check "target on another disk" "is not a partition of"    $'mode=partition\ndisk=/dev/sda\ntarget=/dev/sdb1\nesp=/dev/sda2\nusername=bob\npassword=pw\nhostname=apex\nencrypt=no'
+    check "target == ESP"     "same device"                   $'mode=partition\ndisk=/dev/sda\ntarget=/dev/sda2\nesp=/dev/sda2\nusername=bob\npassword=pw\nhostname=rime\nencrypt=no'
+    check "target on another disk" "is not a partition of"    $'mode=partition\ndisk=/dev/sda\ntarget=/dev/sdb1\nesp=/dev/sda2\nusername=bob\npassword=pw\nhostname=rime\nencrypt=no'
 else
     echo "SKIP  partition-mode cases (need /dev/sda2 and /dev/sdb1 present)"
 fi
 
 echo "── final confirmation: binds the exact device before any write ───────"
 if [ "$ENGINE_RUNNABLE" = 1 ] && command -v losetup >/dev/null \
-   && LOOP_IMG=$(mktemp /var/tmp/apex-confirm-loop.XXXXXX); then
+   && LOOP_IMG=$(mktemp /var/tmp/rime-confirm-loop.XXXXXX); then
     truncate -s 18G "$LOOP_IMG"
     # shellcheck disable=SC2033  # the real losetup, deliberately (see cleanup)
     LOOP_DEV=$(sudo -n losetup --find --show "$LOOP_IMG" 2>/dev/null || true)
     if [ -n "$LOOP_DEV" ]; then
         fp=$(lsblk -bdnP -o MAJ:MIN,SIZE,WWN,SERIAL,PTUUID,PARTUUID,PARTTYPE "$LOOP_DEV")
-        base=$(printf 'mode=disk\ndisk=%s\nusername=bob\npassword=pw\nhostname=apex\nencrypt=no\n' "$LOOP_DEV")
+        base=$(printf 'mode=disk\ndisk=%s\nusername=bob\npassword=pw\nhostname=rime\nencrypt=no\n' "$LOOP_DEV")
         check "missing typed confirmation" "The final confirmation (typing ERASE) is missing" "$base"
         check "wrong confirmed target" "The confirmation was typed for" \
             "$base"$'\nconfirmed=ERASE\nconfirm_target=/dev/not-this-loop\n'"confirm_disk_id=$fp"
@@ -231,13 +231,13 @@ if [ "$ENGINE_RUNNABLE" = 1 ] && command -v losetup >/dev/null \
             "$base"$'\nconfirmed=ERASE\n'"confirm_target=$LOOP_DEV"$'\nconfirm_disk_id=changed'
         printf '%s\nconfirmed=ERASE\nconfirm_target=%s\nconfirm_disk_id=%s\n' \
             "$base" "$LOOP_DEV" "$fp" > "$ANS"
-        out=$(sudo -n APEX_IMAGE="$ENGINE_IMAGE" APEX_DRY_RUN=1 \
+        out=$(sudo -n RIME_IMAGE="$ENGINE_IMAGE" RIME_DRY_RUN=1 \
               "$ENGINE" --headless "$ANS" 2>&1 </dev/null)
-        if grep -q 'APEX-INSTALL-DRYRUN-OK' <<<"$out"; then
+        if grep -q 'RIME-INSTALL-DRYRUN-OK' <<<"$out"; then
             printf 'PASS  %-30s\n' "exact device dry run"; pass=$((pass+1))
         else
             printf 'FAIL  %-30s %s\n' "exact device dry run" \
-                "$(grep -m1 APEX-INSTALL-FAILED <<<"$out" || echo no-sentinel)"
+                "$(grep -m1 RIME-INSTALL-FAILED <<<"$out" || echo no-sentinel)"
             fail=$((fail+1))
         fi
         # The GUI can die mid-install and the engine must still finish. Same
@@ -247,26 +247,26 @@ if [ "$ENGINE_RUNNABLE" = 1 ] && command -v losetup >/dev/null \
         _rc=$(python3 -c 'import os, subprocess, sys
 r, w = os.pipe(); os.close(r)
 print(subprocess.call(sys.argv[1:], stdin=subprocess.DEVNULL, stdout=w, stderr=w))' \
-              sudo -n APEX_IMAGE="$ENGINE_IMAGE" APEX_DRY_RUN=1 "$ENGINE" --headless "$ANS")
+              sudo -n RIME_IMAGE="$ENGINE_IMAGE" RIME_DRY_RUN=1 "$ENGINE" --headless "$ANS")
         # ...and the relay must really be in place, stderr included: a merge
         # condition that can never be true once passed this check unnoticed.
-        if [ "$_rc" = 0 ] && sudo -n grep -q 'APEX-DRY-RUN: validation complete' /var/log/apex-install.log \
-           && sudo -n grep -qE 'stdout relayed via pid [0-9]+; stderr merged: yes' /var/log/apex-install.log; then
+        if [ "$_rc" = 0 ] && sudo -n grep -q 'RIME-DRY-RUN: validation complete' /var/log/rime-install.log \
+           && sudo -n grep -qE 'stdout relayed via pid [0-9]+; stderr merged: yes' /var/log/rime-install.log; then
             printf 'PASS  %-30s\n' "engine outlives a dead GUI"; pass=$((pass+1))
         else
             printf 'FAIL  %-30s rc=%s %s\n' "engine outlives a dead GUI" "$_rc" \
-                "$(sudo -n tail -1 /var/log/apex-install.log 2>/dev/null)"; fail=$((fail+1))
+                "$(sudo -n tail -1 /var/log/rime-install.log 2>/dev/null)"; fail=$((fail+1))
         fi
         # Partition mode binds THREE identities — disk, root partition, ESP —
         # and each one on its own must be able to stop the install. The disk
-        # below mimics a dual-boot layout (ESP, a partition for APEX, a
+        # below mimics a dual-boot layout (ESP, a partition for Rime, a
         # partition that must survive), all inside the sparse loop image
         # allocated above; the engine stays in dry-run mode throughout.
         if [[ "$LOOP_DEV" == /dev/loop* ]] && command -v sgdisk >/dev/null \
            && command -v mkfs.vfat >/dev/null; then
             sudo -n sgdisk --zap-all "$LOOP_DEV" >/dev/null 2>&1
             sudo -n sgdisk -n1:0:+300M -t1:ef00 -c1:"EFI system partition" \
-                -n2:0:+14G -t2:8300 -c2:apex-root \
+                -n2:0:+14G -t2:8300 -c2:rime-root \
                 -n3:0:0 -t3:0700 -c3:"Basic data partition" "$LOOP_DEV" >/dev/null 2>&1
             sudo -n partprobe "$LOOP_DEV" >/dev/null 2>&1
             sudo -n udevadm settle --timeout=10 >/dev/null 2>&1
@@ -277,7 +277,7 @@ print(subprocess.call(sys.argv[1:], stdin=subprocess.DEVNULL, stdout=w, stderr=w
                 target_fp=$(lsblk -bdnP -o MAJ:MIN,SIZE,WWN,SERIAL,PTUUID,PARTUUID,PARTTYPE "$target")
                 esp_fp=$(lsblk -bdnP -o MAJ:MIN,SIZE,WWN,SERIAL,PTUUID,PARTUUID,PARTTYPE "$esp")
                 kept_fp=$(lsblk -bdnP -o MAJ:MIN,SIZE,WWN,SERIAL,PTUUID,PARTUUID,PARTTYPE "$kept")
-                pbase=$(printf 'mode=partition\ndisk=%s\ntarget=%s\nesp=%s\nusername=bob\npassword=pw\nhostname=apex\nencrypt=no\nconfirmed=ERASE\nconfirm_target=%s\nconfirm_disk_id=%s\nconfirm_target_id=%s\nconfirm_esp_id=%s\n' \
+                pbase=$(printf 'mode=partition\ndisk=%s\ntarget=%s\nesp=%s\nusername=bob\npassword=pw\nhostname=rime\nencrypt=no\nconfirmed=ERASE\nconfirm_target=%s\nconfirm_disk_id=%s\nconfirm_target_id=%s\nconfirm_esp_id=%s\n' \
                     "$LOOP_DEV" "$target" "$esp" "$target" "$disk_fp" "$target_fp" "$esp_fp")
                 check "changed root identity" "is not the partition that was confirmed" \
                     "${pbase/confirm_target_id=$target_fp/confirm_target_id=changed}"
@@ -293,13 +293,13 @@ print(subprocess.call(sys.argv[1:], stdin=subprocess.DEVNULL, stdout=w, stderr=w
                 check "identity of a kept partition" "is not the partition that was confirmed" \
                     "${pbase/confirm_target_id=$target_fp/confirm_target_id=$kept_fp}"
                 printf '%s\n' "$pbase" > "$ANS"
-                out=$(sudo -n APEX_IMAGE="$ENGINE_IMAGE" APEX_DRY_RUN=1 \
+                out=$(sudo -n RIME_IMAGE="$ENGINE_IMAGE" RIME_DRY_RUN=1 \
                       "$ENGINE" --headless "$ANS" 2>&1 </dev/null)
-                if grep -q 'APEX-INSTALL-DRYRUN-OK' <<<"$out"; then
+                if grep -q 'RIME-INSTALL-DRYRUN-OK' <<<"$out"; then
                     printf 'PASS  %-30s\n' "partition dry run"; pass=$((pass+1))
                 else
                     printf 'FAIL  %-30s %s\n' "partition dry run" \
-                        "$(grep -m1 APEX-INSTALL-FAILED <<<"$out" || echo no-sentinel)"
+                        "$(grep -m1 RIME-INSTALL-FAILED <<<"$out" || echo no-sentinel)"
                     fail=$((fail+1))
                 fi
             else
@@ -328,7 +328,7 @@ echo "── netinstall staging: never RAM, never the disk being wiped ───
 #
 # The functions are sourced out of the shipped engine rather than copied, so
 # this tests what installs, not a paraphrase of it.
-_fns=$(mktemp /tmp/apex-scratch-fns.XXXXXX)
+_fns=$(mktemp /tmp/rime-scratch-fns.XXXXXX)
 sed -n '/^scratch_fs_ok()/,/^}/p;/^pick_scratch()/,/^}/p;/^stage_budget_kb()/,/^}/p;/^stage_setup()/,/^}/p;/^stage_teardown()/,/^}/p' "$ENGINE" > "$_fns"
 if [ ! -s "$_fns" ]; then
     printf 'FAIL  %-30s could not extract the chooser from %s\n' "scratch chooser" "$ENGINE"
@@ -345,8 +345,8 @@ else
         if [ "$2" = "$3" ]; then printf 'PASS  %-30s\n' "$1"; _p=$((_p+1))
         else printf 'FAIL  %-30s want %s got %s\n' "$1" "$3" "$2"; _f=$((_f+1)); fi
     }
-    mkdir -p /dev/shm/apex-scratch-test
-    scratch_fs_ok /dev/shm/apex-scratch-test && r=yes || r=no
+    mkdir -p /dev/shm/rime-scratch-test
+    scratch_fs_ok /dev/shm/rime-scratch-test && r=yes || r=no
     _ck "tmpfs refused"              "$r" no
     scratch_fs_ok /var/tmp && r=yes || r=no
     _ck "real filesystem accepted"   "$r" yes
@@ -358,10 +358,10 @@ else
     # shellcheck disable=SC2034  # read by scratch_fs_ok, sourced above
     ( DISK=$(df -P /var/tmp | awk 'NR==2{print $1}'); scratch_fs_ok /var/tmp ) && r=yes || r=no
     _ck "target disk refused"        "$r" no
-    mkdir -p /var/tmp/apex-scratch-ovr
-    out=$(APEX_OCI_SCRATCH=/var/tmp/apex-scratch-ovr pick_scratch || true)
-    _ck "override honoured"          "$out" /var/tmp/apex-scratch-ovr
-    out=$(APEX_OCI_SCRATCH=/dev/shm/apex-scratch-test pick_scratch || true)
+    mkdir -p /var/tmp/rime-scratch-ovr
+    out=$(RIME_OCI_SCRATCH=/var/tmp/rime-scratch-ovr pick_scratch || true)
+    _ck "override honoured"          "$out" /var/tmp/rime-scratch-ovr
+    out=$(RIME_OCI_SCRATCH=/dev/shm/rime-scratch-test pick_scratch || true)
     _ck "override onto tmpfs refused" "${out:-<empty>}" "<empty>"
 
     # ── The machine this installer will meet most often ────────────────────
@@ -374,17 +374,17 @@ else
     # never been published. The candidate list is substituted here rather
     # than simulated so the case is the real chooser's answer to the real
     # shape of that machine.
-    out=$( APEX_SCRATCH_CANDIDATES="/dev/shm/apex-scratch-test /no/such/dir" \
+    out=$( RIME_SCRATCH_CANDIDATES="/dev/shm/rime-scratch-test /no/such/dir" \
            pick_scratch || true )
     _ck "single-disk USB falls back"  "${out:-<empty>}" "@target"
     # …and the tmpfs in that list was refused on the way past, not chosen:
     # falling back to RAM is the bug 63857891 fixed and this must not undo.
     _ck "fallback is not the tmpfs"   "$(printf '%s' "$out" | grep -c '/dev/shm' || true)" 0
     # A real scratch volume still wins — the fallback is a fallback.
-    out=$( APEX_SCRATCH_CANDIDATES="/dev/shm/apex-scratch-test /var/tmp" \
+    out=$( RIME_SCRATCH_CANDIDATES="/dev/shm/rime-scratch-test /var/tmp" \
            pick_scratch || true )
-    _ck "spare volume still preferred" "${out:-<empty>}" "/var/tmp/apex-install-scratch"
-    rmdir /dev/shm/apex-scratch-test /var/tmp/apex-scratch-ovr 2>/dev/null
+    _ck "spare volume still preferred" "${out:-<empty>}" "/var/tmp/rime-install-scratch"
+    rmdir /dev/shm/rime-scratch-test /var/tmp/rime-scratch-ovr 2>/dev/null
 
     # ── How much of the target the download may take ───────────────────────
     # The only part of staging-on-target that can be exercised without a block
@@ -413,7 +413,7 @@ else
     # function under test is supposed to remove. If the unlink is ever
     # simplified out, every staged install fails on hardware and nothing else
     # in this suite would notice.
-    _st=$(mktemp -d /var/tmp/apex-stage-probe.XXXXXX)
+    _st=$(mktemp -d /var/tmp/rime-stage-probe.XXXXXX)
     (
       # shellcheck disable=SC2034  # LOG and STAGE_DIR are read by stage_setup,
       # which is sourced from the engine above, not defined here.
@@ -434,17 +434,17 @@ else
       [ "$STAGE_RESERVE_GB" -ge 1 ] || STAGE_RESERVE_GB=1
       mkdir -p "$_st/root"
       stage_setup "$_st/root" >/dev/null 2>&1 || { echo "SETUP-FAILED"; exit 0; }
-      [ -e "$_st/root/.apex-stage.img" ] && echo "LEFT-BEHIND" && exit 0
+      [ -e "$_st/root/.rime-stage.img" ] && echo "LEFT-BEHIND" && exit 0
       [ "$STAGE_TMPDIR" = "$_st/mnt/tmp" ] || { echo "TMPDIR=$STAGE_TMPDIR"; exit 0; }
       printf '%s\n' "${STAGE_BOOTC_ARGS[*]}"
     ) > "$_st/out" 2>&1
     _ck "staging image is unlinked"   "$(cat "$_st/out")" "--skip-finalize"
     rm -rf "$_st"
-    echo "$_p $_f" > /tmp/apex-scratch-counts
+    echo "$_p $_f" > /tmp/rime-scratch-counts
 )
-read -r _sp _sf < /tmp/apex-scratch-counts 2>/dev/null || { _sp=0; _sf=1; }
+read -r _sp _sf < /tmp/rime-scratch-counts 2>/dev/null || { _sp=0; _sf=1; }
 pass=$((pass + _sp)); fail=$((fail + _sf))
-rm -f "$_fns" /tmp/apex-scratch-counts
+rm -f "$_fns" /tmp/rime-scratch-counts
 fi
 
 # What the engine must and must not say about staging.
@@ -505,7 +505,7 @@ else
     printf 'PASS  %-30s\n' "skopeo copy names --tmpdir"; pass=$((pass+1))
 fi
 
-# A published netinstall ISO downloads a pinned DIGEST. Once :apex moves on,
+# A published netinstall ISO downloads a pinned DIGEST. Once :rime moves on,
 # that digest is untagged, and deleting untagged package versions would break
 # every ISO in the wild at its first pull. Two halves: no workflow may delete
 # package versions, and every release pins its digest with a durable
@@ -534,15 +534,15 @@ else
     printf 'FAIL  %-30s %s\n' "lock before log and mounts" "flock at ${_lock_ln:-?}, log truncation at ${_trunc_ln:-?}, unmount_target at ${_um_ln:-?}"; fail=$((fail+1))
 fi
 if [ "$ENGINE_RUNNABLE" = 1 ] && command -v flock >/dev/null; then
-    _L=/run/apex-install-test.$$.lock
-    sudo -n sh -c 'printf "log of the install that is running\n" > /var/log/apex-install.log'
+    _L=/run/rime-install-test.$$.lock
+    sudo -n sh -c 'printf "log of the install that is running\n" > /var/log/rime-install.log'
     sudo -n timeout 20 flock "$_L" sleep 20 & _holder=$!
     sleep 1
-    printf 'mode=disk\ndisk=/dev/null\nusername=bob\npassword=pw\nhostname=apex\nencrypt=no\n' > "$ANS"
-    out=$(sudo -n APEX_INSTALL_LOCK="$_L" APEX_IMAGE="$ENGINE_IMAGE" APEX_DRY_RUN=1 "$ENGINE" --headless "$ANS" 2>&1 </dev/null); _rc=$?
+    printf 'mode=disk\ndisk=/dev/null\nusername=bob\npassword=pw\nhostname=rime\nencrypt=no\n' > "$ANS"
+    out=$(sudo -n RIME_INSTALL_LOCK="$_L" RIME_IMAGE="$ENGINE_IMAGE" RIME_DRY_RUN=1 "$ENGINE" --headless "$ANS" 2>&1 </dev/null); _rc=$?
     kill "$_holder" 2>/dev/null; wait "$_holder" 2>/dev/null
     if [ "$_rc" = 1 ] && grep -q 'already running' <<<"$out" \
-       && sudo -n grep -q 'log of the install that is running' /var/log/apex-install.log; then
+       && sudo -n grep -q 'log of the install that is running' /var/log/rime-install.log; then
         printf 'PASS  %-30s\n' "second engine refuses cleanly"; pass=$((pass+1))
     else
         printf 'FAIL  %-30s rc=%s %s\n' "second engine refuses cleanly" "$_rc" "$(tail -1 <<<"$out")"; fail=$((fail+1))
@@ -553,13 +553,13 @@ else
 fi
 # The result record a reattaching front end reads: root-only, and it carries
 # the recovery key (the only on-machine copy once the front end is gone).
-_rf=$(mktemp -d /var/tmp/apex-result-test.XXXXXX)
+_rf=$(mktemp -d /var/tmp/rime-result-test.XXXXXX)
 (
     set +u
     eval "$(sed -n '/^write_result() {/,/^}/p' "$ENGINE")"
     RESULT_ON=1; RESULT_FILE="$_rf/sub/result"
-    INSTALL_MODE=disk; DISK=/dev/vda; TARGET=/dev/vda; USERNAME=bob; HOSTNAME=apex
-    RESULT_RECOVERY_KEY=abcd-efgh; RESULT_RECOVERY_SAVED=apex-recovery-key-apex.txt; RESULT_RECOVERY_UNSAVED=
+    INSTALL_MODE=disk; DISK=/dev/vda; TARGET=/dev/vda; USERNAME=bob; HOSTNAME=rime
+    RESULT_RECOVERY_KEY=abcd-efgh; RESULT_RECOVERY_SAVED=rime-recovery-key-rime.txt; RESULT_RECOVERY_UNSAVED=
     log() { :; }
     write_result ok ""
     # A die() after success must not turn a finished install into a failure.
@@ -573,10 +573,10 @@ else
     printf 'FAIL  %-30s %s\n' "engine records its result" "$(tr '\n' ' ' < "$_rf/out")"; fail=$((fail+1))
 fi
 # ...and the GUI reads it back into the state its done page draws from.
-printf 'status=failed\nmessage=disk went away\nmode=disk\ndisk=/dev/vda\ntarget=\nusername=bob\nhostname=apex\nrecovery_key=abcd\nrecovery_saved=\nrecovery_unsaved=x\n' > "$_rf/result"
-if APEX_RESULT_FILE="$_rf/result" python3 -c "
+printf 'status=failed\nmessage=disk went away\nmode=disk\ndisk=/dev/vda\ntarget=\nusername=bob\nhostname=rime\nrecovery_key=abcd\nrecovery_saved=\nrecovery_unsaved=x\n' > "$_rf/result"
+if RIME_RESULT_FILE="$_rf/result" python3 -c "
 import os, re, subprocess
-src = open('apex-installer-gui').read()
+src = open('rime-installer-gui').read()
 g = {'os': os, 're': re, 'subprocess': subprocess}
 exec(compile(src[src.index('ENGINE = '):src.index('def netinstall')].replace('ENGINE = ', 'ENGINE_ = ', 1), 'gui', 'exec'), g)
 r = g['read_result']()
@@ -590,12 +590,12 @@ fi
 (
     set +u
     eval "$(sed -n '/^pinned_image_gone() {/,/^}/p' "$ENGINE")"
-    LOG="$_rf/log"; printf 'reading manifest sha256:00 in ghcr.io/andrenijman/apex-os: manifest unknown\n' > "$LOG"
-    NET_SOURCE_IMAGE=ghcr.io/andrenijman/apex-os@sha256:00; TARGET_IMAGE=ghcr.io/andrenijman/apex-os:apex
+    LOG="$_rf/log"; printf 'reading manifest sha256:00 in ghcr.io/andrenijman/rime-os: manifest unknown\n' > "$LOG"
+    NET_SOURCE_IMAGE=ghcr.io/andrenijman/rime-os@sha256:00; TARGET_IMAGE=ghcr.io/andrenijman/rime-os:rime
     pinned_image_gone && echo GONE-PINNED
     NET_SOURCE_IMAGE=$TARGET_IMAGE
     pinned_image_gone || echo UNPINNED-NOT-GONE
-    printf 'dial tcp: lookup ghcr.io: no such host\n' > "$LOG"; NET_SOURCE_IMAGE=ghcr.io/andrenijman/apex-os@sha256:00
+    printf 'dial tcp: lookup ghcr.io: no such host\n' > "$LOG"; NET_SOURCE_IMAGE=ghcr.io/andrenijman/rime-os@sha256:00
     pinned_image_gone || echo OFFLINE-NOT-GONE
 ) > "$_rf/gone" 2>&1
 if [ "$(tr '\n' ' ' < "$_rf/gone")" = "GONE-PINNED UNPINNED-NOT-GONE OFFLINE-NOT-GONE " ]; then
@@ -612,7 +612,7 @@ mkdir -p "$_rf/bin"
 printf '#!/bin/sh\necho "chvt $*" >> "%s/order"\n' "$_rf" > "$_rf/bin/chvt"
 printf '#!/bin/sh\necho gui >> "%s/order"\n' "$_rf" > "$_rf/bin/gui"
 chmod +x "$_rf/bin/chvt" "$_rf/bin/gui"
-_launch_fns="$(sed -n '/^front_tty1() {/,/^}/p; /^start_gui() {/,/^}/p' apex-installer-launch)"
+_launch_fns="$(sed -n '/^front_tty1() {/,/^}/p; /^start_gui() {/,/^}/p' rime-installer-launch)"
 ( set +u; PATH="$_rf/bin:$PATH"; LOG="$_rf/launch.log"; log() { :; }; GUI_CMD=("$_rf/bin/gui")
   eval "$_launch_fns"; start_gui 1 ) >/dev/null 2>&1
 _order="$(tr '\n' ' ' < "$_rf/order" 2>/dev/null)"
@@ -643,9 +643,9 @@ fi
 
 echo "── GUI: every page must draw — it is the only front end there is ──────"
 
-GUI=./apex-installer-gui
-GUITEST=localhost/apex-guitest:latest       # gtk4/libadwaita/cage/grim/python3-cairo
-RANDR=localhost/apex-guitest-randr:latest   # + wlr-randr, to drive the output geometry
+GUI=./rime-installer-gui
+GUITEST=localhost/rime-guitest:latest       # gtk4/libadwaita/cage/grim/python3-cairo
+RANDR=localhost/rime-guitest-randr:latest   # + wlr-randr, to drive the output geometry
 SIZES="1024x600 1366x768"
 
 # The page list comes from the GUI's own registry (the add_named loop in
@@ -679,7 +679,7 @@ fi
 # That went unnoticed because this job is gated on installer changes and the
 # roadmap branches had not touched installer/ until now. It is a pre-existing
 # defect surfaced by this branch, not one it introduced.
-BUILD_CTX=$(mktemp -d /tmp/apex-guitest-ctx.XXXXXX)
+BUILD_CTX=$(mktemp -d /tmp/rime-guitest-ctx.XXXXXX)
 build_img() {   # build_img <tag> <containerfile-on-stdin>
     local tag=$1 err
     if err=$(sudo -n podman build -t "$tag" -f - "$BUILD_CTX" 2>&1 >/dev/null); then
@@ -704,12 +704,12 @@ if [ "$gui_skip" = 0 ] && ! sudo -n podman image exists "$RANDR" 2>/dev/null; th
 fi
 
 if [ "$gui_skip" = 0 ]; then
-    WORK=$(mktemp -d /tmp/apex-gui-render.XXXXXX)
+    WORK=$(mktemp -d /tmp/rime-gui-render.XXXXXX)
     mkdir -p "$WORK/gui" "$WORK/stub"
     # SELinux denies the container read access to $HOME even :ro, so the GUI is
     # copied beside the output dir and the whole thing is mounted :Z. The copy
     # is made fresh every run — it IS the file under test, just relabelled.
-    cp "$GUI" "$WORK/gui/apex-installer-gui"
+    cp "$GUI" "$WORK/gui/rime-installer-gui"
 
     # Stub lsblk (PATH-first inside the container): the container has no disks,
     # which would render only the empty-state pages. This presents a realistic
@@ -722,7 +722,7 @@ if [ "$gui_skip" = 0 ]; then
 case "$*" in
   *NAME,MOUNTPOINT*) exit 0 ;;   # live-media scan: nothing here is live media
   *NAME,SIZE,TYPE,MODEL,TRAN,RM,SERIAL*)
-    echo 'NAME="vda" SIZE="512G" TYPE="disk" MODEL="APEX Test SSD" TRAN="nvme" RM="0" SERIAL="APXTEST01"'; exit 0 ;;
+    echo 'NAME="vda" SIZE="512G" TYPE="disk" MODEL="Rime Test SSD" TRAN="nvme" RM="0" SERIAL="APXTEST01"'; exit 0 ;;
   *NAME,TYPE,SIZE,FSTYPE,LABEL,PARTTYPE*)
     printf '%s\n' \
       'vda1 part 512M vfat ESP c12a7328-f81f-11d2-ba4b-00a0c93ec93b' \
@@ -737,12 +737,12 @@ exit 0
 STUB
 
     # Inert engine stand-in for the run page. Without it the GUI's spawn of
-    # /usr/bin/apex-install fails instantly and the page bounces to "done"
+    # /usr/bin/rime-install fails instantly and the page bounces to "done"
     # before grim fires — the screenshot would show the wrong page. It emits
     # the two status lines the page displays, then idles. Touches nothing.
-    cat > "$WORK/stub/apex-install" <<'STUB'
+    cat > "$WORK/stub/rime-install" <<'STUB'
 #!/usr/bin/env bash
-echo "Installing APEX-OS to /dev/vda3 (partition of /dev/vda) … (full log: /var/log/apex-install.log)"
+echo "Installing Rime OS to /dev/vda3 (partition of /dev/vda) … (full log: /var/log/rime-install.log)"
 echo "Do not power off — /dev/vda3 is being erased and rewritten from here on."
 sleep 300
 STUB
@@ -819,8 +819,8 @@ from gi.repository import Gtk
 
 # SourceFileLoader explicitly: the GUI has no .py extension, so
 # spec_from_file_location alone cannot infer a loader for it.
-loader = SourceFileLoader("apexgui", "/out/gui/apex-installer-gui")
-spec = importlib.util.spec_from_loader("apexgui", loader)
+loader = SourceFileLoader("rimegui", "/out/gui/rime-installer-gui")
+spec = importlib.util.spec_from_loader("rimegui", loader)
 mod = importlib.util.module_from_spec(spec)
 loader.exec_module(mod)
 
@@ -829,7 +829,7 @@ app = mod.Installer()
 
 def measure(_app):
     # Runs after the GUI's own activate handler, so builders exist and the
-    # APEX_GUI_* state has been seeded exactly as in a jump-to-page render.
+    # RIME_GUI_* state has been seeded exactly as in a jump-to-page render.
     for name, build in app.builders.items():
         page = build()
         for w in widths:
@@ -843,7 +843,7 @@ PY
 
     # Runs INSIDE the container: for each geometry × page, start cage on a
     # headless output, let the first client resize it with wlr-randr, exec the
-    # real GUI jumped to the page via APEX_GUI_PAGE (its documented test
+    # real GUI jumped to the page via RIME_GUI_PAGE (its documented test
     # affordance), screenshot with grim, tear down. Measure everything at the
     # end in one pass.
     cat > "$WORK/inner.sh" <<'INNER'
@@ -855,16 +855,16 @@ mkdir -p "$XDG_RUNTIME_DIR"; chmod 700 "$XDG_RUNTIME_DIR"
 export WLR_BACKENDS=headless WLR_RENDERER=pixman WLR_LIBINPUT_NO_DEVICES=1
 export GSK_RENDERER=cairo GDK_BACKEND=wayland LIBGL_ALWAYS_SOFTWARE=1
 export PATH=/out/stub:$PATH
-install -m 0755 /out/stub/apex-install /usr/bin/apex-install
+install -m 0755 /out/stub/rime-install /usr/bin/rime-install
 # Jump-to-page state: a partition-mode install of /dev/vda3, so confirm shows
 # a per-partition verdict list and done shows the partition-mode success text.
-export APEX_GUI_MODE=partition APEX_GUI_DISK=/dev/vda \
-       APEX_GUI_TARGET=/dev/vda3 APEX_GUI_ESP=/dev/vda1 APEX_GUI_OK=1
+export RIME_GUI_MODE=partition RIME_GUI_DISK=/dev/vda \
+       RIME_GUI_TARGET=/dev/vda3 RIME_GUI_ESP=/dev/vda1 RIME_GUI_OK=1
 for size in $sizes; do
   for p in $pages; do
     rm -f "$XDG_RUNTIME_DIR"/wayland*   # fresh socket → grim finds wayland-0
-    APEX_GUI_PAGE=$p timeout 30 cage -- bash -c \
-      "wlr-randr --output HEADLESS-1 --custom-mode $size >/dev/null 2>&1; sleep 1; exec python3 /out/gui/apex-installer-gui" \
+    RIME_GUI_PAGE=$p timeout 30 cage -- bash -c \
+      "wlr-randr --output HEADLESS-1 --custom-mode $size >/dev/null 2>&1; sleep 1; exec python3 /out/gui/rime-installer-gui" \
       2>/dev/null &
     cpid=$!
     sleep 6                             # measured: first frame lands well within this
@@ -876,7 +876,7 @@ done
 # client measures every page at every panel width and prints MEASURE lines.
 rm -f "$XDG_RUNTIME_DIR"/wayland*
 MEASURE_WIDTHS="$(for s in $sizes; do printf '%s ' "${s%x*}"; done)" \
-  APEX_GUI_PAGE=confirm timeout 60 cage -- python3 /out/measure.py 2>/dev/null
+  RIME_GUI_PAGE=confirm timeout 60 cage -- python3 /out/measure.py 2>/dev/null
 exec python3 /out/analyze.py
 INNER
 

@@ -2,16 +2,16 @@
 #
 # boot-sb-vm.sh — boot a kernel under an SB-ENFORCING OVMF in QEMU and capture
 # the serial log. Used to demonstrate that:
-#   * an APEX-signed kernel boots (kernel + lockdown come up), and
+#   * a Rime-signed kernel boots (kernel + lockdown come up), and
 #   * an unsigned / foreign-signed kernel is refused by the firmware.
 #
 # Builds a throwaway FAT ESP (superfloppy) containing:
-#   /EFI/BOOT/BOOTX64.EFI  <- an APEX-signed UEFI shell (auto-booted)
+#   /EFI/BOOT/BOOTX64.EFI  <- a Rime-signed UEFI shell (auto-booted)
 #   /startup.nsh           <- launches the kernel with a cmdline + initrd
 #   /vmlinuz.efi           <- the kernel under test
 #   /initramfs.cpio.gz     <- tiny init that proves userspace + powers off
 #
-# The firmware verifies every LoadImage against db; the shell is APEX-signed so
+# The firmware verifies every LoadImage against db; the shell is Rime-signed so
 # it always loads, and it is the shell's LoadImage of the kernel that is the
 # actual signature gate under test.
 #
@@ -64,19 +64,19 @@ NSH="$OUTDIR/startup-$NAME.nsh"
 # ---- startup.nsh: launch kernel, and if LoadImage is refused, shut down ----
 cat > "$NSH" <<EOF
 @echo -on
-echo "APEX-SPIKE-D: startup.nsh executing on" %cwd%
+echo "RIME-SPIKE-D: startup.nsh executing on" %cwd%
 fs0:
-echo "APEX-SPIKE-D: launching vmlinuz.efi (firmware will verify its signature vs db)"
+echo "RIME-SPIKE-D: launching vmlinuz.efi (firmware will verify its signature vs db)"
 vmlinuz.efi initrd=\initramfs.cpio.gz $CMDLINE
-echo "APEX-SPIKE-D: control returned to shell -> kernel image was REFUSED or exited (lasterror=%lasterror%)"
-echo "APEX-SPIKE-D: shutting down"
+echo "RIME-SPIKE-D: control returned to shell -> kernel image was REFUSED or exited (lasterror=%lasterror%)"
+echo "RIME-SPIKE-D: shutting down"
 reset -s
 EOF
 
 # ---- build the ESP (superfloppy FAT, no root needed via mtools) ----
 rm -f "$ESP"
 truncate -s 96M "$ESP"
-mkfs.vfat -F 32 -n APEXESP "$ESP" >/dev/null
+mkfs.vfat -F 32 -n RIMEESP "$ESP" >/dev/null
 mmd   -i "$ESP" ::/EFI ::/EFI/BOOT
 mcopy -i "$ESP" "$LOADER"    ::/EFI/BOOT/BOOTX64.EFI
 mcopy -i "$ESP" "$NSH"       ::/startup.nsh

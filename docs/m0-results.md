@@ -1,4 +1,4 @@
-# APEX-OS M0 spike results
+# Rime OS M0 spike results
 
 Findings from the M0 de-risking spikes. Each spike is a self-contained
 section; a spike that fails with a clear diagnosis is still a valid result.
@@ -11,8 +11,8 @@ section; a spike that fails with a clear diagnosis is still a valid result.
 
 **Goal.** Prove the base-image stack builds, produces a bootable disk image,
 boots in a VM, renders the greeter, and completes a real login through
-`apex-greet`. The stack: fedora-bootc + Hyprland (COPR) + quickshell +
-greetd/cage + the `apex-greet` greeter.
+`rime-greet`. The stack: fedora-bootc + Hyprland (COPR) + quickshell +
+greetd/cage + the `rime-greet` greeter.
 
 ### Result at a glance
 
@@ -22,12 +22,12 @@ greetd/cage + the `apex-greet` greeter.
 | qcow2 via bootc-image-builder | **PASS** (1.7 GB qcow2, `--rootfs xfs`) |
 | VM boots (UEFI/OVMF, kernel 7.1.4, graphical.target) | **PASS** |
 | greetd runs (display-manager alias, session on seat0/tty1) | **PASS** |
-| `apex-greet` *launches* (cage+qs, loads shell.qml, greetd IPC) | **PASS** |
+| `rime-greet` *launches* (cage+qs, loads shell.qml, greetd IPC) | **PASS** |
 | Greeter *renders on screen* (clock / pill / spark) | **FAIL in this headless QEMU**: QML bug fixed, but blocked by compositor/layer-shell + headless-GL (see below) |
 | Login (`test`/`test`) auth path | **infra PASS**: PAM reachable, serial login `test`/`test` works; full auth-through-the-greeter not confirmed on screen (greeter never painted) |
 
 **One-line verdict:** the base stack builds, the qcow2 boots, greetd runs, and
-`apex-greet` launches and is parse/logic-correct, but this headless QEMU setup
+`rime-greet` launches and is parse/logic-correct, but this headless QEMU setup
 could not confirm live pixel rendering. Defer the visual check to real hardware
 or a GL-capable runner, and revisit the greeter's compositor host (cage 0.2.0
 does not serve quickshell's layer-shell).
@@ -40,7 +40,7 @@ does not serve quickshell's layer-shell).
   `aquamarine 0.9.5-2.fc43`, `hyprlang`, `hyprutils`, `hyprgraphics`,
   `hyprcursor`.
 - **Quickshell COPR:** `errornointernet/quickshell` → `quickshell
-  0.3.0-3.fc43`, the exact version `apex-greet` targets (Fedora proper
+  0.3.0-3.fc43`, the exact version `rime-greet` targets (Fedora proper
   carries only `quickshell 0.2.1`, so the COPR is worth keeping even though
   Fedora now packages quickshell).
 - **From stock Fedora 43:** `greetd 0.10.3`, `cage 0.2.0`, `foot 1.25.0`,
@@ -88,10 +88,10 @@ does not serve quickshell's layer-shell).
    **`greetd`** system user via sysusers.d (UID/GID 977); there is **no
    `greeter` user**. The greeter's `greetd-config.toml` used
    `user = "greeter"`, which would stop greetd from starting the session.
-   Fix: `user = "greetd"`, with the `/var/lib/apex-greet` state-dir
+   Fix: `user = "greetd"`, with the `/var/lib/rime-greet` state-dir
    ownership aligned to `greetd:greetd`. (Committed as a `fix(greeter)`.)
 4. **Greeter had no keyboard path to the username field.** On a fresh boot
-   (`/var/lib/apex-greet/last-user` empty) the greeter always force-focused
+   (`/var/lib/rime-greet/last-user` empty) the greeter always force-focused
    the password field and no key reached the username pill, so a
    keyboard-only login could never enter a username. Fix: focus the
    username field first when nothing is prefilled, and add Tab / Shift+Tab
@@ -196,7 +196,7 @@ scanner warnings, but confirm that the handlers fire.
 
 ### Screenshots
 
-Under `/home/andre/apex-os-m0-work/spike-a/shots/` (NOT committed):
+Under `/home/andre/rime-os-m0-work/spike-a/shots/` (NOT committed):
 
 - `greeter-fixed.png`: cage, post theme/ctx fix, 432 B solid black (cage up,
   quickshell layershell init failed → no surface painted).
@@ -226,10 +226,10 @@ Under `/home/andre/apex-os-m0-work/spike-a/shots/` (NOT committed):
   without rebuilding.
 - Graphical capture: QMP `screendump` (PPM) → `magick` → PNG, read back.
 
-**Evidence that `apex-greet` launched (even though it did not paint):**
+**Evidence that `rime-greet` launched (even though it did not paint):**
 `loginctl` showed greeter session `c1`, uid 977 `greetd`, seat0, tty1, with
 `cage` and `qs` processes; the quickshell log shows `Launching config
-"/usr/share/apex-greet/shell.qml"`, successful edition detection, and
+"/usr/share/rime-greet/shell.qml"`, successful edition detection, and
 `quickshell.service.greetd  Connected to greetd socket`, which means the
 greetd IPC/PAM conversation is reachable. `greetd`'s own PAM stack
 authenticated `test` on the serial getty. The greeter, its greetd backend,
@@ -244,7 +244,7 @@ determine the image-layering model, and boot the result in a VM.
 
 **Host / tooling:** Void Linux, podman 5.8.3 (rootful build via passwordless
 sudo), qemu 11.0.2 + KVM, bootc-image-builder, 16 threads. Large artifacts live
-outside the repo in `~/apex-os-m0-work/spike-b/`. Repo deliverable:
+outside the repo in `~/rime-os-m0-work/spike-b/`. Repo deliverable:
 `kernel/Containerfile.kernel-spike`.
 
 ### Verdict per sub-goal
@@ -336,7 +336,7 @@ akmods --force --kernels 7.0.12-cachyos1.fc42.x86_64 --kmod nvidia
 - **No version skew:** the 580.159.03 driver builds without errors against a
   7.0 kernel with gcc 15.2.1, so the GCC-built CachyOS kernel + RPMFusion gcc
   akmod path is compatible. (The Containerfile makes this step
-  capture-and-continue with a `/usr/lib/apex-nvidia-akmod-status` marker so a
+  capture-and-continue with a `/usr/lib/rime-nvidia-akmod-status` marker so a
   future skew failure will not block the other checks. The marker read
   `PASS driver=580.159.03 kver=7.0.12-...`.)
 
@@ -406,13 +406,13 @@ module's `vermagic`, and the BORE banner on the live serial console.
 
 **Exact remaining step (VM boot → full multi-user):** produce the qcow2 with
 `bootc-image-builder`. The config + serial karg are already written to
-`~/apex-os-m0-work/spike-b/{bib-config.toml,boot-qemu.sh}`, and
-`localhost/apex-kernel-spike-bootcheck` has a baked-in boot-check oneshot
+`~/rime-os-m0-work/spike-b/{bib-config.toml,boot-qemu.sh}`, and
+`localhost/rime-kernel-spike-bootcheck` has a baked-in boot-check oneshot
 service that prints `uname -r` + nvidia-module presence to the console and
 powers off. This needs a host with cgroups mounted (a CI runner, or
 `mount -t cgroup2 none /sys/fs/cgroup` on the build box). On such a host the
 whole step is: `bib --type qcow2 --local
---config /config.toml localhost/apex-kernel-spike-bootcheck` → `boot-qemu.sh`.
+--config /config.toml localhost/rime-kernel-spike-bootcheck` → `boot-qemu.sh`.
 
 ### 7. Defects found (fix before M1)
 
@@ -441,7 +441,7 @@ whole step is: `bib --type qcow2 --local
 ## Spike D: Secure Boot chain
 
 **Goal:** prove the Secure Boot signing-chain mechanics with our own key: an
-APEX-signed kernel boots with SB **enforcing** in a VM, and the firmware
+Rime-signed kernel boots with SB **enforcing** in a VM, and the firmware
 **rejects** unsigned / foreign kernels. The spike is scriptable and headless
 (no interactive MokManager), so it can drop into CI.
 
@@ -449,15 +449,15 @@ APEX-signed kernel boots with SB **enforcing** in a VM, and the firmware
 
 | Step | Result |
 |------|--------|
-| Generate APEX signing keypair (test) | **PASS** |
+| Generate Rime signing keypair (test) | **PASS** |
 | Enroll our cert as PK/KEK/db, SB on, headless | **PASS** |
-| APEX-signed kernel boots under SB enforcing (SB detected + lockdown active + userspace) | **PASS** |
+| Rime-signed kernel boots under SB enforcing (SB detected + lockdown active + userspace) | **PASS** |
 | Unsigned kernel rejected by firmware | **PASS** (`Access Denied`) |
 | Foreign (rogue-key) signed kernel rejected | **PASS** (`Access Denied`) |
 | Kernel-module signing (bonus) | **NOT DEMONSTRATED in-VM**: impractical here; exact procedure documented below |
 
 Everything below ran on the Void host (qemu 11.0.2 + KVM). Large artifacts
-live outside the repo in `~/apex-os-m0-work/spike-d/`; the repo holds only the
+live outside the repo in `~/rime-os-m0-work/spike-d/`; the repo holds only the
 scripts (`signing/spike-d/`). **No key material is committed.**
 
 ### Environment / tools installed
@@ -471,7 +471,7 @@ scripts (`signing/spike-d/`). **No key material is committed.**
   `sbvarsign`).
 - **Installed via pip (isolated venv, host untouched):** `virt-firmware 26.7.2`
   → `virt-fw-vars`. (System pip is PEP-668 "externally managed"; a venv at
-  `~/apex-os-m0-work/spike-d/venv` avoids `--break-system-packages`.)
+  `~/rime-os-m0-work/spike-d/venv` avoids `--break-system-packages`.)
 - Already present: `gcc`, `cpio`, `mtools` (`mcopy`/`mmd`/`mformat`),
   `mkfs.vfat`, `openssl`.
 
@@ -482,20 +482,20 @@ Rather than download a distro cloud image, the spike used the stock host kernel
 `CONFIG_EFI_STUB=y` (bootable PE with EFI handoff),
 `CONFIG_SECURITY_LOCKDOWN_LSM=y` + `_EARLY=y`, `CONFIG_SERIAL_8250_CONSOLE=y`.
 A ~330 KB initramfs (statically-linked C `init`, see
-`~/apex-os-m0-work/spike-d/initramfs/init.c`) mounts `/proc` `/sys` `efivarfs`,
+`~/rime-os-m0-work/spike-d/initramfs/init.c`) mounts `/proc` `/sys` `efivarfs`,
 tags the kernel's SB/lockdown log lines, reads the `SecureBoot` EFI var, and
 powers off, so the VM proves userspace with no root disk and shuts itself down.
 
 ### Exact invocations
 
 **1. Keypair (`keygen.sh`)**: RSA-2048, self-signed, SHA-256; the future
-"APEX MOK"/db key (here a throwaway TEST key):
+"Rime MOK"/db key (here a throwaway TEST key):
 
 ```sh
 openssl req -new -x509 -newkey rsa:2048 -nodes \
-  -keyout apex-mok.key -out apex-mok.crt -days 3650 -sha256 \
+  -keyout rime-mok.key -out rime-mok.crt -days 3650 -sha256 \
   -subj "/CN=APEX-OS TEST Secure Boot key (SPIKE-D, DO NOT TRUST)/"
-openssl x509 -in apex-mok.crt -outform DER -out apex-mok.der
+openssl x509 -in rime-mok.crt -outform DER -out rime-mok.der
 ```
 
 **2. Enroll into an SB-enforcing varstore (`enroll-vars.sh`)**: headless, our
@@ -504,11 +504,11 @@ key only, Microsoft keys left out on purpose:
 ```sh
 virt-fw-vars \
   --input  /usr/share/edk2/x64/OVMF_VARS.4m.fd \
-  --set-pk  <GUID> apex-mok.der \
-  --add-kek <GUID> apex-mok.der \
-  --add-db  <GUID> apex-mok.der \
+  --set-pk  <GUID> rime-mok.der \
+  --add-kek <GUID> rime-mok.der \
+  --add-db  <GUID> rime-mok.der \
   --no-microsoft --secure-boot \
-  --output apex-VARS.ours-only.4m.fd
+  --output rime-VARS.ours-only.4m.fd
 ```
 
 Result (`virt-fw-vars --print`): `PK`, `KEK`, `db` each a 911-byte blob (our
@@ -518,9 +518,9 @@ Mode and enters User Mode = SB enforcing.
 **3. Sign the kernel (`sign-kernel.sh` → `sbsign`)**:
 
 ```sh
-sbsign --key apex-mok.key --cert apex-mok.crt \
-       --output vmlinuz-apex-signed.efi /boot/vmlinuz-7.1.4_1
-sbverify --cert apex-mok.crt vmlinuz-apex-signed.efi   # -> Signature verification OK
+sbsign --key rime-mok.key --cert rime-mok.crt \
+       --output vmlinuz-rime-signed.efi /boot/vmlinuz-7.1.4_1
+sbverify --cert rime-mok.crt vmlinuz-rime-signed.efi   # -> Signature verification OK
 ```
 
 A rogue keypair (not enrolled) signed a second copy, and a third copy stayed
@@ -540,25 +540,25 @@ qemu-system-x86_64 \
   -serial file:serial-<test>.log -display none -no-reboot
 ```
 
-The FAT ESP holds `\EFI\BOOT\BOOTX64.EFI` (an **APEX-signed** UEFI shell) plus a
+The FAT ESP holds `\EFI\BOOT\BOOTX64.EFI` (an **Rime-signed** UEFI shell) plus a
 `startup.nsh` that launches `vmlinuz.efi` with a cmdline + `initrd=`. The
-APEX-signed shell loading is itself a positive check; the shell's `LoadImage`
+Rime-signed shell loading is itself a positive check; the shell's `LoadImage`
 of the kernel is the signature gate under test. The cmdline included
 `console=ttyS0,115200 ... lockdown=integrity` (see lockdown note below).
 
 ### Serial evidence
 
-**Positive (APEX-signed kernel boots, SB enforcing):**
+**Positive (Rime-signed kernel boots, SB enforcing):**
 
 ```
 FS0:\> vmlinuz.efi initrd=\initramfs.cpio.gz console=ttyS0,115200 ... lockdown=integrity
 [    0.016634] Secure boot enabled
 [    0.925962] Lockdown: swapper/0: hibernation is restricted; see man kernel_lockdown.7
 [    0.977893] Run /init as init process
-APEX-SPIKE-D: >>> reached userspace: kernel executed under UEFI Secure Boot <<<
-APEX-EVIDENCE: Kernel is locked down from command line; see man kernel_lockdown.7
-APEX-EVIDENCE: Secure boot enabled
-APEX-EVIDENCE: efivar SecureBoot = 1 (1 = enabled)
+RIME-SPIKE-D: >>> reached userspace: kernel executed under UEFI Secure Boot <<<
+RIME-EVIDENCE: Kernel is locked down from command line; see man kernel_lockdown.7
+RIME-EVIDENCE: Secure boot enabled
+RIME-EVIDENCE: efivar SecureBoot = 1 (1 = enabled)
 [    2.004344] reboot: Power down
 ```
 
@@ -586,7 +586,7 @@ The Void host kernel is built `CONFIG_LOCK_DOWN_KERNEL_FORCE_NONE=y`: it does
 passed `lockdown=integrity` on the cmdline to activate the lockdown LSM, and the
 log reads "locked down **from command line**". Fedora/RHEL/Ubuntu kernels carry
 the SB→lockdown coupling and would instead print "locked down **from EFI Secure
-Boot mode**" with no argument. **Implication for the APEX kernel:** build it with
+Boot mode**" with no argument. **Implication for the Rime kernel:** build it with
 `CONFIG_LOCK_DOWN_KERNEL_FORCE_INTEGRITY=y` (or the SB-coupling) so lockdown is
 automatic under SB and does not depend on a cmdline argument a user could drop.
 
@@ -604,20 +604,20 @@ host:
   `certs/signing_key.pem`. Enrolling our key in **db** (which gates the *boot*
   chain) does nothing for module trust. Under `lockdown=integrity` the kernel
   refuses unsigned modules, but we cannot make this kernel *accept* an
-  APEX-signed module without rebuilding it.
+  Rime-signed module without rebuilding it.
 
-Exact procedure for the APEX image pipeline (captured in
+Exact procedure for the Rime image pipeline (captured in
 `signing/spike-d/sign-module.sh`):
 
 ```sh
-# Sign every shipped kmod with the APEX key (DER cert), sha512 to match
+# Sign every shipped kmod with the Rime key (DER cert), sha512 to match
 # the kernel's CONFIG_MODULE_SIG_HASH:
-/lib/modules/<kver>/build/scripts/sign-file sha512 apex-mok.key apex-mok.der module.ko
+/lib/modules/<kver>/build/scripts/sign-file sha512 rime-mok.key rime-mok.der module.ko
 ```
 
-For the kernel to trust those signatures, build the APEX kernel with the APEX
+For the kernel to trust those signatures, build the Rime kernel with the Rime
 public key in a trusted keyring: either bundled at build time
-(`CONFIG_SYSTEM_TRUSTED_KEYS=/path/apex.pem`, with `CONFIG_MODULE_SIG=y`), or
+(`CONFIG_SYSTEM_TRUSTED_KEYS=/path/rime.pem`, with `CONFIG_MODULE_SIG=y`), or
 loaded at runtime via the `.machine` keyring
 (`CONFIG_INTEGRITY_MACHINE_KEYRING=y` + shim/MOK). Pair it with
 `CONFIG_MODULE_SIG_FORCE=y` (or `module.sig_enforce=1`) to reject unsigned
@@ -628,7 +628,7 @@ modules unconditionally.
 - The four scripts in `signing/spike-d/` are the pipeline primitives:
   `sbsign` for boot components (kernel/UKI/shim/bootloader), `virt-fw-vars` for
   building test varstores, and `boot-sb-vm.sh` as an automated SB smoke test
-  that CI can gate on (APEX-signed boots, unsigned/foreign `Access Denied`).
+  that CI can gate on (Rime-signed boots, unsigned/foreign `Access Denied`).
 - Keep the private key out of the tree: inject it from a CI secret / HSM at
   sign time. Only the public cert (DER) ships in images for enrollment. The
   repo `.gitignore` already blocks `*.key`/`*.pem`/`*.p12`.
@@ -637,31 +637,31 @@ modules unconditionally.
   (kernel+initrd+cmdline in one signed PE) so the cmdline sits inside the
   signature envelope where nobody can tamper with it, and lockdown does not
   rest on a mutable cmdline arg.
-- Match the kernel's module-sig hash (sha512 here) and bake the APEX key into a
+- Match the kernel's module-sig hash (sha512 here) and bake the Rime key into a
   trusted keyring so kmod signing is enforceable (above).
 
 ### db-enroll (this VM) vs shim + MOK (real hardware)
 
-This spike enrolled the APEX key straight into UEFI **db** (with self-owned
+This spike enrolled the Rime key straight into UEFI **db** (with self-owned
 PK/KEK). That is legitimate and fully enforcing, but only feasible where we
 control the firmware's key database: VMs, or physical machines where the
 owner clears Setup Mode and enrolls a custom PK/db. Most retail hardware does
 **not** ship that way: those machines trust the **Microsoft UEFI CA** in db,
 and their owners cannot easily rewrite db.
 
-On real hardware the APEX flow is therefore **shim + MOK**, not db:
+On real hardware the Rime flow is therefore **shim + MOK**, not db:
 
 1. Ship a `shim` signed by the Microsoft UEFI CA (already trusted in db).
-2. shim carries/enrolls the **APEX cert as a MOK** (Machine Owner Key); the
+2. shim carries/enrolls the **Rime cert as a MOK** (Machine Owner Key); the
    user confirms MOK enrollment once in MokManager at first boot (or
    `mokutil` pre-seeds it).
-3. shim verifies the APEX-signed kernel/UKI against the MOK: no db change
+3. shim verifies the Rime-signed kernel/UKI against the MOK: no db change
    needed, SB stays enforcing, and the kernel links the MOK into its
    `.machine` keyring so the **same key also validates signed modules**.
 
 The *signing* commands proven here (`sbsign`, `sign-file`) are identical for
 both paths; only *where the trust anchor lives* differs (db in the VM;
-MOK-behind-shim on locked-down retail firmware). To offer both, ship the APEX
+MOK-behind-shim on locked-down retail firmware). To offer both, ship the Rime
 cert for db-enrollment on owner-controlled machines **and** a
 Microsoft-CA-signed shim that enrolls the same cert as a MOK everywhere else.
 
@@ -670,7 +670,7 @@ Microsoft-CA-signed shim that enrolls the same cert as a MOK everywhere else.
 **Date:** 2026-07-21   **Host:** Void Linux, qemu 11.0.2 + KVM, OVMF (edk2 x64,
 4 MB split), podman 5.8.3   **Image:** `quay.io/fedora/fedora-bootc:43`
 (bootc **1.16.3**)   **Scripts:** [`files/scripts/spike-e/`](../files/scripts/spike-e/)
-(reusable install template)   **Artifacts:** `~/apex-os-m0-work/spike-e/` (VM
+(reusable install template)   **Artifacts:** `~/rime-os-m0-work/spike-e/` (VM
 disks + `out/` captures, not in repo).
 
 ### Question
@@ -689,7 +689,7 @@ The harness built a 30 GB GPT VM disk with a layout mirroring the L16:
 |------|------|----|------|
 | `vda1` | 1 GiB | FAT32 | **shared ESP** |
 | `vda2` | 12 GiB | ext4 | incumbent root (Alpine) |
-| `vda3` | ~17 GiB | btrfs (empty) | APEX-OS install target |
+| `vda3` | ~17 GiB | btrfs (empty) | Rime OS install target |
 
 The **incumbent is Alpine 3.24.1** booting **classic EFISTUB** the same way
 Void does on the L16: kernel + initramfs copied *onto* the shared ESP at
@@ -721,7 +721,7 @@ podman run --rm --privileged --pid=host --network=host \
     -v /target:/target \
     quay.io/fedora/fedora-bootc:43 \
     bootc install to-filesystem \
-      --karg=root=UUID=<apex-root-uuid> --karg=rw \
+      --karg=root=UUID=<rime-root-uuid> --karg=rw \
       --karg=console=tty0 --karg=console=ttyS0,115200 \
       --skip-fetch-check \
       /target
@@ -741,7 +741,7 @@ Executing: "efibootmgr" "--create" "--disk" "/dev/vda" "--part" "1" \
 Installation complete!
 ```
 
-The apex root received a correct bootc/ostree deployment
+The rime root received a correct bootc/ostree deployment
 (`.bootc-aleph.json`, `ostree/deploy/default/deploy`, `/boot` with
 `grub2/`, `loader/`, `bootupd-state.json`).
 

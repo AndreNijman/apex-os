@@ -2,7 +2,7 @@
 # ─────────────────────────────────────────────────────────────────────────────
 #  test-bootc-install-guard.sh — the efivars guard, proven in BOTH directions.
 #
-#  What it guards, in one paragraph: on 2026-09-20 `installer/apex-install`
+#  What it guards, in one paragraph: on 2026-09-20 `installer/rime-install`
 #  ran inside a `--privileged --pid=host` container and reached bootc's
 #  bootloader step without `--generic-image`. bootupd deleted the host's
 #  Boot0000 and recreated it against the ESP inside the image file being built.
@@ -43,9 +43,9 @@
 #  ═══ WHAT THE REPO SCAN CANNOT COVER, SAID OUT LOUD ═══
 #
 #  The scan matches the literal `--via-loopback`. NEITHER of the two real
-#  incidents contained that string: both were `apex-install` handing bootc a
+#  incidents contained that string: both were `rime-install` handing bootc a
 #  loop DEVICE it had attached itself, on a `to-filesystem` install. So the
-#  scan covers the shape a human types at a prompt, and covers apex-install's
+#  scan covers the shape a human types at a prompt, and covers rime-install's
 #  path NOT AT ALL — that one is covered by `installer/test-installer-luks.sh`'s
 #  NVRAM section and by the live suite asserting nvram-guard's verdict. Saying
 #  so here is the point: a scan believed to cover more than it does is how the
@@ -56,7 +56,7 @@
 #  No `bootc install` is executed, no container is started, no EFI variable is
 #  written and no real NVRAM is read: `podman` and `efibootmgr` are stubs on
 #  PATH and the guard's firmware root is pointed at a fixture tree through
-#  APEX_NVRAM_EFI_ROOT. The assertion under test is about LAUNCH ARGUMENTS,
+#  RIME_NVRAM_EFI_ROOT. The assertion under test is about LAUNCH ARGUMENTS,
 #  which can be checked without launching anything.
 # ─────────────────────────────────────────────────────────────────────────────
 set -uo pipefail
@@ -119,13 +119,13 @@ EFI="$WORK/efi"; mkdir -p "$EFI/efivars"
 G=8be4df61-93ca-11d2-aa0d-00e098032b8c
 printf 'fake-boot0000' > "$EFI/efivars/Boot0000-$G"
 printf 'fake-bootorder' > "$EFI/efivars/BootOrder-$G"
-export APEX_NVRAM_EFI_ROOT="$EFI"
+export RIME_NVRAM_EFI_ROOT="$EFI"
 
 cat > "$REC/ebm.out.default" <<'EBM'
 BootCurrent: 0000
 Timeout: 0 seconds
 BootOrder: 0000,0004
-Boot0000* APEX-OS	HD(1,GPT,1c417de2-5766-455f-9318-198610885424,0x800,0x12c000)/\EFI\fedora\shimx64.efi
+Boot0000* Rime OS	HD(1,GPT,1c417de2-5766-455f-9318-198610885424,0x800,0x12c000)/\EFI\fedora\shimx64.efi
 Boot0004* Linux-Firmware-Updater	HD(1,GPT,1c417de2-5766-455f-9318-198610885424,0x800,0x12c000)/\EFI\fedora\fwupdx64.efi
 EBM
 
@@ -399,12 +399,12 @@ grep -q 'verdict: verified' <<<"$sout" && bad "it claimed verified with an empty
 cat > "$REC/ebm.out.default" <<'EBM'
 BootCurrent: 0000
 BootOrder: 0000,0004
-Boot0000* APEX-OS	HD(1,GPT,1c417de2-5766-455f-9318-198610885424,0x800,0x12c000)/\EFI\fedora\shimx64.efi
+Boot0000* Rime OS	HD(1,GPT,1c417de2-5766-455f-9318-198610885424,0x800,0x12c000)/\EFI\fedora\shimx64.efi
 EBM
 
 # could-not-run: no firmware at all — the command runs, and nothing is claimed
 reset_recordings
-nout="$(APEX_NVRAM_EFI_ROOT="$WORK/no-such-firmware" "$GUARD" --label t -- sh -c "touch '$WORK/ran-no-efi'; exit 7" 2>&1)"; nrc=$?
+nout="$(RIME_NVRAM_EFI_ROOT="$WORK/no-such-firmware" "$GUARD" --label t -- sh -c "touch '$WORK/ran-no-efi'; exit 7" 2>&1)"; nrc=$?
 eq 7 "$nrc" "with no UEFI the command's own exit status is propagated"
 [[ -e "$WORK/ran-no-efi" ]] && ok "the command ran" || bad "the command did not run on a non-UEFI host"
 grep -q 'could-not-run' <<<"$nout" && ok "verdict could-not-run" || bad "wrong verdict: $nout"
@@ -478,7 +478,7 @@ FIX="$WORK/fixtures"; mkdir -p "$FIX"
 cat > "$FIX/violating.sh" <<'FIXTURE'
 #!/bin/sh
 # A loopback install that would run bootc's firmware step against this machine.
-# NOT a transcript of either real incident: both of those were apex-install
+# NOT a transcript of either real incident: both of those were rime-install
 # handing bootc a loop DEVICE, with no `--via-loopback` anywhere in them. This
 # is the shape a person types at a prompt, which is the shape the scan covers.
 # Note it DOES carry the efivars tmpfs, and is dangerous anyway — that is the
@@ -488,7 +488,7 @@ sudo podman run --rm --privileged --pid=host \
     -v /dev:/dev \
     --tmpfs /sys/firmware/efi/efivars \
     -v /var/lab-scratch:/work \
-    localhost/apex-os:daily \
+    localhost/rime-os:daily \
     bootc install to-disk --via-loopback --wipe \
         --filesystem ext4 /work/lab.img
 FIXTURE
@@ -499,7 +499,7 @@ sudo podman run --rm --privileged --pid=host \
     -v /dev:/dev \
     --tmpfs /sys/firmware/efi/efivars \
     -v /var/lab-scratch:/work \
-    localhost/apex-os:daily \
+    localhost/rime-os:daily \
     bootc install to-disk --via-loopback --generic-image --wipe \
         --filesystem ext4 /work/lab.img
 FIXTURE
@@ -509,7 +509,7 @@ cat > "$FIX/commented.sh" <<'FIXTURE'
 sudo podman run --rm --privileged --pid=host \
     -v /dev:/dev \
     -v /var/lab-scratch:/work \
-    localhost/apex-os:daily \
+    localhost/rime-os:daily \
     bootc install to-disk --via-loopback --wipe \
         --filesystem ext4 /work/lab.img   # TODO add --generic-image
 FIXTURE
@@ -560,9 +560,9 @@ printf '%s\n' ${tracked[@]+"${tracked[@]}"} > "$WORK/tracked.txt"
     || bad "the scan is vacuous: git ls-files gave ${#tracked[@]} files (a tarball checkout has no .git)"
 # Not piped into `grep -q`: a match makes grep exit early, printf takes SIGPIPE,
 # and under `pipefail` the pipeline returns 141 on SUCCESS.
-grep -qxF 'installer/apex-install' "$WORK/tracked.txt" \
-    && ok "the sentinel installer/apex-install is inside the scanned set" \
-    || bad "installer/apex-install is not in the scanned set — the file list is wrong"
+grep -qxF 'installer/rime-install' "$WORK/tracked.txt" \
+    && ok "the sentinel installer/rime-install is inside the scanned set" \
+    || bad "installer/rime-install is not in the scanned set — the file list is wrong"
 hits="$(scan_list < "$WORK/tracked.txt")"
 [[ -z "$hits" ]] \
     && ok "no tracked file runs a --via-loopback install without --generic-image" \

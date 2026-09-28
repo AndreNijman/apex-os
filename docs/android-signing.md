@@ -1,7 +1,7 @@
 # Signing the Android app
 
 One key signs the APK on the Releases page, and that key decides something no
-server can undo later: whether a phone with APEX Remote on it can ever move to a
+server can undo later: whether a phone with Rime Remote on it can ever move to a
 newer build. Android installs an update only if the same key signed it as the
 version already there. A different key means no update, no override and no
 appeal: the owner's only way forward is to uninstall, and uninstalling destroys
@@ -54,12 +54,12 @@ listing, a signature checked by hand), nobody has it. That is the failure that
 would happen here, so this page states it in those terms instead of "keep a
 backup".
 
-### Why the passwords are not `apex-secretd`
+### Why the passwords are not `rime-secretd`
 
-`apex-secretd` protects secrets *on a booted APEX machine*, for things the
+`rime-secretd` protects secrets *on a booted Rime machine*, for things the
 machine itself needs at runtime. A GitHub runner and Andre need this key, and
-neither is an APEX machine. A dependency on the desktop's secret service would
-mean the release could only be cut from a working APEX install: one more way to
+neither is a Rime machine. A dependency on the desktop's secret service would
+mean the release could only be cut from a working Rime install: one more way to
 be unable to ship. The passwords live where the keystore lives:
 in the backup directory, and in a repository secret.
 
@@ -71,7 +71,7 @@ One command, on Andre's own machine:
 android/tools/generate-signing-key.sh
 ```
 
-It writes four files to `~/apex-android-signing`:
+It writes four files to `~/rime-android-signing`:
 
 | file | what it is |
 | --- | --- |
@@ -90,20 +90,25 @@ checkout.
 
 ### Then, in this order
 
-1. **Back up `~/apex-android-signing`**, all four files together, to two
+1. **Back up `~/rime-android-signing`**, all four files together, to two
    places that are not GitHub, at least one of them not network-attached. Do
    this before step 2, not after.
 2. Set the four secrets. The commands read from files, so you never type a
    password into a shell and from there into its history:
 
    ```
-   gh secret set APEX_KEYSTORE_BASE64   -R AndreNijman/apex-os < ~/apex-android-signing/keystore.base64
-   gh secret set APEX_KEYSTORE_PASSWORD -R AndreNijman/apex-os < ~/apex-android-signing/password.txt
-   gh secret set APEX_KEY_PASSWORD      -R AndreNijman/apex-os < ~/apex-android-signing/password.txt
-   printf '%s' 'apex-release' | gh secret set APEX_KEY_ALIAS -R AndreNijman/apex-os
+   gh secret set APEX_KEYSTORE_BASE64   -R AndreNijman/apex-os < ~/rime-android-signing/keystore.base64
+   gh secret set APEX_KEYSTORE_PASSWORD -R AndreNijman/apex-os < ~/rime-android-signing/password.txt
+   gh secret set APEX_KEY_PASSWORD      -R AndreNijman/apex-os < ~/rime-android-signing/password.txt
+   printf '%s' 'rime-release' | gh secret set APEX_KEY_ALIAS -R AndreNijman/apex-os
    ```
 
-   `APEX_KEY_PASSWORD` is the same value as `APEX_KEYSTORE_PASSWORD` on purpose.
+   The secret names and the repository are the pre-rebrand ones on purpose: <!-- rime-rename: keep -->
+   the secrets kept their names through the rename to Rime OS, because a
+   secret's value cannot be read back to copy it under a new name, and GitHub
+   redirects `AndreNijman/apex-os` once the repository is renamed. <!-- rime-rename: keep -->
+
+   `APEX_KEY_PASSWORD` is the same value as `APEX_KEYSTORE_PASSWORD` on purpose. <!-- rime-rename: keep -->
    Measured with OpenJDK 21's keytool: a PKCS12 keystore cannot hold two
    different passwords (*"Different store and key passwords not supported for
    PKCS12 KeyStores"*), and it ignores the one you gave it.
@@ -133,7 +138,7 @@ This is the SHA-256 of the signing certificate, and it is the value a stranger
 can check their download against:
 
 ```
-apksigner verify --print-certs apex-remote-<version>.apk
+apksigner verify --print-certs rime-remote-<version>.apk
 ```
 
 The `certificate SHA-256 digest` it prints must equal the value above. It is

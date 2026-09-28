@@ -1,9 +1,9 @@
 {
-  "name": "apex-remote-relay",
+  "name": "rime-remote-relay",
   "version": "0.1.0",
   "private": true,
   "type": "module",
-  "description": "Rendezvous relay for APEX Remote: pairs two outbound WebSockets and copies ciphertext between them",
+  "description": "Rendezvous relay for Rime Remote: pairs two outbound WebSockets and copies ciphertext between them",
   "license": "MIT",
   "scripts": {
     "test": "node --test"

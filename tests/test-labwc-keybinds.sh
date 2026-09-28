@@ -1,6 +1,6 @@
 #!/usr/bin/env bash
 # ─────────────────────────────────────────────────────────────────────────────
-#  Assertions for /usr/libexec/apex-labwc-keybinds — §17's fourth generator.
+#  Assertions for /usr/libexec/rime-labwc-keybinds — §17's fourth generator.
 #
 #  The shell has written Hyprland .conf/.lua and niri .kdl on every keybind edit
 #  for a long time. labwc got nothing, because it has no IPC to push bindings
@@ -23,7 +23,7 @@ set -uo pipefail
 set +e
 
 ROOT="$(cd "$(dirname "${BASH_SOURCE[0]}")/.." && pwd)"
-GEN="${ROOT}/files/system/libexec/apex-labwc-keybinds"
+GEN="${ROOT}/files/system/libexec/rime-labwc-keybinds"
 CHECK="${ROOT}/files/scripts/check-labwc-keybinds"
 RC="${ROOT}/files/desktop/labwc/rc.xml"
 WORK="$(mktemp -d)"
@@ -41,34 +41,34 @@ section() { printf '\n── %s ──\n' "$1"; }
 # first: the installed copy is whatever the last image shipped, which lags the
 # tree under test, and checking a change against a stale source of truth fails
 # for reasons unrelated to the change.
-# APEX_SHELL_TREE first, because the two repositories are not always siblings:
-# roadmap work happens in paired worktrees under /var/tmp/apex-work, where
-# `../apex-shell` resolves to nothing and the fallback silently measures the
+# RIME_SHELL_TREE first, because the two repositories are not always siblings:
+# roadmap work happens in paired worktrees under /var/tmp/rime-work, where
+# `../rime-shell` resolves to nothing and the fallback silently measures the
 # INSTALLED shell — whatever the last image shipped. That is the worst of the
 # three outcomes: it runs, it is green, and it says nothing about the change.
 SHELL_TREE=""
-for cand in "${APEX_SHELL_TREE:-}" "${ROOT}/../apex-shell" /usr/share/apex-shell; do
+for cand in "${RIME_SHELL_TREE:-}" "${ROOT}/../rime-shell" /usr/share/rime-shell; do
     [ -n "$cand" ] || continue
     [ -f "${cand}/src/services/config_tab/KeybindService.qml" ] && { SHELL_TREE="$cand"; break; }
 done
 
 if [ -z "$SHELL_TREE" ]; then
     # A suite that skips proves nothing, and this one skipped its ENTIRE self on
-    # CI the first time it ran there: no apex-shell checkout next to the repo, no
-    # /usr/share/apex-shell in the runner, `passed=0 failed=0`, green tick. That
+    # CI the first time it ran there: no rime-shell checkout next to the repo, no
+    # /usr/share/rime-shell in the runner, `passed=0 failed=0`, green tick. That
     # is indistinguishable from working.
     #
-    # So CI sets APEX_REQUIRE_SHELL_TREE=1 and the skip becomes a failure. A
+    # So CI sets RIME_REQUIRE_SHELL_TREE=1 and the skip becomes a failure. A
     # developer running this locally without a shell checkout still gets a skip,
     # because there the absence is obvious and the alternative is a suite nobody
     # can run.
-    if [ "${APEX_REQUIRE_SHELL_TREE:-0}" = "1" ]; then
-        printf 'FAIL  an apex-shell tree is required here and none was found\n' >&2
-        printf '      looked in: $APEX_SHELL_TREE, %s/../apex-shell and /usr/share/apex-shell\n' "$ROOT" >&2
+    if [ "${RIME_REQUIRE_SHELL_TREE:-0}" = "1" ]; then
+        printf 'FAIL  a rime-shell tree is required here and none was found\n' >&2
+        printf '      looked in: $RIME_SHELL_TREE, %s/../rime-shell and /usr/share/rime-shell\n' "$ROOT" >&2
         printf '\npassed=0 failed=1\n'
         exit 1
     fi
-    printf 'no apex-shell tree available; nothing here can run\n' >&2
+    printf 'no rime-shell tree available; nothing here can run\n' >&2
     printf '\npassed=0 failed=0 (skipped: no shell tree)\n'
     exit 0
 fi
@@ -78,35 +78,35 @@ fi
 # whatever the LAST IMAGE shipped — and when that lags the tree under test, the
 # failures look like real regressions in the code you just wrote. That happened
 # while integrating the P1 branches: three assertions failed in a git worktree
-# purely because the worktree has no sibling apex-shell, and the fallback was
+# purely because the worktree has no sibling rime-shell, and the fallback was
 # silent about it.
 #
 # And the NOTE was not enough. It is printed once, at the top, and the FAIL
 # lines are forty lines below it; on 2026-09-13 a reader who had just fixed the
 # CI half of this same problem ran the suite in a worktree with no sibling
 # checkout, read three failures, and reported a screen-reader hole in the
-# product. The three failures were real about /usr/share/apex-shell and false
+# product. The three failures were real about /usr/share/rime-shell and false
 # about both repositories at roadmap/v2.2, where the same suite is 39/0.
 #
-# So: under APEX_REQUIRE_SHELL_TREE=1 the installed shell is REFUSED rather than
+# So: under RIME_REQUIRE_SHELL_TREE=1 the installed shell is REFUSED rather than
 # quietly measured. That flag means "measure the tree under test", and the
 # installed shell is by definition not it — CI vendors a checkout to a sibling
 # path, so nothing that sets the flag is relying on this fallback. Locally it
 # turns three failures that read as a product defect into one line naming the
 # variable to set.
-if [ "$SHELL_TREE" = /usr/share/apex-shell ] \
-   && [ "${APEX_REQUIRE_SHELL_TREE:-0}" = "1" ]; then
-    printf 'FAIL  APEX_REQUIRE_SHELL_TREE=1 and the only shell tree found is the INSTALLED\n' >&2
-    printf '      one at /usr/share/apex-shell — whatever the LAST IMAGE shipped, which on a\n' >&2
+if [ "$SHELL_TREE" = /usr/share/rime-shell ] \
+   && [ "${RIME_REQUIRE_SHELL_TREE:-0}" = "1" ]; then
+    printf 'FAIL  RIME_REQUIRE_SHELL_TREE=1 and the only shell tree found is the INSTALLED\n' >&2
+    printf '      one at /usr/share/rime-shell — whatever the LAST IMAGE shipped, which on a\n' >&2
     printf '      roadmap machine lags both repositories by weeks. Measuring it would produce\n' >&2
     printf '      failures about staleness that read exactly like regressions.\n' >&2
-    printf '      Set APEX_SHELL_TREE=<the apex-shell checkout under test>.\n' >&2
+    printf '      Set RIME_SHELL_TREE=<the rime-shell checkout under test>.\n' >&2
     printf '\npassed=0 failed=1\n'
     exit 1
 fi
 case "$SHELL_TREE" in
-    /usr/share/apex-shell)
-        printf 'NOTE  no apex-shell checkout beside this repo; testing against the
+    /usr/share/rime-shell)
+        printf 'NOTE  no rime-shell checkout beside this repo; testing against the
 '
         printf '      INSTALLED shell at %s, which is whatever the last image
 ' "$SHELL_TREE"
@@ -114,7 +114,7 @@ case "$SHELL_TREE" in
 
 '
         ;;
-    *)  printf 'using apex-shell tree: %s\n\n' "$SHELL_TREE" ;;
+    *)  printf 'using rime-shell tree: %s\n\n' "$SHELL_TREE" ;;
 esac
 
 # The provenance of the thing being measured, on the line people quote. The
@@ -123,20 +123,20 @@ esac
 SHELL_TREE_ID="$SHELL_TREE"
 if [ -d "$SHELL_TREE/.git" ] || git -C "$SHELL_TREE" rev-parse --git-dir >/dev/null 2>&1; then
     SHELL_TREE_ID="$SHELL_TREE @ $(git -C "$SHELL_TREE" log -1 --format=%h 2>/dev/null || echo unknown)"
-elif [ "$SHELL_TREE" = /usr/share/apex-shell ]; then
+elif [ "$SHELL_TREE" = /usr/share/rime-shell ]; then
     SHELL_TREE_ID="$SHELL_TREE (INSTALLED — whatever the last image shipped)"
 fi
 
 # What root._shellDir resolves to on a booted system. Fixed even though the
 # model is read from a checkout — the seeded rc.xml is written for the installed
 # location, not for whatever path this test happens to run from.
-INSTALLED=/usr/share/apex-shell
+INSTALLED=/usr/share/rime-shell
 g() { python3 "$GEN" "$@" --shell-dir "$SHELL_TREE" --shell-path "$INSTALLED"; }
 
 section "the generator"
 
 python3 -c "import ast; ast.parse(open('$GEN').read())" \
-    && ok "apex-labwc-keybinds is valid Python" || bad "apex-labwc-keybinds is valid Python"
+    && ok "rime-labwc-keybinds is valid Python" || bad "rime-labwc-keybinds is valid Python"
 
 block="$(g print 2>/dev/null)"
 [ -n "$block" ] && ok "it generates a non-empty block" || bad "it generates a non-empty block"
@@ -161,7 +161,7 @@ from importlib.machinery import SourceFileLoader
 # $ROOT, not a relative path: run from tests/ and a relative load fails, the
 # three assertions built on it print blank counts ("sees  of 68 ids"), and the
 # suite reads like a broken product rather than a broken invocation.
-k = SourceFileLoader("k", sys.argv[3] + "/files/system/libexec/apex-labwc-keybinds").load_module()
+k = SourceFileLoader("k", sys.argv[3] + "/files/system/libexec/rime-labwc-keybinds").load_module()
 defaults = k.shell_defaults(sys.argv[1], sys.argv[2])
 block, skipped = k.generate(defaults)
 generated = block.count("<keybind key=")
@@ -197,7 +197,7 @@ PYEOF
 # ── the screen reader's way in (roadmap P2-003) ─────────────────────────────
 # The image ships orca and deliberately autostarts nothing, so this one binding
 # is the whole of "a blind user can turn the reader on". It is asserted HERE
-# rather than only in apex-shell because labwc is the third of the three
+# rather than only in rime-shell because labwc is the third of the three
 # sessions and the one that gets its bindings by a different mechanism from the
 # other two: no IPC, no include, an allowlist plus an exec arm that DROPS any
 # command still starting with `$` after substitution. A binding written the
@@ -206,7 +206,7 @@ PYEOF
 # while reading as though it satisfied all of it. That is exactly the trap
 # voice-ptt's comment in KeybindService.qml records, and the only thing that
 # catches it is running this generator.
-if printf '%s\n' "$block" | grep -q 'apex-screen-reader'; then
+if printf '%s\n' "$block" | grep -q 'rime-screen-reader'; then
     ok "the screen-reader binding survives the labwc generator"
 else
     # The provenance goes IN the failure, not only in the header. This is the
@@ -223,7 +223,7 @@ import re, sys
 text = open(sys.argv[1], encoding="utf-8").read()
 key = ""
 for m in re.finditer(r'<keybind key="([^"]+)">(.*?)</keybind>', text, re.S):
-    if "apex-screen-reader" in m.group(2):
+    if "rime-screen-reader" in m.group(2):
         key = m.group(1); break
 print(key)
 PYEOF
@@ -239,9 +239,9 @@ dupes="$(printf '%s\n' "$block" | grep -oE '<keybind key="[^"]+"' | sort | uniq 
     && ok "no shortcut is generated twice" \
     || bad "duplicate shortcuts generated: $dupes"
 
-printf '%s\n' "$block" | grep -q 'APEX-KEYBINDS-BEGIN' \
+printf '%s\n' "$block" | grep -q 'RIME-KEYBINDS-BEGIN' \
     && ok "the block carries its begin marker" || bad "the block carries its begin marker"
-printf '%s\n' "$block" | grep -q 'APEX-KEYBINDS-END' \
+printf '%s\n' "$block" | grep -q 'RIME-KEYBINDS-END' \
     && ok "the block carries its end marker" || bad "the block carries its end marker"
 
 # Deterministic: the splice compares against generated output, so an unstable
@@ -278,7 +278,7 @@ printf '%s\n' "$block" | grep -q 'command="\$' \
 # The browser bind must name NO browser. It opens whatever the user has set as
 # default, so a hardcoded `firefox` or `zen` here would make the shortcut
 # contradict the user's own setting — which is exactly what it used to do.
-printf '%s\n' "$block" | grep -q 'command="/usr/libexec/apex-open-browser"' \
+printf '%s\n' "$block" | grep -q 'command="/usr/libexec/rime-open-browser"' \
     && ok "the browser bind opens the default browser, not a named one" \
     || bad "the browser bind opens the default browser, not a named one"
 
@@ -302,7 +302,7 @@ mkdir -p "$WORK/ov"
 printf '{"dashboard-launcher": {"mods": "SUPER + SHIFT", "key": "P"}}' > "$WORK/ov/keybinds.json"
 ovblock="$(g print --overrides "$WORK/ov/keybinds.json" 2>/dev/null)"
 
-printf '%s\n' "$ovblock" | grep -A1 'key="W-S-p"' | grep -q 'apex shell launcher' \
+printf '%s\n' "$ovblock" | grep -A1 'key="W-S-p"' | grep -q 'rime shell launcher' \
     && ok "a rebind reaches the generated config" \
     || bad "a rebind reaches the generated config"
 
@@ -332,7 +332,7 @@ cat > "$WORK/fresh.xml" <<'XML'
 </labwc_config>
 XML
 g apply --rc "$WORK/fresh.xml" --no-reload >/dev/null 2>&1
-grep -q 'APEX-KEYBINDS-BEGIN' "$WORK/fresh.xml" \
+grep -q 'RIME-KEYBINDS-BEGIN' "$WORK/fresh.xml" \
     && ok "a file with no markers gets the block inserted" \
     || bad "a file with no markers gets the block inserted"
 grep -q 'a header comment that must survive' "$WORK/fresh.xml" \
@@ -390,6 +390,41 @@ grep -q 'key="W-S-p"' "$WORK/fresh.xml" && ! grep -q 'key="A-space"' "$WORK/fres
     && ok "re-applying with an override replaces the old shortcut" \
     || bad "re-applying with an override replaces the old shortcut"
 
+# An rc.xml upgraded from APEX carries the region under the APEX markers
+# (rime-rename: keep — the spelling on disk). `apply` must replace that region,
+# not insert a second one beside it: the stale one's binds would all stay live,
+# each calling a CLI name the image no longer ships.
+cat > "$WORK/apex-era.xml" <<'XML'
+<?xml version="1.0"?>
+<labwc_config>
+  <keyboard>
+    <keybind key="A-Tab"><action name="NextWindow"/></keybind>
+    <!-- APEX-KEYBINDS-BEGIN — generated by apex-labwc-keybinds. Do not edit. -->
+    <keybind key="W-F9"><action name="Execute" command="apex shell stale-verb"/></keybind>
+    <!-- APEX-KEYBINDS-END -->
+  </keyboard>
+</labwc_config>
+XML
+g apply --rc "$WORK/apex-era.xml" --no-reload >/dev/null 2>&1
+if grep -q 'RIME-KEYBINDS-BEGIN' "$WORK/apex-era.xml" \
+   && [ "$(grep -c 'KEYBINDS-BEGIN' "$WORK/apex-era.xml")" = 1 ] \
+   && ! grep -q 'stale-verb' "$WORK/apex-era.xml" && grep -q 'A-Tab' "$WORK/apex-era.xml"; then
+    ok "an APEX-era region is replaced by one Rime region, the user's binds kept"
+else
+    bad "an APEX-era region is replaced by one Rime region, the user's binds kept"
+fi
+cat > "$WORK/apex-era-check.xml" <<'XML'
+<?xml version="1.0"?>
+<labwc_config><keyboard>
+    <!-- APEX-KEYBINDS-BEGIN — generated by apex-labwc-keybinds. Do not edit. -->
+    <!-- APEX-KEYBINDS-END -->
+</keyboard></labwc_config>
+XML
+g check --rc "$WORK/apex-era-check.xml" > "$WORK/apex-era-check.out" 2>&1
+grep -q 'has no Rime keybind region' "$WORK/apex-era-check.out" \
+    && bad "check reads an APEX-era region as a region" \
+    || ok "check reads an APEX-era region as a region"
+
 section "refusals"
 
 # A clean refusal and an unhandled traceback both exit non-zero, so exit status
@@ -446,8 +481,8 @@ python3 "$CHECK" "$SHELL_TREE" "$WORK/mutated.xml" >/dev/null 2>&1 \
     && bad "the check fails on a drifted rc.xml" \
     || ok "the check fails on a drifted rc.xml"
 
-# A file with no APEX region at all must fail rather than pass vacuously.
-sed '/APEX-KEYBINDS-BEGIN/,/APEX-KEYBINDS-END/d' "$RC" > "$WORK/noregion.xml"
+# A file with no Rime region at all must fail rather than pass vacuously.
+sed '/RIME-KEYBINDS-BEGIN/,/RIME-KEYBINDS-END/d' "$RC" > "$WORK/noregion.xml"
 python3 "$CHECK" "$SHELL_TREE" "$WORK/noregion.xml" >/dev/null 2>&1 \
     && bad "the check fails when the region is missing entirely" \
     || ok "the check fails when the region is missing entirely"
@@ -456,19 +491,19 @@ section "the shell asks for it"
 
 KS="${SHELL_TREE}/src/services/config_tab/KeybindService.qml"
 if [ -f "$KS" ]; then
-    grep -q 'apex-labwc-keybinds' "$KS" \
+    grep -q 'rime-labwc-keybinds' "$KS" \
         && ok "KeybindService invokes the generator" \
         || bad "KeybindService invokes the generator"
     # The shell is a \$HOME checkout that updates independently of the image the
     # helper ships in, so a missing helper must not log a failed spawn on every
     # save.
-    grep -q 'test -x /usr/libexec/apex-labwc-keybinds' "$KS" \
+    grep -q 'test -x /usr/libexec/rime-labwc-keybinds' "$KS" \
         && ok "it checks the helper exists before spawning it" \
         || bad "it checks the helper exists before spawning it"
 else
     skp "no KeybindService.qml to check"
 fi
 
-printf '\npassed=%d failed=%d  (apex-shell model read from %s)\n' \
+printf '\npassed=%d failed=%d  (rime-shell model read from %s)\n' \
     "$pass" "$fail" "$SHELL_TREE_ID"
 [ "$fail" -eq 0 ]

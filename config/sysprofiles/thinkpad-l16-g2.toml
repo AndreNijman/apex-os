@@ -1,4 +1,4 @@
-# APEX-OS system profile: thinkpad-l16-g2
+# Rime OS system profile: thinkpad-l16-g2
 #
 # Device profile for the Lenovo ThinkPad L16 Gen 2 (AMD Ryzen 7 PRO 250 /
 # Radeon 780M, amd-pstate-epp). Matched on DMI product_version / product_family
@@ -7,7 +7,7 @@
 # profile on this exact machine.
 #
 # What this device profile adds over the class is a battery-longevity charge
-# window. It does NOT name a battery: apexd enumerates
+# window. It does NOT name a battery: rimed enumerates
 # /sys/class/power_supply at start-up, keeps whatever reports type=Battery, and
 # writes the window to every pack whose driver publishes threshold attributes.
 # On this machine that resolves to BAT0 via thinkpad_acpi; on a machine where
@@ -49,8 +49,8 @@ stop = 80
 # ── Fans ─────────────────────────────────────────────────────────────────────
 # Verified on this machine: thinkpad_acpi's hwmon node ("thinkpad") publishes
 # fan1_input plus pwm1 and pwm1_enable at mode 0644 — but the driver answers
-# -EPERM to any write unless it was loaded with fan_control=1, which APEX-OS
-# does not do. So the attributes look controllable and are not; apexd writes,
+# -EPERM to any write unless it was loaded with fan_control=1, which Rime OS
+# does not do. So the attributes look controllable and are not; rimed writes,
 # reads back, sees nothing moved, and reports the refusal instead of pretending.
 # No default_mode is set here: there is no reason to poke the EC at boot.
 [fan]

@@ -1,7 +1,7 @@
-# APEX-OS M6 notes (apexd: real fan control + game orchestration)
+# Rime OS M6 notes (rimed: real fan control + game orchestration)
 
-M6 turns the two M3 stubs into real implementations: `org.apexos.Apexd1.Fan`
-now enumerates and commands fans, and `org.apexos.Apexd1.GameMode` runs a real
+M6 turns the two M3 stubs into real implementations: `org.rimeos.Rimed1.Fan`
+now enumerates and commands fans, and `org.rimeos.Rimed1.GameMode` runs a real
 session (top tier, NVIDIA clock locks, P-core cpuset pinning and IRQ steering)
 and undoes it exactly on exit. The frozen M3 member signatures are unchanged;
 everything new is additive.
@@ -9,19 +9,19 @@ everything new is additive.
 ## What landed
 
 ```
-apexd-core/src/topology.rs   P-core / E-core detection (ladder, records its source)
-apexd-core/src/fan.rs        hwmon + msi-wmi-platform + msi-ec discovery, modes, curve, restore
-apexd-core/src/gpu.rs        nvidia-smi query + clock-lock planning
-apexd-core/src/irq.rs        /proc/irq enumeration, steering plan, irqbalance detection
-apexd-core/src/game.rs       the symmetric enter/exit planner
-apexd-core/src/profile.rs    [fan] and [gamemode] schema (both optional)
-apexd-core/src/tier.rs       12 new Actions, every one carrying an absolute path
-apexd-core/src/syswriter.rs  RealWriter support for them + the fan-restore ladder
-apexd/src/fan.rs             FanController: snapshot, modes, curve loop, restore
-apexd/src/game.rs            GameSession: prior-state capture, enter/exit, status
-apexd/src/dbus.rs            real .Fan and .GameMode interfaces
-apexd/apexd/apexd.service    ProtectControlGroups=no + the ExecStopPost fan safety net
-apex/src/main.rs             `apex fan …` and `apex game …`
+rimed-core/src/topology.rs   P-core / E-core detection (ladder, records its source)
+rimed-core/src/fan.rs        hwmon + msi-wmi-platform + msi-ec discovery, modes, curve, restore
+rimed-core/src/gpu.rs        nvidia-smi query + clock-lock planning
+rimed-core/src/irq.rs        /proc/irq enumeration, steering plan, irqbalance detection
+rimed-core/src/game.rs       the symmetric enter/exit planner
+rimed-core/src/profile.rs    [fan] and [gamemode] schema (both optional)
+rimed-core/src/tier.rs       12 new Actions, every one carrying an absolute path
+rimed-core/src/syswriter.rs  RealWriter support for them + the fan-restore ladder
+rimed/src/fan.rs             FanController: snapshot, modes, curve loop, restore
+rimed/src/game.rs            GameSession: prior-state capture, enter/exit, status
+rimed/src/dbus.rs            real .Fan and .GameMode interfaces
+rimed/rimed/rimed.service    ProtectControlGroups=no + the ExecStopPost fan safety net
+rime/src/main.rs             `rime fan …` and `rime game …`
 config/sysprofiles/*.toml    Katana M6 values; L16 + intel-hybrid degradation
 ```
 
@@ -37,7 +37,7 @@ no toolchain):
 cargo build --release --locked   Finished `release` profile [optimized] target(s)
 cargo test                       77 passed; 0 failed   (21 fan + 15 gamemode +
                                  10 profile_m6 + 9 topology + 11 tier_plan +
-                                 6 selection + 5 apexd in-crate)
+                                 6 selection + 5 rimed in-crate)
 cargo clippy --all-targets -- -D warnings   clean
 ```
 
@@ -55,7 +55,7 @@ The 17 M3 tests still pass unmodified: M6 actions never enter a tier plan
 | MSI fan speed | `/sys/devices/platform/msi-ec/{cpu,gpu}/realtime_fan_speed` | a **percentage**, not RPM; never reported as `rpm` |
 | Curve sensor | `hwmon*/temp*_input` (prefers `coretemp`/`k10temp`/`zenpower`), else `class/thermal/thermal_zone*/temp` | |
 | P/E split | `/sys/devices/cpu_core/cpus` + `/sys/devices/cpu_atom/cpus` | rung 1; then `cpu/types/*/cpulist|cpumap`, `cpu_capacity`, `acpi_cppc/highest_perf`, `cpuinfo_max_freq` |
-| cpuset | cgroup v2: `<cgroup>/cpuset.cpus`, `cpuset.mems`, `cgroup.procs`, parent `cgroup.subtree_control` | default cgroup `/sys/fs/cgroup/apex-game` |
+| cpuset | cgroup v2: `<cgroup>/cpuset.cpus`, `cpuset.mems`, `cgroup.procs`, parent `cgroup.subtree_control` | default cgroup `/sys/fs/cgroup/rime-game` |
 | Prior cgroup of a PID | `/proc/<pid>/cgroup` (`0::` line) | recorded so exit can put the PID back where it was |
 | IRQ affinity | `/proc/irq/<n>/smp_affinity_list`, handler names from `/proc/irq/<n>/<name>/` | |
 | irqbalance | scan of `/proc/*/comm` | detection only |
@@ -84,14 +84,14 @@ mechanisms enforce it, in the order they apply:
    game mode → `fan.restore()` → drop to a non-ryzenadj tier. Mode changes stop
    the curve loop before applying anything new.
 5. **The crash path.** A killed daemon cannot restore anything, so
-   `apexd.service` carries
-   `ExecStopPost=-/usr/bin/apex fan restore --local`. That verb re-discovers the
+   `rimed.service` carries
+   `ExecStopPost=-/usr/bin/rime fan restore --local`. That verb re-discovers the
    fans and applies `plan_firmware_restore` **directly to sysfs**, with no bus,
    no daemon and no prior state (`fan::firmware_restore_needs_no_prior_state`
    proves a fan left in manual at duty cycle 0 comes back to `pwm_enable=2`).
    By design it skips the `daemon_running` gate the other mutating verbs use.
 
-Two further properties: writes go through `SysWriter`, so `APEXD_DRY_RUN=1`
+Two further properties: writes go through `SysWriter`, so `RIMED_DRY_RUN=1`
 neutralises all of it, and a machine with no controllable fan reports
 `Fan.Supported = false` and plans nothing at all.
 
@@ -102,7 +102,7 @@ answers `-EPERM` to every write, because the module loaded without
 `FanController::set_mode` **reads the controls back** after applying and, if
 nothing moved, **replays the snapshot before returning an error**. A plan can
 land its `pwm_enable=1` write and then have its duty-cycle write refused, and
-the safety model must not end in that half-applied state. `apex doctor` phrases
+the safety model must not end in that half-applied state. `rime doctor` phrases
 its check as "fan control channel present, write access unverified" for the same
 reason.
 
@@ -115,7 +115,7 @@ and profile now reflect it:
   kernel carries a 25-entry EC-firmware allowlist with no `17L3` entry (the
   Katana GF76 is board **MS-17L3**), and this build exposes no `force`
   parameter. Consequences:
-  * no `fan_mode`, no `cooler_boost` → **apexd reports `Fan.Supported = false`
+  * no `fan_mode`, no `cooler_boost` → **rimed reports `Fan.Supported = false`
     on the Katana as shipped** and touches nothing;
   * `/sys/class/power_supply/BAT1/charge_control_*_threshold` do not exist
     either, so the profile's `[charge] 60/80` block is a **silent no-op**. That
@@ -126,7 +126,7 @@ and profile now reflect it:
 * **`msi-wmi-platform` is the working lead for readings.** It has a `force`
   module parameter (`module_param_unsafe`, so it taints the kernel) and
   registers an hwmon device named `msi_wmi_platform` with four **read-only**
-  `fanN_input` channels: RPM you can watch, but no PWM and no mode. apexd's
+  `fanN_input` channels: RPM you can watch, but no PWM and no mode. rimed's
   generic hwmon leg picks it up on its own; `backend = "msi-wmi"` selects it and
   nothing else.
 * Discovery **probes, never assumes**: naming a backend in a profile does not
@@ -141,21 +141,21 @@ only) → `msi-ec` → unsupported.
 Enter, in order: record prior tier **and disable auto-switch** → apply the
 profile's game tier → apply the profile's fan mode → create the cpuset cgroup
 and move the PIDs in → steer IRQs → lock GPU clocks. Exit runs the inverse,
-from a plan **built at enter time from values read before apexd wrote
+from a plan **built at enter time from values read before rimed wrote
 anything**.
 
 Symmetry rules that fixture tests cannot express but that matter on real
 hardware:
 
-* apexd captures prior state only on the 0 → 1 transition; a second
+* rimed captures prior state only on the 0 → 1 transition; a second
   `SetActive(true)` only attaches PIDs, so it can never clobber the restore
   values.
-* apexd disables auto-switch for the session. Without that, an AC/battery
+* rimed disables auto-switch for the session. Without that, an AC/battery
   transition mid-game would re-apply the profile default, clobber the game tier
   and strand the recorded prior tier.
 * IRQ restore writes back each interrupt's exact prior `smp_affinity_list`;
-  apexd neither writes nor records interrupts that were already on the target.
-* apexd returns PIDs to the cgroup `/proc/<pid>/cgroup` reported before the
+  rimed neither writes nor records interrupts that were already on the target.
+* rimed returns PIDs to the cgroup `/proc/<pid>/cgroup` reported before the
   move, not to the root cgroup.
 
 Degradation: a uniform CPU (the L16) pins to all CPUs and therefore steers no
@@ -184,7 +184,7 @@ that rejects an affinity write is a logged skip, not a failed session.
 * Profile schema: pre-M6 profiles parse unchanged and get safe defaults; partial
   tables keep the other defaults; the Katana values are what the file says;
   an unparseable IRQ policy fails safe to `off`.
-* The daemon half of game-mode symmetry (`apexd/src/game.rs`, in-crate tests
+* The daemon half of game-mode symmetry (`rimed/src/game.rs`, in-crate tests
   against a `MockWriter` and an empty sysfs root): enter holds the profile's
   game tier and disables auto-switch, exit restores both, a repeated enter
   cannot overwrite the recorded prior state, and an exit with no session (or a
@@ -226,8 +226,8 @@ Owned by the image agents: M6 left `Containerfile.*` and `files/**` untouched
 on purpose. In rough priority order:
 
 1. **`msi-wmi-platform` with `force=1`** (Katana, for fan RPM):
-   * `files/system/modules-load.d/apex-msi.conf` → `msi-wmi-platform`
-   * `files/system/modprobe.d/apex-msi.conf` → `options msi-wmi-platform force=1`
+   * `files/system/modules-load.d/rime-msi.conf` → `msi-wmi-platform`
+   * `files/system/modprobe.d/rime-msi.conf` → `options msi-wmi-platform force=1`
    * Note: the parameter is `module_param_unsafe`, so loading it **taints the
      kernel**. Accept that or drop fan readings on this machine.
 2. **A `msi-ec` that binds on MS-17L3** (Katana, for fan *control* and for the
@@ -235,44 +235,44 @@ on purpose. In rough priority order:
    BeardOverflow `msi-ec` as a kmod/akmod with an MS-17L3 configuration, signed
    for Secure Boot like the other out-of-tree modules, plus a `modules-load.d`
    entry. Without this the Katana has **no fan control and no charge limiting**,
-   and `apex doctor` will say so.
+   and `rime doctor` will say so.
 3. **`irqbalance` must not fight game mode.** It re-scatters interrupt affinity
    on its own cadence and will undo the steering within seconds.
    **Recommendation: mask it in the gaming image** (`systemctl mask
    irqbalance.service`), because a static `IRQBALANCE_BANNED_CPULIST` cannot
-   track a cpuset apexd computes at runtime. apexd detects a running irqbalance
-   and reports it in `apex game status`, but does not try to stop it.
-4. **`gamemoded` must not fight apexd for the governor.** The image ships no
+   track a cpuset rimed computes at runtime. rimed detects a running irqbalance
+   and reports it in `rime game status`, but does not try to stop it.
+4. **`gamemoded` must not fight rimed for the governor.** The image ships no
    `/etc/gamemode.ini` today, so gamemoded's default `desiredgov=performance`
-   writes `scaling_governor` behind apexd's back. Ship `/etc/gamemode.ini` with:
+   writes `scaling_governor` behind rimed's back. Ship `/etc/gamemode.ini` with:
    ```ini
    [general]
-   ; apexd owns the governor; do not let gamemoded touch it
+   ; rimed owns the governor; do not let gamemoded touch it
    desiredgov=performance
    defaultgov=performance
    igpu_desiredgov=performance
 
    [custom]
-   start=/usr/bin/apex game start
-   end=/usr/bin/apex game stop
+   start=/usr/bin/rime game start
+   end=/usr/bin/rime game stop
    ```
    The `[custom]` hooks are the intended integration: gamemoded triggers the
-   session and apexd orchestrates it. They run as the requesting user, which
+   session and rimed orchestrates it. They run as the requesting user, which
    polkit's `allow_active = yes` already permits without a password.
 5. **`nvidia-smi` on PATH** in the gaming image (the NVIDIA driver package's
    `/usr/bin/nvidia-smi`), plus the `nvidia` kernel module loaded. Without it
-   game mode silently skips all GPU work. `apex doctor` checks for it when an
+   game mode silently skips all GPU work. `rime doctor` checks for it when an
    NVIDIA GPU is present.
 6. **cgroup v2 unified hierarchy** (systemd default) with the `cpuset`
-   controller available. apexd enables `+cpuset` on the parent's
+   controller available. rimed enables `+cpuset` on the parent's
    `cgroup.subtree_control` itself, best-effort.
 7. **Optional: dedicated polkit actions.** At M6, fan and game-mode mutations
-   reuse `org.apexos.apexd.manage-power` because
-   `files/system/polkit-1/actions/org.apexos.apexd.policy` is out of scope. If
-   you want finer granularity, add `org.apexos.apexd.manage-fan` and
-   `org.apexos.apexd.manage-game` (same `allow_active = yes` shape) and tell me
+   reuse `org.rimeos.rimed.manage-power` because
+   `files/system/polkit-1/actions/org.rimeos.rimed.policy` is out of scope. If
+   you want finer granularity, add `org.rimeos.rimed.manage-fan` and
+   `org.rimeos.rimed.manage-game` (same `allow_active = yes` shape) and tell me
    to switch the daemon over.
-8. **`apexd.service` needs no Containerfile change.** The unit file itself now
+8. **`rimed.service` needs no Containerfile change.** The unit file itself now
    carries `ProtectControlGroups=no` (required: the default `yes` makes
    `/sys/fs/cgroup` read-only and silently disables all cpuset pinning) and the
    `ExecStopPost` fan restore. It installs from the same path as before.

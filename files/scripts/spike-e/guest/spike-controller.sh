@@ -11,7 +11,7 @@
 # Stages: setup | before | install | after | verify-incumbent
 set -u
 
-VDA=/dev/vda            # main dual-boot disk (ESP=vda1, alpine=vda2, apex=vda3)
+VDA=/dev/vda            # main dual-boot disk (ESP=vda1, alpine=vda2, rime=vda3)
 ESP_PART=1
 PAYLOAD=/dev/vdb        # payload disk (ext4): bootc image tar + scripts + out/
 PMNT=/payload
@@ -98,14 +98,14 @@ case "$STAGE" in
     efibootmgr -v > "$PMNT/out/after-efibootmgr.txt" 2>&1
     { echo "# find $ESPMNT"; find "$ESPMNT" | sort; } > "$PMNT/out/after-esp-tree.txt" 2>&1
     { echo "# du -ab bytes"; du -ab "$ESPMNT" | sort -k2; } > "$PMNT/out/after-esp-du.txt" 2>&1
-    # inspect the apex btrfs target that bootc wrote to
-    mkdir -p /mnt/apex
-    if mount "$VDA"3 /mnt/apex 2>/dev/null; then
-      { echo "# apex root top-level"; ls -la /mnt/apex; \
-        echo; echo "# ostree deploy dirs"; find /mnt/apex -maxdepth 4 -name '*.0' -o -maxdepth 4 -name 'deploy' 2>/dev/null | head; \
-        echo; echo "# /boot inside apex root"; ls -la /mnt/apex/boot 2>/dev/null; } \
-        > "$PMNT/out/after-apex-tree.txt" 2>&1
-      umount /mnt/apex 2>/dev/null || true
+    # inspect the rime btrfs target that bootc wrote to
+    mkdir -p /mnt/rime
+    if mount "$VDA"3 /mnt/rime 2>/dev/null; then
+      { echo "# rime root top-level"; ls -la /mnt/rime; \
+        echo; echo "# ostree deploy dirs"; find /mnt/rime -maxdepth 4 -name '*.0' -o -maxdepth 4 -name 'deploy' 2>/dev/null | head; \
+        echo; echo "# /boot inside rime root"; ls -la /mnt/rime/boot 2>/dev/null; } \
+        > "$PMNT/out/after-rime-tree.txt" 2>&1
+      umount /mnt/rime 2>/dev/null || true
     fi
     # Identify the bootc entry the install created (label typically contains
     # "Fedora" / "bootc" / "Linux") and the incumbent entry.

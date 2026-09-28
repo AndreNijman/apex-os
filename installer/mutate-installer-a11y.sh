@@ -23,7 +23,7 @@
 set -uo pipefail
 cd "$(dirname "$0")/.." || exit 2
 
-GUI="installer/apex-installer-gui"
+GUI="installer/rime-installer-gui"
 LIB="tests/lib/atspi.sh"
 SUITE_F="installer/test-installer-a11y.sh"
 FILES="$GUI $LIB $SUITE_F"
@@ -163,8 +163,8 @@ mutate B6 "$LIB" \
 #      assertion about names and Tab stops stays green and a keyboard-only user
 #      cannot leave step 1 of 7.
 mutate B7 "$GUI" \
-    'self.btn("Begin", "apex-go", lambda *_: self.go("keyboard"))' \
-    'self.btn("Begin", "apex-go", lambda *_: None)' \
+    'self.btn("Begin", "rime-go", lambda *_: self.go("keyboard"))' \
+    'self.btn("Begin", "rime-go", lambda *_: None)' \
     "pressing it with the keyboard alone opens the next page"
 
 # B8 — the page-advance section's vacuity control, and the one that matters
@@ -183,8 +183,8 @@ mutate B8 "$SUITE_F" \
 #      audit cannot see this — the button is named either way — and neither can
 #      a ring walk that only counts stops.
 mutate B9 "$GUI" \
-    'go = self.btn("Erase and install", "apex-destroy", lambda *_: self.begin(), False)' \
-    'go = self.btn("Erase and install", "apex-destroy", lambda *_: self.begin(), True)' \
+    'go = self.btn("Erase and install", "rime-destroy", lambda *_: self.begin(), False)' \
+    'go = self.btn("Erase and install", "rime-destroy", lambda *_: self.begin(), True)' \
     "the erase button is out of reach until ERASE is typed"
 
 # B10 — the per-page ring walk's own vacuity floor. Press a key that moves
@@ -221,9 +221,9 @@ mutate B11 "$GUI" \
 #       name. Nothing about names or Tab stops changes; only the glyph check
 #       can see this.
 mutate B12 "$GUI" \
-    '                        r.append(lbl(bars, "apex-accent apex-mono", wrap=False,
+    '                        r.append(lbl(bars, "rime-accent rime-mono", wrap=False,
                                      pres=True))' \
-    '                        r.append(lbl(bars, "apex-accent apex-mono", wrap=False))' \
+    '                        r.append(lbl(bars, "rime-accent rime-mono", wrap=False))' \
     "the signal bars are out of the accessibility tree"
 
 # B13 — the page opens with the focus on a nameless scroll container, which is

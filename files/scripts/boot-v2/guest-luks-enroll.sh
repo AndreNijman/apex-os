@@ -1,8 +1,8 @@
 #!/bin/sh
 # ─────────────────────────────────────────────────────────────────────────────
-#  guest-luks-enroll.sh — runs INSIDE the real APEX initramfs, at dracut's
+#  guest-luks-enroll.sh — runs INSIDE the real Rime initramfs, at dracut's
 #  pre-mount hook point, and runs the REAL SHIPPED enrolment script
-#  (files/system/libexec/apex-luks-enroll) against a fresh LUKS2 volume.
+#  (files/system/libexec/rime-luks-enroll) against a fresh LUKS2 volume.
 #
 #  ── why this exists ──
 #
@@ -36,7 +36,7 @@
 #  with `lsinitrd`. Every path added is `usr/...`: this initramfs is usrmerged
 #  (`lib64 -> usr/lib64`, `bin -> usr/bin`), and a payload cpio that created a
 #  REAL `lib64/` directory would shadow the symlink and take every library in
-#  the initramfs down with it — the same trap `apex-image`'s hook comment
+#  the initramfs down with it — the same trap `rime-image`'s hook comment
 #  documents for `usr/lib/dracut/hooks`.
 #
 #  POSIX sh, because that is what dracut's hook interpreter is, same as
@@ -44,11 +44,11 @@
 # ─────────────────────────────────────────────────────────────────────────────
 
 say() {
-    printf 'APEX-BOOTLAB: %s\n' "$*" > /dev/console 2>/dev/null || true
-    printf '<0>APEX-BOOTLAB: %s\n' "$*" > /dev/kmsg 2>/dev/null || true
+    printf 'RIME-BOOTLAB: %s\n' "$*" > /dev/console 2>/dev/null || true
+    printf '<0>RIME-BOOTLAB: %s\n' "$*" > /dev/kmsg 2>/dev/null || true
 }
 
-say "apex-initramfs-reached"
+say "rime-initramfs-reached"
 
 # ── preconditions, said BEFORE the attempt, so a boot that never reaches the
 #    enrolment line still says exactly what was missing ──────────────────────
@@ -62,39 +62,39 @@ if command -v python3 >/dev/null 2>&1; then
 else
     say "have-python3=NO"
 fi
-if [ -x /usr/libexec/apex-luks-enroll ]; then
-    say "have-apex-luks-enroll=yes"
+if [ -x /usr/libexec/rime-luks-enroll ]; then
+    say "have-rime-luks-enroll=yes"
 else
-    say "have-apex-luks-enroll=NO"
+    say "have-rime-luks-enroll=NO"
 fi
 
 # `-x` above inspected the FILE. It says nothing about whether the kernel can
 # RUN it, and the difference is not academic: execve() returns ENOENT for a
 # missing SHEBANG INTERPRETER, so a perfectly present script reports
 # "No such file or directory" about a file that is plainly there. That exact
-# pair — `have-apex-luks-enroll=yes` next to `enroll-exit=127` — is what this
+# pair — `have-rime-luks-enroll=yes` next to `enroll-exit=127` — is what this
 # scenario's first real boot produced on 2026-09-21: the shipped script starts
-# `#!/usr/bin/env bash`, and the generic APEX initramfs carries `bash` but not
+# `#!/usr/bin/env bash`, and the generic Rime initramfs carries `bash` but not
 # `env`. So name the interpreter and say whether it is there. Pure shell, no
 # sed/cut: a probe for missing commands must not itself need one.
-read -r apex_shebang < /usr/libexec/apex-luks-enroll 2>/dev/null || apex_shebang=""
-case "$apex_shebang" in
+read -r rime_shebang < /usr/libexec/rime-luks-enroll 2>/dev/null || rime_shebang=""
+case "$rime_shebang" in
     '#!'*)
-        apex_interp="${apex_shebang#\#!}"
-        while [ "${apex_interp# }" != "$apex_interp" ]; do apex_interp="${apex_interp# }"; done
-        apex_interp_arg="${apex_interp#* }"
-        apex_interp="${apex_interp%% *}"
-        [ "$apex_interp_arg" = "$apex_interp" ] && apex_interp_arg=""
-        if [ -x "$apex_interp" ]; then
-            say "enroll-interpreter=$apex_interp present"
+        rime_interp="${rime_shebang#\#!}"
+        while [ "${rime_interp# }" != "$rime_interp" ]; do rime_interp="${rime_interp# }"; done
+        rime_interp_arg="${rime_interp#* }"
+        rime_interp="${rime_interp%% *}"
+        [ "$rime_interp_arg" = "$rime_interp" ] && rime_interp_arg=""
+        if [ -x "$rime_interp" ]; then
+            say "enroll-interpreter=$rime_interp present"
         else
-            say "enroll-interpreter=$apex_interp MISSING (execve fails ENOENT)"
+            say "enroll-interpreter=$rime_interp MISSING (execve fails ENOENT)"
         fi
-        if [ -n "$apex_interp_arg" ]; then
-            if command -v "$apex_interp_arg" >/dev/null 2>&1; then
-                say "enroll-interpreter-arg=$apex_interp_arg present"
+        if [ -n "$rime_interp_arg" ]; then
+            if command -v "$rime_interp_arg" >/dev/null 2>&1; then
+                say "enroll-interpreter-arg=$rime_interp_arg present"
             else
-                say "enroll-interpreter-arg=$apex_interp_arg MISSING"
+                say "enroll-interpreter-arg=$rime_interp_arg MISSING"
             fi
         fi
         ;;
@@ -144,14 +144,14 @@ export NEWPIN=inert-unused-pin
 # property under test. If this UKI accidentally satisfies probe_signed_pcr11
 # instead (a `--pcr-key`/`--pcr-pubkey` build), the "tpm2:" line will say so —
 # read the field, do not assume it.
-enroll_out=/run/apex-enroll.out
-enroll_err=/run/apex-enroll.err
+enroll_out=/run/rime-enroll.out
+enroll_err=/run/rime-enroll.err
 enroll_rc=0
 if command -v timeout >/dev/null 2>&1; then
-    timeout 90 /usr/libexec/apex-luks-enroll \
+    timeout 90 /usr/libexec/rime-luks-enroll \
         --device /dev/vdb \
-        --unlock-key-file /apex-bootlab-passphrase \
-        --recovery-out /run/apex-bootlab-recovery-key \
+        --unlock-key-file /rime-bootlab-passphrase \
+        --recovery-out /run/rime-bootlab-recovery-key \
         --tpm2-device auto \
         >"$enroll_out" 2>"$enroll_err" </dev/null
     enroll_rc=$?
@@ -182,7 +182,7 @@ fi
 # the header and needs no device-mapper node, so it runs safely here in the
 # initramfs with the real root still unmounted.
 if command -v cryptsetup >/dev/null 2>&1; then
-    if cryptsetup open --test-passphrase --key-file /apex-bootlab-passphrase \
+    if cryptsetup open --test-passphrase --key-file /rime-bootlab-passphrase \
            /dev/vdb >/dev/null 2>&1; then
         say "passphrase-after-enrol=SUCCESS"
     else
@@ -192,8 +192,8 @@ else
     say "passphrase-after-enrol=<no cryptsetup in this initramfs>"
 fi
 
-if [ -r /run/apex-bootlab-recovery-key ]; then
-    say "recovery-key=$(cat /run/apex-bootlab-recovery-key)"
+if [ -r /run/rime-bootlab-recovery-key ]; then
+    say "recovery-key=$(cat /run/rime-bootlab-recovery-key)"
 else
     say "recovery-key=<not written>"
 fi

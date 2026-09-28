@@ -9,7 +9,7 @@
 #  catches rustc's lints and none of clippy's — and reporting it as clippy is how
 #  three status claims in this program came to say something nobody had checked.
 #  Measured rather than argued: `fn f(v: &Vec<String>) -> usize { v.len() }` in
-#  apex-agent-core fails this script with clippy::ptr_arg (exit 101) and builds
+#  rime-agent-core fails this script with clippy::ptr_arg (exit 101) and builds
 #  clean under `RUSTFLAGS="-D warnings" cargo build --locked` (exit 0).
 #
 #  So clippy runs in a container, against a clean checkout, and says so.
@@ -23,7 +23,7 @@ command -v podman >/dev/null 2>&1 || { echo "podman is not installed; cannot run
 
 REF="${1:-}"
 if [ -n "$REF" ]; then
-    WORK="$(mktemp -d /var/tmp/apex-clippy.XXXXXX)"
+    WORK="$(mktemp -d /var/tmp/rime-clippy.XXXXXX)"
     trap 'git worktree remove --force "$WORK" 2>/dev/null; rm -rf "$WORK"' EXIT
     git worktree add --detach -q "$WORK" "$REF" || exit 2
     echo "clippy: $REF at $(git -C "$WORK" rev-parse --short HEAD), in a container"
@@ -42,7 +42,7 @@ fi
 # discarded, turning "Temporary failure in name resolution" into "could not add
 # the clippy component" and reading like a broken image. Both halves of that are
 # fixed here: the network, and saying what actually went wrong.
-podman run --rm --network=host -v "$WORK:/w:z" -w /w/apexd \
+podman run --rm --network=host -v "$WORK:/w:z" -w /w/rimed \
     -e CARGO_TARGET_DIR=/w/target-clippy \
     docker.io/library/rust:1 \
     sh -c 'rustup component add clippy || { echo "could not add the clippy component" >&2; exit 2; }

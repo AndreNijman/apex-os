@@ -16,7 +16,7 @@ API so that stays checked instead of asserted.
 
 Read `ARCHITECTURE.md` first. It answers the question that decides the whole
 design (a Windows program cannot run `bootc install`, so what does "install
-APEX from Windows" mean?) and gives the measured facts that decided it.
+Rime from Windows" mean?) and gives the measured facts that decided it.
 
 **There is a Windows virtual machine, and it is part of the deliverable.**
 `lab/winlab` builds one from Microsoft's evaluation media: Windows Server 2022
@@ -64,13 +64,13 @@ Intended Windows build, in a Windows x64 MSVC developer environment with Rust:
 ```powershell
 $env:RUSTFLAGS = '-C target-feature=+crt-static'
 cargo build --release --locked --offline --target x86_64-pc-windows-msvc
-# target/x86_64-pc-windows-msvc/release/apex-windows-installer.exe
+# target/x86_64-pc-windows-msvc/release/rime-windows-installer.exe
 ```
 
 This MSVC command is a build recipe, **not a verified Windows artifact**: nobody
 has run it. The `.exe` that does exist comes from `build-windows.sh`, which
 cross-compiles the GNU target in a Fedora container; `tests/test-windows-installer.sh`
-runs it under wine and, with `APEX_WINLAB_GUEST=1`, on the Windows Server 2022
+runs it under wine and, with `RIME_WINLAB_GUEST=1`, on the Windows Server 2022
 guest (`VALIDATION.md` has the transcript). `tests/image_lab.py` runs the Linux
 debug binary. Executable imports, startup on a clean Windows install, and
 reparse-point guards still need validation. No release artifact or Authenticode
@@ -115,7 +115,7 @@ then, **all installation is disabled**, even following an all-zero report.
 
 ## Reference behavior and required adaptation
 
-Read `installer/apex-install` before this design. It validates the selected disk,
+Read `installer/rime-install` before this design. It validates the selected disk,
 parent/partition relationships, minimum capacity (16 decimal GB), mounted state,
 container membership, ESP type/parent, accounts and filesystem tooling. Partition
 mode formats only the target (btrfs default), mounts the root and existing ESP,
@@ -144,13 +144,13 @@ resizing and free-space budgets need a proof of concept before choosing a VM
 runtime. Alternatively a signed build-produced root image may reduce local work,
 but exact geometry and per-machine configuration still need proof.
 
-Resolve `ghcr.io/andrenijman/apex-os:apex` (there is one image; `:daily`,
+Resolve `ghcr.io/andrenijman/rime-os:rime` (there is one image; `:daily`,
 `:gaming-mesa` and `:gaming-nvidia` resolve to the same digest) to one immutable
 digest; validate the repository's cosign identity, source SHA, architecture and
 kernel/module signatures before any target writes. Per-SHA tags are
 traceability inputs, not substitutes for digest verification. Floating tags
 move only on main builds; never resolve them twice during a transaction.
-Preserve the `:apex` update origin so bootc upgrade/rollback stays image-based.
+Preserve the `:rime` update origin so bootc upgrade/rollback stays image-based.
 No parallel Windows updater for image-owned components.
 
 Configure the staged deployment using the target's tools and SELinux policy:
@@ -179,9 +179,9 @@ A future elevated writer accepts an immutable plan, not a drive number. It must:
 - Show a plain-language review identifying size, filesystem label (verified
   absent for all-zero content), GPT name, model, serial, GUID and extent. Include
   an independently identified shared Windows ESP and an exact list of new files
-  and boot variables. Example: "Write the verified APEX-OS filesystem to the
+  and boot variables. Example: "Write the verified Rime OS filesystem to the
   selected 100 GB partition, filesystem label: none, on MODEL / SERIAL. Add the
-  listed APEX boot files to this shared Windows ESP. Windows remains the default."
+  listed Rime boot files to this shared Windows ESP. Windows remains the default."
   The real values, byte counts, digest and paths must replace every placeholder.
 - Require explicit final confirmation tied to the plan and a fresh all-zero scan
   under the held handle/lock. A changed identity, layout or precondition
@@ -215,7 +215,7 @@ power loss; design crash recovery before enabling writes. The default is no
 NVRAM change until a separately reviewed boot-entry step. That step may create
 one unused Boot#### and append its ID at the end of BootOrder, preserving every
 existing ID's position and the Windows default. No BootNext change, no
-reordering, no replacing a prior APEX entry. Read back and verify all firmware
+reordering, no replacing a prior Rime entry. Read back and verify all firmware
 state. If firmware unexpectedly reorders entries, do not claim success; recovery
 must be proven in VM firmware before this code can ship.
 
@@ -243,7 +243,7 @@ blocker requiring fault-injection tests, and an "undo" button does not solve it.
 - [ ] Verified all-byte scan and explicit consent immediately before bounded
       writes; no disk-index authority or automatic "make empty" operation.
 - [ ] Signed immutable payload, geometry, capacity and SELinux/account setup;
-      bootc first boot, upgrade and rollback in a VM, on the one APEX-OS image.
+      bootc first boot, upgrade and rollback in a VM, on the one Rime OS image.
 - [ ] Secure Boot/MOK and isolated bootloader namespace proven; all preexisting
       ESP bytes and Windows entry/order preserved through success and failures.
 - [ ] Durable journal, additive-only rollback, cancellation/power-loss recovery

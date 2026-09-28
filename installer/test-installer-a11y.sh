@@ -10,7 +10,7 @@
 #  other suite in this repository answers questions about the installer by
 #  reading its source or by driving it through Python — clicking buttons by
 #  calling `emit("clicked")`. Neither can see the two things that decide whether
-#  a blind user or a user with no mouse can install APEX at all:
+#  a blind user or a user with no mouse can install Rime at all:
 #
 #    * whether a control ANNOUNCES itself, and
 #    * whether the Tab key can reach it.
@@ -78,7 +78,7 @@ set +e
 cd "$(dirname "$0")" || exit 2
 HERE="$(pwd)"
 ROOT="$(cd .. && pwd)"
-GUI="$HERE/apex-installer-gui"
+GUI="$HERE/rime-installer-gui"
 WALK="$ROOT/tests/atspi-walk.py"
 
 pass=0; fail=0; skip=0
@@ -191,7 +191,7 @@ audit_page() {   # audit_page <page> <sentinel accessible name> <floor> [KEY=VAL
     # built at all — the disk, the install mode. They go through `env` rather
     # than being exported, so one page's stand-in state cannot leak into the
     # next page's process.
-    APEX_GUI_PAGE="$page" atspi_run_app env "$@" python3 "$GUI" \
+    RIME_GUI_PAGE="$page" atspi_run_app env "$@" python3 "$GUI" \
         >"$ATSPI_W/gui-$page.out" 2>"$ATSPI_W/gui-$page.err" &
     GPID=$!
 
@@ -405,7 +405,7 @@ ring_now() {   # ring_now <page> <a name the ring must reach> — walk the page 
             "the page's process is not running — see the audit above"
         return
     fi
-    wid="$(xdotool search --name "APEX-OS Installer" 2>/dev/null | head -1)"
+    wid="$(xdotool search --name "Rime OS Installer" 2>/dev/null | head -1)"
     if [ -z "$wid" ]; then
         skp "page '$page': its Tab ring can be walked" \
             "no installer window on the private display to send Tab to"
@@ -437,7 +437,7 @@ ring_now() {   # ring_now <page> <a name the ring must reach> — walk the page 
 # the wifi page has never been audited anywhere but a laptop with a Wi-Fi card,
 # and with the stub it builds identically on a runner with none. The page under
 # test is the shipped one; only the scanner behind it is ours.
-WIFI_STUB_SSIDS="APEX-TEST-OPEN APEX-TEST-WPA APEX-TEST-EAP APEX-TEST-WEAK"
+WIFI_STUB_SSIDS="RIME-TEST-OPEN RIME-TEST-WPA RIME-TEST-EAP RIME-TEST-WEAK"
 
 ring_wifi() {
     local stub="$ATSPI_W/wifi-stub" dump="$ATSPI_W/dump-wifi-stub.txt"
@@ -452,10 +452,10 @@ case "$*" in
   "-t -f TYPE device")              echo wifi ;;
   "-t -f DEVICE,TYPE,STATE device") echo "wlan0:wifi:disconnected" ;;
   "-t -f SSID,SIGNAL,SECURITY device wifi list")
-      printf 'APEX-TEST-OPEN:88:\n'
-      printf 'APEX-TEST-WPA:62:WPA2\n'
-      printf 'APEX-TEST-EAP:41:WPA2 802.1X\n'
-      printf 'APEX-TEST-WEAK:9:WPA2\n' ;;
+      printf 'RIME-TEST-OPEN:88:\n'
+      printf 'RIME-TEST-WPA:62:WPA2\n'
+      printf 'RIME-TEST-EAP:41:WPA2 802.1X\n'
+      printf 'RIME-TEST-WEAK:9:WPA2\n' ;;
   *) : ;;
 esac
 exit 0
@@ -485,7 +485,7 @@ STUBEOF
         sleep 0.3
     done
 
-    APEX_GUI_PAGE=wifi atspi_run_app env PATH="$stub:$PATH" python3 "$GUI" \
+    RIME_GUI_PAGE=wifi atspi_run_app env PATH="$stub:$PATH" python3 "$GUI" \
         >"$ATSPI_W/gui-wifi-stub.out" 2>"$ATSPI_W/gui-wifi-stub.err" &
     GPID=$!
 
@@ -497,13 +497,13 @@ STUBEOF
     built=0
     for _ in $(seq 1 100); do
         python3 "$WALK" --dump >"$dump" 2>/dev/null
-        grep -qF '| role=list item | name=APEX-TEST-WEAK |' "$dump" && { built=1; break; }
+        grep -qF '| role=list item | name=RIME-TEST-WEAK |' "$dump" && { built=1; break; }
         kill -0 "$GPID" 2>/dev/null || break
         sleep 0.4
     done
     if [ "$built" != "1" ]; then
         bad "the wifi page's adapter shape can be built with a stubbed scanner" \
-            "no list item named APEX-TEST-WEAK ever reached the bus"
+            "no list item named RIME-TEST-WEAK ever reached the bus"
         grep -v 'libEGL\|DRI3\|Adwaita-WARNING' "$ATSPI_W/gui-wifi-stub.err" 2>/dev/null \
             | sed 's/^/      /' | head -8
         kill "$GPID" 2>/dev/null
@@ -563,7 +563,7 @@ STUBEOF
         fi
     done
 
-    wid="$(xdotool search --name "APEX-OS Installer" 2>/dev/null | head -1)"
+    wid="$(xdotool search --name "Rime OS Installer" 2>/dev/null | head -1)"
     if [ -z "$wid" ]; then
         skp "page 'wifi': its Tab ring can be walked" \
             "no installer window on the private display to send Tab to"
@@ -578,7 +578,7 @@ STUBEOF
     # so a future GTK that adds a stop still passes and one that loses a network
     # row does not.
     walk_ring wifi "$wid" 16 11 \
-        APEX-TEST-OPEN APEX-TEST-WPA APEX-TEST-EAP APEX-TEST-WEAK \
+        RIME-TEST-OPEN RIME-TEST-WPA RIME-TEST-EAP RIME-TEST-WEAK \
         "Network password" "Connect" "Continue"
 }
 
@@ -631,7 +631,7 @@ ring_confirm() {   # ring_confirm reachable|locked
             "the page's process is not running — see the audit above"
         return
     fi
-    wid="$(xdotool search --name "APEX-OS Installer" 2>/dev/null | head -1)"
+    wid="$(xdotool search --name "Rime OS Installer" 2>/dev/null | head -1)"
     if [ -z "$wid" ]; then
         skp "page 'confirm': its Tab ring can be walked" \
             "no installer window on the private display to send Tab to"
@@ -755,7 +755,7 @@ kill "$GPID" 2>/dev/null
 # GUI's own test affordance supplies it — with a disk that does not exist, so
 # the page builds and nothing real is ever named as a target.
 audit_page confirm    "Type ERASE to confirm"         3 \
-    APEX_GUI_DISK=/dev/zzz-not-a-disk APEX_GUI_MODE=disk
+    RIME_GUI_DISK=/dev/zzz-not-a-disk RIME_GUI_MODE=disk
 ring_confirm locked
 kill "$GPID" 2>/dev/null
 # The same page with the device given an identity. `lsblk` is stubbed the way
@@ -775,7 +775,7 @@ STUBEOF
 chmod +x "$LSBLK_STUB/lsblk"
 if "$LSBLK_STUB/lsblk" -bdnP -o SIZE /dev/zzz-not-a-disk 2>/dev/null | grep -q A11Y-STUB; then
     audit_page confirm    "Type ERASE to confirm"         3 \
-        APEX_GUI_DISK=/dev/zzz-not-a-disk APEX_GUI_MODE=disk PATH="$LSBLK_STUB:$PATH"
+        RIME_GUI_DISK=/dev/zzz-not-a-disk RIME_GUI_MODE=disk PATH="$LSBLK_STUB:$PATH"
     ring_confirm reachable
     kill "$GPID" 2>/dev/null
 else
@@ -820,7 +820,7 @@ section "the installer can be driven with the keyboard alone"
 
 # The account page's process is still up -- audit_page leaves the last one
 # running precisely so the keyboard walk has something real to drive.
-WID="$(xdotool search --name "APEX-OS Installer" 2>/dev/null | head -1)"
+WID="$(xdotool search --name "Rime OS Installer" 2>/dev/null | head -1)"
 if [ -z "$WID" ]; then
     bad "the installer window can be found on the private display" ""
     finish; exit 1
@@ -953,7 +953,7 @@ advance_with() {   # advance_with <xdotool key name>
         sleep 0.3
     done
 
-    APEX_GUI_PAGE=welcome atspi_run_app python3 "$GUI" \
+    RIME_GUI_PAGE=welcome atspi_run_app python3 "$GUI" \
         >"$ATSPI_W/gui-adv-$key.out" 2>"$ATSPI_W/gui-adv-$key.err" &
     GPID=$!
     for _ in $(seq 1 100); do
@@ -964,7 +964,7 @@ advance_with() {   # advance_with <xdotool key name>
     done
     [ "$ADV_BUILT" = 1 ] || return 0
 
-    wid="$(xdotool search --name "APEX-OS Installer" 2>/dev/null | head -1)"
+    wid="$(xdotool search --name "Rime OS Installer" 2>/dev/null | head -1)"
     [ -n "$wid" ] || return 0
     xdotool windowactivate --sync "$wid" >/dev/null 2>&1
     xdotool windowfocus "$wid" >/dev/null 2>&1

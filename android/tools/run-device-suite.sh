@@ -3,15 +3,15 @@
 # Run the on-device suite: P1-060's first two criteria, which are claims about
 # what Android does with this code and which no JVM test can make.
 #
-# It stands up `apex-agentd` and `apex-remoted` FROM THIS WORKTREE in their own
-# XDG root, puts a line-JSON broker in front of `apex-remoted`'s control socket
+# It stands up `rime-agentd` and `rime-remoted` FROM THIS WORKTREE in their own
+# XDG root, puts a line-JSON broker in front of `rime-remoted`'s control socket
 # so the phone can ask the real daemon for a real pairing offer, builds both
 # APKs, installs them, and runs the instrumentation.
 #
 # It NEVER touches the live runtime. Both daemons get their own
-# XDG_RUNTIME_DIR, XDG_STATE_HOME and APEX_AGENT_SCRATCH_ROOT, and both are
+# XDG_RUNTIME_DIR, XDG_STATE_HOME and RIME_AGENT_SCRATCH_ROOT, and both are
 # stopped by the pid this script started — nothing here looks a process up by
-# name, because `pkill apex-agentd` would take out the session its owner is
+# name, because `pkill rime-agentd` would take out the session its owner is
 # working in.
 #
 # Usage:
@@ -26,7 +26,7 @@ here=$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)
 android=$(dirname "$here")
 repo=$(dirname "$android")
 
-serial=${APEX_ADB_SERIAL:-}
+serial=${RIME_ADB_SERIAL:-}
 classes=""
 while getopts "s:c:" opt; do
   case $opt in
@@ -53,7 +53,7 @@ if [ -z "$serial" ]; then
 fi
 A=("$adb" -s "$serial")
 
-state=${APEX_DEVICE_SUITE_DIR:-$(mktemp -d /var/tmp/apex-device-suite-XXXXXX)}
+state=${RIME_DEVICE_SUITE_DIR:-$(mktemp -d /var/tmp/rime-device-suite-XXXXXX)}
 mkdir -p "$state"
 # `root` is declared here and set further down, so the EXIT trap below can
 # read it even when the script fails before the daemon root exists.
@@ -75,12 +75,12 @@ cleanup() {
   local rc=$?
   restore_talkback
   [ -n "$broker_pid" ] && kill "$broker_pid" 2>/dev/null || true
-  # The CURRENT apex-remoted, which is not always the one this script started.
+  # The CURRENT rime-remoted, which is not always the one this script started.
   # `restart_remoted` — the verb the reconnect test uses — stops the daemon and
   # starts another, and writes the new pid to `remoted.pid`. Killing the shell
   # variable instead left the replacement running: measured on 2026-09-19, the
-  # previous round's worktree still held **seven** orphaned `apex-remoted`
-  # processes and one `apex-agentd`, the oldest nearly nine hours old, each
+  # previous round's worktree still held **seven** orphaned `rime-remoted`
+  # processes and one `rime-agentd`, the oldest nearly nine hours old, each
   # holding a TCP listener. This script's own header says it stops its daemons
   # by pid; the pid it has to use is the one on disk.
   local current=""
@@ -95,10 +95,10 @@ cleanup() {
 }
 trap cleanup EXIT
 
-bin=$repo/apexd/target/debug
-for b in apex-agentd apex-remoted; do
+bin=$repo/rimed/target/debug
+for b in rime-agentd rime-remoted; do
   if [ ! -x "$bin/$b" ]; then
-    echo "FAIL: $bin/$b is not built. Run: (cd $repo/apexd && cargo build --workspace)"
+    echo "FAIL: $bin/$b is not built. Run: (cd $repo/rimed && cargo build --workspace)"
     exit 1
   fi
 done
@@ -110,19 +110,19 @@ done
 # Each binary is compared only against the crates IT is built from, which is the
 # correction the Rust version needed after its first attempt failed every run:
 # cargo does not relink a binary whose own inputs are unchanged, so after a
-# change to `apex-agentd` the `apex-remoted` binary is LEGITIMATELY older, and
+# change to `rime-agentd` the `rime-remoted` binary is LEGITIMATELY older, and
 # saying otherwise makes a true guard cry wolf on a perfectly fresh build.
 stale_against() {
   local binary=$1; shift
   local found
   found=$(find "$@" -name '*.rs' -newer "$binary" -print -quit 2>/dev/null || true)
   if [ -n "$found" ]; then
-    echo "FAIL: $found is newer than $binary. Run: (cd $repo/apexd && cargo build --workspace)"
+    echo "FAIL: $found is newer than $binary. Run: (cd $repo/rimed && cargo build --workspace)"
     exit 1
   fi
 }
-stale_against "$bin/apex-agentd"  "$repo/apexd/apex-agentd/src"  "$repo/apexd/apex-agent-core/src"
-stale_against "$bin/apex-remoted" "$repo/apexd/apex-remoted/src" "$repo/apexd/apex-remote-core/src"
+stale_against "$bin/rime-agentd"  "$repo/rimed/rime-agentd/src"  "$repo/rimed/rime-agent-core/src"
+stale_against "$bin/rime-remoted" "$repo/rimed/rime-remoted/src" "$repo/rimed/rime-remote-core/src"
 
 root=$state/daemons
 rm -rf "$root"; mkdir -p "$root"/run "$root"/state "$root"/scratch
@@ -133,8 +133,8 @@ port=$(python3 -c 'import socket;s=socket.socket();s.bind(("0.0.0.0",0));print(s
 brokerport=$(python3 -c 'import socket;s=socket.socket();s.bind(("0.0.0.0",0));print(s.getsockname()[1]);s.close()')
 
 XDG_RUNTIME_DIR=$root/run XDG_STATE_HOME=$root/state \
-  APEX_AGENT_SCRATCH_ROOT=$root/scratch \
-  "$bin/apex-agentd" >"$root/agentd.log" 2>&1 &
+  RIME_AGENT_SCRATCH_ROOT=$root/scratch \
+  "$bin/rime-agentd" >"$root/agentd.log" 2>&1 &
 agentd_pid=$!
 
 # The relay the daemon holds a rendezvous at, so the RELAY LEG is exercised by
@@ -144,22 +144,22 @@ agentd_pid=$!
 # answer the question the relay leg exists to answer: whether a phone can reach
 # this computer when it is NOT on this network. Cloudflare terminates the TLS,
 # routes the custom domain and runs the Durable Object; a double proves none of
-# that. `apex-remoted` treats an unusable relay as a warning rather than a
+# that. `rime-remoted` treats an unusable relay as a warning rather than a
 # refusal to start (`main.rs`: "a bad relay address must not cost the machine
 # its LAN path"), so a run with no internet loses the relay test and keeps the
 # other thirty-odd.
 #
-# Set `APEX_DEVICE_SUITE_RELAY=` to run without one: the other tests all pass
+# Set `RIME_DEVICE_SUITE_RELAY=` to run without one: the other tests all pass
 # and the three relay tests fail naming the argument they were not given, which
 # is the right answer on a machine with no internet — a skip would be a suite
 # reporting success for a leg it never touched.
-relay=${APEX_DEVICE_SUITE_RELAY-wss://apex-relay.andrenijman.com}
+relay=${RIME_DEVICE_SUITE_RELAY-wss://apex-relay.andrenijman.com}  # rime-rename: keep (the deployed relay)
 
 start_remoted() {
   local extra=()
   [ -n "$relay" ] && extra=(--relay "$relay")
   XDG_RUNTIME_DIR=$root/run XDG_STATE_HOME=$root/state \
-    "$bin/apex-remoted" --port "$port" --allow-foreground "${extra[@]}" \
+    "$bin/rime-remoted" --port "$port" --allow-foreground "${extra[@]}" \
     >>"$root/remoted.log" 2>&1 &
   remoted_pid=$!
   echo "$remoted_pid" > "$root/remoted.pid"
@@ -168,14 +168,14 @@ start_remoted
 
 ready=0
 for _ in $(seq 1 80); do
-  if [ -S "$root/run/apex-agentd/control.sock" ] && [ -S "$root/run/apex-remoted/control.sock" ]; then
+  if [ -S "$root/run/rime-agentd/control.sock" ] && [ -S "$root/run/rime-remoted/control.sock" ]; then
     if (exec 3<>"/dev/tcp/127.0.0.1/$port") 2>/dev/null; then ready=1; break; fi
   fi
   sleep 0.25
 done
 [ "$ready" = 1 ] || { echo "FAIL: the daemons did not come up"; tail -20 "$root"/*.log; exit 1; }
 
-# The broker. `apex-remoted`'s control socket is a unix socket on this machine
+# The broker. `rime-remoted`'s control socket is a unix socket on this machine
 # and a phone can never touch one, so this forwards a line of JSON to it and
 # forwards the answer back. It decides NOTHING: every offer, every device list
 # and every revocation is the daemon's.
@@ -187,12 +187,12 @@ done
 #
 # `file_privilege_request` and `decide_locally` are the other two, and they are
 # the HUMAN AT THIS MACHINE — the person a phone is not. §7 reserves deciding a
-# root operation for a local origin, `apex-agentd` enforces that on the wire,
+# root operation for a local origin, `rime-agentd` enforces that on the wire,
 # and a phone therefore cannot produce the state an approvals screen exists to
 # show. These two produce it from the computer, where it belongs.
 #
 # They are deliberately two named verbs with fixed shapes rather than a general
-# "forward anything to apex-agentd", which would be a way for a test to borrow a
+# "forward anything to rime-agentd", which would be a way for a test to borrow a
 # local origin for any request at all — and this suite's whole value is that the
 # phone's own origin is real.
 cat > "$root/broker.py" <<'PY'
@@ -209,7 +209,7 @@ def control(line):
     return out
 
 def agentd(request):
-    """One request to apex-agentd, from THIS process — a local origin."""
+    """One request to rime-agentd, from THIS process — a local origin."""
     s = socket.socket(socket.AF_UNIX); s.settimeout(60); s.connect(AGENTD)
     s.sendall((json.dumps(request) + "\n").encode())
     f = s.makefile("rb"); out = f.readline().decode().strip(); s.close()
@@ -236,7 +236,7 @@ def restart():
     # the verb the reconnect test uses, and a replacement that held no
     # rendezvous would leave half this suite testing a machine the relay has
     # never heard of — a failure that looks like the phone's.
-    argv = [os.path.join(BIN, "apex-remoted"), "--port", DPORT, "--allow-foreground"]
+    argv = [os.path.join(BIN, "rime-remoted"), "--port", DPORT, "--allow-foreground"]
     if RELAY:
         argv += ["--relay", RELAY]
     p = subprocess.Popen(argv, env=env, stdout=log, stderr=log)
@@ -248,7 +248,7 @@ def restart():
             return json.dumps({"reply": "ok", "pid": p.pid})
         except OSError:
             time.sleep(0.05)
-    return json.dumps({"reply": "error", "message": "apex-remoted did not come back"})
+    return json.dumps({"reply": "error", "message": "rime-remoted did not come back"})
 
 class H(socketserver.StreamRequestHandler):
     timeout = 120
@@ -282,8 +282,8 @@ class S(socketserver.ThreadingTCPServer):
 
 S(("0.0.0.0", PORT), H).serve_forever()
 PY
-python3 "$root/broker.py" "$root/run/apex-remoted/control.sock" "$brokerport" "$root" "$bin" "$port" \
-  "$root/run/apex-agentd/control.sock" "$relay" >"$root/broker.log" 2>&1 &
+python3 "$root/broker.py" "$root/run/rime-remoted/control.sock" "$brokerport" "$root" "$bin" "$port" \
+  "$root/run/rime-agentd/control.sock" "$relay" >"$root/broker.log" 2>&1 &
 broker_pid=$!
 
 # Which of this machine's addresses the PHONE can actually reach. Measured from
@@ -321,15 +321,15 @@ echo "desktop reachable from the phone at $lan (broker on $brokerport)"
 # Asked HERE, before the two-minute APK build, because the answer depends on
 # how this script was STARTED and not on anything in the tree.
 #
-# `apex-remoted` decides whether a human is at the machine by reading the
+# `rime-remoted` decides whether a human is at the machine by reading the
 # connecting peer's cgroup (`origin::classify`), and pairing is one of the
 # things §7 reserves for one — pairing hands a phone standing access to every
 # agent here. A suite launched from a terminal is observed `local-terminal` and
 # pairs; a suite launched by a systemd user unit — a timer, a dispatched agent,
 # CI — is observed `scheduled-job` and every offer is refused.
 #
-# Measured on 2026-09-19 from `apex-roadmap-resume.service`: 24 tests ran and 8
-# failed, all eight on `apex-remoted did not mint an offer`. Nothing was wrong
+# Measured on 2026-09-19 from `rime-roadmap-resume.service`: 24 tests ran and 8
+# failed, all eight on `rime-remoted did not mint an offer`. Nothing was wrong
 # with the app, the phone or the daemon. The same commit from a login session
 # is OK (24 tests). That is two minutes of gradle and twenty seconds of
 # instrumentation spent to produce eight failures about the launcher, so the
@@ -348,20 +348,20 @@ except OSError as e:
 PY
 )
 if [[ "$preflight" != *'"qr"'* ]]; then
-  echo "FAIL: apex-remoted will not mint a pairing offer for this process, so the"
+  echo "FAIL: rime-remoted will not mint a pairing offer for this process, so the"
   echo "      end-to-end tests cannot run. It answered:"
   echo "      $preflight"
   if [[ "$preflight" == *scheduled-job* ]]; then
     echo
     echo "      This script is running under a systemd user unit — $(cat /proc/self/cgroup)"
-    echo "      — which apex-remoted observes as \`scheduled-job\`, not as a human at the"
+    echo "      — which rime-remoted observes as \`scheduled-job\`, not as a human at the"
     echo "      keyboard. Run it inside a real login session instead:"
     echo
     echo "        tests/in-login-session.sh /bin/bash -c \\"
     echo "          'export JAVA_HOME=\$JAVA_HOME ANDROID_HOME=\$ANDROID_HOME; \\"
     echo "           exec android/tools/run-device-suite.sh $*'"
     echo
-    echo "      The wrapper forwards PATH HOME LANG LC_ALL TMPDIR and APEX_*/CARGO_*/"
+    echo "      The wrapper forwards PATH HOME LANG LC_ALL TMPDIR and RIME_*/CARGO_*/"
     echo "      RUST*/XDG_*_HOME only, so JAVA_HOME and ANDROID_HOME must be exported"
     echo "      inside it."
   fi
@@ -421,7 +421,7 @@ fi
 out=$state/instrument.txt
 set +e
 "${A[@]}" shell am instrument -w -r "${args[@]}" \
-  com.apexos.remote.test/androidx.test.runner.AndroidJUnitRunner | tee "$out"
+  com.rimeos.remote.test/androidx.test.runner.AndroidJUnitRunner | tee "$out"
 set -e
 restore_talkback
 

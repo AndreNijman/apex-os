@@ -1,10 +1,10 @@
 #!/usr/bin/env bash
 # ─────────────────────────────────────────────────────────────────────────────
-#  verify-signing-identity.sh — is this the key we told everybody signs APEX?
+#  verify-signing-identity.sh — is this the key we told everybody signs Rime?
 #
 #  WHY THIS EXISTS AT ALL. `verifyReleaseSigning` proves an artefact is signed.
 #  It cannot prove it is signed by the RIGHT key, because the build's only idea
-#  of the right key is whatever `APEX_KEYSTORE_BASE64` happened to decode to.
+#  of the right key is whatever `RIME_KEYSTORE_BASE64` happened to decode to.
 #  Swap that secret — by accident, during a rotation done half-way, or by
 #  anyone who can write repository secrets — and every gate in the release
 #  still passes while the published APK becomes uninstallable over the top of
@@ -23,7 +23,7 @@
 #      --keystore FILE --alias NAME     before the build. Two seconds, and a
 #                                       wrong key stops the release before ten
 #                                       minutes of Gradle. The password comes
-#                                       from APEX_KEYSTORE_PASSWORD in the
+#                                       from RIME_KEYSTORE_PASSWORD in the
 #                                       environment — never an argument, which
 #                                       `ps` would show to every other process.
 #
@@ -125,15 +125,15 @@ found=()
 
 if [ -n "$keystore" ]; then
     [ -f "$keystore" ] || fatal "--keystore '$keystore' is not a file"
-    [ -n "${APEX_KEYSTORE_PASSWORD:-}" ] \
-        || fatal "APEX_KEYSTORE_PASSWORD is not set, so the keystore cannot be opened. The password is taken from the environment on purpose: an argument is visible in ps to every process on the machine."
+    [ -n "${RIME_KEYSTORE_PASSWORD:-}" ] \
+        || fatal "RIME_KEYSTORE_PASSWORD is not set, so the keystore cannot be opened. The password is taken from the environment on purpose: an argument is visible in ps to every process on the machine."
     command -v keytool >/dev/null 2>&1 || fatal "keytool is not on PATH, so the keystore's certificate cannot be read. A run that could not look must fail rather than report that it found no problem."
 
     der=$(mktemp) || fatal "cannot create a temporary file"
     # `-storepass:env`, never `-storepass <value>`: same reason as above. The
     # alias is not secret and is an argument.
     if ! keytool -exportcert -keystore "$keystore" -alias "$alias" \
-            -storepass:env APEX_KEYSTORE_PASSWORD > "$der" 2>/dev/null; then
+            -storepass:env RIME_KEYSTORE_PASSWORD > "$der" 2>/dev/null; then
         rm -f "$der"
         fatal "the keystore did not open with the supplied password, or it holds no key called '$alias'. Nothing about the key material is printed here on purpose."
     fi

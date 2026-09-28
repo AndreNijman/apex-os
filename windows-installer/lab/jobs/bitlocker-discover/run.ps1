@@ -21,8 +21,8 @@
 #    4. **Which PCRs does BitLocker's platform validation profile bind?** TCG
 #       assigns PCR 5 to the GPT partition table. Where a profile binds PCR 5,
 #       ANY GPT change forces a 48-digit recovery prompt on the next Windows
-#       boot -- including merely CREATING APEX's own ESP, not just retyping a
-#       partition. `docs/apex-owns-its-esp.md` makes this must-measure item 5
+#       boot -- including merely CREATING Rime's own ESP, not just retyping a
+#       partition. `docs/rime-owns-its-esp.md` makes this must-measure item 5
 #       and says explicitly that this job "runs `manage-bde -status` and
 #       `-protectors -disable` and does not read the profile at all -- adding
 #       that is the first thing it needs." This is that addition. The profile
@@ -156,7 +156,7 @@ function Dump-PcrProfile {
             Emit ("pcr-profile[$v]: " + ($nums -join ','))
             Emit ("pcr5-bound[$v]: " + $(if ($nums -contains '5') { 'YES' } else { 'NO' }))
             if ($nums -contains '5') {
-                Emit "pcr5-WARNING[$v]: this profile binds PCR 5, the GPT partition table. ANY GPT change -- including merely CREATING APEX's own ESP -- forces a recovery prompt on the next Windows boot on this machine."
+                Emit "pcr5-WARNING[$v]: this profile binds PCR 5, the GPT partition table. ANY GPT change -- including merely CREATING Rime's own ESP -- forces a recovery prompt on the next Windows boot on this machine."
             }
         } else {
             Emit "pcr-profile[$v]: NOT PRINTED (no TPM-backed protector on this volume)"
@@ -241,7 +241,7 @@ if ($phase -eq 2) {
     Emit ((& cmd /c "manage-bde -status $L 2>&1") | Out-String -Width 200)
 
     Emit "--- Enable-BitLocker $L with a password protector, used space only ---"
-    $pw = ConvertTo-SecureString 'ApexLab-Passw0rd-2026!' -AsPlainText -Force
+    $pw = ConvertTo-SecureString 'RimeLab-Passw0rd-2026!' -AsPlainText -Force
     try {
         $r = Enable-BitLocker -MountPoint $L -PasswordProtector -Password $pw `
                 -EncryptionMethod Aes128 -UsedSpaceOnly -SkipHardwareTest -ErrorAction Stop

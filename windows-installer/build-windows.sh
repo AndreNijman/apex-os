@@ -4,7 +4,7 @@
 #
 #  WHY A CONTAINER
 #
-#  This repository is built and developed on APEX, which is bootc and
+#  This repository is built and developed on Rime, which is bootc and
 #  read-only: `dnf install` on the host is refused outright ("this bootc system
 #  is configured to be read-only"). So the toolchain cannot be installed
 #  alongside the source, and the first round of this work recorded "No Windows
@@ -27,7 +27,7 @@
 #
 #      windows-installer/build-windows.sh [OUTDIR]
 #
-#  Writes apex-windows-installer.exe into OUTDIR (default ./dist). Prints the
+#  Writes rime-windows-installer.exe into OUTDIR (default ./dist). Prints the
 #  produced file's type, because "the build exited 0" and "a PE32+ binary
 #  exists" are different claims and only the second one matters.
 # ─────────────────────────────────────────────────────────────────────────────
@@ -35,7 +35,7 @@ set -euo pipefail
 
 HERE="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
 OUT="${1:-$HERE/dist}"
-IMAGE="${APEX_WIN_BUILD_IMAGE:-registry.fedoraproject.org/fedora:43}"
+IMAGE="${RIME_WIN_BUILD_IMAGE:-registry.fedoraproject.org/fedora:43}"
 
 if ! command -v podman >/dev/null 2>&1; then
     echo "SKIP  podman is absent; the Windows cross-build needs a container" >&2
@@ -67,12 +67,12 @@ podman run --rm \
         cd /build
         cargo build --release --target x86_64-pc-windows-gnu
 
-        exe=target/x86_64-pc-windows-gnu/release/apex-windows-installer.exe
+        exe=target/x86_64-pc-windows-gnu/release/rime-windows-installer.exe
         test -s "$exe" || { echo "FATAL: no .exe produced" >&2; exit 1; }
         cp "$exe" /out/
     '
 
-exe="$OUT/apex-windows-installer.exe"
+exe="$OUT/rime-windows-installer.exe"
 test -s "$exe" || { echo "FATAL: $exe missing after the build" >&2; exit 1; }
 
 # The build exiting 0 is not the claim worth making. This is.

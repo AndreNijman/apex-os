@@ -4,7 +4,7 @@ import QtQuick
 //  greet-atspi-app.qml — the shipped login surface, in a real window, so that
 //  what it publishes to AT-SPI can be read off the bus.
 //
-//  Run via tests/test-apex-greet-atspi.sh. This is the companion to
+//  Run via tests/test-rime-greet-atspi.sh. This is the companion to
 //  greet-a11y-test.qml, and the difference between them is the whole point:
 //
 //    greet-a11y-test.qml  reads `Accessible.name` off a live QQuickItem under
@@ -42,7 +42,7 @@ Window {
     visible: true
     width: 1280
     height: 800
-    title: "apex-greet-atspi-fixture"
+    title: "rime-greet-atspi-fixture"
     color: "#000000"
 
     // ── The fakes, kept to exactly what GreetSurface.qml reads ───────────────
@@ -72,8 +72,8 @@ Window {
         property bool   hasError:  false
         property string errorText: ""
 
-        property var sessions: [ { id: "apex-labwc",  name: "APEX Desktop", exec: "x" },
-                                 { id: "apex-gaming", name: "APEX Gaming",  exec: "y" } ]
+        property var sessions: [ { id: "rime-labwc",  name: "Rime Desktop", exec: "x" },
+                                 { id: "rime-gaming", name: "Rime Gaming",  exec: "y" } ]
         property int  sessionIndex: 0
         readonly property string sessionName: sessions[sessionIndex].name
 

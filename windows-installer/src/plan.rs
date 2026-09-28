@@ -16,13 +16,13 @@ pub const EFI_SYSTEM: &str = "c12a7328-f81f-11d2-ba4b-00a0c93ec93b";
 pub const MICROSOFT_RESERVED: &str = "e3c9e316-0b5c-4db8-817d-f92df00215ae";
 pub const WINDOWS_RECOVERY: &str = "de94bba4-06d1-4d40-a16a-bfd50179d6ac";
 
-/// 16 decimal GB, borrowed from `installer/apex-install` and applied to a
+/// 16 decimal GB, borrowed from `installer/rime-install` and applied to a
 /// different thing.
 ///
 /// That installer checks `$DISK` — in BOTH of its modes, whole-disk and
-/// partition (`installer/apex-install:849-855`), so in partition mode it never
+/// partition (`installer/rime-install:849-855`), so in partition mode it never
 /// sizes the target partition at all. A 40 GB disk with a 2 GB free partition
-/// passes its check and still cannot hold APEX. This program applies the same
+/// passes its check and still cannot hold Rime. This program applies the same
 /// number to the partition, which is the thing that has to hold the operating
 /// system, and is therefore **stricter than the Linux installer**, not equal
 /// to it. Worth knowing before anyone "aligns" the two.
@@ -194,7 +194,7 @@ pub fn assess(p: &PartitionFacts, claims: &[Claim]) -> Verdict {
         return refuse(
             "too small",
             format!(
-                "{} is below the {} APEX needs. The Linux installer refuses the same \
+                "{} is below the {} Rime needs. The Linux installer refuses the same \
                  number.",
                 human(p.length),
                 human(MINIMUM_ROOT_BYTES)
@@ -265,7 +265,7 @@ pub fn confirmation_text(
     format!(
         "ERASE AND INSTALL -- read this before continuing.\n\
          \n\
-         APEX will be written to ONE partition:\n\
+         Rime will be written to ONE partition:\n\
          \n\
          \x20   partition name   {name}\n\
          \x20   size             {size}\n\
@@ -311,7 +311,7 @@ mod tests {
         PartitionFacts {
             id: "11111111-2222-3333-4444-555555555555".into(),
             type_guid: type_guid.into(),
-            name: "APEX-TARGET".into(),
+            name: "RIME-TARGET".into(),
             offset: 1_048_576,
             length,
             attributes,
@@ -319,7 +319,7 @@ mod tests {
     }
     fn disk() -> DiskIdentity {
         DiskIdentity {
-            model: "APEX-FIXTURE-A".into(),
+            model: "RIME-FIXTURE-A".into(),
             serial: "FIXA00000001".into(),
             bus: "SATA".into(),
             length: 40_000_000_000,
@@ -432,7 +432,7 @@ mod tests {
     #[test]
     fn the_confirmation_names_the_disk_by_serial_and_never_by_index() {
         let text = confirmation_text(&disk(), &part(LINUX_FILESYSTEM, BIG, 0), None, BIG);
-        for must in ["FIXA00000001", "APEX-FIXTURE-A", "11111111-2222-3333-4444-555555555555"] {
+        for must in ["FIXA00000001", "RIME-FIXTURE-A", "11111111-2222-3333-4444-555555555555"] {
             assert!(text.contains(must), "the confirmation must contain {must}:\n{text}");
         }
         // The load-bearing negative. Index-based identification is how people

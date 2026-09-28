@@ -1,25 +1,25 @@
-# APEX-OS
+# Rime OS
 
-APEX-OS is an atomic Linux distribution built on **Fedora bootc** (OCI-native,
+Rime OS is an atomic Linux distribution built on **Fedora bootc** (OCI-native,
 image-based, transactional updates with rollback). Its desktop is
-[APEX Shell](https://github.com/AndreNijman/apex-shell) on Hyprland. The image
-build vendors the shell into `/usr/share/apex-shell` instead of cloning it into
-your home directory, and **apexd**, a first-party system daemon, manages the
+[Rime Shell](https://github.com/AndreNijman/apex-shell) on Hyprland. The image <!-- rime-rename: keep: GitHub redirects the old repository name -->
+build vendors the shell into `/usr/share/rime-shell` instead of cloning it into
+your home directory, and **rimed**, a first-party system daemon, manages the
 machine.
 
 ## One image, every laptop
 
-APEX-OS used to ship three editions (Daily, Gaming Mesa and Gaming NVIDIA), and
+Rime OS used to ship three editions (Daily, Gaming Mesa and Gaming NVIDIA), and
 you had to pick one at install time without the information to pick well.
 Someone with a gaming laptop who played a game now and then picked Daily and
 found their GPU had no driver.
 
 Now there is one image. CI builds the NVIDIA driver and the Xbox controller
-modules (xone, xpadneo) into it and signs them with the APEX Machine Owner Key.
+modules (xone, xpadneo) into it and signs them with the Rime Machine Owner Key.
 The gaming userspace stays out of the image and installs when you want it:
 
 ```sh
-sudo apex install steam gamescope mangohud gamemode
+sudo rime install steam gamescope mangohud gamemode
 ```
 
 The line between the two is technical. A kernel module has to be signed by a
@@ -27,20 +27,22 @@ key that only CI holds, so nobody can add one to a running machine under Secure
 Boot; userspace has no such limit. Every kernel module ships in the image, and
 everything else is a package.
 
-`ghcr.io/andrenijman/apex-os:apex` is the image. `:daily`, `:gaming-mesa` and
-`:gaming-nvidia` resolve to the same digest, so machines installed before the
-merge keep updating and their owners have nothing to do.
+`ghcr.io/andrenijman/rime-os:rime` is the image. `:apex`, `:daily`, `:gaming-mesa` <!-- rime-rename: keep -->
+and `:gaming-nvidia` resolve to the same digest, so machines installed before the
+merge keep updating and their owners have nothing to do. Every build is also
+published under the pre-rebrand name, `ghcr.io/andrenijman/apex-os`, with the <!-- rime-rename: keep -->
+same tags, for machines that have not moved to the new name yet.
 
 The "spark" logo is the mark, in chartreuse, with mono (black/white) variants
 for neutral contexts. See [docs/branding.md](docs/branding.md).
 
 ## The desktop
 
-You log in to Hyprland running APEX Shell. The login screen also offers niri
-(**APEX Scrolling**), labwc (**APEX Floating**) and **APEX Safe Graphics**;
-**APEX Gaming Mode** appears once you install gamescope.
+You log in to Hyprland running Rime Shell. The login screen also offers niri
+(**Rime Scrolling**), labwc (**Rime Floating**) and **Rime Safe Graphics**;
+**Rime Gaming Mode** appears once you install gamescope.
 
-- **APEX Shell** is the redesigned shell from apex-shell's `main` branch. Its
+- **Rime Shell** is the redesigned shell from rime-shell's `main` branch. Its
   panels open and close on springs, and the Reduce Motion setting removes the
   movement. Settings grows out of the notch at the top centre of the screen,
   and the Dashboard's last tab opens it. Volume and brightness changes show
@@ -56,23 +58,23 @@ You log in to Hyprland running APEX Shell. The login screen also offers niri
 - **Windows.** Hyprland opens, moves and switches workspaces on springs, and a
   closing window shrinks away over 200 ms. SUPER + left-drag moves a window and
   SUPER + right-drag resizes it. The settings live in
-  `files/desktop/hypr/apex/appearance.lua`.
-- **Boot splash.** On a black screen the APEX spark comes into focus out of its
+  `files/desktop/hypr/rime/appearance.lua`.
+- **Boot splash.** On a black screen the Rime spark comes into focus out of its
   own glow and the wordmark fades in. On an encrypted disk the passphrase prompt
   appears on the splash, with a dot for each character you type and the
   keyboard layout in use.
 
-All of it ships in the image. Each build of `main` takes APEX Shell from
-apex-shell's `main` branch and records the commit in
-`/usr/share/apex-shell/.apex-shell-commit`. The shell, the login screen and the
-splash update together with `sudo apex update` and roll back together with
-`sudo apex rollback`; APEX Shell has no updater of its own.
+All of it ships in the image. Each build of `main` takes Rime Shell from
+rime-shell's `main` branch and records the commit in
+`/usr/share/rime-shell/.rime-shell-commit`. The shell, the login screen and the
+splash update together with `sudo rime update` and roll back together with
+`sudo rime rollback`; Rime Shell has no updater of its own.
 
 ## Installing
 
 You need a USB stick of **4 GB or more** (it will be erased), a machine with at
 least **16 GB** of disk, and **internet on that machine while installing**: the
-installer downloads APEX-OS during the install.
+installer downloads Rime OS during the install.
 
 The installer stages the download on disk before it installs, and that needs
 room:
@@ -88,22 +90,22 @@ Allow about 30 minutes start to finish, most of it waiting.
 
 ### Step 1: Download
 
-From the [Releases page](https://github.com/AndreNijman/apex-os/releases), take
+From the [Releases page](https://github.com/AndreNijman/apex-os/releases), take <!-- rime-rename: keep: GitHub redirects the old repository name -->
 the ISO plus its `.sha256` file:
 
 | File | What it installs |
 |------|------------------|
-| `apex-os-netinstall-x86_64.iso` | APEX-OS. One ISO, because there is one image. |
+| `rime-os-netinstall-x86_64.iso` | Rime OS. One ISO, because there is one image. |
 
 Releases before v1.0.0 published one ISO per edition
-(`apex-os-daily-netinstall.iso`, `apex-os-gaming-nvidia-netinstall.iso`). Those
+(`rime-os-daily-netinstall.iso`, `rime-os-gaming-nvidia-netinstall.iso`). Those
 names are gone; take the newest release.
 
-Each ISO downloads the exact APEX-OS build it was tested with, not whatever was
+Each ISO downloads the exact Rime OS build it was tested with, not whatever was
 published last. The ISO records that image digest at
-`/usr/lib/apex-installer/image-digest`, and a release should quote it in its
-notes. The installed machine follows the normal `:apex` update channel from then
-on, so the first `sudo apex update` brings it current.
+`/usr/lib/rime-installer/image-digest`, and a release should quote it in its
+notes. The installed machine follows the normal `:rime` update channel from then
+on, so the first `sudo rime update` brings it current.
 
 Check that the download is intact. A truncated ISO fails much later, in ways
 that look like hardware problems.
@@ -111,14 +113,14 @@ that look like hardware problems.
 **Linux / macOS**
 
 ```sh
-sha256sum -c apex-os-netinstall-x86_64.iso.sha256     # macOS: shasum -a 256 -c
+sha256sum -c rime-os-netinstall-x86_64.iso.sha256     # macOS: shasum -a 256 -c
 ```
 
 **Windows** (PowerShell): compare the output to the contents of the `.sha256`
 file.
 
 ```powershell
-Get-FileHash .\apex-os-netinstall-x86_64.iso -Algorithm SHA256
+Get-FileHash .\rime-os-netinstall-x86_64.iso -Algorithm SHA256
 ```
 
 ---
@@ -144,7 +146,7 @@ select image, select drive, Flash.
 
 ```sh
 lsblk                       # identify the stick — check SIZE, not just the name
-sudo dd if=apex-os-netinstall-x86_64.iso of=/dev/sdX bs=4M oflag=direct status=progress
+sudo dd if=rime-os-netinstall-x86_64.iso of=/dev/sdX bs=4M oflag=direct status=progress
 sync
 ```
 
@@ -155,14 +157,14 @@ Use the **whole disk** (`/dev/sdX`), never a partition (`/dev/sdX1`).
 ```sh
 diskutil list                          # find the disk, e.g. /dev/disk4
 diskutil unmountDisk /dev/diskN
-sudo dd if=apex-os-netinstall-x86_64.iso of=/dev/rdiskN bs=4m
+sudo dd if=rime-os-netinstall-x86_64.iso of=/dev/rdiskN bs=4m
 ```
 
 ---
 
 ### Step 3: Only if you are keeping Windows on the same machine
 
-Skip this if APEX is taking the whole disk.
+Skip this if Rime is taking the whole disk.
 
 The installer can install into an existing partition, but it will **not** shrink
 Windows for you. Do that from Windows first:
@@ -174,7 +176,7 @@ Windows for you. Do that from Windows first:
    power buttons do* → uncheck **Turn on fast startup**. Fast Startup leaves the
    Windows partition in a half-hibernated state that is unsafe to resize.
 3. **Shrink C:**: right-click Start → Disk Management → right-click `C:` →
-   *Shrink Volume*. Give APEX at least 53 GB: with no second drive plugged in,
+   *Shrink Volume*. Give Rime at least 53 GB: with no second drive plugged in,
    the installer stages the download on this partition. With a second drive or
    USB stick that has 32 GB free, 40 GB is enough.
 4. **Create a partition in the free space**: right-click the unallocated space
@@ -193,11 +195,11 @@ Acer F12, MSI F11, ASUS Esc). Pick the USB entry.
 If the stick is not listed, go into firmware setup and disable **Fast Boot**.
 The stick boots both UEFI and legacy BIOS machines, so either mode is fine.
 
-At the APEX menu:
+At the Rime menu:
 
 | Entry | Use it when |
 |-------|-------------|
-| **Install APEX-OS** | Always start here |
+| **Install Rime OS** | Always start here |
 | **Safe graphics** | The screen goes black after the menu |
 | **Troubleshoot** | The stick is not found (drops to a debug shell) |
 
@@ -243,7 +245,7 @@ partition cannot be encrypted: the engine refuses that combination rather than
 inventing somewhere to put an unencrypted `/boot`.
 
 **6 · Secure Boot** *(UEFI machines)*: choose a one-time password to enrol the
-APEX signing key, or skip. Enrol even if Secure Boot is off now, so you can
+Rime signing key, or skip. Enrol even if Secure Boot is off now, so you can
 switch it on later without reinstalling.
 
 **7 · Confirm**: the page lists every partition as **ERASED**, **KEPT** or
@@ -286,8 +288,8 @@ The installer never leaves you at a blank screen: it prints what failed and
 drops to a root shell. Photograph the screen; that is usually enough to
 diagnose the failure.
 
-- <kbd>Ctrl</kbd>+<kbd>Alt</kbd>+<kbd>F2</kbd> gives a login: `root` / `apex`
-- Logs: `/var/log/apex-install.log` and `/var/log/apex-installer-launch.log`
+- <kbd>Ctrl</kbd>+<kbd>Alt</kbd>+<kbd>F2</kbd> gives a login: `root` / `rime`
+- Logs: `/var/log/rime-install.log` and `/var/log/rime-installer-launch.log`
 - The installer writes nothing to any disk until you type `ERASE`, so a failure
   before that point has changed nothing
 
@@ -311,29 +313,29 @@ far less space, because it embeds no OS image).
 cd installer
 
 # small ISO that downloads the OS during the install — this is the published one
-NETINSTALL=1 EDITION=apex WORK=/var/tmp/apex-iso \
-  OUT=/var/tmp/apex-iso/apex-os-netinstall-x86_64.iso sudo -E bash build-live-iso.sh
+NETINSTALL=1 EDITION=rime WORK=/var/tmp/rime-iso \
+  OUT=/var/tmp/rime-iso/rime-os-netinstall-x86_64.iso sudo -E bash build-live-iso.sh
 
 # fat ISO with the whole OS embedded — installs with no network at all
-sudo skopeo copy containers-storage:localhost/apex-os:apex \
-  oci-archive:/var/tmp/apex-iso/apex.oci:apex-os-apex
-EDITION=apex WORK=/var/tmp/apex-iso \
-  OUT=/var/tmp/apex-iso/apex-os-x86_64.iso sudo -E bash build-live-iso.sh
+sudo skopeo copy containers-storage:localhost/rime-os:rime \
+  oci-archive:/var/tmp/rime-iso/rime.oci:rime-os-rime
+EDITION=rime WORK=/var/tmp/rime-iso \
+  OUT=/var/tmp/rime-iso/rime-os-x86_64.iso sudo -E bash build-live-iso.sh
 ```
 
 `EDITION` names the tag the installed machine records as its update origin, so
 it has to match a published tag. `daily`, `gaming-mesa` and `gaming-nvidia`
 still work and resolve to the same image, but a production build
-(`PRODUCTION=1`, the default) refuses anything but `apex`.
+(`PRODUCTION=1`, the default) refuses anything but `rime`.
 
-The netinstall build resolves `:apex` to a digest once, refuses it unless
+The netinstall build resolves `:rime` to a digest once, refuses it unless
 `build-image.yml` on `main` signed it (cosign), and stamps it into the ISO. Pass
 `RELEASE_DIGEST=sha256:…` to pin a specific build instead. Use the digest the
 boot-tested build printed, so the ISO you publish downloads the image you
 tested.
 
 Before you publish a netinstall ISO, pin that digest. The digest loses its tag
-when `:apex` moves on, and a registry cleanup removes untagged versions, so
+when `:rime` moves on, and a registry cleanup removes untagged versions, so
 every copy of the ISO would fail at its first download:
 
 ```sh
@@ -346,24 +348,24 @@ The workflow checks the digest's signature and gives it a write-once
 To build the OS images with a signed kernel, use `./build-local.sh`. It passes
 the Secure Boot signing key and refuses to produce an unsigned image by
 accident. `./build-local.sh kernel` builds the kernel tier on its own (about 45
-minutes); `core`, `base` and `apex` build the tiers above it.
+minutes); `core`, `base` and `rime` build the tiers above it.
 
 
 ## Updating
 
-APEX-OS is image-based, so an update replaces the whole OS atomically and you
+Rime OS is image-based, so an update replaces the whole OS atomically and you
 can roll it back:
 
 ```sh
-sudo apex update          # pull the newest image, then check firmware
-sudo apex update --check  # report what is available, download nothing
+sudo rime update          # pull the newest image, then check firmware
+sudo rime update --check  # report what is available, download nothing
 sudo systemctl reboot     # boot into it
-sudo apex rollback        # go back to the previous image if anything broke
+sudo rime rollback        # go back to the previous image if anything broke
 ```
 
-`apex update`, `apex rollback` and `apex pin` change the booted system and
+`rime update`, `rime rollback` and `rime pin` change the booted system and
 refuse to run without root. Each prints the exact `sudo` line to use instead of
-failing somewhere inside `bootc`. Everything else (`apex status`, `tier`,
+failing somewhere inside `bootc`. Everything else (`rime status`, `tier`,
 `battery`, `fan`, `doctor`) stays usable as your normal user, because the
 desktop drives those.
 
@@ -372,14 +374,14 @@ image) so that a typical release moves only the thin top ones.
 [docs/update-cost.md](docs/update-cost.md) explains how that works and why it
 matters: every update used to cost 5.3 GB.
 
-There are four channels: `edge`, `beta`, `candidate` and `stable`. `:apex` (and
+There are four channels: `edge`, `beta`, `candidate` and `stable`. `:rime` (and
 its three aliases) moves on every successful build of `main`, so a machine you
 have never moved is on **edge**:
 
 ```sh
-apex channel status          # which one this machine follows, and how the last update went
-apex channel list            # what the four mean
-sudo apex channel set beta   # from the next update onwards
+rime channel status          # which one this machine follows, and how the last update went
+rime channel list            # what the four mean
+sudo rime channel set beta   # from the next update onwards
 ```
 
 CI enforces each promotion: it refuses a digest that is not already on the
@@ -389,28 +391,28 @@ direction pins the current deployment first and says what your persistent state
 will and will not roll back with it. See
 [docs/update-channels.md](docs/update-channels.md).
 
-The images are public, at `ghcr.io/andrenijman/apex-os`.
+The images are public, at `ghcr.io/andrenijman/rime-os`.
 
 ## Installing software
 
 ```sh
-sudo apex install android-tools   # any Fedora package
-sudo apex install org.gimp.GIMP   # a reverse-DNS id installs the Flatpak
-sudo apex install ~/app.rpm       # a path installs that RPM file
-sudo apex remove  android-tools
-apex search wireshark
-apex resolve obs-studio           # which source APEX would use, and why
-apex pkg list
+sudo rime install android-tools   # any Fedora package
+sudo rime install org.gimp.GIMP   # a reverse-DNS id installs the Flatpak
+sudo rime install ~/app.rpm       # a path installs that RPM file
+sudo rime remove  android-tools
+rime search wireshark
+rime resolve obs-studio           # which source Rime would use, and why
+rime pkg list
 ```
 
 A bare name can be an RPM, a Flatpak or something that belongs inside a
-container, so APEX ranks the sources. `apex resolve` shows the ranking, what
+container, so Rime ranks the sources. `rime resolve` shows the ranking, what
 vouches for each source, and the exact command for the alternatives; it is
 read-only and needs no root. `--source rpm|flatpak|capsule` overrides the
-ranking for one install. `sudo apex repo enable-copr OWNER/PROJECT` adds a COPR
+ranking for one install. `sudo rime repo enable-copr OWNER/PROJECT` adds a COPR
 to search, install and upgrades.
 
-APEX builds packages into a systemd system extension overlaid on `/usr`; it does
+Rime builds packages into a systemd system extension overlaid on `/usr`; it does
 **not** layer them with `rpm-ostree`. A single `rpm-ostree` layer puts the deployment
 into "local modifications" state, and `bootc upgrade` refuses to run from then
 on, so installing one CLI tool used to stop the machine updating without a
@@ -419,26 +421,26 @@ updates no longer exclude each other, and programs still land in the real
 `/usr/bin` with working `.desktop` files, units and udev rules.
 
 A local `.rpm` file goes through the same pipeline, so it lands in the launcher
-with its icons and MIME types like any other application. APEX copies the file
-into `/var/lib/apex/pkg/local` and every later rebuild uses that copy, so
-`apex update` and the rebuild after an OS upgrade keep working once the original
-file is gone; its dependencies still come from the repositories. APEX refuses
+with its icons and MIME types like any other application. Rime copies the file
+into `/var/lib/rime/pkg/local` and every later rebuild uses that copy, so
+`rime update` and the rebuild after an OS upgrade keep working once the original
+file is gone; its dependencies still come from the repositories. Rime refuses
 any RPM it cannot verify against a trusted key. To accept one anyway you pass an
-explicit `--allow-unsigned` for that file, and `apex pkg list` says so
-afterwards. APEX does not run `%post` scriptlets.
+explicit `--allow-unsigned` for that file, and `rime pkg list` says so
+afterwards. Rime does not run `%post` scriptlets.
 
-Already have layered packages? `sudo apex pkg adopt` converts them and restores
+Already have layered packages? `sudo rime pkg adopt` converts them and restores
 updates. See [docs/packages.md](docs/packages.md).
 
 ## Coding agents as an OS workload
 
 `claude`, `opencode`, `codex`, `gemini` and anything else you already run keep
-working as they do. APEX adds what sits underneath: the terminal they run on,
+working as they do. Rime adds what sits underneath: the terminal they run on,
 the confinement they run inside, and the project state around them. It is off
 until you turn it on.
 
 ```sh
-apex agent enable               # per-user; works for any user, root included
+rime agent enable               # per-user; works for any user, root included
 a                               # start an agent here
 a "fix the failing tests"       # with an opening instruction
 al                              # what is running
@@ -446,22 +448,22 @@ aa                              # reattach
 ad                              # what it changed
 ```
 
-APEX creates the PTY and then execs the ordinary agent binary inside it, so the
+Rime creates the PTY and then execs the ordinary agent binary inside it, so the
 agent needs no changes. A daemon owns the terminal instead of your shell, so
 closing the window does not kill the work. Detach with **ctrl-]** and reattach
 from anywhere, including from the phone app.
 
-Two daemons, split on purpose: `apex-agentd` is per-user and unprivileged and
-handles untrusted model output; `apex-secretd` is the only root piece, holds
+Two daemons, split on purpose: `rime-agentd` is per-user and unprivileged and
+handles untrusted model output; `rime-secretd` is the only root piece, holds
 credentials, and has no verb that returns one. Sessions run in a bubblewrap
 sandbox with `/` read-only and the home masked; the working directory is
 writable. [docs/agent-runtime.md](docs/agent-runtime.md) is the reference.
 
 ## The AI desktop apps
 
-The ChatGPT and Claude desktop applications are part of APEX-OS. The image
+The ChatGPT and Claude desktop applications are part of Rime OS. The image
 carries both, so they are there on a fresh install and reach an existing machine
-through the ordinary `sudo apex update`. Neither self-updates and neither runs
+through the ordinary `sudo rime update`. Neither self-updates and neither runs
 an auto-update timer of its own: a new version is a new image. The Claude Code
 CLI ships alongside them.
 
@@ -477,25 +479,25 @@ down with the lid shut (heat, a battery floor, or you), and each says which one
 fired; the first two checkpoint first.
 
 ```sh
-apex lid status     # what the policy sees, and what it would do now
-apex lid explain    # the same decision with every input that produced it
-apex lid report     # what the last closed period actually did
-apex lid pin on     # keep working on a close, whatever is running
-apex lid pin auto   # hand the decision back to the measurement
+rime lid status     # what the policy sees, and what it would do now
+rime lid explain    # the same decision with every input that produced it
+rime lid report     # what the last closed period actually did
+rime lid pin on     # keep working on a close, whatever is running
+rime lid pin auto   # hand the decision back to the measurement
 ```
 
 [docs/lid.md](docs/lid.md) has the full verb list and the guard thresholds.
 
 ## The phone app
 
-APEX Remote pairs a phone with one of your machines, over your network or
+Rime Remote pairs a phone with one of your machines, over your network or
 through a relay when you are away from it, and lets you watch and drive what is
 running on it: agent sessions, approvals, and a real terminal. It talks only to
 machines you have paired by scanning a QR code off their screen. There is no
 account and no server of ours in the middle.
 
 The APK goes to the same
-[Releases page](https://github.com/AndreNijman/apex-os/releases) as the ISO,
+[Releases page](https://github.com/AndreNijman/apex-os/releases) as the ISO, <!-- rime-rename: keep: GitHub redirects the old repository name -->
 under its own `android-v<version>` tags, with a `.sha256` beside it. Each release
 explains, for somebody who has never sideloaded an app, what Android will ask
 and how to answer it.
@@ -504,14 +506,14 @@ and how to answer it.
 below is real, and `.github/workflows/release-android.yml` is what publishes one;
 nobody has pushed an `android-v*` tag.
 
-One certificate signs every APEX Remote APK, and this is its SHA-256
+One certificate signs every Rime Remote APK, and this is its SHA-256
 fingerprint:
 
 <!-- fingerprint:begin -->
 9b2418f3cd37ba2ae83cdaeec5068280e02dc64135fdb1bb9fcb247326a66c67
 <!-- fingerprint:end -->
 
-`apksigner verify --print-certs apex-remote-<version>.apk` prints the
+`apksigner verify --print-certs rime-remote-<version>.apk` prints the
 certificate that signed your download; it must be that value. (`UNSET` in that
 block would mean no signing key exists and no release can be cut.) From then on
 Android enforces the same thing: it will not install an update signed by any
@@ -519,9 +521,9 @@ other key over it.
 
 Once installed, the app keeps itself current: it checks the Releases page and
 offers the update, and Android still shows its own install prompt before it
-replaces anything. On the machine, `apex remote status` says whether the
+replaces anything. On the machine, `rime remote status` says whether the
 service is running and which protocol version it speaks. Pairing is
-`apex remote pair`.
+`rime remote pair`.
 
 [docs/android-app.md](docs/android-app.md) covers how the release is built, how
 the version is derived, and what happens when the app and the machine are
@@ -533,21 +535,21 @@ signing key: who holds it, why GitHub is not its backup, and how to rotate it.
 
 | Path | Contents |
 |------|----------|
-| `Containerfile.kernel` | The kernel tier: APEX compiles its own kernel from pinned sources |
+| `Containerfile.kernel` | The kernel tier: Rime compiles its own kernel from pinned sources |
 | `Containerfile.core` | Slow-moving foundation: kernel install + MOK signing, desktop stack, apps (bootc) |
-| `Containerfile.base` | Thin per-commit tier on top of core: apexd, files/**, shell |
-| `Containerfile.apex` | The published image: variant stamp, splash, final initramfs |
+| `Containerfile.base` | Thin per-commit tier on top of core: rimed, files/**, shell |
+| `Containerfile.rime` | The published image: variant stamp, splash, final initramfs |
 | `kernel/` | Kernel spec and `kernel.pin`: every input that decides what the kernel is |
 | `installer/` | The live ISO build, the install engine and its GTK front end |
 | `signing/` | The M0 Secure Boot signing-chain proof scripts (no private keys; production signing is in `Containerfile.core`) |
 | `files/branding/` | Logos, Plymouth boot themes, wallpapers |
 | `files/system/` | System-level files baked into the image |
-| `files/desktop/` | Desktop / APEX Shell integration files |
+| `files/desktop/` | Desktop / Rime Shell integration files |
 | `files/scripts/` | Build and runtime helper scripts |
-| `apexd/` | The Rust workspace: apexd, the `apex` CLI, and the agent/secret/backup/remote daemons |
+| `rimed/` | The Rust workspace: rimed, the `rime` CLI, and the agent/secret/backup/remote daemons |
 | `config/sysprofiles/` | Per-machine hardware tuning profiles |
-| `android/` | APEX Remote, the Android client (`:core` protocol, `:app` UI) |
-| `relay/` | The Cloudflare Worker APEX Remote rendezvouses through when off-network |
+| `android/` | Rime Remote, the Android client (`:core` protocol, `:app` UI) |
+| `relay/` | The Cloudflare Worker Rime Remote rendezvouses through when off-network |
 | `tests/` | Image and integration tests |
 | `docs/` | Project documentation |
 | `.github/workflows/` | CI (image build, sign, publish) |
@@ -555,32 +557,32 @@ signing key: who holds it, why GitHub is not its backup, and how to rotate it.
 ## Status
 
 The latest release is **v2.1.0** (2026-09-26), on the
-[Releases page](https://github.com/AndreNijman/apex-os/releases).
+[Releases page](https://github.com/AndreNijman/apex-os/releases). <!-- rime-rename: keep: GitHub redirects the old repository name -->
 
 **The image and CI.** `Containerfile.kernel` → `Containerfile.core` →
-`Containerfile.base` → `Containerfile.apex`. APEX compiles its own CachyOS-based
+`Containerfile.base` → `Containerfile.rime`. Rime compiles its own CachyOS-based
 kernel in the first tier from the inputs pinned in `kernel/kernel.pin`. Core
-installs it, signs it with the APEX MOK, builds the NVIDIA and controller akmods
+installs it, signs it with the Rime MOK, builds the NVIDIA and controller akmods
 against that exact kernel, and carries the desktop and greeter stack, scx (with
 `scx_lavd` patched for an upstream stall while COPR ships 1.1.3) and Bazaar.
 `.github/workflows/build-image.yml` builds, cosign-signs (keyless), pushes, and
-verifies that `:apex`, `:daily`, `:gaming-mesa` and `:gaming-nvidia` all resolve
+verifies that `:rime`, `:daily`, `:gaming-mesa` and `:gaming-nvidia` all resolve
 to the one digest.
 
-**apexd.** The `apexd/` cargo workspace ships `apexd-core` (fingerprint, layered
-profile selection, tier engine, `SysWriter`), the `apexd` daemon (frozen
-`org.apexos.Apexd1` D-Bus API, AC/battery auto-switch, gated RyzenAdj EC-defeat
-loop, Prometheus metrics on 127.0.0.1:9723), the `apex` control CLI, and the
+**rimed.** The `rimed/` cargo workspace ships `rimed-core` (fingerprint, layered
+profile selection, tier engine, `SysWriter`), the `rimed` daemon (frozen
+`org.rimeos.Rimed1` D-Bus API, AC/battery auto-switch, gated RyzenAdj EC-defeat
+loop, Prometheus metrics on 127.0.0.1:9723), the `rime` control CLI, and the
 agent, secret, backup and remote daemons beside them. The six system profiles
 live in `config/sysprofiles/`. The frozen D-Bus contract is in
-[docs/apexd-dbus.md](docs/apexd-dbus.md).
+[docs/rimed-dbus.md](docs/rimed-dbus.md).
 
 The development notes for each milestone record what happened then; they do
 not describe the tree today:
 [m0](docs/m0-results.md) (spikes) ·
 [m1](docs/m1-notes.md) (first production image; its per-edition tables predate
 the one-image merge) ·
-[m3](docs/m3-notes.md) (apexd v1) ·
+[m3](docs/m3-notes.md) (rimed v1) ·
 [m6](docs/m6-notes.md) (real fan control, game orchestration) ·
 [p1](docs/p1-progress.md) · [p2](docs/p2-progress.md) ·
 [p3](docs/p3-progress.md) · [p4](docs/p4-progress.md) (three editions become

@@ -1,6 +1,6 @@
 #!/usr/bin/env bash
 # ─────────────────────────────────────────────────────────────────────────────
-#  mutate-a11y-stack.sh — prove test-apex-a11y-stack.sh can go red.
+#  mutate-a11y-stack.sh — prove test-rime-a11y-stack.sh can go red.
 #
 #  The suite makes two claims that are easy to assert vacuously: a package is
 #  installed, and a package is NOT started. The first is the M7 trap — the word
@@ -16,10 +16,10 @@ cd "$(dirname "$0")/.." || exit 2
 
 CORE="Containerfile.core"
 AUTO="files/desktop/labwc/autostart"
-READER="files/system/libexec/apex-screen-reader"
-SUITE_F="tests/test-apex-a11y-stack.sh"
+READER="files/system/libexec/rime-screen-reader"
+SUITE_F="tests/test-rime-a11y-stack.sh"
 FILES="$CORE $AUTO $READER $SUITE_F"
-SUITE="./tests/test-apex-a11y-stack.sh"
+SUITE="./tests/test-rime-a11y-stack.sh"
 
 applied=0; noapply=0; caught=0; survived=0
 
@@ -63,7 +63,7 @@ EDIT
         caught=$((caught + 1))
     else
         printf '%-5s SURVIVED  %s\n' "$id" "$want"
-        printf '%s\n' "$out" | grep -E '^(FAIL|SKIP|apex-a11y-stack)' | sed 's/^/      /'
+        printf '%s\n' "$out" | grep -E '^(FAIL|SKIP|rime-a11y-stack)' | sed 's/^/      /'
         survived=$((survived + 1))
     fi
     restore
@@ -71,8 +71,8 @@ EDIT
 
 echo "── baseline: green, or nothing below means anything ──"
 base="$(run_suite)"
-printf '%s\n' "$base" | grep -E '^apex-a11y-stack'
-if ! printf '%s' "$base" | grep -qE '^apex-a11y-stack: [0-9]+ passed, 0 failed'; then
+printf '%s\n' "$base" | grep -E '^rime-a11y-stack'
+if ! printf '%s' "$base" | grep -qE '^rime-a11y-stack: [0-9]+ passed, 0 failed'; then
     echo "ABORT: the suite is not green to begin with" >&2
     printf '%s\n' "$base" | grep -E '^(FAIL|SKIP)' >&2
     exit 3
@@ -155,9 +155,9 @@ mutate D6 "$READER" \
 #      because they run the script from the checkout; only the question "does
 #      anything put this in the image" can see it. K12/K13 in miniature.
 mutate D7 "$CORE" \
-    'COPY --chmod=0755 files/system/libexec/apex-screen-reader /usr/libexec/apex-screen-reader' \
+    'COPY --chmod=0755 files/system/libexec/rime-screen-reader /usr/libexec/rime-screen-reader' \
     '# (the switch is no longer installed)' \
-    "Containerfile.core installs it to /usr/libexec/apex-screen-reader"
+    "Containerfile.core installs it to /usr/libexec/rime-screen-reader"
 
 # D8 — the systemd path is dropped and the switch always execs orca directly.
 #      A reader started outside the unit has no Restart=always, and a blind user

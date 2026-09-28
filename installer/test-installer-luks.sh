@@ -23,7 +23,7 @@
 #  3. The passphrase rules, which exist because the unlock prompt is a kernel
 #     console prompt: printable ASCII only (no accents, no input method, no
 #     compose key at that prompt) and at least 8 characters.
-#  4. An APEX-OS image with no /usr/libexec/apex-luks-enroll cannot produce a
+#  4. A Rime OS image with no /usr/libexec/rime-luks-enroll cannot produce a
 #     recovery key, so it may not produce an encrypted disk either. That
 #     refusal is asserted, and so is its inverse — with a helper present the
 #     same answers reach the dry-run stop.
@@ -46,10 +46,10 @@
 set -uo pipefail
 cd "$(dirname "$0")" || exit 1
 
-ENGINE=./apex-install
-WORK=$(mktemp -d /tmp/apex-luks-suite.XXXXXX)
+ENGINE=./rime-install
+WORK=$(mktemp -d /tmp/rime-luks-suite.XXXXXX)
 ANS="$WORK/answers"
-SCRATCH_IMAGE="localhost/apex-luks-probe:test"
+SCRATCH_IMAGE="localhost/rime-luks-probe:test"
 ENGINE_IMAGE=""
 scratch_made=0
 cleanup() {
@@ -74,14 +74,14 @@ ok()  { printf 'PASS  %-46s %s\n' "$1" "${2:-}"; pass=$((pass+1)); }
 bad() { printf 'FAIL  %-46s %s\n' "$1" "${2:-}"; fail=$((fail+1)); }
 
 # Same trick test-installer.sh uses: the engine's preflight refuses to continue
-# without an APEX-OS image in ROOT podman storage, and that check runs before
+# without a Rime OS image in ROOT podman storage, and that check runs before
 # argument parsing. An empty tar imported by podman is a valid image with no
 # layers — no network, no build, removed on exit.
 ensure_engine_image() {
     command -v podman >/dev/null 2>&1 || return 1
     sudo -n true 2>/dev/null || return 1
-    if sudo -n podman image exists localhost/apex-os:daily 2>/dev/null; then
-        ENGINE_IMAGE="localhost/apex-os:daily"; return 0
+    if sudo -n podman image exists localhost/rime-os:daily 2>/dev/null; then
+        ENGINE_IMAGE="localhost/rime-os:daily"; return 0
     fi
     local t; t=$(mktemp "$WORK/empty.XXXXXX.tar") || return 1
     tar -cf "$t" -T /dev/null 2>/dev/null \
@@ -97,11 +97,11 @@ ensure_engine_image() {
 ENGINE_RUNNABLE=1
 if ! ensure_engine_image; then
     ENGINE_RUNNABLE=0
-    echo "SKIP: the engine half cannot run here — it needs an APEX-OS image in ROOT"
+    echo "SKIP: the engine half cannot run here — it needs a Rime OS image in ROOT"
     echo "      podman storage and passwordless sudo. The keymap half still runs."
 fi
 
-# A stand-in for /usr/libexec/apex-luks-enroll that the engine can find without
+# A stand-in for /usr/libexec/rime-luks-enroll that the engine can find without
 # an image carrying one. It is only ever reached by the dry-run cases, which
 # stop before any enrolment happens; the live suite exercises a real one.
 HELPER="$WORK/enroll-stub"
@@ -134,8 +134,8 @@ printf '#!/bin/sh\nexit 0\n' > "$HELPER"; chmod 755 "$HELPER"
 # that an untypeable character is NAMED rather than merely counted. That wiring
 # has to give the same answer on every machine, and now does.
 #
-# The engine reads the fixture through APEX_KBD_KEYMAPS / APEX_KBD_MODEL_MAP,
-# the same shape of testing hook as the APEX_IMAGE the rest of this file
+# The engine reads the fixture through RIME_KBD_KEYMAPS / RIME_KBD_MODEL_MAP,
+# the same shape of testing hook as the RIME_IMAGE the rest of this file
 # already uses. Nothing the GUI, the answers file or the kernel command line
 # can reach sets them.
 #
@@ -199,7 +199,7 @@ done
 run_engine() {  # $1=engine path  $2=answers body  [$3..]=extra env assignments
     local eng="$1" body="$2"; shift 2
     printf '%s\n' "$body" > "$ANS"
-    sudo -n APEX_DRY_RUN=1 APEX_IMAGE="$ENGINE_IMAGE" "$@" "$eng" --headless "$ANS" 2>&1 </dev/null
+    sudo -n RIME_DRY_RUN=1 RIME_IMAGE="$ENGINE_IMAGE" "$@" "$eng" --headless "$ANS" 2>&1 </dev/null
 }
 
 # $1 name, $2 expected substring, $3 answers body, $4.. extra env
@@ -213,7 +213,7 @@ check() {
         bad "$name" "ERR TRAP FIRED"; return
     fi
     if [[ "$out" == *"$want"* ]]; then ok "$name"
-    else bad "$name" "wanted '$want'; got: $(printf '%s' "$out" | grep -m1 'APEX-INSTALL-' || echo '<no sentinel>')"
+    else bad "$name" "wanted '$want'; got: $(printf '%s' "$out" | grep -m1 'RIME-INSTALL-' || echo '<no sentinel>')"
     fi
 }
 
@@ -244,7 +244,7 @@ mutate_check() {  # $1 name  $2 sed program  $3 no-longer-expected substring  $4
 # the encryption guards then stop at the block-device check, so nothing real is
 # ever named, let alone opened.
 GHOST=/dev/zzz-does-not-exist
-BASE=$'mode=disk\ndisk='"$GHOST"$'\nusername=bob\npassword=pw\nhostname=apex'
+BASE=$'mode=disk\ndisk='"$GHOST"$'\nusername=bob\npassword=pw\nhostname=rime'
 
 echo "── the encryption decision is explicit, or refused ────────────────────"
 check "encrypt= missing is refused"        "encrypt missing"      "$BASE"
@@ -259,8 +259,8 @@ mutate_check "encrypt= missing" \
 echo
 echo "── encryption needs a whole disk, and says so before erasing ──────────"
 if [ -b /dev/sda ] && [ -b /dev/sda2 ] && [ -b /dev/sda1 ]; then
-    check "partition mode + encrypt=yes refused" "only available when APEX-OS gets a whole disk" \
-        $'mode=partition\ndisk=/dev/sda\ntarget=/dev/sda2\nesp=/dev/sda1\nusername=bob\npassword=pw\nhostname=apex\nencrypt=yes\nlukspass=correcthorse'
+    check "partition mode + encrypt=yes refused" "only available when Rime OS gets a whole disk" \
+        $'mode=partition\ndisk=/dev/sda\ntarget=/dev/sda2\nesp=/dev/sda1\nusername=bob\npassword=pw\nhostname=rime\nencrypt=yes\nlukspass=correcthorse'
 else
     echo "SKIP  partition+encrypt case (needs /dev/sda1 and /dev/sda2 present)"
 fi
@@ -287,7 +287,7 @@ check "encrypt=yes + ext4 refused" "only supported with the btrfs root filesyste
 
 echo
 echo "── the dry run, the keymap it resolved, and the helper check ──────────"
-# APEX_DRY_RUN runs every guard against the REAL device named and stops
+# RIME_DRY_RUN runs every guard against the REAL device named and stops
 # immediately before the first destructive command. A loopback file is made
 # here only so the device checks have something to look at; that nothing was
 # written to it is itself asserted below.
@@ -307,13 +307,13 @@ if [ -n "$LOOPDEV" ]; then
     # has to do real work: the answer must come back as bg_bds-utf8.
     LOOP_FP=$(lsblk -bdnP -o MAJ:MIN,SIZE,WWN,SERIAL,PTUUID,PARTUUID,PARTTYPE "$LOOPDEV")
     printf '%s\n' "mode=disk" "disk=$LOOPDEV" "username=bob" "password=pw" \
-        "hostname=apex" "encrypt=yes" "lukspass=correct horse 9" "keymap=bg" \
+        "hostname=rime" "encrypt=yes" "lukspass=correct horse 9" "keymap=bg" \
         "confirmed=ERASE" "confirm_target=$LOOPDEV" "confirm_disk_id=$LOOP_FP" > "$ANS"
 
     # dry_run <engine> <keymap-tree> <model-map> — the same run three ways.
     dry_run() {
-        sudo -n APEX_IMAGE="$ENGINE_IMAGE" APEX_DRY_RUN=1 APEX_LUKS_ENROLL_LOCAL="$HELPER" \
-                APEX_KBD_KEYMAPS="$2" APEX_KBD_MODEL_MAP="$3" \
+        sudo -n RIME_IMAGE="$ENGINE_IMAGE" RIME_DRY_RUN=1 RIME_LUKS_ENROLL_LOCAL="$HELPER" \
+                RIME_KBD_KEYMAPS="$2" RIME_KBD_MODEL_MAP="$3" \
                 "$1" --headless "$ANS" 2>&1 </dev/null
     }
     # The summary line's KEYMAP=, or the empty string. Never `grep -q` in a
@@ -321,7 +321,7 @@ if [ -n "$LOOPDEV" ]; then
     dry_keymap() { printf '%s' "$1" | grep -o 'KEYMAP=[a-z0-9_.-]*' | tail -1; }
 
     out=$(dry_run "$ENGINE" "$KBD_TREE" "$KBD_MODELMAP")
-    if [[ "$out" == *"APEX-INSTALL-DRYRUN-OK"* ]]; then ok "encrypt=yes reaches the dry-run stop"
+    if [[ "$out" == *"RIME-INSTALL-DRYRUN-OK"* ]]; then ok "encrypt=yes reaches the dry-run stop"
     else bad "encrypt=yes reaches the dry-run stop" "$(printf '%s' "$out" | tail -3 | tr '\n' ' ')"; fi
     if [[ "$out" == *"ENCRYPT=yes"* ]]; then ok "the dry run names the encryption decision"
     else bad "the dry run names the encryption decision" "no ENCRYPT= in the summary"; fi
@@ -349,7 +349,7 @@ if [ -n "$LOOPDEV" ]; then
     # and that is precisely how bg used to fall through to `us` while
     # bg_bds-utf8.map.gz sat unused in the keymap tree. Delete the clause that
     # makes a list match and the identical run must report `us`.
-    KMMUT="$WORK/apex-install.multilayout-mutant"
+    KMMUT="$WORK/rime-install.multilayout-mutant"
     sed 's/index($2, l ",")==1/0/g' "$ENGINE" > "$KMMUT"
     chmod 755 "$KMMUT"
     if cmp -s "$ENGINE" "$KMMUT"; then
@@ -377,16 +377,16 @@ if [ -n "$LOOPDEV" ]; then
     # The run above passed WITH a helper. These two differ from it only in the
     # helper, so that pass cannot be an accident of something else letting it
     # through.
-    out=$(sudo -n APEX_IMAGE="$ENGINE_IMAGE" APEX_DRY_RUN=1 APEX_LUKS_ENROLL_LOCAL=/nonexistent/x \
+    out=$(sudo -n RIME_IMAGE="$ENGINE_IMAGE" RIME_DRY_RUN=1 RIME_LUKS_ENROLL_LOCAL=/nonexistent/x \
              "$ENGINE" --headless "$ANS" 2>&1 </dev/null)
     if [[ "$out" == *"is not executable"* ]]; then ok "an unusable helper stops the same run"
     else bad "an unusable helper stops the same run" "$(printf '%s' "$out" | tail -2 | tr '\n' ' ')"; fi
     # With no override the engine asks the IMAGE, which today carries no such
     # helper — whichever image was picked above. The refusal must name the path
     # it looked for, because "encryption failed" with no path is unactionable.
-    out=$(sudo -n APEX_IMAGE="$ENGINE_IMAGE" APEX_DRY_RUN=1 \
+    out=$(sudo -n RIME_IMAGE="$ENGINE_IMAGE" RIME_DRY_RUN=1 \
              "$ENGINE" --headless "$ANS" 2>&1 </dev/null)
-    if [[ "$out" == *"/usr/libexec/apex-luks-enroll"* ]]; then
+    if [[ "$out" == *"/usr/libexec/rime-luks-enroll"* ]]; then
         ok "an image without the helper is refused, by name"
     else
         bad "an image without the helper is refused, by name" "$(printf '%s' "$out" | tail -2 | tr '\n' ' ')"
@@ -400,11 +400,11 @@ echo
 echo "── the ENCRYPTED NETWORK install, and the disk it stages onto ─────────"
 # ═══ WHY THIS SECTION EXISTS ═══
 #
-# `installer/apex-install:74` sets NETINSTALL=0 and only raises it when
-# /usr/lib/apex-installer/netinstall exists, so on any developer machine or CI
+# `installer/rime-install:74` sets NETINSTALL=0 and only raises it when
+# /usr/lib/rime-installer/netinstall exists, so on any developer machine or CI
 # runner every assertion above this line runs the OFFLINE engine. Until this
 # section landed, NO suite that touches encryption had ever set
-# APEX_NETINSTALL, which left two pieces of the engine with zero coverage of
+# RIME_NETINSTALL, which left two pieces of the engine with zero coverage of
 # any kind:
 #
 #   * the deferred enrolment-helper check (the `elif NETINSTALL=1 &&
@@ -417,7 +417,7 @@ echo "── the ENCRYPTED NETWORK install, and the disk it stages onto ──�
 #     created LUKS volume, the download into it, and the re-check that has to
 #     run after the wipe but before bootc writes a byte.
 #
-# installer/test-installer-live-paths.sh does set APEX_NETINSTALL, but only for
+# installer/test-installer-live-paths.sh does set RIME_NETINSTALL, but only for
 # the two UNENCRYPTED paths, and it is in tests/suites-not-in-ci.txt.
 #
 # ═══ HOW THIS IS MADE HERMETIC, AND WHY THAT IS NOT A DODGE ═══
@@ -452,7 +452,7 @@ cat > "$NET_SHIM/ip" <<EOF
 #!/bin/sh
 echo "ip \$*" >> "$SHIMLOG"
 case "\$*" in
-  "route show default") echo "default via 192.0.2.1 dev apex-test-shim proto static"; exit 0 ;;
+  "route show default") echo "default via 192.0.2.1 dev rime-test-shim proto static"; exit 0 ;;
 esac
 exec $REAL_IP "\$@"
 EOF
@@ -494,16 +494,16 @@ _count_lines() {  # $1 = pattern, $2 = file, $3 = 1 to read it as root
     else                       n=$(grep -c -- "$1" "$2" 2>/dev/null | head -1); fi
     printf '%s' "${n:-0}"
 }
-net_log_has() { _count_lines "$1" /var/log/apex-install.log 1; }
+net_log_has() { _count_lines "$1" /var/log/rime-install.log 1; }
 shim_count()  { _count_lines "$1" "$SHIMLOG" 0; }
 
 # ── an image that provably does NOT carry the enrolment helper ──────────────
-# ensure_engine_image() above prefers localhost/apex-os:daily when the machine
-# has one, and a real APEX-OS image DOES contain /usr/libexec/apex-luks-enroll.
+# ensure_engine_image() above prefers localhost/rime-os:daily when the machine
+# has one, and a real Rime OS image DOES contain /usr/libexec/rime-luks-enroll.
 # The two cases below turn on an image that does not, so they get their own
 # empty-tar image rather than inheriting a choice that would make them pass or
 # fail depending on what is in this machine's podman storage.
-NOHELPER_IMAGE="localhost/apex-luks-nohelper:test"
+NOHELPER_IMAGE="localhost/rime-luks-nohelper:test"
 nohelper_made=0
 if [ "$ENGINE_RUNNABLE" = 1 ]; then
     _nh=$(mktemp "$WORK/empty-nh.XXXXXX.tar")
@@ -521,7 +521,7 @@ fi
 # /var/lab-scratch is where this machine keeps lab images; /tmp is a 15 GB
 # tmpfs on 29 GB of RAM and a CI runner has no /var/lab-scratch at all, so the
 # location is chosen and not assumed.
-NETLOOPDIR="${APEX_LOOP_DIR:-/var/lab-scratch}"
+NETLOOPDIR="${RIME_LOOP_DIR:-/var/lab-scratch}"
 { [ -d "$NETLOOPDIR" ] && [ -w "$NETLOOPDIR" ]; } || NETLOOPDIR="$WORK"
 NOSCRATCH="$WORK/no-such-scratch-volume"   # deliberately never created
 LOOP_BIG=""; LOOP_SMALL=""; NETIMG_BIG=""; NETIMG_SMALL=""
@@ -537,8 +537,8 @@ if [ "$ENGINE_RUNNABLE" = 1 ] && [ "$nohelper_made" = 1 ] && command -v losetup 
     # NEED_SCRATCH_GB (32) + STAGE_RESERVE_GB (15) after the 2 GiB margin the
     # raw-size check subtracts (49 GiB raw). 20 GiB is comfortably under it,
     # which is what makes the refusal case a refusal.
-    NETIMG_BIG=$(mktemp "$NETLOOPDIR/apex-luks-net-big.XXXXXX.img")
-    NETIMG_SMALL=$(mktemp "$NETLOOPDIR/apex-luks-net-small.XXXXXX.img")
+    NETIMG_BIG=$(mktemp "$NETLOOPDIR/rime-luks-net-big.XXXXXX.img")
+    NETIMG_SMALL=$(mktemp "$NETLOOPDIR/rime-luks-net-small.XXXXXX.img")
     truncate -s 52G "$NETIMG_BIG"   2>/dev/null && LOOP_BIG=$(sudo -n losetup -fP --show "$NETIMG_BIG" 2>/dev/null || true)
     truncate -s 20G "$NETIMG_SMALL" 2>/dev/null && LOOP_SMALL=$(sudo -n losetup -fP --show "$NETIMG_SMALL" 2>/dev/null || true)
 fi
@@ -547,7 +547,7 @@ net_answers() {  # $1 = disk
     local disk_fp
     disk_fp=$(lsblk -bdnP -o MAJ:MIN,SIZE,WWN,SERIAL,PTUUID,PARTUUID,PARTTYPE "$1")
     printf '%s\n' "mode=disk" "disk=$1" "username=bob" "password=pw" \
-        "hostname=apex" "encrypt=yes" "lukspass=correct horse 9" "keymap=us" \
+        "hostname=rime" "encrypt=yes" "lukspass=correct horse 9" "keymap=us" \
         "confirmed=ERASE" "confirm_target=$1" "confirm_disk_id=$disk_fp" > "$ANS"
 }
 
@@ -559,9 +559,9 @@ if [ -n "$LOOP_BIG" ] && [ -n "$LOOP_SMALL" ]; then
     # installer asked the same question inside stage_setup, i.e. after mkfs.
     : > "$SHIMLOG"
     net_answers "$LOOP_SMALL"
-    out=$(net_run "$ENGINE" APEX_NETINSTALL=1 APEX_DRY_RUN=1 \
-                  APEX_TARGET_IMAGE="$NOHELPER_IMAGE" APEX_SCRATCH_CANDIDATES="$NOSCRATCH")
-    if [[ "$out" == *"too small to install APEX-OS over the network"* ]]; then
+    out=$(net_run "$ENGINE" RIME_NETINSTALL=1 RIME_DRY_RUN=1 \
+                  RIME_TARGET_IMAGE="$NOHELPER_IMAGE" RIME_SCRATCH_CANDIDATES="$NOSCRATCH")
+    if [[ "$out" == *"too small to install Rime OS over the network"* ]]; then
         ok "netinstall+encrypt: a target too small to stage onto is refused"
     else
         bad "netinstall+encrypt: a target too small to stage onto is refused" \
@@ -590,9 +590,9 @@ if [ -n "$LOOP_BIG" ] && [ -n "$LOOP_SMALL" ]; then
     elif ! bash -n "$NETMUT" 2>/dev/null; then
         bad "mutant: the pre-wipe size check" "the mutant does not parse"
     else
-        mout=$(net_run "$NETMUT" APEX_NETINSTALL=1 APEX_DRY_RUN=1 \
-                       APEX_TARGET_IMAGE="$NOHELPER_IMAGE" APEX_SCRATCH_CANDIDATES="$NOSCRATCH")
-        if [[ "$mout" == *"too small to install APEX-OS over the network"* ]]; then
+        mout=$(net_run "$NETMUT" RIME_NETINSTALL=1 RIME_DRY_RUN=1 \
+                       RIME_TARGET_IMAGE="$NOHELPER_IMAGE" RIME_SCRATCH_CANDIDATES="$NOSCRATCH")
+        if [[ "$mout" == *"too small to install Rime OS over the network"* ]]; then
             bad "mutant: the pre-wipe size check" "the refusal survived its own deletion"
         else
             ok "mutant: the pre-wipe size check" "removed -> a 20 GiB disk would be staged onto"
@@ -606,9 +606,9 @@ if [ -n "$LOOP_BIG" ] && [ -n "$LOOP_SMALL" ]; then
     # against an empty store — and the run must reach the dry-run stop.
     : > "$SHIMLOG"
     net_answers "$LOOP_BIG"
-    out=$(net_run "$ENGINE" APEX_NETINSTALL=1 APEX_DRY_RUN=1 \
-                  APEX_TARGET_IMAGE="$NOHELPER_IMAGE" APEX_SCRATCH_CANDIDATES="$NOSCRATCH")
-    if [[ "$out" == *"APEX-INSTALL-DRYRUN-OK"* ]]; then
+    out=$(net_run "$ENGINE" RIME_NETINSTALL=1 RIME_DRY_RUN=1 \
+                  RIME_TARGET_IMAGE="$NOHELPER_IMAGE" RIME_SCRATCH_CANDIDATES="$NOSCRATCH")
+    if [[ "$out" == *"RIME-INSTALL-DRYRUN-OK"* ]]; then
         ok "netinstall+encrypt: no scratch volume reaches the dry-run stop"
     else
         bad "netinstall+encrypt: no scratch volume reaches the dry-run stop" \
@@ -626,7 +626,7 @@ if [ -n "$LOOP_BIG" ] && [ -n "$LOOP_SMALL" ]; then
         ok "…and the helper check is deferred, not answered from an empty store"
     else
         bad "…and the helper check is deferred, not answered from an empty store" \
-            "no deferral line in /var/log/apex-install.log"
+            "no deferral line in /var/log/rime-install.log"
     fi
     if [ -z "$(sudo -n blkid -p "$LOOP_BIG" 2>/dev/null || true)" ]; then
         ok "…and the dry run wrote nothing to the 40 GiB target"
@@ -655,12 +655,12 @@ if [ -n "$LOOP_BIG" ] && [ -n "$LOOP_SMALL" ]; then
     # Identical answers and the identical helper-less image, with the network
     # install turned off. The image is present locally, so the question CAN be
     # answered, and it must be answered `no` — by name.
-    out=$(net_run "$ENGINE" APEX_NETINSTALL=0 APEX_DRY_RUN=1 \
-                  APEX_IMAGE="$NOHELPER_IMAGE" APEX_SCRATCH_CANDIDATES="$NOSCRATCH")
+    out=$(net_run "$ENGINE" RIME_NETINSTALL=0 RIME_DRY_RUN=1 \
+                  RIME_IMAGE="$NOHELPER_IMAGE" RIME_SCRATCH_CANDIDATES="$NOSCRATCH")
     # It must ALSO not print the staging note: that note is what the case above
     # reads to prove the fallback was taken, and a note the engine prints on
     # every path would prove nothing.
-    if [[ "$out" == *"/usr/libexec/apex-luks-enroll"* ]] && [[ "$out" != *"downloads onto it as it goes"* ]]; then
+    if [[ "$out" == *"/usr/libexec/rime-luks-enroll"* ]] && [[ "$out" != *"downloads onto it as it goes"* ]]; then
         ok "the same image offline IS refused, by name" "the deferral is not a free pass"
     else
         bad "the same image offline IS refused, by name" \
@@ -680,9 +680,9 @@ if [ -n "$LOOP_BIG" ] && [ -n "$LOOP_SMALL" ]; then
         bad "mutant: the deferred helper check" "the mutant does not parse"
     else
         net_answers "$LOOP_BIG"
-        mout=$(net_run "$DEFMUT" APEX_NETINSTALL=1 APEX_DRY_RUN=1 \
-                       APEX_TARGET_IMAGE="$NOHELPER_IMAGE" APEX_SCRATCH_CANDIDATES="$NOSCRATCH")
-        if [[ "$mout" == *"/usr/libexec/apex-luks-enroll"* ]]; then
+        mout=$(net_run "$DEFMUT" RIME_NETINSTALL=1 RIME_DRY_RUN=1 \
+                       RIME_TARGET_IMAGE="$NOHELPER_IMAGE" RIME_SCRATCH_CANDIDATES="$NOSCRATCH")
+        if [[ "$mout" == *"/usr/libexec/rime-luks-enroll"* ]]; then
             ok "mutant: the deferred helper check" "arm removed -> the not-yet-downloaded image is refused"
         else
             bad "mutant: the deferred helper check" \
@@ -704,7 +704,7 @@ if [ -n "$LOOP_BIG" ] && [ -n "$LOOP_SMALL" ]; then
     fi
 elif [ "$ENGINE_RUNNABLE" != 1 ]; then
     # The same reason check() and the dry-run block above skip: the engine half
-    # needs an APEX-OS image in ROOT podman storage and passwordless sudo, and
+    # needs a Rime OS image in ROOT podman storage and passwordless sudo, and
     # a machine with neither cannot run the engine at all. Everything else here
     # is a FAIL, because it means the prerequisites WERE there and the rig did
     # not come up.
@@ -735,7 +735,7 @@ sed -n '/^scratch_fs_ok()/,/^}/p;/^pick_scratch()/,/^}/p;/^stage_budget_kb()/,/^
 # for real against a loop-backed xfs on a file, and write what it built as
 # key=value lines. Factored out so the mutant below runs the IDENTICAL probe.
 stage_probe() {
-    local STAGEROOT="$NETLOOPDIR/apex-luks-stage-probe.$$"
+    local STAGEROOT="$NETLOOPDIR/rime-luks-stage-probe.$$"
     sudo -n mkdir -p "$STAGEROOT" 2>/dev/null
     # The redirect at the end of this command is THIS shell's, into $WORK, on
     # purpose: the probe runs as root but its output has to be readable by the
@@ -751,13 +751,13 @@ stage_probe() {
         _avail_gb=$(df -PBG "$STAGEROOT" | awk "NR==2{gsub(/G/,\"\",\$4); print \$4+0}")
         STAGE_RESERVE_GB=$(( _avail_gb - 3 ))
         [ "$STAGE_RESERVE_GB" -ge 1 ] || STAGE_RESERVE_GB=1
-        STAGE_DIR=/run/apex-stage-probe-$$
+        STAGE_DIR=/run/rime-stage-probe-$$
         . "$STAGE_FNS"
         stage_setup "$STAGEROOT" >/dev/null 2>&1 || { echo "SETUP-FAILED"; exit 0; }
         printf "fstype=%s\n" "$(findmnt -no FSTYPE "$STAGE_MNT" 2>/dev/null)"
         printf "source=%s\n" "$(findmnt -no SOURCE "$STAGE_MNT" 2>/dev/null)"
         printf "dfsrc=%s\n"  "$(df -PT "$STAGE_MNT" 2>/dev/null | awk "NR==2{print \$2}")"
-        printf "backing=%s\n" "$( [ -e "$STAGEROOT/.apex-stage.img" ] && echo present || echo unlinked )"
+        printf "backing=%s\n" "$( [ -e "$STAGEROOT/.rime-stage.img" ] && echo present || echo unlinked )"
         printf "tmpdir=%s\n" "$STAGE_TMPDIR"
         printf "bootcargs=%s\n" "${STAGE_BOOTC_ARGS[*]}"
         _loop="$STAGE_LOOP"
@@ -798,7 +798,7 @@ else
             *) bad "…on a loop device and not on a tmpfs" "source=$(_sv source) df-type=$(_sv dfsrc)" ;;
         esac
         case "$(_sv tmpdir)" in
-            /run/apex-stage-probe-*/tmp)
+            /run/rime-stage-probe-*/tmp)
                 if [ "$(_sv bootcargs)" = "--skip-finalize" ]; then
                     ok "…with TMPDIR redirected into it" "and bootc gets --skip-finalize"
                 else
@@ -852,7 +852,7 @@ if cmp -s "$ENGINE" "$TMPFSMUT"; then
 else
     _tm=$(mktemp "$WORK/tmpfs-fns.XXXXXX")
     sed -n '/^scratch_fs_ok()/,/^}/p;/^pick_scratch()/,/^}/p' "$TMPFSMUT" > "$_tm"
-    mkdir -p /dev/shm/apex-luks-tmpfs-probe 2>/dev/null
+    mkdir -p /dev/shm/rime-luks-tmpfs-probe 2>/dev/null
     mout=$(
         set +u
         # All three are read by scratch_fs_ok and pick_scratch, which are
@@ -865,9 +865,9 @@ else
         DISK=/dev/sdz
         # shellcheck disable=SC1090
         . "$_tm"
-        APEX_SCRATCH_CANDIDATES="/dev/shm/apex-luks-tmpfs-probe" pick_scratch 2>/dev/null
+        RIME_SCRATCH_CANDIDATES="/dev/shm/rime-luks-tmpfs-probe" pick_scratch 2>/dev/null
     )
-    rmdir /dev/shm/apex-luks-tmpfs-probe 2>/dev/null
+    rmdir /dev/shm/rime-luks-tmpfs-probe 2>/dev/null
     rm -f "$_tm"
     case "$mout" in
         /dev/shm/*) ok "mutant: the RAM-filesystem refusal" "removed -> pick_scratch chose $mout" ;;
@@ -880,7 +880,7 @@ echo
 echo "── the order the encrypted path does things in ────────────────────────"
 # ═══ THE ASSERTION THAT CANNOT BE MADE ANY OTHER WAY ═══
 #
-# APEX_DRY_RUN stops the engine immediately before the first destructive
+# RIME_DRY_RUN stops the engine immediately before the first destructive
 # command, which is ~300 lines ABOVE everything the encrypted branch does. So
 # no dry run can reach stage_setup-inside-LUKS, the download into it, or the
 # deferred re-check — and the only two things that can are a real encrypted
@@ -1011,7 +1011,7 @@ echo "── a loopback target must not be able to reach this machine's NVRAM �
 # and the live half of this suite points that at a LOOPBACK FILE on a
 # developer's own machine. On 2026-09-20 exactly that shape of run — a
 # privileged loopback install with the host's efivarfs visible — deleted a
-# laptop's real `APEX-OS` boot entry and recreated it against the loop device's
+# laptop's real `Rime OS` boot entry and recreated it against the loop device's
 # ESP. The laptop would not boot. BOOT-BREAKAGE-2026-09-20.md.
 #
 # The engine now masks efivars when, and only when, the target is loop-backed.
@@ -1023,13 +1023,13 @@ FAKESYS="$WORK/sysblock"
 mkdir -p "$FAKESYS/loop9/loop"
 printf '/var/lab-scratch/pretend.img\n' > "$FAKESYS/loop9/loop/backing_file"
 
-# nvram_probe ENGINE DEVICE [APEX_SYSFS_BLOCK] — prints the NVRAM_ARGS the
+# nvram_probe ENGINE DEVICE [RIME_SYSFS_BLOCK] — prints the NVRAM_ARGS the
 # named engine would use for that device, or `EXTRACT-FAILED`.
 nvram_probe() {
     local eng="$1" dev="$2" seam="${3:-}"
     sed -n '/^disk_is_loopback()/,/^}/p;/^set_nvram_args_for()/,/^}/p' "$eng" > "$NVFNS"
     grep -q 'set_nvram_args_for' "$NVFNS" || { echo "EXTRACT-FAILED"; return; }
-    APEX_SYSFS_BLOCK="$seam" bash -c '
+    RIME_SYSFS_BLOCK="$seam" bash -c '
         log()  { :; }
         note() { :; }
         . "$1"
@@ -1089,7 +1089,7 @@ fi
 #
 # There is exactly one privileged container that is NOT an install: the call to
 # the enrolment helper. It is named here rather than exempted by position,
-# because it deliberately keeps the host's efivarfs — /usr/libexec/apex-luks-
+# because it deliberately keeps the host's efivarfs — /usr/libexec/rime-luks-
 # enroll decides whether to add a TPM keyslot by reading the SecureBoot EFI
 # variable, and masking that would silently turn every TPM enrolment off. It
 # runs no bootloader tool. Any OTHER privileged container appearing in this
@@ -1237,7 +1237,7 @@ km_runtime() {
     return 1
 }
 
-if [ -z "${APEX_KEYMAP_FORCE_CONTAINER:-}" ] \
+if [ -z "${RIME_KEYMAP_FORCE_CONTAINER:-}" ] \
    && [ -f /usr/share/systemd/kbd-model-map ] && [ -d /usr/lib/kbd/keymaps ] \
    && [ -r /usr/share/X11/xkb/rules/base.lst ]; then
     bash ./keymap-checks.sh "$ENGINE" "$WORK" 2>&1 | tee "$KM_OUT"
@@ -1246,10 +1246,10 @@ elif km_runtime; then
     # Fully qualified on purpose: a bare `fedora:43` makes podman ask which
     # registry it meant and makes the step fail for a reason that has nothing
     # to do with keymaps.
-    "${KM_RT[@]}" run --rm -v "$PWD":/w:ro,z -w /w "${APEX_KEYMAP_IMAGE:-quay.io/fedora/fedora:43}" bash -c '
+    "${KM_RT[@]}" run --rm -v "$PWD":/w:ro,z -w /w "${RIME_KEYMAP_IMAGE:-quay.io/fedora/fedora:43}" bash -c '
         dnf -y install --setopt=install_weak_deps=False kbd systemd xkeyboard-config >/dev/null 2>&1 || {
             echo "FAIL  the container could not install kbd, systemd and xkeyboard-config"; exit 1; }
-        bash ./keymap-checks.sh ./apex-install /tmp/kmwork' 2>&1 | tee "$KM_OUT"
+        bash ./keymap-checks.sh ./rime-install /tmp/kmwork' 2>&1 | tee "$KM_OUT"
 else
     echo "FAIL  the keymap conversion could not be measured here: no Fedora keymap data and no container runtime"
     printf 'KEYMAP-CHECKS: 0 1\n' > "$KM_OUT"
@@ -1285,11 +1285,11 @@ if sudo -n true 2>/dev/null && [ -x "$ENGINE" ]; then
     # built: without it these six assertions read the tester's own kbd package
     # and were red on every CI runner this suite has ever run on.
     cp_check() {
-        printf '%s' "$2" | sudo -n APEX_KBD_KEYMAPS="$4" APEX_KBD_MODEL_MAP="$KBD_MODELMAP" \
+        printf '%s' "$2" | sudo -n RIME_KBD_KEYMAPS="$4" RIME_KBD_MODEL_MAP="$KBD_MODELMAP" \
             "$1" --check-passphrase "$3" "" 2>&1
     }
 
-    out=$(cp_check "$ENGINE" "apexbootproof1" us "$KBD_TREE"); rc=$?
+    out=$(cp_check "$ENGINE" "rimebootproof1" us "$KBD_TREE"); rc=$?
     if [ "$out" = "typeable: yes console=us" ] && [ "$rc" = 0 ]; then
         ok "us + an all-ASCII passphrase: typeable: yes"
     else bad "us + an all-ASCII passphrase: typeable: yes" "rc=$rc out='$out'"; fi
@@ -1301,7 +1301,7 @@ if sudo -n true 2>/dev/null && [ -x "$ENGINE" ]; then
     # here reproduces the SHAPE so that the engine's wiring — dispatch ->
     # console_keymap_for -> keymap_can_type -> this exact output format — is
     # measured identically on a machine with no Fedora kbd at all.
-    out=$(cp_check "$ENGINE" "apex1zed" vn "$KBD_TREE"); rc=$?
+    out=$(cp_check "$ENGINE" "rime1zed" vn "$KBD_TREE"); rc=$?
     if [ "$out" = "typeable: no console=vn chars=1" ] && [ "$rc" = 0 ]; then
         ok "vn + a passphrase containing '1': typeable: no, names the character"
     else bad "vn + a passphrase containing '1': typeable: no, names the character" "rc=$rc out='$out'"; fi
@@ -1310,7 +1310,7 @@ if sudo -n true 2>/dev/null && [ -x "$ENGINE" ]; then
     # resolve, the engine falls back to `us`, and the verdict is the useless
     # `typeable: yes console=us` this suite used to report as a pass. If this
     # and the case above are ever both green, the fixture is being ignored.
-    out=$(cp_check "$ENGINE" "apex1zed" vn "$KBD_NONE"); rc=$?
+    out=$(cp_check "$ENGINE" "rime1zed" vn "$KBD_NONE"); rc=$?
     if [ "$out" = "typeable: yes console=us" ] && [ "$rc" = 0 ]; then
         ok "…and with an empty keymap tree it falls back to us" "so the case above read the fixture"
     else bad "…and with an empty keymap tree it falls back to us" "rc=$rc out='$out'"; fi
@@ -1327,14 +1327,14 @@ if sudo -n true 2>/dev/null && [ -x "$ENGINE" ]; then
     # MUTATION: make keymap_can_type() unable to ever report a missing
     # character. The vn case above must then go green-for-the-wrong-reason,
     # which is what this arm refuses to let happen silently.
-    KCMUT="$WORK/apex-install.can-type-mutant"
+    KCMUT="$WORK/rime-install.can-type-mutant"
     sed 's/\[ -n "$missing" \]/[ -z "$missing" ]/' "$ENGINE" > "$KCMUT"
     chmod 755 "$KCMUT"
     if cmp -s "$ENGINE" "$KCMUT"; then
         bad "mutant: keymap_can_type can no longer say no" \
             "the sed program matched no line — the mutant is the engine unchanged"
     else
-        mout=$(cp_check "$KCMUT" "apex1zed" vn "$KBD_TREE")
+        mout=$(cp_check "$KCMUT" "rime1zed" vn "$KBD_TREE")
         if [ "$mout" = "typeable: no console=vn chars=1" ]; then
             bad "mutant: keymap_can_type can no longer say no" \
                 "it still reported the missing character with the branch removed"
@@ -1356,8 +1356,8 @@ if sudo -n true 2>/dev/null && [ -x "$ENGINE" ]; then
     # into `exit 1` on "no" would make the GUI's subprocess call read a
     # typeable-but-inconvenient passphrase as "the engine crashed" and block an
     # install this same passphrase would succeed at today.
-    printf '%s' "apex1zed" \
-        | sudo -n APEX_KBD_KEYMAPS="$KBD_TREE" APEX_KBD_MODEL_MAP="$KBD_MODELMAP" \
+    printf '%s' "rime1zed" \
+        | sudo -n RIME_KBD_KEYMAPS="$KBD_TREE" RIME_KBD_MODEL_MAP="$KBD_MODELMAP" \
             "$ENGINE" --check-passphrase vn "" >/dev/null 2>&1
     _cprc=$?
     if [ "$_cprc" = 0 ]; then ok "a 'no' verdict still exits 0 — advisory, never a gate"
@@ -1366,7 +1366,7 @@ if sudo -n true 2>/dev/null && [ -x "$ENGINE" ]; then
     # MUTATION: remove the case arm entirely and confirm the same call falls
     # through to the engine's ordinary refusal instead of silently doing
     # nothing — a copy of the engine, the original is never touched.
-    CPMUT="$WORK/apex-install.check-passphrase-mutant"
+    CPMUT="$WORK/rime-install.check-passphrase-mutant"
     sed '/^  --check-passphrase)$/,/^    ;;$/d' "$ENGINE" > "$CPMUT" 2>/dev/null
     chmod 755 "$CPMUT" 2>/dev/null
     # A substring match on --check-passphrase would also match the header
@@ -1376,7 +1376,7 @@ if sudo -n true 2>/dev/null && [ -x "$ENGINE" ]; then
     if grep -q -- '^  --check-passphrase)$' "$CPMUT"; then
         bad "mutant: the case arm removed" "the sed program matched no line — the mutant is identical to the engine"
     else
-        mutout=$(printf '%s' "apexbootproof1" | sudo -n "$CPMUT" --check-passphrase us "" 2>&1)
+        mutout=$(printf '%s' "rimebootproof1" | sudo -n "$CPMUT" --check-passphrase us "" 2>&1)
         if [[ "$mutout" == *"unknown argument"* ]]; then
             ok "mutant: the case arm removed" "falls through to the ordinary refusal, as it must"
         else

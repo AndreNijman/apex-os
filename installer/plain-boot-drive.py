@@ -54,12 +54,12 @@ REACHED_MARKERS = [
     ("multiuser-target", "Reached target multi-user.target"),
     ("graphical-target", "Reached target graphical.target"),
     # ── getty.target, added 2026-09-22 after a REAL boot went unrecognised ──
-    # Measured on an APEX partition-mode install that booted perfectly: none of
+    # Measured on a Rime partition-mode install that booted perfectly: none of
     # the five markers above ever appeared, and the disk was nonetheless up with
     # a working system. Two independent reasons, both properties of the image
     # rather than of the install:
     #
-    #  * APEX's greeter is greetd, and greetd's configured session is `sway`,
+    #  * Rime's greeter is greetd, and greetd's configured session is `sway`,
     #    a full wlroots compositor (/etc/greetd/config.toml says why: cage does
     #    not give quickshell wlr-layer-shell). The qemu line below has
     #    `-nodefaults -display none` and NO display adapter, so there is no DRM
@@ -147,7 +147,7 @@ def main():
            "-debugcon", "file:%s" % dbg, "-global", "isa-debugcon.iobase=0x402",
            "-serial", "file:%s" % serial,
            # ── A USER-MODE NIC, because a first-boot unit waits on the network ──
-           # APEX ships apex-flatpak-preinstall.service with
+           # Rime ships rime-flatpak-preinstall.service with
            #     After=network-online.target / Wants=network-online.target
            #     WantedBy=multi-user.target
            # On a guest with NO network device at all, network-online.target can
@@ -167,7 +167,7 @@ def main():
            # forever. It was tried on 2026-09-22 and it BREAKS THE BOOT: with
            # virtio-gpu-pci present, GRUB hands off and the kernel then produces
            # NOT ONE BYTE on the serial console — measured at 8438 bytes frozen
-           # at "Booting `APEX-OS (ostree:0)'" with qemu spinning at 100% CPU for
+           # at "Booting `Rime OS (ostree:0)'" with qemu spinning at 100% CPU for
            # three minutes, against 13 seconds to pivot on the identical disk
            # with no adapter. The guest is not slow, it is stuck, and the only
            # variable is the device.

@@ -8,10 +8,10 @@ name: boot-v2
 # ═══ WHAT THIS WORKFLOW MUST NOT DO ═══
 #
 #   * It must not rebuild `core`. A core rebuild reissues ~5 GB of layers to
-#     every machine on the next `apex update` (see the arithmetic at the top of
+#     every machine on the next `rime update` (see the arithmetic at the top of
 #     build-image.yml), and this workflow has no business costing the fleet
 #     anything. It never invokes build-image.yml, never touches
-#     Containerfile.core, and pulls no APEX image at all: the boot lab carries
+#     Containerfile.core, and pulls no Rime image at all: the boot lab carries
 #     its own kernel precisely so a runner does not have to fetch a
 #     multi-gigabyte one to prove a bootloader behaviour.
 #   * It must not publish or promote. `permissions: contents: read` and nothing
@@ -29,7 +29,7 @@ name: boot-v2
 # report on EVERY pull request therefore live in pr-validation.yml's `static`
 # job, which has no path filter: the unit conditions that keep systemd-boot
 # opt-in, the tripwire against a shipped script touching a boot path, and the
-# schema parity between apex-boot-health and `apex boot status`. What lives
+# schema parity between rime-boot-health and `rime boot status`. What lives
 # here is the part that needs qemu, OVMF and eight minutes.
 
 on:
@@ -41,11 +41,11 @@ on:
       # scenarios exercise THIS file and nothing else does: without the filter a
       # PR that changes only the enrolment logic skips this workflow, and a
       # skipped job counts as success.
-      - "files/system/libexec/apex-luks-enroll"
-      - "files/system/libexec/apex-boot-health"
-      - "files/system/units/apex-boot-*.service"
+      - "files/system/libexec/rime-luks-enroll"
+      - "files/system/libexec/rime-boot-health"
+      - "files/system/units/rime-boot-*.service"
       - "bootlab/**"
-      - "apexd/apex/src/boot.rs"
+      - "rimed/rime/src/boot.rs"
       - "tests/test-boot-v2.sh"
       - ".github/workflows/boot-v2.yml"
   # P1-062's second criterion is "boot/update/install/rollback loops run
@@ -139,7 +139,7 @@ jobs:
           # The lab's own postconditions run during the build: a missing OVMF,
           # ukify, virt-fw-vars, swtpm or kernel is a build failure here rather
           # than a confusing qemu error later. See bootlab/Containerfile.
-          podman build -t localhost/apex-bootlab -f bootlab/Containerfile .
+          podman build -t localhost/rime-bootlab -f bootlab/Containerfile .
 
       - name: Boot the scenarios
         env:
@@ -166,7 +166,7 @@ jobs:
           podman run --rm "${kvm_arg[@]}" \
             -v "$PWD:/work:z" \
             -e "SCENARIOS=$SCENARIOS" \
-            localhost/apex-bootlab -c '
+            localhost/rime-bootlab -c '
               set -euo pipefail
               # Unquoted on purpose: SCENARIOS is a space-separated list of
               # scenario names, and run-scenarios validates every one against
@@ -200,10 +200,10 @@ jobs:
           # controls must not. Asserted again here, out of band from the
           # harness, so a harness whose own assertions were commented out
           # still cannot produce a green run.
-          grep -aq 'APEX-BOOTLAB: userspace-reached' "$out/serial-signed.log" \
+          grep -aq 'RIME-BOOTLAB: userspace-reached' "$out/serial-signed.log" \
             || { echo "FATAL: the signed UKI never reached userspace" >&2; exit 1; }
           for log in serial-unsigned.log serial-foreign.log serial-tampered.log; do
-              if grep -aq 'APEX-BOOTLAB: userspace-reached' "$out/$log"; then
+              if grep -aq 'RIME-BOOTLAB: userspace-reached' "$out/$log"; then
                   echo "FATAL: $log reached userspace — Secure Boot did not refuse it" >&2
                   exit 1
               fi
@@ -214,12 +214,12 @@ jobs:
           # each boot; asserting it here as well means a change that made the
           # harness stop checking cannot pass unnoticed.
           test -f "$out/disk-count.img.after"
-          entries="$(podman run --rm -v "$PWD:/work:z" localhost/apex-bootlab -c \
+          entries="$(podman run --rm -v "$PWD:/work:z" localhost/rime-bootlab -c \
               'mdir -i /work/'"$out"'/disk-count.img.after -b ::/EFI/Linux' \
               | sed 's|::/EFI/Linux/||' | tr -d "\r" | sort | tr "\n" " ")"
           echo "final ESP entries: $entries"
-          [[ "$entries" == "apex-good.efi apex-new+0-3.efi " ]] \
-            || { echo "FATAL: expected 'apex-good.efi apex-new+0-3.efi ', got '$entries'" >&2; exit 1; }
+          [[ "$entries" == "rime-good.efi rime-new+0-3.efi " ]] \
+            || { echo "FATAL: expected 'rime-good.efi rime-new+0-3.efi ', got '$entries'" >&2; exit 1; }
 
           echo "boot-v2: every guest booted or was refused as expected"
 
@@ -265,7 +265,7 @@ jobs:
           esac
           # Same reason as the scenario launch above: the chaos loop boots
           # guests from the host side. AGENTS.md boot-path rule 6.
-          CHAOS_BOOTLAB_IMAGE=localhost/apex-bootlab \
+          CHAOS_BOOTLAB_IMAGE=localhost/rime-bootlab \
             ./tests/lab/nvram-guard --label boot-v2-chaos -- \
             ./tests/chaos/chaos-loop \
               --out "$RUNNER_TEMP/chaos-series" \

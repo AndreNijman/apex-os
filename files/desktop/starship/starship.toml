@@ -1,13 +1,13 @@
 # ─────────────────────────────────────────────────────────────────────────────
-#  APEX-OS starship prompt
+#  Rime OS starship prompt
 #
-#  @ACCENT@ is substituted per-edition by apex-shell-firstrun: chartreuse for
+#  @ACCENT@ is substituted per-edition by rime-shell-firstrun: chartreuse for
 #  Daily, gold for Gaming, matching docs/branding.md. The prompt is part of the
 #  product identity, so it uses the same accent as the greeter, the boot splash
 #  and the installer rather than picking its own.
 #
 #  DELIBERATELY NOT the default starship look. The stock preset is a rainbow
-#  powerline — the visual equivalent of a default. This is the APEX direction:
+#  powerline — the visual equivalent of a default. This is the Rime direction:
 #  industrial, mono, one accent, information where you need it and nowhere else.
 #
 #  Two lines on purpose: the command always starts at the same column no matter
@@ -90,7 +90,7 @@ format      = "[ $time]($style)"
 time_format = "%H:%M"
 
 # ── containers / toolboxes ───────────────────────────────────────────────────
-# APEX-OS is image-based and distrobox is baked in, so knowing you are inside a
+# Rime OS is image-based and distrobox is baked in, so knowing you are inside a
 # container is genuinely load-bearing here — a `dnf install` in the wrong place
 # is a confusing five minutes.
 [container]

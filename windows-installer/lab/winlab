@@ -12,7 +12,7 @@
 #  laptop. There is no Windows machine in this program that may be written to,
 #  so the Windows machine has to be built.
 #
-#  Everything below is a file under $APEX_WINLAB_DIR. No host disk, no host
+#  Everything below is a file under $RIME_WINLAB_DIR. No host disk, no host
 #  ESP, no host firmware variable is in reach of any guest. /dev/kvm is passed
 #  as a device to an unprivileged container, which is a device pass-through and
 #  not a privilege.
@@ -31,7 +31,7 @@
 #     starts over, forever.
 #  4. Nothing is asked of the guest over a network or a shared folder, because
 #     Windows Setup media carries no virtio driver. The transport is a FAT disk
-#     labelled APEXLAB that the host writes with mtools and the guest reads as
+#     labelled APEXLAB that the host writes with mtools and the guest reads as  (rime-rename: keep)
 #     an ordinary drive letter. Everything comes back the same way.
 #
 #  ═══ THE MACHINE ═══
@@ -55,18 +55,21 @@
 #                                overlays. Up to N boots; the default is 1.
 #      winlab status             what exists and what does not
 #
-#  $APEX_WINLAB_DIR defaults to /var/lab-scratch/winlab. It is not /tmp on
+#  $RIME_WINLAB_DIR defaults to /var/lab-scratch/winlab. It is not /tmp on
 #  purpose: /tmp here is a tmpfs on a 29 GB machine and a 5 GB ISO plus a 40 GB
 #  disk image would be RAM.
 # ─────────────────────────────────────────────────────────────────────────────
 set -uo pipefail
 
 HERE="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
-DIR="${APEX_WINLAB_DIR:-/var/lab-scratch/winlab}"
-IMAGE="${APEX_WINLAB_IMAGE:-localhost/apex-winlab:latest}"
+DIR="${RIME_WINLAB_DIR:-/var/lab-scratch/winlab}"
+# The lab keeps its APEX-era names wherever an artifact already built under  (rime-rename: keep)
+# them depends on them: the podman image, the remastered media, and the
+# APEXLAB transport volume the golden image's baked agent looks for.  (rime-rename: keep)
+IMAGE="${RIME_WINLAB_IMAGE:-localhost/apex-winlab:latest}"  # rime-rename: keep (an existing lab artifact carries this name)
 
 ISO="$DIR/ws2022-eval.iso"
-MEDIA="$DIR/apex-winsetup.iso"
+MEDIA="$DIR/apex-winsetup.iso"  # rime-rename: keep (an existing lab artifact carries this name)
 GOLDEN="$DIR/golden.raw"
 GOLDVARS="$DIR/golden-VARS.fd"
 
@@ -152,24 +155,24 @@ cmd_media() {
         test -s /w/isoroot/sources/install.wim
         chmod -R u+w /w/isoroot
         cp /lab/autounattend.xml     /w/isoroot/autounattend.xml
-        cp /lab/apexlab-agent.ps1    /w/isoroot/apexlab-agent.ps1
+        cp /lab/apexlab-agent.ps1    /w/isoroot/apexlab-agent.ps1  # rime-rename: keep (an existing lab artifact carries this name)
         echo "splitting install.wim (4.34 GB does not fit an ISO-9660 file) …"
         wimsplit /w/isoroot/sources/install.wim /w/isoroot/sources/install.swm 3800 >/dev/null
         rm -f /w/isoroot/sources/install.wim
         ls -l /w/isoroot/sources/install*.swm
         echo "authoring …"
-        rm -f /w/apex-winsetup.iso
+        rm -f /w/apex-winsetup.iso  # rime-rename: keep (an existing lab artifact carries this name)
         xorriso -as mkisofs \
-            -iso-level 3 -J -joliet-long -V APEX_WINSETUP \
+            -iso-level 3 -J -joliet-long -V RIME_WINSETUP \
             -e efi/microsoft/boot/efisys_noprompt.bin -no-emul-boot \
-            -o /w/apex-winsetup.iso /w/isoroot 2>&1 | tail -8
+            -o /w/apex-winsetup.iso /w/isoroot 2>&1 | tail -8  # rime-rename: keep (an existing lab artifact carries this name)
         rm -rf /w/isoroot
-        ls -l /w/apex-winsetup.iso
+        ls -l /w/apex-winsetup.iso  # rime-rename: keep (an existing lab artifact carries this name)
         echo "--- the produced media, as the firmware will see it ---"
-        xorriso -indev /w/apex-winsetup.iso -report_el_torito plain 2>&1 |
+        xorriso -indev /w/apex-winsetup.iso -report_el_torito plain 2>&1 |  # rime-rename: keep (an existing lab artifact carries this name)
             grep -E "El Torito (boot img|images|catalog)"
         echo "--- autounattend.xml is in the root, and it is ours ---"
-        7z l /w/apex-winsetup.iso 2>/dev/null | grep -iE "autounattend|apexlab-agent" | head
+        7z l /w/apex-winsetup.iso 2>/dev/null | grep -iE "autounattend|apexlab-agent" | head  # rime-rename: keep (an existing lab artifact carries this name)
     ' || die "remaster failed"
     say "media: $MEDIA"
 }
@@ -190,19 +193,19 @@ qemu_run() {
     local cdidx=2 dkidx=1
     [ "$first" = cd ] && { cdidx=1; dkidx=2; }
     local cd=()
-    if [ "$first" = cd ] && [ -f /w/apex-winsetup.iso ]; then
-        cd=(-drive "id=cd,file=/w/apex-winsetup.iso,format=raw,if=none,media=cdrom,readonly=on"
+    if [ "$first" = cd ] && [ -f /w/apex-winsetup.iso ]; then  # rime-rename: keep (an existing lab artifact carries this name)
+        cd=(-drive "id=cd,file=/w/apex-winsetup.iso,format=raw,if=none,media=cdrom,readonly=on"  # rime-rename: keep (an existing lab artifact carries this name)
             -device "ide-cd,drive=cd,bus=ahci.4,bootindex=$cdidx")
     fi
     rm -f "$MON"
     timeout "${QEMU_TIMEOUT:-2700}" qemu-system-x86_64 \
-        -name apex-winlab \
+        -name rime-winlab \
         -machine q35,accel=kvm -cpu host -smp 4 -m 4096 \
         -drive "if=pflash,format=raw,unit=0,readonly=on,file=/usr/share/edk2/ovmf/OVMF_CODE.fd" \
         -drive "if=pflash,format=raw,unit=1,file=$VARS" \
         -device ich9-ahci,id=ahci \
         -drive "id=sys,file=$SYSDISK,format=${SYSFMT:-raw},if=none,cache=unsafe" \
-        -device "ide-hd,drive=sys,bus=ahci.0,bootindex=$dkidx,model=APEX-LAB-SYSTEM,serial=SYS0000000001" \
+        -device "ide-hd,drive=sys,bus=ahci.0,bootindex=$dkidx,model=RIME-LAB-SYSTEM,serial=SYS0000000001" \
         "${cd[@]}" "$@" \
         -display none -vga std -monitor "unix:$MON,server,nowait" \
         -no-reboot -rtc base=utc -boot menu=off &
@@ -241,13 +244,13 @@ cmd_golden() {
         # "DiskID 0, WillWipeDisk true" cannot possibly address anything else.
         mkfs_transport() {
             qemu-img create -f raw /w/transport.raw 64M >/dev/null
-            printf "label: gpt\nsize=60MiB, type=EBD0A0A2-B9E5-4433-87C0-68B6B72699C7, name=APEXLAB\n" |
+            printf "label: gpt\nsize=60MiB, type=EBD0A0A2-B9E5-4433-87C0-68B6B72699C7, name=APEXLAB\n" |  # rime-rename: keep (the baked agent looks for APEXLAB)
                 sfdisk /w/transport.raw >/dev/null 2>&1
-            mformat -i /w/transport.raw@@1048576 -F -v APEXLAB ::
+            mformat -i /w/transport.raw@@1048576 -F -v APEXLAB ::  # rime-rename: keep (the baked agent looks for APEXLAB)
             # The agent rides in on the transport, not on the install CD: the
             # CD is detached after the first Setup phase and a copy from it
             # silently finds nothing.
-            mcopy -i /w/transport.raw@@1048576 /lab/apexlab-agent.ps1 ::/
+            mcopy -i /w/transport.raw@@1048576 /lab/apexlab-agent.ps1 ::/  # rime-rename: keep (the name the autounattend.xml on the media copies)
         }
 
         phase=1
@@ -261,7 +264,7 @@ cmd_golden() {
                 [ -f /w/transport.raw ] || mkfs_transport
                 qemu_run disk \
                     -drive "id=tr,file=/w/transport.raw,format=raw,if=none" \
-                    -device "ide-hd,drive=tr,bus=ahci.1,model=APEX-LAB-TRANSPORT,serial=TRN0000000001" \
+                    -device "ide-hd,drive=tr,bus=ahci.1,model=RIME-LAB-TRANSPORT,serial=TRN0000000001" \
                     || rc=$?
             fi
             echo "   qemu exited rc=$rc at $(date -u +%H:%M:%S)"
@@ -341,17 +344,17 @@ cmd_fixtures() {
             printf "%s" "$3" | sfdisk "$1" >/dev/null
         }
         # The partitions are 17 GiB because the installer refuses anything
-        # under 16 decimal GB, which is the number installer/apex-install
+        # under 16 decimal GB, which is the number installer/rime-install
         # refuses too. Fixtures small enough to be convenient would have
         # exercised every rule except the one that fires in real life. The
         # images are sparse: 17 GiB of zeroes costs no disk.
         mk /w/fixture-a.raw 36G "label: gpt
-size=17GiB, type=0FC63DAF-8483-4772-8E79-3D69D8477DE4, name=\"APEX-TARGET-A\"
+size=17GiB, type=0FC63DAF-8483-4772-8E79-3D69D8477DE4, name=\"RIME-TARGET-A\"
 size=1GiB,  type=EBD0A0A2-B9E5-4433-87C0-68B6B72699C7, name=\"Windows data\"
 size=17GiB, type=EBD0A0A2-B9E5-4433-87C0-68B6B72699C7, name=\"Blank basic\"
 "
         mk /w/fixture-b.raw 18G "label: gpt
-size=17GiB, type=0FC63DAF-8483-4772-8E79-3D69D8477DE4, name=\"APEX-TARGET-B\"
+size=17GiB, type=0FC63DAF-8483-4772-8E79-3D69D8477DE4, name=\"RIME-TARGET-B\"
 "
         # Partition 2 gets a real NTFS filesystem. Offsets come from sfdisk
         # rather than arithmetic, so a layout change cannot silently format the
@@ -434,12 +437,12 @@ cmd_run() {
         # Fresh transport every run: a stale result.txt from a previous run is
         # indistinguishable from a run that produced one.
         qemu-img create -f raw /w/run-transport.raw 256M >/dev/null
-        printf "label: gpt\nsize=250MiB, type=EBD0A0A2-B9E5-4433-87C0-68B6B72699C7, name=APEXLAB\n" |
+        printf "label: gpt\nsize=250MiB, type=EBD0A0A2-B9E5-4433-87C0-68B6B72699C7, name=APEXLAB\n" |  # rime-rename: keep (the baked agent looks for APEXLAB)
             sfdisk /w/run-transport.raw >/dev/null
-        mformat -i /w/run-transport.raw@@1048576 -F -v APEXLAB ::
+        mformat -i /w/run-transport.raw@@1048576 -F -v APEXLAB ::  # rime-rename: keep (the baked agent looks for APEXLAB)
         mcopy -i /w/run-transport.raw@@1048576 /job/* ::/ 
-        [ -f /w/apex-windows-installer.exe ] &&
-            mcopy -i /w/run-transport.raw@@1048576 /w/apex-windows-installer.exe ::/
+        [ -f /w/rime-windows-installer.exe ] &&
+            mcopy -i /w/run-transport.raw@@1048576 /w/rime-windows-installer.exe ::/
         echo "--- transport contents ---"
         mdir -i /w/run-transport.raw@@1048576 ::
 
@@ -481,9 +484,9 @@ cmd_run() {
             rc=0
             QEMU_TIMEOUT=900 qemu_run disk \
                 -drive "id=tr,file=/w/run-transport.raw,format=raw,if=none" \
-                -device "ide-hd,drive=tr,bus=ahci.$trport,model=APEX-LAB-TRANSPORT,serial=TRN0000000001" \
+                -device "ide-hd,drive=tr,bus=ahci.$trport,model=RIME-LAB-TRANSPORT,serial=TRN0000000001" \
                 -drive "id=fa,file=/w/run-fixture-a.qcow2,format=qcow2,if=none" \
-                -device "ide-hd,drive=fa,bus=ahci.$faport,model=APEX-FIXTURE-A,serial=FIXA00000001" \
+                -device "ide-hd,drive=fa,bus=ahci.$faport,model=RIME-FIXTURE-A,serial=FIXA00000001" \
                 -drive "id=fb,file=/w/run-fixture-b.qcow2,format=qcow2,if=none" \
                 -device "nvme,drive=fb,serial=FIXB00000002" || rc=$?
             echo "qemu exited rc=$rc after boot $boot"

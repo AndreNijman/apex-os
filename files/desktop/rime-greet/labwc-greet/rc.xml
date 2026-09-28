@@ -1,0 +1,71 @@
+<?xml version="1.0"?>
+<!--
+  Rime OS greeter — labwc rc.xml (fallback host).
+
+  Minimal config to host the rime-greet quickshell greeter.  labwc, like sway,
+  implements wlr-layer-shell natively, so rime-greet's PanelWindow (Overlay
+  layer, exclusive keyboard) maps here where it did NOT under cage 0.2.0 (see
+  docs/m0-results.md "Spike A").
+
+  labwc is loaded via `labwc -C /usr/share/rime-greet/labwc-greet` (config
+  directory holding this rc.xml + autostart + environment).  See README
+  "Compositor host" for when to reach for labwc instead of sway.
+
+  This is intentionally bare: no keybinds, no menu, no bar — the greeter owns
+  all input and is the only client.
+-->
+<labwc_config>
+
+  <core>
+    <!-- No server-side decorations: the greeter is a layer surface (never
+         decorated anyway); this keeps any stray xdg-toplevel borderless too. -->
+    <decoration>client</decoration>
+    <gap>0</gap>
+  </core>
+
+  <!-- Empty theme name = labwc built-in theme.  Decorations are suppressed
+       per-window below, so the theme is effectively unused. -->
+  <theme>
+    <name></name>
+    <font place="ActiveWindow">
+      <name>JetBrainsMono Nerd Font</name>
+      <size>10</size>
+    </font>
+  </theme>
+
+  <!-- Touchpad: tap-to-click OFF (greeter is keyboard-driven). -->
+  <libinput>
+    <device category="touchpad">
+      <tap>no</tap>
+      <naturalScroll>no</naturalScroll>
+    </device>
+  </libinput>
+
+  <!-- Force any toplevel window to be undecorated / borderless. -->
+  <windowRules>
+    <windowRule identifier="*" serverDecoration="no" skipTaskbar="yes" />
+  </windowRules>
+
+  <!-- ONE keybind: the screen reader, and nothing else. Keyboard events belong
+       to the client, and this is the exception that proves it — a user who
+       cannot see the screen has no way to ask for a reader through a client
+       they cannot read, so the host has to offer the one key that starts one.
+
+       W-A-s is SUPER+ALT+S: the same combination the desktop uses (rime-shell's
+       `screenreader-toggle` default, generated into all three sessions) and the
+       same one GNOME has used for years.
+
+       greetd's command is `/usr/libexec/rime-greet-session labwc -C …`, which
+       has already started the session bus and the accessibility bus this needs;
+       orca sets org.a11y.Status.ScreenReaderEnabled itself on connecting, which
+       is the property Qt's bridge gates on.
+
+       (Omitting <keyboard> entirely means labwc's built-in defaults would
+       apply, so this set stays explicit and stays this short.) -->
+  <keyboard>
+    <keybind key="W-A-s">
+      <action name="Execute" command="/usr/libexec/rime-screen-reader toggle"/>
+    </keybind>
+  </keyboard>
+
+</labwc_config>

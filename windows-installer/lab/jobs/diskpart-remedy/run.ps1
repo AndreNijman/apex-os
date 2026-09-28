@@ -33,7 +33,7 @@
 #  plan::assess actually acts on -- and prints one greppable REMEDY-<n>: line.
 # ─────────────────────────────────────────────────────────────────────────────
 $ErrorActionPreference = 'Continue'
-$exe = Join-Path $PSScriptRoot 'apex-windows-installer.exe'
+$exe = Join-Path $PSScriptRoot 'rime-windows-installer.exe'
 if (-not (Test-Path $exe)) { "FATAL: no installer at $exe"; exit 2 }
 
 $LINUX_GUID = '0fc63daf-8483-4772-8e79-3d69d8477de4'
@@ -83,8 +83,8 @@ function Rescan-AndSurvey {
 }
 
 '=== disk lookup ==='
-$disk = Get-Disk | Where-Object FriendlyName -eq 'APEX-FIXTURE-A' | Select-Object -First 1
-if (-not $disk) { "FATAL: no disk named APEX-FIXTURE-A"; exit 2 }
+$disk = Get-Disk | Where-Object FriendlyName -eq 'RIME-FIXTURE-A' | Select-Object -First 1
+if (-not $disk) { "FATAL: no disk named RIME-FIXTURE-A"; exit 2 }
 "fixture-a is disk $($disk.Number)"
 
 $part = Get-Partition -DiskNumber $disk.Number |
@@ -147,7 +147,7 @@ gpt attributes=0x0000000000000000
 
 '=== sanity: the OTHER two partitions on this disk were never touched ==='
 $survey = Invoke-Installer 'survey'
-$survey | Select-String -Pattern 'PARTITION |Windows data|APEX-TARGET-A|attributes 0x' | Out-String -Width 200
+$survey | Select-String -Pattern 'PARTITION |Windows data|RIME-TARGET-A|attributes 0x' | Out-String -Width 200
 
 '=== JOB COMPLETE ==='
 exit 0

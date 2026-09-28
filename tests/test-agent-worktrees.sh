@@ -1,6 +1,6 @@
 #!/usr/bin/env bash
 # ─────────────────────────────────────────────────────────────────────────────
-#  End-to-end assertions for `apex agent worktrees` (P1-036): tests,
+#  End-to-end assertions for `rime agent worktrees` (P1-036): tests,
 #  conflicts, diff and local readiness, per worktree.
 #
 #  The unit tests cover the parsers and the readiness rules. What they cannot
@@ -27,7 +27,7 @@
 #         objects and that is exactly what a refused call must not do.
 #
 #  NOTHING HERE TOUCHES A RUNNING DAEMON. Its own XDG_RUNTIME_DIR, its own
-#  XDG_STATE_HOME, its own XDG_CONFIG_HOME, its own APEX_AGENT_SCRATCH_ROOT,
+#  XDG_STATE_HOME, its own XDG_CONFIG_HOME, its own RIME_AGENT_SCRATCH_ROOT,
 #  and the daemon is killed by the pid this script started — never by name.
 #  The project store is under this suite's XDG_STATE_HOME, so the projects the
 #  daemon can see are this suite's fixtures and not the user's real checkouts.
@@ -44,7 +44,7 @@ ROOT="$(cd "$(dirname "${BASH_SOURCE[0]}")/.." && pwd)"
 
 # Before the temp tree, the daemon or the build: this suite needs an
 # environment the daemon will observe as LOCAL, and that has to be arranged
-# from outside the suite. `apex-agentd` places a peer from its cgroup, and a
+# from outside the suite. `rime-agentd` places a peer from its cgroup, and a
 # process started by systemd — a CI job, a timer-dispatched agent — is in
 # neither a login session nor a user service, so §7 refuses it before the
 # behaviour under test is reached. Here it stops the suite starting the
@@ -53,7 +53,7 @@ ROOT="$(cd "$(dirname "${BASH_SOURCE[0]}")/.." && pwd)"
 # session it created or — saying why, out loud — in place; either way the
 # suite runs exactly once, so this is `exec` and not a call. Same block, and
 # the same reason, as tests/test-privilege-requests.sh.
-if [ -z "${APEX_LOGIN_SESSION_WRAPPED:-}" ] && [ -x "${ROOT}/tests/in-login-session.sh" ]; then
+if [ -z "${RIME_LOGIN_SESSION_WRAPPED:-}" ] && [ -x "${ROOT}/tests/in-login-session.sh" ]; then
     exec "${ROOT}/tests/in-login-session.sh" "${BASH_SOURCE[0]}" "$@"
 fi
 WORK="$(mktemp -d)"
@@ -85,44 +85,44 @@ for tool in cargo git python3 awk cmp; do
 done
 
 section "the binaries"
-if ! cargo build --manifest-path "${ROOT}/apexd/Cargo.toml" \
-        --bin apex-agentd --bin apex >/dev/null 2>&1; then
-    bad "apex-agentd and apex build"
+if ! cargo build --manifest-path "${ROOT}/rimed/Cargo.toml" \
+        --bin rime-agentd --bin rime >/dev/null 2>&1; then
+    bad "rime-agentd and rime build"
     give_up
 fi
-ok "apex-agentd and apex build"
+ok "rime-agentd and rime build"
 
-BIN="${CARGO_TARGET_DIR:-${ROOT}/apexd/target}/debug"
-AGENTD="${BIN}/apex-agentd"
-APEX="${BIN}/apex"
+BIN="${CARGO_TARGET_DIR:-${ROOT}/rimed/target}/debug"
+AGENTD="${BIN}/rime-agentd"
+Rime="${BIN}/rime"
 
 # ── an isolated runtime ──────────────────────────────────────────────────────
 export XDG_RUNTIME_DIR="${WORK}/run"
 export XDG_STATE_HOME="${WORK}/state"
 export XDG_CONFIG_HOME="${WORK}/config"
-export APEX_AGENT_SCRATCH_ROOT="${WORK}/scratch"
+export RIME_AGENT_SCRATCH_ROOT="${WORK}/scratch"
 mkdir -p "$XDG_RUNTIME_DIR" "$XDG_STATE_HOME" "$XDG_CONFIG_HOME"
 chmod 0700 "$XDG_RUNTIME_DIR"
 
 # What the machine's REAL daemon already has under the shared scratch root,
 # recorded before this suite's daemon starts. Compared, not merely tested for
-# absence: `/tmp/apex-agent/1` belongs to the real daemon on a machine where a
+# absence: `/tmp/rime-agent/1` belongs to the real daemon on a machine where a
 # session is running, and asserting it does not exist would fail for a reason
 # that has nothing to do with this suite.
-PRE_SCRATCH="$(ls /tmp/apex-agent 2>/dev/null | sort | tr '\n' ' ')"
+PRE_SCRATCH="$(ls /tmp/rime-agent 2>/dev/null | sort | tr '\n' ' ')"
 
-# apex-agentd writes here and `apex agent worktrees` reads here. Asserted
+# rime-agentd writes here and `rime agent worktrees` reads here. Asserted
 # rather than assumed, because if the daemon resolved projects from the user's
 # real store instead, this suite would run `merge-tree --write-tree` in
 # Andre's own repositories on every run.
-PROJECTS="${XDG_STATE_HOME}/apex/agent/projects"
+PROJECTS="${XDG_STATE_HOME}/rime/agent/projects"
 
 git_q() { git -c advice.detachedHead=false -c init.defaultBranch=main "$@"; }
 
 # ── the fixture project ──────────────────────────────────────────────────────
 #
 # One repository, a bare remote to push to, and two agent worktrees under
-# `.apex/worktrees/` — which is where `project::worktrees` looks to decide a
+# `.rime/worktrees/` — which is where `project::worktrees` looks to decide a
 # worktree is an agent's rather than the user's own.
 #
 #   main          f.txt = "base\nmain change\n"
@@ -143,9 +143,9 @@ printf 'untouched\n' > "${PROJ}/keep.txt"
 git_q -C "$PROJ" add f.txt keep.txt
 git_q -C "$PROJ" commit -qm "base"
 
-mkdir -p "${PROJ}/.apex/worktrees"
-WT_CLASH="${PROJ}/.apex/worktrees/clash"
-WT_TIDY="${PROJ}/.apex/worktrees/tidy"
+mkdir -p "${PROJ}/.rime/worktrees"
+WT_CLASH="${PROJ}/.rime/worktrees/clash"
+WT_TIDY="${PROJ}/.rime/worktrees/tidy"
 git_q -C "$PROJ" worktree add -q -b agent/clash "$WT_CLASH" >/dev/null 2>&1
 git_q -C "$PROJ" worktree add -q -b agent/tidy "$WT_TIDY" >/dev/null 2>&1
 
@@ -176,7 +176,7 @@ git_q -C "$PROJ" commit -qam "main's take on f.txt"
 # failing the whole listing. Neither half of that had any coverage against
 # real git until this fixture existed: a mutation that let `unknown` count as
 # ready survived the suite.
-WT_ALIEN="${PROJ}/.apex/worktrees/alien"
+WT_ALIEN="${PROJ}/.rime/worktrees/alien"
 git_q -C "$PROJ" worktree add -q --detach "$WT_ALIEN" >/dev/null 2>&1
 git_q -C "$WT_ALIEN" checkout -q --orphan agent/alien >/dev/null 2>&1
 git_q -C "$WT_ALIEN" rm -q -rf . >/dev/null 2>&1
@@ -217,7 +217,7 @@ fi
 section "the daemon"
 "$AGENTD" > "${WORK}/agentd.log" 2>&1 &
 DAEMON_PID=$!
-SOCK="${XDG_RUNTIME_DIR}/apex-agentd/control.sock"
+SOCK="${XDG_RUNTIME_DIR}/rime-agentd/control.sock"
 for _ in $(seq 1 50); do [ -S "$SOCK" ] && break; sleep 0.1; done
 if [ -S "$SOCK" ]; then
     ok "the daemon came up on an isolated socket"
@@ -229,11 +229,11 @@ fi
 
 # ── the project store the daemon reads ───────────────────────────────────────
 #
-# There is no `apex project add`. A project is remembered when a session starts
-# in it (apex-agentd's session.rs), which is also the only way it can happen on
+# There is no `rime project add`. A project is remembered when a session starts
+# in it (rime-agentd's session.rs), which is also the only way it can happen on
 # a real machine — so that is how this suite registers one, rather than
 # planting a record and testing a path nothing takes.
-PROJ_SESSION="$("$APEX" agent run --agent generic --sandbox unrestricted \
+PROJ_SESSION="$("$Rime" agent run --agent generic --sandbox unrestricted \
     --cwd "$PROJ" -d -- /bin/sh -c 'sleep 600' 2>"${WORK}/proj-run.err" \
     | sed -n 's/^session \([0-9]\+\) .*/\1/p' | head -1)"
 if [ -n "$PROJ_SESSION" ]; then
@@ -326,12 +326,12 @@ fi
 
 # ── the call ─────────────────────────────────────────────────────────────────
 section "the status call"
-"$APEX" agent worktrees --json > "${WORK}/status.json" 2> "${WORK}/status.err"
+"$Rime" agent worktrees --json > "${WORK}/status.json" 2> "${WORK}/status.err"
 rc=$?
 if [ "$rc" -eq 0 ] && [ -s "${WORK}/status.json" ]; then
-    ok "apex agent worktrees --json answered"
+    ok "rime agent worktrees --json answered"
 else
-    bad "apex agent worktrees --json answered"
+    bad "rime agent worktrees --json answered"
     echo "      exit ${rc}" >&2
     sed 's/^/      /' "${WORK}/status.err" >&2
     sed 's/^/      /' "${WORK}/agentd.log" >&2
@@ -507,7 +507,7 @@ fi
 # a hook event from a session, matched to the worktree that session lives in.
 section "a test run is observed and joined to the right worktree"
 
-SESSION_ID="$("$APEX" agent run --agent generic --sandbox unrestricted \
+SESSION_ID="$("$Rime" agent run --agent generic --sandbox unrestricted \
     --cwd "$WT_CLASH" -d -- /bin/sh -c 'sleep 600' 2>"${WORK}/run.err" \
     | sed -n 's/^session \([0-9]\+\) .*/\1/p' | head -1)"
 if [ -n "$SESSION_ID" ]; then
@@ -520,8 +520,8 @@ fi
 
 hook_event() {   # hook_event <event> <command> [cwd]
     printf '{"tool_name":"Bash","tool_input":{"command":"%s"}}' "$2" \
-        | (cd "${3:-$WORK}" && APEX_AGENT_SESSION="$SESSION_ID" \
-            "$APEX" agent hook "$1" >/dev/null 2>&1)
+        | (cd "${3:-$WORK}" && RIME_AGENT_SESSION="$SESSION_ID" \
+            "$Rime" agent hook "$1" >/dev/null 2>&1)
 }
 
 # Deliberately run from $WORK — NOT from the worktree. The daemon must use the
@@ -531,7 +531,7 @@ hook_event() {   # hook_event <event> <command> [cwd]
 # else) and the assertion below would fail.
 hook_event pre_tool_use "cargo test --locked"
 sleep 0.3
-"$APEX" agent worktrees --json > "${WORK}/running.json" 2>/dev/null
+"$Rime" agent worktrees --json > "${WORK}/running.json" 2>/dev/null
 tests="$(jq_get "${WORK}/running.json" clash 'w["tests"]["state"]')"
 cmd="$(jq_get "${WORK}/running.json" clash 'w["tests"].get("command","")')"
 if [ "$tests" = "running" ] && [ "$cmd" = "cargo test" ]; then
@@ -553,7 +553,7 @@ fi
 
 hook_event post_tool_use_failure "cargo test --locked"
 sleep 0.3
-"$APEX" agent worktrees --json > "${WORK}/failed.json" 2>/dev/null
+"$Rime" agent worktrees --json > "${WORK}/failed.json" 2>/dev/null
 tests="$(jq_get "${WORK}/failed.json" clash 'w["tests"]["state"]')"
 if [ "$tests" = "failed" ]; then
     ok "a failure event turns the observation into 'failed'"
@@ -562,7 +562,7 @@ else
     echo "      state='${tests}'" >&2
 fi
 blockers="$(jq_get "${WORK}/failed.json" clash '" | ".join(w["ready"]["blockers"])')"
-if printf '%s' "$blockers" | grep -q "the last test run APEX observed failed"; then
+if printf '%s' "$blockers" | grep -q "the last test run Rime observed failed"; then
     ok "an observed failure blocks readiness, in those words"
 else
     bad "an observed failure blocks readiness, in those words"
@@ -574,7 +574,7 @@ fi
 # `git commit -m 'fix the test'` constantly.
 hook_event post_tool_use "cargo build --tests"
 sleep 0.3
-"$APEX" agent worktrees --json > "${WORK}/nottest.json" 2>/dev/null
+"$Rime" agent worktrees --json > "${WORK}/nottest.json" 2>/dev/null
 tests="$(jq_get "${WORK}/nottest.json" clash 'w["tests"]["state"]')"
 if [ "$tests" = "failed" ]; then
     ok "a command that only mentions tests does not overwrite the observation"
@@ -603,7 +603,7 @@ else
     echo "      main tree sessions='${main_sessions}', wanted only '${PROJ_SESSION}'" >&2
 fi
 
-# `apex agent run --cwd <a worktree>` makes apex-agentd remember that WORKTREE
+# `rime agent run --cwd <a worktree>` makes rime-agentd remember that WORKTREE
 # as a project of its own, because `project::detect` resolves a project from
 # `git rev-parse --show-toplevel` and inside a linked worktree that is the
 # worktree. Every worktree of the repository is visible from in there, so
@@ -629,7 +629,7 @@ fi
 # ...and asking for the linked worktree's own slug says why, rather than
 # answering with a second copy of the repository.
 wt_slug="$(ls "$PROJECTS" | sed -n 's/\.json$//p' | grep -v "^${SLUG}$" | head -1)"
-out="$("$APEX" agent worktrees --project "$wt_slug" --json 2>&1)"
+out="$("$Rime" agent worktrees --project "$wt_slug" --json 2>&1)"
 if [ $? -ne 0 ] && printf '%s' "$out" | grep -q "linked git worktree"; then
     ok "asking for a linked worktree by slug is refused with the reason"
 else
@@ -648,8 +648,8 @@ fi
 section "a session whose cwd goes through a symlink"
 
 ln -s "$PROJ" "${WORK}/link"
-LINK_SESSION="$("$APEX" agent run --agent generic --sandbox unrestricted \
-    --cwd "${WORK}/link/.apex/worktrees/tidy" -d -- /bin/sh -c 'sleep 600' \
+LINK_SESSION="$("$Rime" agent run --agent generic --sandbox unrestricted \
+    --cwd "${WORK}/link/.rime/worktrees/tidy" -d -- /bin/sh -c 'sleep 600' \
     2>"${WORK}/link-run.err" | sed -n 's/^session \([0-9]\+\) .*/\1/p' | head -1)"
 if [ -n "$LINK_SESSION" ]; then
     ok "a session started through the symlink (id ${LINK_SESSION})"
@@ -657,14 +657,14 @@ else
     bad "a session started through the symlink"
     sed 's/^/      /' "${WORK}/link-run.err" >&2
 fi
-"$APEX" agent worktrees --project "$SLUG" --json > "${WORK}/linked.json" 2>/dev/null
+"$Rime" agent worktrees --project "$SLUG" --json > "${WORK}/linked.json" 2>/dev/null
 linked="$(jq_get "${WORK}/linked.json" tidy '",".join(str(i) for i in w["sessions"])')"
 if [ "$linked" = "$LINK_SESSION" ]; then
     ok "the worktree claims the session even though its cwd went through a symlink"
 else
     bad "the worktree claims the session even though its cwd went through a symlink"
     echo "      tidy sessions='${linked}', wanted '${LINK_SESSION}'" >&2
-    echo "      the session recorded $("$APEX" agent status "$LINK_SESSION" 2>/dev/null | grep -i cwd)" >&2
+    echo "      the session recorded $("$Rime" agent status "$LINK_SESSION" 2>/dev/null | grep -i cwd)" >&2
 fi
 rows="$(python3 -c 'import json,sys; print(len(json.load(open(sys.argv[1]))))' "${WORK}/linked.json")"
 if [ "$rows" -eq 4 ]; then
@@ -698,10 +698,10 @@ git_q -C "$DECOY" config user.name t
 printf 'decoy\n' > "${DECOY}/d.txt"
 git_q -C "$DECOY" add d.txt
 git_q -C "$DECOY" commit -qm "decoy"
-mkdir -p "${DECOY}/.apex/worktrees"
-git_q -C "$DECOY" worktree add -q -b agent/x "${DECOY}/.apex/worktrees/x" >/dev/null 2>&1
-printf 'decoy\nfrom the worktree\n' > "${DECOY}/.apex/worktrees/x/d.txt"
-git_q -C "${DECOY}/.apex/worktrees/x" commit -qam "the decoy worktree's take"
+mkdir -p "${DECOY}/.rime/worktrees"
+git_q -C "$DECOY" worktree add -q -b agent/x "${DECOY}/.rime/worktrees/x" >/dev/null 2>&1
+printf 'decoy\nfrom the worktree\n' > "${DECOY}/.rime/worktrees/x/d.txt"
+git_q -C "${DECOY}/.rime/worktrees/x" commit -qam "the decoy worktree's take"
 printf 'decoy\nfrom main\n' > "${DECOY}/d.txt"
 git_q -C "$DECOY" commit -qam "the decoy main tree's take"
 # Proof the decoy is a repository where a reached probe WOULD write: git
@@ -734,7 +734,7 @@ before="$(decoy_objects)"
 before_status="$(git_q -C "$DECOY" status --porcelain; git_q -C "$DECOY" ls-files --stage)"
 
 for slug in "../planted/decoy" "../../planted/decoy" ".." "/etc" "planted/decoy"; do
-    out="$("$APEX" agent worktrees --project "$slug" --json 2>&1)"
+    out="$("$Rime" agent worktrees --project "$slug" --json 2>&1)"
     rc=$?
     if [ "$rc" -ne 0 ]; then
         ok "a path-shaped slug is refused: --project ${slug} (exit ${rc})"
@@ -760,7 +760,7 @@ fi
 
 # A slug that IS a slug but names nothing is a different refusal, and it must
 # still be a refusal rather than a silent empty listing.
-out="$("$APEX" agent worktrees --project no-such-project --json 2>&1)"
+out="$("$Rime" agent worktrees --project no-such-project --json 2>&1)"
 if [ $? -ne 0 ] && printf '%s' "$out" | grep -q "no remembered project"; then
     ok "an unknown slug is refused by name, not answered with an empty list"
 else
@@ -769,7 +769,7 @@ else
 fi
 
 # ...and the real slug still works, so the guard did not simply break the verb.
-out="$("$APEX" agent worktrees --project "$SLUG" --json 2>&1)"
+out="$("$Rime" agent worktrees --project "$SLUG" --json 2>&1)"
 if [ $? -eq 0 ] && printf '%s' "$out" | grep -q '"name": "clash"'; then
     ok "the fixture's own slug still answers"
 else
@@ -779,7 +779,7 @@ fi
 
 # ── the human-readable form ──────────────────────────────────────────────────
 section "the table a person reads"
-out="$("$APEX" agent worktrees 2>&1)"
+out="$("$Rime" agent worktrees 2>&1)"
 printf '%s\n' "$out" | sed 's/^/      | /'
 if printf '%s' "$out" | grep -q "WORKTREE" && printf '%s' "$out" | grep -q "clash"; then
     ok "the table lists the worktrees under a header"
@@ -789,25 +789,25 @@ fi
 # The claim this feature must never make. "TESTS" in a column heading invites
 # "the tests pass"; the footer is where that is corrected, so its absence is a
 # failure and not a cosmetic one.
-if printf '%s' "$out" | grep -q "last run APEX observed"; then
-    ok "the table says the test column is the last run APEX observed, not a fresh result"
+if printf '%s' "$out" | grep -q "last run Rime observed"; then
+    ok "the table says the test column is the last run Rime observed, not a fresh result"
 else
-    bad "the table says the test column is the last run APEX observed, not a fresh result"
+    bad "the table says the test column is the last run Rime observed, not a fresh result"
 fi
 
 # ── nothing of the user's was touched ────────────────────────────────────────
 #
-# The reason `1bb5db4` exists: session scratch used to be `/tmp/apex-agent/<id>`
+# The reason `1bb5db4` exists: session scratch used to be `/tmp/rime-agent/<id>`
 # with no XDG in it, a fixture daemon numbers its sessions from 1, and a
 # session reap runs `remove_dir_all` on its own id — so a suite could delete a
 # live session's scratch out from under the real daemon.
 section "the suite stayed inside its own fixture"
-if [ -d "${APEX_AGENT_SCRATCH_ROOT}/${PROJ_SESSION}" ]; then
-    ok "session scratch went where the fixture told it to (${APEX_AGENT_SCRATCH_ROOT}/${PROJ_SESSION})"
+if [ -d "${RIME_AGENT_SCRATCH_ROOT}/${PROJ_SESSION}" ]; then
+    ok "session scratch went where the fixture told it to (${RIME_AGENT_SCRATCH_ROOT}/${PROJ_SESSION})"
 else
     bad "session scratch went where the fixture told it to"
-    echo "      expected ${APEX_AGENT_SCRATCH_ROOT}/${PROJ_SESSION}" >&2
-    ls -la "$APEX_AGENT_SCRATCH_ROOT" 2>&1 | sed 's/^/      /' >&2
+    echo "      expected ${RIME_AGENT_SCRATCH_ROOT}/${PROJ_SESSION}" >&2
+    ls -la "$RIME_AGENT_SCRATCH_ROOT" 2>&1 | sed 's/^/      /' >&2
 fi
 # The hazard is DELETION: a session reap runs `remove_dir_all` on its own id,
 # a fixture daemon numbers its sessions from 1, and before `1bb5db4` that
@@ -816,12 +816,12 @@ fi
 # an unrelated session start fail this line.
 gone=""
 for entry in $PRE_SCRATCH; do
-    [ -e "/tmp/apex-agent/${entry}" ] || gone="${gone}${entry} "
+    [ -e "/tmp/rime-agent/${entry}" ] || gone="${gone}${entry} "
 done
 if [ -z "$gone" ]; then
-    ok "nothing was deleted from the shared /tmp/apex-agent the real daemon uses"
+    ok "nothing was deleted from the shared /tmp/rime-agent the real daemon uses"
 else
-    bad "nothing was deleted from the shared /tmp/apex-agent the real daemon uses"
+    bad "nothing was deleted from the shared /tmp/rime-agent the real daemon uses"
     echo "      gone: ${gone}" >&2
     echo "      before: ${PRE_SCRATCH}" >&2
 fi

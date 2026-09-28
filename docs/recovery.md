@@ -1,27 +1,27 @@
 # Recovery, repair and disposable execution
 
-Roadmap §19. This is the reference for `apex recover`, `apex disposable` and
-`apex doctor --json`: what exists, what each verb will and will not do, the
+Roadmap §19. This is the reference for `rime recover`, `rime disposable` and
+`rime doctor --json`: what exists, what each verb will and will not do, the
 exact data boundary of the factory reset, and the two things §19 asks for that
-APEX deliberately does not ship.
+Rime deliberately does not ship.
 
 `docs/rollback.md` is the drill for the deployment layer underneath this
-(`apex rollback`, `ostree admin pin`, rebuild-from-git). This document covers
+(`rime rollback`, `ostree admin pin`, rebuild-from-git). This document covers
 the surface on top of it.
 
 ## The recovery surface
 
-`apex recover status` reports the eight components §19 names, each with a
+`rime recover status` reports the eight components §19 names, each with a
 state and the command that addresses it.
 
 ```
 COMPONENT               STATE        DETAIL
-Current deployment      verified     ostree 8f14e45fceea — APEX-OS 43 gaming
+Current deployment      verified     ostree 8f14e45fceea — Rime OS 43 gaming
 Previous deployment     available    2 deployments present, so there is one to go back to
 Secure Boot             attention    firmware reports Secure Boot disabled
 Filesystem              verified     /usr is read-only on an overlay root, ostree-booted
 GPU driver              verified     1 — amd via amdgpu
-APEX Shell              verified     vendored in the image, and this account is provisioned
+Rime Shell              verified     vendored in the image, and this account is provisioned
 Network                 available    a default route exists. Nothing was contacted.
 Package extensions      verified     no user packages on this machine
 ```
@@ -36,51 +36,51 @@ There are four states, and the distinction between the last two matters:
 | `unavailable` | could not be determined, or does not exist on this hardware. **Never** a synonym for "fine" |
 
 `--json` emits the same rows with stable ids (`current-deployment`,
-`previous-deployment`, `secure-boot`, `filesystem`, `gpu-driver`, `apex-shell`,
+`previous-deployment`, `secure-boot`, `filesystem`, `gpu-driver`, `rime-shell`,
 `network`, `package-extensions`), the four action buttons, the recovery routes
-and the reset scopes. Those ids are a compatibility surface: APEX Settings keys
+and the reset scopes. Those ids are a compatibility surface: Rime Settings keys
 on them, so a rename breaks a settings page. The same rule covers the members
-of `org.apexos.Apexd1`.
+of `org.rimeos.Rimed1`.
 
 **It spawns no subprocess and contacts nothing.** Every fact is a file read:
 `/proc/cmdline`, `/proc/mounts`, `/proc/modules`, `/proc/net/route`,
 `/run/ostree-booted`, the efivars, the `/ostree/deploy` directory listing,
-`/var/lib/apex/pkg/state.json`. Three things follow, and the suite asserts each
+`/var/lib/rime/pkg/state.json`. Three things follow, and the suite asserts each
 of them:
 
 * it cannot raise an authentication prompt, because nothing it does needs
   authorising;
-* it cannot hang, so APEX Settings can poll it;
+* it cannot hang, so Rime Settings can poll it;
 * the states a healthy machine does not have (no rollback target, `/usr`
   mounted read-write, an extension built for the previous release, no GPU
   driver) are reachable as fixture trees instead of by reasoning.
 
 The deliberate cost: the deployment row reports the ostree **checksum**, not
 the image reference. The reference lives in `bootc status`, and parsing another
-tool's JSON schema to duplicate what `apex changelog` already prints would buy
-a second thing to keep in sync. The row names `apex changelog` instead.
+tool's JSON schema to duplicate what `rime changelog` already prints would buy
+a second thing to keep in sync. The row names `rime changelog` instead.
 
-### Rollback is `apex rollback`, and there is no second name for it
+### Rollback is `rime rollback`, and there is no second name for it
 
 §19 lists `[Boot previous deployment]` as a button and asks to "make rollback
 visible from Settings, not only the CLI". The `previous-deployment` row
 satisfies both: it reports whether there *is* anything to go back to and names
-`sudo apex rollback` as the command a button runs. Adding an
-`apex recover previous` verb would have been a second name for an operation
+`sudo rime rollback` as the command a button runs. Adding an
+`rime recover previous` verb would have been a second name for an operation
 that already exists.
 
 The row also carries the advice `docs/rollback.md` gives: bootc keeps only
 booted+previous, so two bad updates in a row can evict the last good image, and
-`sudo apex pin` before anything risky prevents that.
+`sudo rime pin` before anything risky prevents that.
 
 ## Automatic repair
 
-`apex recover repair` is a dry run unless given `--commit`.
+`rime recover repair` is a dry run unless given `--commit`.
 
 **A step is eligible for automatic repair only if it is idempotent and removes
 no data.** That invariant makes a single button defensible: pressing it twice
 does nothing the second time, and pressing it by accident costs nothing.
-`apexd-core`'s test asserts it over the whole table: no step's argv may contain
+`rimed-core`'s test asserts it over the whole table: no step's argv may contain
 a destructive argument, and none may contain `sudo`, `pkexec`, `su`, `run0` or
 `systemd-run`.
 
@@ -92,17 +92,17 @@ Two steps, each offered only when the surface diagnoses it:
 
 | step | domain | when |
 | --- | --- | --- |
-| `reprovision-desktop` | user | the `apex-shell` row reports attention |
+| `reprovision-desktop` | user | the `rime-shell` row reports attention |
 | `rebuild-package-extension` | system | the `package-extensions` row reports attention |
 
-Like `apex apply`, repair converges the privilege domain it is already running
+Like `rime apply`, repair converges the privilege domain it is already running
 in and *reports* the other. Nothing here calls `sudo` itself, so it cannot
-raise an authentication prompt; `sudo apex recover repair --commit` runs the
+raise an authentication prompt; `sudo rime recover repair --commit` runs the
 system half.
 
 `ostree admin pin 0` is **not** a repair step, by design. It would pass every
-invariant (it is idempotent and deletes nothing), but APEX cannot tell whether
-it is *needed* without running `ostree admin status`, and `apex recover status`
+invariant (it is idempotent and deletes nothing), but Rime cannot tell whether
+it is *needed* without running `ostree admin status`, and `rime recover status`
 reads files rather than spawning subprocesses. A repair with no diagnosis
 behind it gets proposed on every healthy machine, and people learn to ignore a
 button that always has something to say. It is advice on the
@@ -110,7 +110,7 @@ previous-deployment row instead.
 
 ## The factory reset, and exactly what it deletes
 
-`apex recover reset` is the most destructive verb in the product, so it is
+`rime recover reset` is the most destructive verb in the product, so it is
 built to be refused.
 
 **Dry run is the default.** Performing it needs `--commit` **and**
@@ -118,11 +118,11 @@ built to be refused.
 set of paths the plan found*:
 
 ```
-$ apex recover reset --scope user
+$ rime recover reset --scope user
 Factory reset — DRY RUN. Nothing has been changed.
 …
 To perform it, run exactly:
-  apex recover reset --scope user --commit --confirm user:9:3f2a1c9b
+  rime recover reset --scope user --commit --confirm user:9:3f2a1c9b
 ```
 
 A caller cannot construct that token from the scope alone: it has to run the
@@ -134,18 +134,18 @@ nothing touched.
 
 | | `--scope desktop` | `--scope user` |
 | --- | --- | --- |
-| APEX Shell settings, keybinds, caches | removed | removed |
+| Rime Shell settings, keybinds, caches | removed | removed |
 | the generated Hyprland input/monitor overrides | **emptied**, not removed | **emptied**, not removed |
-| your blueprint (`~/.config/apex/blueprint.toml`) | preserved | **removed** |
+| your blueprint (`~/.config/rime/blueprint.toml`) | preserved | **removed** |
 | per-game profiles, trusted devices, local-model settings | preserved | **removed** |
-| `~/.local/state/apex` (applied-blueprint record, probe cache, recorded agent sessions) | preserved | **removed** |
+| `~/.local/state/rime` (applied-blueprint record, probe cache, recorded agent sessions) | preserved | **removed** |
 
 Preserved by **both**, and printed in full by the dry run:
 
 * every document, project, checkout and credential in your home directory;
 * `~/.ssh`, `~/.gnupg`, `~/.aws` and every browser profile;
 * your Hyprland, niri and labwc configuration, including the lock/idle config;
-* APEX Shell plugins in `~/.config/apex-shell/plugins`;
+* Rime Shell plugins in `~/.config/rime-shell/plugins`;
 * your capsules and their records;
 * installed packages, Flatpaks and downloaded models;
 * the booted deployment and its rollback target.
@@ -158,20 +158,20 @@ Preserved by **both**, and printed in full by the dry run:
   without deploying. A reset that emptied it would produce a machine that does
   not boot or cannot be logged into, and the thing that would undo it is what
   it broke.
-* **Nothing under `/var/lib/apex`.** The package extension, the model store and
-  the boot-health records each have a program that owns them (`apex-pkg`,
-  `apex ai`, `apex-boot-health`). Deleting `pkg/state.json` under a *merged*
-  system extension leaves `/usr` carrying packages APEX can no longer name,
+* **Nothing under `/var/lib/rime`.** The package extension, the model store and
+  the boot-health records each have a program that owns them (`rime-pkg`,
+  `rime ai`, `rime-boot-health`). Deleting `pkg/state.json` under a *merged*
+  system extension leaves `/usr` carrying packages Rime can no longer name,
   which is worse than the state being left. The machine-level operations are
-  the verbs that already exist, and `apex recover status` names them.
-* **Not the capsule records under `~/.local/share/apex/env`.** Each one names a
+  the verbs that already exist, and `rime recover status` names them.
+* **Not the capsule records under `~/.local/share/rime/env`.** Each one names a
   real rootless container. Deleting the record orphans the container:
-  `apex env list` would show nothing while `podman ps -a` still shows them, and
-  APEX would have lost the name it needs to remove them. `apex env rm` is the
+  `rime env list` would show nothing while `podman ps -a` still shows them, and
+  Rime would have lost the name it needs to remove them. `rime env rm` is the
   verb for that.
 * **Nothing under `~/.config/hypr` is ever *deleted*.** The reset **truncates**
-  the generated modules `apex/input.lua`, `apex/monitors.lua` and
-  `apex/shell-keybinds.lua` to the "no overrides" state, and preserves
+  the generated modules `rime/input.lua`, `rime/monitors.lua` and
+  `rime/shell-keybinds.lua` to the "no overrides" state, and preserves
   everything else in that directory. A one-line edit to a live compositor
   config has already cost this project a desktop once; `AGENTS.md`'s "Editing a
   live machine's configuration" rules exist because of it.
@@ -183,34 +183,34 @@ Preserved by **both**, and printed in full by the dry run:
   because "empty" is a state the compositor understands and one this code can
   produce without deciding which of the user's files it may remove.
 
-  `apex/user-overrides.lua` is the exception in the other direction: it is where
-  `apex-hypr-migrate` puts a user's own hand-written hyprlang after converting
+  `rime/user-overrides.lua` is the exception in the other direction: it is where
+  `rime-hypr-migrate` puts a user's own hand-written hyprlang after converting
   it, so it is a preserved landmark and not a reset target at all.
 
 ### The other protections
 
 * **It refuses to run as root.** Root's home is not the user's, so
-  `sudo apex recover reset` would reset root's desktop and leave the user's
+  `sudo rime recover reset` would reset root's desktop and leave the user's
   as it is, while reporting success.
 * **`$HOME` is validated before anything is resolved under it**: absolute, an
   existing directory, at least two components deep, and never `/`, `/home`,
   `/var/home`, `/usr`, `/etc` or `/var`.
 * **Every target is re-resolved before it is touched.** The final component
   must not be a symlink (`realpath` on a symlink returns its *target*, so a
-  prefix check alone would resolve `~/.cache/apex-shell` → `$HOME` and conclude
+  prefix check alone would resolve `~/.cache/rime-shell` → `$HOME` and conclude
   `$HOME` is inside itself), the parent is canonicalised, and the rebuilt path
   must be inside the home and must not be the home. A single refusal aborts the
   **whole** reset. It is all-or-nothing because a reset that removed four paths
   and then refused the fifth leaves a state nobody planned.
 * **Everything removed is copied aside first**, to
-  `~/apex-reset-backup-<timestamp>`, except caches. `AGENTS.md`'s first rule
+  `~/rime-reset-backup-<timestamp>`, except caches. `AGENTS.md`'s first rule
   about touching a live config is to back it up, and that rule is what turned
   an earlier outage into a two-minute restore.
 * **Preserved landmarks are re-checked afterwards.** Every landmark that
   existed before the commit must still exist after it. Grepping for what you
   deleted cannot detect what you deleted *as well*; this check can.
 * **It refuses to start if the provisioner is missing.** Removing the files
-  APEX Shell needs with no way to put them back is worse than the state being
+  Rime Shell needs with no way to put them back is worse than the state being
   left. `--no-reprovision` takes the deletion alone, deliberately.
 
 ### What a full factory reset is, and why it is not this verb
@@ -220,13 +220,13 @@ pristine, disks repartitioned) is **a reinstall**, and the installer is what
 does it. Nothing on a running system can recreate `/etc` from the image without
 deploying, and deleting user accounts from a running system is not a CLI verb.
 
-`apex recover reset --scope user` is the largest reset APEX will perform, and
-it is scoped to one account's APEX-owned state. Saying so is better than a
+`rime recover reset --scope user` is the largest reset Rime will perform, and
+it is scoped to one account's Rime-owned state. Saying so is better than a
 `[Factory reset]` button that stops somewhere the user cannot predict.
 
 ## Recovery routes
 
-`apex recover status` reports which ways back into a working system exist on
+`rime recover status` reports which ways back into a working system exist on
 *this* machine. They differ from machine to machine, and the report says which
 apply.
 
@@ -235,7 +235,7 @@ apply.
 | previous deployment | two or more deployments under `/ostree/deploy` |
 | `rescue.target` | the kernel command line is editable at the boot menu |
 | boot counting | `LoaderBootCountPath` is set: the opt-in systemd-boot path |
-| disposable environment | `/usr/libexec/apex-disposable` is installed |
+| disposable environment | `/usr/libexec/rime-disposable` is installed |
 | recovery boot entry | **never**; see below |
 | installer media | reported as *unknown*, because a running system cannot tell |
 
@@ -246,9 +246,9 @@ signature worth having. On the opt-in systemd-boot+UKI path that route
 therefore does not exist, on exactly the machines that are hardest to get
 into, and reporting it on every machine would be a false claim there.
 
-### APEX ships no recovery boot entry, and that is deliberate
+### Rime ships no recovery boot entry, and that is deliberate
 
-§19 asks for "a recovery boot entry **or** environment". APEX ships the
+§19 asks for "a recovery boot entry **or** environment". Rime ships the
 environment and documents the entry as an operator procedure. The reason is
 `AGENTS.md`'s boot-path rules, which are binding:
 
@@ -258,12 +258,12 @@ environment and documents the entry as an operator procedure. The reason is
 
 Creating a genuine recovery *entry* means one of `bootctl install`,
 `efibootmgr -c`, a file under `/boot/loader/entries`, or `grub2-mkconfig`
-against a live `grub.cfg`. Rule 1 forbids every one of those on a real APEX
+against a live `grub.cfg`. Rule 1 forbids every one of those on a real Rime
 host, and `tests/test-boot-v2.sh` scans every shipped unit and helper for those
 commands on executable lines and **fails the build** if one appears. Scripting
 it would have broken an existing CI gate as well as the contract.
 
-`apex recover status` therefore reports this route as `available: false` with
+`rime recover status` therefore reports this route as `available: false` with
 the reason, rather than omitting it. The operator procedure, for someone who
 wants one:
 
@@ -286,25 +286,25 @@ sudo grub2-mkconfig -o /boot/grub2/grub.cfg
 Nothing in this repository runs those commands for you, and a test checks
 that.
 
-## APEX Safe Graphics
+## Rime Safe Graphics
 
 Roadmap P2-018. When the desktop does not paint (a GPU driver that stopped
-working after an update, a compositor configuration that will not parse, APEX
+working after an update, a compositor configuration that will not parse, Rime
 Shell dying on startup), Safe Graphics is a minimal desktop that comes up
 anyway, on the CPU, with the tools to find out what happened.
 
 It is a labwc session started as:
 
 ```
-labwc -C /usr/share/apex/safe-graphics
+labwc -C /usr/share/rime/safe-graphics
 ```
 
 That flag names a config **directory**, not a config file, and it is the whole
 of the mechanism. labwc reads `rc.xml`, `autostart`, `environment` and
 `menu.xml` from there and never opens `~/.config/labwc`. That matters more on
-this system than elsewhere, because APEX itself writes into the user's copy:
-`apex-input-apply` splices a `<libinput>` element into `rc.xml` with
-ElementTree, and `apex-labwc-keybinds` generates the keybind block. labwc falls
+this system than elsewhere, because Rime itself writes into the user's copy:
+`rime-input-apply` splices a `<libinput>` element into `rc.xml` with
+ElementTree, and `rime-labwc-keybinds` generates the keybind block. labwc falls
 back to its built-in defaults **silently** on a malformed `rc.xml`, so a
 recovery session that read the user's copy would inherit whatever broke the
 last one and say nothing about it.
@@ -317,15 +317,15 @@ reach.
 
 ### Getting into it
 
-**From the greeter.** "APEX Safe Graphics" is in the session list.
+**From the greeter.** "Rime Safe Graphics" is in the session list.
 
 **The machine offers it, after three failed starts.** You do not have to know
-about this route. `/usr/libexec/apex-session-watchdog` counts: the greeter
+about this route. `/usr/libexec/rime-session-watchdog` counts: the greeter
 writes down what it launched, and the next greeter to start asks how long ago
 that was. A session that did not last 45 seconds did not get anywhere. After
 three of those in a row for the same session, the picker comes up already on
-APEX Safe Graphics, with a line above the password box saying *Your desktop did
-not start — APEX Safe Graphics selected*.
+Rime Safe Graphics, with a line above the password box saying *Your desktop did
+not start — Rime Safe Graphics selected*.
 
 That line is a suggestion, and the machine does not force it:
 
@@ -338,7 +338,7 @@ That line is a suggestion, and the machine does not force it:
   choice survives the visit, so once the machine is fixed you land back on the
   desktop you were using rather than on the rescue one.
 - **Success clears the count; recovery does not.** Any ordinary session that
-  survives 45 seconds wipes it. A working trip through APEX Safe Graphics
+  survives 45 seconds wipes it. A working trip through Rime Safe Graphics
   clears nothing, because recovery working says nothing about whether the normal
   desktop was fixed. After you fix the machine, pick your desktop once and the
   notice is gone.
@@ -349,13 +349,13 @@ To clear the count by hand (the `greetd` user owns the state, so this needs
 root):
 
 ```sh
-sudo /usr/libexec/apex-session-watchdog reset
+sudo /usr/libexec/rime-session-watchdog reset
 ```
 
 and to see what it believes now, which needs nothing:
 
 ```sh
-/usr/libexec/apex-session-watchdog status
+/usr/libexec/rime-session-watchdog status
 ```
 
 **What it does not catch.** It detects a session that *dies* within 45
@@ -368,13 +368,13 @@ because a heuristic could put a working machine into the rescue session.
 **From a virtual console.** `Ctrl+Alt+F2`, log in, and run:
 
 ```sh
-apex-safe-graphics
+rime-safe-graphics
 ```
 
 The virtual console is the route that works when nothing paints. The greeter is
 itself a wlroots compositor on VT 1, so a machine with no working GL may never
 paint the session picker at all, and a recovery desktop reachable only through
-a screen that does not come up is no recovery desktop. Nothing else in APEX
+a screen that does not come up is no recovery desktop. Nothing else in Rime
 advertises the virtual consoles; this document does.
 
 There is no route through a recovery boot entry, for the reason the section
@@ -385,18 +385,18 @@ variable, and `tests/test-boot-v2.sh` fails the build if one tries.
 
 | | normal session | safe graphics |
 | --- | --- | --- |
-| configuration | `~/.config/labwc`, seeded and then yours | `/usr/share/apex/safe-graphics`, read-only |
+| configuration | `~/.config/labwc`, seeded and then yours | `/usr/share/rime/safe-graphics`, read-only |
 | renderer | GPU | `WLR_RENDERER=pixman`, `LIBGL_ALWAYS_SOFTWARE=1`, llvmpipe |
 | driver selection | whatever the environment says | `__GLX_VENDOR_LIBRARY_NAME`, `GBM_BACKEND`, `MESA_LOADER_DRIVER_OVERRIDE` **unset** |
-| clients | APEX Shell, your autostart | one terminal |
-| menu | APEX Shell's, plain right-click | the recovery menu, plain right-click |
+| clients | Rime Shell, your autostart | one terminal |
+| menu | Rime Shell's, plain right-click | the recovery menu, plain right-click |
 
 `WLR_BACKENDS` is the one variable the session does **not** set. Unset, wlroots
 picks DRM for a person at a keyboard, and a test can ask for `headless` and get
 it, which is the only way to exercise this session without taking somebody's
 display away.
 
-The autostart does not start APEX Shell. The shell is one of the
+The autostart does not start Rime Shell. The shell is one of the
 things that can be broken, and a recovery session that started it would fail in
 the same way as the session the user left.
 
@@ -404,18 +404,18 @@ the same way as the session the user left.
 
 Right-click anywhere:
 
-* **What is wrong**: `apex recover status`, the eight-row report above.
-* **Full health report**: `apex doctor`.
-* **Collect diagnostics**: `apex-safe-graphics diagnose`, which writes
-  `apex-diagnostics-<date>.tar.gz` into your home directory and prints the
+* **What is wrong**: `rime recover status`, the eight-row report above.
+* **Full health report**: `rime doctor`.
+* **Collect diagnostics**: `rime-safe-graphics diagnose`, which writes
+  `rime-diagnostics-<date>.tar.gz` into your home directory and prints the
   path. It carries the boot journal at warning and above, the user journal,
-  `apex recover status --json`, `apex doctor --json`, `lspci -k` and
+  `rime recover status --json`, `rime doctor --json`, `lspci -k` and
   `/proc/modules`. **No file in it is ever empty**: a step that could not run
   writes `could-not-run: …` into its own file, because an empty file and a
   refused command read the same and only one of them means there was nothing to
   report.
-* **Roll back to the previous deployment**: `sudo apex rollback`. This is also
-  the driver rollback: a graphics driver on APEX is image content, so the
+* **Roll back to the previous deployment**: `sudo rime rollback`. This is also
+  the driver rollback: a graphics driver on Rime is image content, so the
   previous deployment *is* the previous driver.
 * **Files** and **Network**: Thunar and `nmtui`.
 * **Log out**, back to the greeter.
@@ -427,35 +427,35 @@ features would be a second desktop to keep working.
 ### Checking it without starting it
 
 ```sh
-apex-safe-graphics check
+rime-safe-graphics check
 ```
 
 This prints the config directory, the compositor, the terminal it would open
 and the renderer, or fails naming what is missing. A session that cannot start
 exits non-zero rather than showing a black screen, and greetd then re-displays
-the greeter: the same fail-safe `apex-gaming-session` takes.
+the greeter: the same fail-safe `rime-gaming-session` takes.
 
 ## Disposable environments
 
-`apex disposable` is a **mode of APEX Capsules**, not a second environment
+`rime disposable` is a **mode of Rime Capsules**, not a second environment
 mechanism. Every disposable environment is an ordinary capsule created through
-`/usr/libexec/apex-env`, so `apex env list` sees it and `podman ps` sees it.
+`/usr/libexec/rime-env`, so `rime env list` sees it and `podman ps` sees it.
 It adds three things a capsule does not have: a home that is not yours, an
 explicit copy boundary, and a teardown.
 
 ```bash
-apex disposable plan --copy-in ~/src/thing --copy-out ~/results
-apex disposable run  --copy-in ~/src/thing --copy-out ~/results -- make test
-apex disposable run --git https://github.com/someone/unknown-project
-apex disposable list       # normally empty: a run deletes its own
-apex disposable purge      # removes ones a lost-power run left behind
+rime disposable plan --copy-in ~/src/thing --copy-out ~/results
+rime disposable run  --copy-in ~/src/thing --copy-out ~/results -- make test
+rime disposable run --git https://github.com/someone/unknown-project
+rime disposable list       # normally empty: a run deletes its own
+rime disposable purge      # removes ones a lost-power run left behind
 ```
 
 ### It is not a security boundary, and `plan` says so
 
 distrobox mounts the host's root filesystem at `/run/host` inside **every**
 capsule. That is how `distrobox-export` reaches back out to write a `.desktop`
-file into the host's home, which `apex-env` documents and depends on. No
+file into the host's home, which `rime-env` documents and depends on. No
 distrobox flag removes it. A program in a disposable capsule can read and write
 your files through `/run/host`, as your own uid.
 
@@ -466,12 +466,12 @@ it is **not** satisfied on the axis of containing hostile code.
 
 For confinement (`$HOME` masked, `~/.ssh` unreachable, the system bus
 unreachable, the environment cleared and rebuilt from an allowlist), the
-mechanism that exists and fails closed is the agent sandbox (`apex agent`,
-`apexd/apex-agent-core/src/sandbox.rs`). The two compose: an agent session
+mechanism that exists and fails closed is the agent sandbox (`rime agent`,
+`rimed/rime-agent-core/src/sandbox.rs`). The two compose: an agent session
 confined by that sandbox can be started from inside a disposable capsule, and
 then the environment is thrown away as well.
 
-`apex disposable plan` prints all of this before anything is created, and the
+`rime disposable plan` prints all of this before anything is created, and the
 image build asserts that `--help` still contains "not a security boundary".
 
 ### The copy boundary
@@ -516,18 +516,18 @@ Both guards are mutation-tested. Removing the symlink check fails one assertion
 and the canary still survives, because the equality check catches it on its
 own; removing both fails six, including "THE CANARY IS GONE".
 
-The disposable root is `$XDG_STATE_HOME/apex/disposable`, **not** `/tmp`. This
+The disposable root is `$XDG_STATE_HOME/rime/disposable`, **not** `/tmp`. This
 repository has already had `/tmp` wiped mid-session
 (`docs/p1-progress.md`), and a sweep between `run` and its teardown would take
 the one directory the user asked to keep.
 
-## `apex doctor --json`
+## `rime doctor --json`
 
-This is §19's "expose `apex doctor` results graphically", from the OS side:
+This is §19's "expose `rime doctor` results graphically", from the OS side:
 the checks the text form prints, in the shape a UI renders.
 
 ```json
-{ "checks": [ {"ok": true, "check": "apexd running (owns org.apexos.Apexd1)"} ],
+{ "checks": [ {"ok": true, "check": "rimed running (owns org.rimeos.Rimed1)"} ],
   "passed": 14, "warned": 3, "total": 17 }
 ```
 
@@ -536,7 +536,7 @@ implementations would disagree, and the one the user reads would be the one
 wired to nothing. The suite asserts that the JSON and the text report the same
 count.
 
-**No severity field.** `apex doctor`'s own comment says a WARN is information
+**No severity field.** `rime doctor`'s own comment says a WARN is information
 rather than a fault: a laptop with no ACPI `platform_profile` is not broken.
 Adding a severity would mean inventing a judgement the checks do not make, and
 a UI painting an invented judgement red is worse than one showing two states.
@@ -550,25 +550,25 @@ a UI painting an invented judgement red is worse than one showing two states.
   operator procedure.
 * **A full factory reset: not shipped, deliberately.** Accounts, `/etc` and
   partitions belong to the installer. The largest reset here is scoped to one
-  account's APEX-owned state, and `apex recover reset --scope user` prints
+  account's Rime-owned state, and `rime recover reset --scope user` prints
   exactly where it stops.
 * **"Open normally / Open isolated / Open disposable" is two modes, not
   three.** "Open normally" is the host's default handler and "Open disposable"
-  is `apex disposable run`. There is no generic *confined-open* verb: the
-  bubblewrap sandbox in `apex-agent-core` confines **agent sessions**, and
+  is `rime disposable run`. There is no generic *confined-open* verb: the
+  bubblewrap sandbox in `rime-agent-core` confines **agent sessions**, and
   exposing it as a general "run this one program confined" command is a real
   feature that does not exist yet. Offering a three-item menu where one item
   does nothing different would be worse than reporting the gap.
 * **No GUI in THIS repository.** §19's action list is a UI, and the OS side of
-  it is `apex recover status --json` plus `apex doctor --json`. Nothing here
+  it is `rime recover status --json` plus `rime doctor --json`. Nothing here
   writes QML.
 
-  That sentence used to end "APEX Shell renders them", which was a plan rather
-  than a fact: the consumer this `--help` text advertises as "safe for APEX
-  Settings to poll" did not exist on any apex-shell branch. It does now.
+  That sentence used to end "Rime Shell renders them", which was a plan rather
+  than a fact: the consumer this `--help` text advertises as "safe for Rime
+  Settings to poll" did not exist on any rime-shell branch. It does now.
   `src/services/RecoveryService.qml` polls those two verbs and nothing else,
   and `src/services/config_tab/pages/RecoveryPage.qml` is the Recovery page
-  under System in the Nexus (APEX Settings, `src/nexus/PageRegistry.qml`), which
+  under System in the Nexus (Rime Settings, `src/nexus/PageRegistry.qml`), which
   opens from the Dashboard's Settings tab. The row ids above are what it keys
   on, which is what makes them the compatibility surface this document already
   said they were.

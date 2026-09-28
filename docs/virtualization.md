@@ -1,17 +1,17 @@
-# Virtual machines on APEX
+# Virtual machines on Rime
 
-`apex vm` is APEX's virtualization UX: full guests with their own kernel,
+`rime vm` is Rime's virtualization UX: full guests with their own kernel,
 rootless, headless, and enforcing Secure Boot by default.
 
 This page records what is built and what is proven. The last section lists
 what is **not** built, so a list of six flows cannot hide the ones that are
 missing.
 
-## Why `apex vm` and not `apex env`
+## Why `rime vm` and not `rime env`
 
 They solve different problems and share no state.
 
-| | `apex env` (capsule) | `apex vm` |
+| | `rime env` (capsule) | `rime vm` |
 |---|---|---|
 | kernel | the host's | its own |
 | your home | mounted inside | not reachable |
@@ -31,13 +31,13 @@ the line here: an out-of-tree kernel module must be built and signed into the
 image, because it cannot be added at runtime under Secure Boot, and userspace
 must **not** be baked in. KVM needs no out-of-tree module at all: `kvm`,
 `kvm_intel` and `kvm_amd` are in-tree in the signed kernel and already on every
-APEX machine.
+Rime machine.
 
 The engine ships in the image and the stack arrives on demand:
 
 ```
-apex vm doctor
-sudo apex install qemu-kvm libvirt-daemon-kvm libvirt-client edk2-ovmf \
+rime vm doctor
+sudo rime install qemu-kvm libvirt-daemon-kvm libvirt-client edk2-ovmf \
                  swtpm swtpm-tools virtiofsd mtools dosfstools
 ```
 
@@ -48,11 +48,11 @@ reading the package list did not:
 * **`swtpm-tools`** carries `swtpm_setup`, which libvirt runs to create a
   domain's TPM state. On Fedora 43 `swtpm` neither requires nor recommends it
   and does not ship it. Without it a `--tpm` domain defines cleanly and then
-  fails at start. `apex vm doctor` probes it as its own row.
-* **`mtools`** and **`dosfstools`** are what `apex vm run` builds its volumes
+  fails at start. `rime vm doctor` probes it as its own row.
+* **`mtools`** and **`dosfstools`** are what `rime vm run` builds its volumes
   with (`mkfs.vfat`) and reads the egress volume back with (`mcopy`).
 
-`apex vm doctor` probes each piece and prints that install line when something
+`rime vm doctor` probes each piece and prints that install line when something
 is missing. Every other verb refuses with the same text **before** creating
 anything, instead of failing halfway through defining a domain.
 
@@ -86,12 +86,12 @@ That leaves two network modes:
 
 ## Headless, always
 
-`apex vm` has no viewer, no SPICE, no VNC and no `--graphics`. The console is a
+`rime vm` has no viewer, no SPICE, no VNC and no `--graphics`. The console is a
 serial port written to a file, plus a pty:
 
 ```
-apex vm console NAME          # attach; Ctrl-] detaches
-apex vm console NAME --log    # print what it has written so far
+rime vm console NAME          # attach; Ctrl-] detaches
+rime vm console NAME --log    # print what it has written so far
 ```
 
 A VM viewer is a second product (a window, a clipboard channel, a USB
@@ -110,9 +110,9 @@ it stands:
 ### create
 
 ```
-apex vm create dev --memory 4096 --cpus 4 --disk 40G
-apex vm start dev
-apex vm console dev
+rime vm create dev --memory 4096 --cpus 4 --disk 40G
+rime vm start dev
+rime vm console dev
 ```
 
 Secure Boot enforcing and an emulated TPM 2.0 by default. `--import FILE`
@@ -121,7 +121,7 @@ used as a backing file. A backing file would make the VM a delta over a path
 the user may move. A plain copy fails too: the domain declares
 `<driver type='qcow2'/>`, and a raw image would define cleanly and then fail at
 start with qemu refusing a magic number. Converting also gives an imported disk
-the internal snapshots `apex vm snapshot` needs, which a raw image cannot hold
+the internal snapshots `rime vm snapshot` needs, which a raw image cannot hold
 at all.
 
 ### Secure Boot
@@ -169,8 +169,8 @@ guest expects. libvirt starts and stops `swtpm` with the domain.
 ### snapshot
 
 ```
-apex vm snapshot create dev before-update
-apex vm snapshot revert dev before-update
+rime vm snapshot create dev before-update
+rime vm snapshot revert dev before-update
 ```
 
 The disk **and** the UEFI variable store, together. Snapshot implementations
@@ -178,7 +178,7 @@ often get that pairing wrong: the variable store holds the guest's boot entries
 and enrolled keys, so restoring the disk without it leaves a firmware pointing
 at a boot entry the disk no longer has.
 
-`apex vm create` writes the variable store as **qcow2** for that reason. libvirt
+`rime vm create` writes the variable store as **qcow2** for that reason. libvirt
 refuses an internal snapshot of a domain whose nvram is raw pflash (a raw image
 has nowhere to put one), and that refusal reads as a snapshot bug when the
 cause is the firmware format.
@@ -186,8 +186,8 @@ cause is the firmware format.
 ### share
 
 ```
-apex vm create dev --share /srv/data:data --share-ro /srv/reference:ref
-apex vm share add dev /srv/more:more
+rime vm create dev --share /srv/data:data --share-ro /srv/reference:ref
+rime vm share add dev /srv/more:more
 ```
 
 virtiofs, not 9p. In the guest:
@@ -208,14 +208,14 @@ The element people forget is the memory backing:
 A vhost-user filesystem maps the guest's RAM into `virtiofsd`. With anonymous
 private memory there is nothing to map, and qemu exits with "unable to map
 backing store for guest RAM", which reads as a memory problem. The engine emits
-the element only when you configure a share, and `apex vm share add`
+the element only when you configure a share, and `rime vm share add`
 **refuses** on a domain created without one instead of defining a device that
 would fail at start.
 
 ### USB
 
 ```
-apex vm usb attach dev 046d:c52b
+rime vm usb attach dev 046d:c52b
 ```
 
 `VENDOR:PRODUCT` is what `lsusb` prints. The engine checks `lsusb` first,
@@ -223,7 +223,7 @@ because libvirt's "no such device" names a bus and device number the user never
 typed. It **refuses when `lsusb` is not installed at all** instead of skipping
 the check: "the question could not be asked" does not mean "the answer is yes",
 and a `<hostdev>` for a device that is not there gives a domain that defines
-and then will not start. `apex vm create --usb` makes the same check; it used
+and then will not start. `rime vm create --usb` makes the same check; it used
 not to, so the same device reached through two verbs got two answers.
 
 Two emitted elements are easy to miss:
@@ -231,33 +231,33 @@ Two emitted elements are easy to miss:
 controller has no free port for a hostdev and the failure reads as a problem
 with the device; and `managed='yes'` on the `<hostdev>`, which makes libvirt
 detach the device from the host driver and give it back afterwards. While the
-VM holds the device the **host cannot use it**, and `apex vm usb attach` says
+VM holds the device the **host cannot use it**, and `rime vm usb attach` says
 so before it happens.
 
 ## Everything else the verb does
 
 ```
-apex vm list            what exists, and the state libvirt says each one is in
-apex vm list --json     the same, for a script
-apex vm info dev        what the VM was made from — the record, not the domain
-apex vm stop dev        ask the guest to shut down
-apex vm stop dev --force   pull the plug
-apex vm rm dev          undefine it and delete its disk
-apex vm rm dev --keep-disk   undefine it and keep the qcow2
+rime vm list            what exists, and the state libvirt says each one is in
+rime vm list --json     the same, for a script
+rime vm info dev        what the VM was made from — the record, not the domain
+rime vm stop dev        ask the guest to shut down
+rime vm stop dev --force   pull the plug
+rime vm rm dev          undefine it and delete its disk
+rime vm rm dev --keep-disk   undefine it and keep the qcow2
 ```
 
-`apex vm list` reports a VM whose daemon cannot be reached as `unknown`, never
+`rime vm list` reports a VM whose daemon cannot be reached as `unknown`, never
 as `shut off`. "The question could not be asked" and "the answer is no" are
 different answers, and this repository has shipped the confusion between them
 before.
 
-`apex vm info` reads the record written at create time: memory, vCPUs, whether
+`rime vm info` reads the record written at create time: memory, vCPUs, whether
 Secure Boot is enforcing, whether there is a TPM, the network mode, the shares
 and the USB devices. It reads a file and not `virsh dumpxml`, because "does
 this VM enforce Secure Boot" is the question asked six months later, and
 `dumpxml` answers it only while the domain is still defined.
 
-`apex vm rm` undefines with `--nvram`, so a VM recreated with the same name
+`rime vm rm` undefines with `--nvram`, so a VM recreated with the same name
 does not inherit the old one's enrolled keys. Four fences guard the recursive
 removal of the VM's directory: the name must match a narrow pattern, the final
 path component must not be a symlink, `realpath` resolves the path, and the
@@ -267,14 +267,14 @@ removing a thing.
 ## Disposable VMs for agent tasks
 
 ```
-apex vm run --image guest.qcow2 \
+rime vm run --image guest.qcow2 \
     --copy-in /home/u/src \
     --egress report.json --egress-to /home/u/results \
     -- ./build-and-report.sh
 ```
 
-`apex vm run` creates a VM, runs one task in it, and deletes the whole thing:
-domain, disks and volumes. It is a stronger boundary than `apex disposable`,
+`rime vm run` creates a VM, runs one task in it, and deletes the whole thing:
+domain, disks and volumes. It is a stronger boundary than `rime disposable`,
 which is a container that can reach the user's home through `/run/host` and
 says so at length. Here the guest is another kernel with no view of the host
 filesystem.
@@ -317,13 +317,13 @@ root, because teardown deletes that tree: every file would be reported copied
 and none would survive.
 
 **A disposable VM has no network and no flag to give it one.** The engine
-refuses `apex vm run --network` with that reason instead of ignoring it: a
+refuses `rime vm run --network` with that reason instead of ignoring it: a
 disposable VM exists to run something the user does not trust, and an outbound
 interface would make the file-egress boundary decorative.
 
 ### The guest contract
 
-`apex vm run` does **not** build a guest image and does not install anything
+`rime vm run` does **not** build a guest image and does not install anything
 into one. `--image` is required and the image must:
 
 * mount the filesystem labelled `APEXIN` and run `task.sh` from it;
@@ -338,7 +338,7 @@ have.
 
 Two suites prove different things.
 
-`tests/test-apex-vm.sh` drives the shipped engine with recording stubs for
+`tests/test-rime-vm.sh` drives the shipped engine with recording stubs for
 `virsh`, `qemu-img`, `mkfs.vfat`, `mcopy`, `lsusb`, `swtpm` and `swtpm_setup`
 on `$PATH` and asserts the exact argv and the exact XML. That is the claim
 "the engine emits the right domain", and it runs everywhere.
@@ -351,7 +351,7 @@ verdict (`tests/chaos/lib.sh`) with one arm renamed: a flow that could not be
 exercised reports `could-not-run` **with a reason**, never a pass.
 
 ```
-podman build -t apex-bootlab bootlab/
+podman build -t rime-bootlab bootlab/
 ./tests/vmlab/run-vmlab                 # all seven
 ./tests/vmlab/run-vmlab --flow share    # one
 ./tests/vmlab/run-vmlab --no-kvm        # the could-not-run arm, on purpose
@@ -366,7 +366,7 @@ the lab also produced.
 | flow | verdict | what the guest or the host observed |
 |---|---|---|
 | create | verified (13) | libvirt defined and started it; the guest reached userspace, got the command line the UKI was *signed* with, and powered itself off; `rm` left no domain and no directory |
-| Secure Boot | verified (8) | three boots of the same signed UKI: against the APEX variable store it boots and reports `SecureBoot=1 SetupMode=0`; against libvirt's own `enrolled-keys` store (Microsoft's db) the firmware **refuses it**; against a key-free store it boots in setup mode, which shows the refusal was about keys |
+| Secure Boot | verified (8) | three boots of the same signed UKI: against the Rime variable store it boots and reports `SecureBoot=1 SetupMode=0`; against libvirt's own `enrolled-keys` store (Microsoft's db) the firmware **refuses it**; against a key-free store it boots in setup mode, which shows the refusal was about keys |
 | TPM | verified (5) | `/sys/class/tpm/tpm0` with `tpm_version_major=2` inside the guest, and **absent** in a `--no-tpm` guest |
 | snapshot | verified (10) | a tally the guest keeps on its own ESP: boot (1), snapshot, boot (2), revert, boot, and the tally reads 2, not 3. `qemu-img snapshot -l` shows the snapshot in **both** `disk.qcow2` and `nvram.qcow2` |
 | share | verified (16) | two virtiofs devices; the guest mounts both tags, reads the host's file, writes through the read-write one so the file appears **on the host**, and is refused on the read-only one |
@@ -400,18 +400,18 @@ Two caveats, written here and not only in the verdict file:
   this as `could-not-run` with that reason.
 * **This verb has no VM viewer and will not get one.**
 * **`--network bridge` is refused**, and nothing implements it. A guest that
-  other machines can reach needs `qemu:///system`, and `apex vm` will not put a
+  other machines can reach needs `qemu:///system`, and `rime vm` will not put a
   host bridge on somebody's laptop on their behalf.
-* **No guest image catalogue.** `apex vm create` makes a blank disk or imports
-  one you already have; it does not download Fedora for you. `apex vm run`
+* **No guest image catalogue.** `rime vm create` makes a blank disk or imports
+  one you already have; it does not download Fedora for you. `rime vm run`
   likewise requires an image that already satisfies the guest contract above.
-* **`apex vm run` does not put an agent CLI into a guest.** Running `claude` or
+* **`rime vm run` does not put an agent CLI into a guest.** Running `claude` or
   `codex` inside a disposable VM needs a guest image that carries it, and
   building that image is not part of this verb. The verb builds and proves the
   boundary: the volumes, the nomination-only egress, and the teardown.
 * **There is no VM-tier browser capsule.** P2-012 wanted one and took the
   container-less sandbox instead, for three reasons `docs/browser-capsule.md`
-  records: no guest image carries a browser either, `apex vm run` refuses
+  records: no guest image carries a browser either, `rime vm run` refuses
   `--network` on purpose and a browser with no network is not a browser, and
   the virt stack stays out of the image on purpose. That verb reused the rule
   and not the machinery: the nomination-only egress loop, default-deny at both
@@ -419,7 +419,7 @@ Two caveats, written here and not only in the verdict file:
 * **No live migration, no CPU pinning, no PCI/GPU passthrough.**
 * **The lab does not exercise virtiofsd's own namespace sandbox**; only a real
   machine does. See the caveat above.
-* **The lab boots guests that are shut off.** `apex vm snapshot` on a *running*
-  domain, `apex vm stop` over ACPI (the lab's guests power themselves off, so
+* **The lab boots guests that are shut off.** `rime vm snapshot` on a *running*
+  domain, `rime vm stop` over ACPI (the lab's guests power themselves off, so
   `shutdown` is never sent), `usb detach` and `share remove` are argv-tested
   and not live-tested.

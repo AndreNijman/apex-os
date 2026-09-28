@@ -6,8 +6,8 @@
 #  a file nobody remembered to add, and on 2026-09-12 it did not: 144 shell
 #  scripts existed under tests/ and files/, 38 were named, and 106 were not —
 #  including four suites landed in the previous two days
-#  (test-apex-user.sh, test-apex-lid.sh, test-apex-lid-live.sh,
-#  test-apex-permissions.sh) and both of the checkers written to catch exactly
+#  (test-rime-user.sh, test-rime-lid.sh, test-rime-lid-live.sh,
+#  test-rime-permissions.sh) and both of the checkers written to catch exactly
 #  this species of gap. That is the same defect as a CI path selector that
 #  names nothing: the step runs, reports success, and inspects nothing.
 #
@@ -35,7 +35,7 @@ command -v shellcheck >/dev/null || { echo "FATAL: shellcheck is not installed";
 # failure would park it on the known-failing list for ever.
 #
 # `kernel` was added 2026-09-20 for the third time this file has had to learn
-# its own lesson. APEX started building its own kernel, and kernel/ acquired
+# its own lesson. Rime started building its own kernel, and kernel/ acquired
 # btf-xcheck.sh — which is COPYed into the kernel build image and is one of the
 # two readers that decide whether a kernel may ship — plus three spike scripts.
 # Not one of them was linted by anything, because the roots were still the
@@ -54,8 +54,8 @@ command -v shellcheck >/dev/null || { echo "FATAL: shellcheck is not installed";
 # script the image installs with `COPY --chmod=0755` does not need to be
 # executable in the repo to be executable on the machine, so ten shipped shell
 # scripts had a shebang, ran on every boot or on every NetworkManager event, and
-# were linted by nobody — among them files/system/libexec/apex-env,
-# apex-session-select, apex-shell-autostart and the safe-graphics autostart. All
+# were linted by nobody — among them files/system/libexec/rime-env,
+# rime-session-select, rime-shell-autostart and the safe-graphics autostart. All
 # ten were clean at this severity, so this cost nothing either, which is the
 # point: the gap is only ever free until it is not. Discovery is now the shebang
 # alone. It reads the first two bytes of ~335 files and takes about a second.

@@ -1,7 +1,7 @@
 {
     "$schema": "https://github.com/fastfetch-cli/fastfetch/raw/dev/doc/json_schema.json",
-    // APEX-OS system fastfetch config (apex-logs 33-fastfetch-terminal.md).
-    // Invoked from /usr/share/apex/shell/greeting.sh (sourced by both /etc/bashrc
+    // Rime OS system fastfetch config (rime-logs 33-fastfetch-terminal.md).
+    // Invoked from /usr/share/rime/shell/greeting.sh (sourced by both /etc/bashrc
     // and the seeded ~/.zshrc) as `fastfetch --config /etc/fastfetch/config.jsonc
     // --logo-color-1 <white|black> [--color <accent>]` so the logo colour tracks
     // the colour scheme and the accent tracks the wallpaper.
@@ -10,10 +10,10 @@
     // never a literal escape, because that is the one thing `--color` can
     // override at runtime. The value set here is only what a session shows
     // before matugen has extracted a palette from a wallpaper, so it stays the
-    // APEX brand chartreuse.
+    // Rime brand chartreuse.
     "logo": {
         "type": "file",
-        "source": "/etc/fastfetch/apex-logo.txt",
+        "source": "/etc/fastfetch/rime-logo.txt",
         "padding": { "top": 0, "left": 2, "right": 3 }
     },
     "display": {
@@ -30,7 +30,7 @@
         // Kernel: `uname -r` is 7.1.3-cachyos1.fc43.x86_64 — the CachyOS COPR
         // build id is compiled into the kernel package and cannot be renamed
         // without building the kernel from source. Show only the upstream
-        // version so the greeting stays APEX-branded; the full string is still
+        // version so the greeting stays Rime-branded; the full string is still
         // one `uname -r` away for anyone who needs it.
         { "type": "command", "key": "│ kernel   │", "text": "uname -r | cut -d- -f1" },
         { "type": "uptime", "key": "│ uptime   │" },

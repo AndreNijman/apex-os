@@ -1,14 +1,14 @@
-# Application permissions in APEX (P1-061)
+# Application permissions in Rime (P1-061)
 
-APEX already answers "who is asking, and from where" for agents: `origin::classify`
+Rime already answers "who is asking, and from where" for agents: `origin::classify`
 establishes one of §7's seven request origins from the kernel's view of a
-connection, and `privilege::decide` reads a policy table off it. `apex-secretd`
+connection, and `privilege::decide` reads a policy table off it. `rime-secretd`
 answers the same question for credentials, with a capability record that travels
 unchanged from the caller to the broker to the audit log.
 
 This document covers the second axis of that question: **what may an ordinary
 application touch**. It needed its own design, and not another row in an
-existing table, because APEX does not enforce an application's answer the way
+existing table, because Rime does not enforce an application's answer the way
 it enforces an agent session's. Somebody else enforces it, or nobody does, and
 which of those it is changes per capability, per application and per login
 session.
@@ -53,14 +53,14 @@ in its sandbox, decided once at install time, and nothing brokers a request for
 it at all.
 
 So the axis is not *Flatpak versus native*. The axis is **which primitive, if
-any, stands between this application and this capability**, and APEX has to
+any, stands between this application and this capability**, and Rime has to
 compute that per pair.
 
 ---
 
 ## 2. What was measured, and on what
 
-Every fact in this section was read off a live APEX machine (`l16`, image
+Every fact in this section was read off a live Rime machine (`l16`, image
 rev 48fb1b26, Hyprland session) on 2026-09-12. Nothing was written; nothing was
 revoked. Package versions:
 
@@ -80,14 +80,14 @@ This is the most surprising fact the measurement found, and it shapes the model.
 
 `xdg-desktop-portal` exports an interface on `org.freedesktop.portal.Desktop`
 only if a *backend selected by this session's `portals.conf`* implements the
-matching `org.freedesktop.impl.portal.*`. APEX ships three sessions with three
+matching `org.freedesktop.impl.portal.*`. Rime ships three sessions with three
 different configurations:
 
 | session | `portals.conf` | source |
 | --- | --- | --- |
 | labwc | `default=gtk`, ScreenCast/Screenshot `wlr`, Secret `gnome-keyring` | `files/system/xdg-desktop-portal/labwc-portals.conf` |
 | niri | `default=gtk;gnome`, ScreenCast/Screenshot `gnome`, Secret `gnome-keyring` | `files/system/xdg-desktop-portal/niri-portals.conf` |
-| Hyprland | `default=hyprland;gtk` | **was the packaged file, with no APEX override (§7)**; now `files/system/xdg-desktop-portal/hyprland-portals.conf` |
+| Hyprland | `default=hyprland;gtk` | **was the packaged file, with no Rime override (§7)**; now `files/system/xdg-desktop-portal/hyprland-portals.conf` |
 
 `hyprland.portal` implements Screenshot, ScreenCast, GlobalShortcuts and
 InputCapture. `gtk.portal` implements FileChooser, AppChooser, Print,
@@ -114,7 +114,7 @@ The model has to carry two consequences:
 * **The Hyprland session had no Secret portal.** That was a real gap, not a
   design decision: the niri and labwc configurations both pin
   `org.freedesktop.impl.portal.Secret=gnome-keyring` and Hyprland's did not,
-  because APEX had never written an override for it.
+  because Rime had never written an override for it.
   `gnome-keyring.portal` also carries `UseIn=gnome`, so no default list in a
   Hyprland session could reach it either; only naming it could. Closed: §7 has
   the fix and the experiment that established the mechanism. The measurement
@@ -171,7 +171,7 @@ distinguishes one of them from another, and therefore:
 > owner was trying to keep.
 
 The same is true of the microphone, of the network, and of the home directory.
-APEX cannot patch around this at this layer: portals are opt-in, and nothing
+Rime cannot patch around this at this layer: portals are opt-in, and nothing
 intercepts a program that does not call one. Saying so precisely is the
 deliverable. The roadmap's own wording ("unifies **or brokers** … **where
 Linux/portal primitives permit**") is what makes documenting the absence an
@@ -286,7 +286,7 @@ itself, and it is not `RequestOrigin`.
 answered a portal dialog), `SeatAcl` (logind gave it to the session), and
 `Unmediated` (nobody granted it; it was never withheld).
 
-### 3.5 Revocation: *what `apex permissions revoke` would do*
+### 3.5 Revocation: *what `rime permissions revoke` would do*
 
 Not a boolean. Five answers, and three of them are "less than you think".
 
@@ -356,7 +356,7 @@ controls sits above what it only observes.
   native `open()` would be a new enforcement mechanism, with its own bypasses,
   and the roadmap asked for unification or brokering *where the primitives
   permit*. Here they do not.
-* **It does not shadow the permission store.** If APEX wrote its own parallel
+* **It does not shadow the permission store.** If Rime wrote its own parallel
   database of intentions that the portal never reads, it would repeat the
   failure in §1 one layer deeper. Every write goes through
   `org.freedesktop.impl.portal.PermissionStore` or `flatpak override`, which are
@@ -373,7 +373,7 @@ The Hyprland session had no Secret portal (§2.1). `files/system/xdg-desktop-por
 carried an override for labwc and one for niri, both of which pin
 `org.freedesktop.impl.portal.Secret=gnome-keyring`; the Hyprland session fell
 through to the packaged `default=hyprland;gtk`, and neither of those backends
-implements Secret. A Flatpak asking for the Secret portal on APEX's default
+implements Secret. A Flatpak asking for the Secret portal on Rime's default
 session got nothing, where the same Flatpak on the niri session got
 gnome-keyring.
 
@@ -405,18 +405,18 @@ would report the broken one as a broker that is there.
 
 ## 8. Using it
 
-`apex permissions list` prints every application, every capability, and the
+`rime permissions list` prints every application, every capability, and the
 enforcer beside each answer. `--json` is the same report for Settings, and adds
 the session's exported portal interfaces, so a consumer can see what is
 brokerable at all without inferring it.
 
-`apex permissions show <app>` narrows that to one application. You name a
+`rime permissions show <app>` narrows that to one application. You name a
 Flatpak by its application id and anything else as `native:<name>`. The prefix
 is the whole distinction the command can make: there is no list of native
 applications to enumerate, because nothing per-application exists to enumerate
 it from.
 
-`apex permissions revoke <app> <capability>` writes `no` into the portal
+`rime permissions revoke <app> <capability>` writes `no` into the portal
 permission store, or writes a `flatpak override`, depending on which one
 enforces the capability. `--forget` deletes the stored answer instead, so the
 application is asked again next time and not silently refused ("never" and "ask

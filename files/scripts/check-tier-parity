@@ -1,20 +1,20 @@
 #!/usr/bin/env python3
-"""Assert that apexd's power tiers and APEX Shell's picker agree.
+"""Assert that rimed's power tiers and Rime Shell's picker agree.
 
 WHY THIS EXISTS
 
-`apexd-core/src/tier.rs` opens by stating the contract in words:
+`rimed-core/src/tier.rs` opens by stating the contract in words:
 
     The three tier IDs are the wire contract: they must match the strings the
-    D-Bus API and the apex-shell `PowerProfileService` use verbatim:
+    D-Bus API and the rime-shell `PowerProfileService` use verbatim:
     `performance`, `balanced`, `power-saver`.
 
 Nothing enforced it. On 2026-09-20 Andre pointed at two buttons on the System
 page -- "Ultra-Max" and "Ultra Performance" -- and said they do nothing any
-more. He was right, and they had been dead for a whole release cycle: apexd
+more. He was right, and they had been dead for a whole release cycle: rimed
 removed the `ultra` and `ultra-max` tiers in the universal-hardware pass, and
-`apexd-core/tests/tier_plan.rs` asserts that neither string parses into a Tier.
-The shell kept offering both, so pressing one ran `apex tier ultra`, got a
+`rimed-core/tests/tier_plan.rs` asserts that neither string parses into a Tier.
+The shell kept offering both, so pressing one ran `rime tier ultra`, got a
 non-zero exit, and let the optimistic label snap back on the next poll.
 
 Each side was internally consistent and correct on its own terms. Only the
@@ -22,9 +22,9 @@ join was wrong, which is why neither repository's tests caught it.
 
 Both directions are failures, and for different reasons:
 
-  * an ID the SHELL offers that apexd will not parse -- a button that can only
+  * an ID the SHELL offers that rimed will not parse -- a button that can only
     fail. This is the defect above.
-  * an ID apexd HAS that the shell does not offer -- a working tier nobody can
+  * an ID rimed HAS that the shell does not offer -- a working tier nobody can
     reach from the UI, which reads as a missing feature rather than a missing
     control.
 
@@ -36,9 +36,9 @@ USAGE
 
     check-tier-parity [--tier-rs PATH] [--service PATH]
 
-Defaults to this repository's tier.rs and a sibling apex-shell checkout. Exits
+Defaults to this repository's tier.rs and a sibling rime-shell checkout. Exits
 0 when they agree, 1 when they do not, and 77 (skip) when the shell checkout
-cannot be found -- CI for apex-os alone must not fail because the other
+cannot be found -- CI for rime-os alone must not fail because the other
 repository is not present.
 """
 
@@ -49,10 +49,10 @@ import sys
 
 HERE = os.path.dirname(os.path.abspath(__file__))
 OS_ROOT = os.path.dirname(os.path.dirname(HERE))
-DEFAULT_TIER_RS = os.path.join(OS_ROOT, "apexd/apexd-core/src/tier.rs")
+DEFAULT_TIER_RS = os.path.join(OS_ROOT, "rimed/rimed-core/src/tier.rs")
 DEFAULT_SERVICE = os.path.join(
     os.path.dirname(OS_ROOT),
-    "apex-shell/src/services/system/PowerProfileService.qml",
+    "rime-shell/src/services/system/PowerProfileService.qml",
 )
 
 
@@ -125,10 +125,10 @@ def main():
     args = ap.parse_args()
 
     if not os.path.exists(args.tier_rs):
-        print(f"FAIL  apexd tier source not found: {args.tier_rs}")
+        print(f"FAIL  rimed tier source not found: {args.tier_rs}")
         return 1
     if not os.path.exists(args.service):
-        print(f"SKIP  apex-shell checkout not found: {args.service}")
+        print(f"SKIP  rime-shell checkout not found: {args.service}")
         return 77
 
     daemon = parse_tier_rs(args.tier_rs)
@@ -138,28 +138,28 @@ def main():
     d_label = dict(daemon)
     s_label = dict(shell)
 
-    print(f"      apexd  : {', '.join(d_ids)}")
+    print(f"      rimed  : {', '.join(d_ids)}")
     print(f"      shell  : {', '.join(s_ids)}")
 
     fails = 0
 
     for i in s_ids:
         if i not in d_label:
-            print(f"FAIL  the shell offers '{i}', which apexd will not parse — that button can only fail")
+            print(f"FAIL  the shell offers '{i}', which rimed will not parse — that button can only fail")
             fails += 1
 
     for i in d_ids:
         if i not in s_label:
-            print(f"FAIL  apexd has tier '{i}' and the shell offers no control for it — unreachable")
+            print(f"FAIL  rimed has tier '{i}' and the shell offers no control for it — unreachable")
             fails += 1
 
     for i in s_ids:
         if i in d_label and d_label[i] != s_label[i]:
-            print(f"FAIL  label for '{i}' differs: apexd {d_label[i]!r} vs shell {s_label[i]!r}")
+            print(f"FAIL  label for '{i}' differs: rimed {d_label[i]!r} vs shell {s_label[i]!r}")
             fails += 1
 
     if d_ids != s_ids:
-        print(f"FAIL  order differs: apexd {d_ids} vs shell {s_ids} — the picker is a high→low ladder")
+        print(f"FAIL  order differs: rimed {d_ids} vs shell {s_ids} — the picker is a high→low ladder")
         fails += 1
 
     if fails:

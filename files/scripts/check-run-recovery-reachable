@@ -262,7 +262,7 @@ def main(argv):
     paths = argv[1:]
     if not paths:
         paths = [p for p in ("Containerfile.core", "Containerfile.base",
-                             "Containerfile.kernel", "Containerfile.apex")
+                             "Containerfile.kernel", "Containerfile.rime")
                  if os.path.exists(p)]
     if not paths:
         print("check-run-recovery-reachable: no Containerfile to check", file=sys.stderr)

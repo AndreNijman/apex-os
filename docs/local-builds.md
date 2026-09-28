@@ -25,7 +25,7 @@ step exit code hours into a CI run:
 - an assertion sourcing a script that self-gates on a binary copied later
 - two Hyprland window rules written in a syntax newer than the pinned 0.51.1,
   which Hyprland rejects and then starts anyway, leaving them inert
-- an assertion reading `/usr/share/apex/labwc/rc.xml` 240 lines above its COPY
+- an assertion reading `/usr/share/rime/labwc/rc.xml` 240 lines above its COPY
 
 ## Setup, once
 
@@ -35,24 +35,26 @@ mkdir -p ~/build && cd ~/build
 git clone https://github.com/AndreNijman/apex-os.git
 ```
 
+(The repository's pre-rebrand name: GitHub redirects it after the rename.) <!-- rime-rename: keep -->
+
 `core` is public, so pull it instead of spending 45 minutes rebuilding it:
 
 ```
-sudo podman pull ghcr.io/andrenijman/apex-os-core:latest
-sudo podman tag  ghcr.io/andrenijman/apex-os-core:latest localhost/apex-os-core:latest
+sudo podman pull ghcr.io/andrenijman/rime-os-core:latest
+sudo podman tag  ghcr.io/andrenijman/rime-os-core:latest localhost/rime-os-core:latest
 ```
 
 The repository in that block is the legacy name, and it stopped moving when
-every tier moved into `ghcr.io/andrenijman/apex-os`. The current core is the
-`:core` tag there, `ghcr.io/andrenijman/apex-os:core`: pull that one and tag it
-`localhost/apex-os-core:latest` the same way.
+every tier moved into `ghcr.io/andrenijman/rime-os`. The current core is the
+`:core` tag there, `ghcr.io/andrenijman/rime-os:core`: pull that one and tag it
+`localhost/rime-os-core:latest` the same way.
 
-`build-local.sh` reuses `localhost/apex-os-core:latest` when it exists.
+`build-local.sh` reuses `localhost/rime-os-core:latest` when it exists.
 
 ## The loop
 
 ```
-ssh katana 'cd ~/build/apex-os && git fetch -q && git reset --hard origin/<branch> \
+ssh katana 'cd ~/build/rime-os && git fetch -q && git reset --hard origin/<branch> \
   && ./build-local.sh --allow-unsigned base'
 ```
 
@@ -72,9 +74,9 @@ The build's own assertions are the first check, but they only prove the layers
 built. Look inside:
 
 ```
-sudo podman run --rm localhost/apex-os-base:latest bash -c '
-  apex --version; apex agent --help | head -3
-  test -x /usr/bin/apex-agentd && echo agentd ok
+sudo podman run --rm localhost/rime-os-base:latest bash -c '
+  rime --version; rime agent --help | head -3
+  test -x /usr/bin/rime-agentd && echo agentd ok
   sed -n "s/^org.freedesktop.impl.portal.ScreenCast=//p" \
     /etc/xdg-desktop-portal/labwc-portals.conf'
 ```

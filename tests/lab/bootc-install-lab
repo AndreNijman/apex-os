@@ -47,28 +47,28 @@
 #  and moved `Boot0000` off the real ESP four log lines later. nvram-guard
 #  caught it when the command returned, and the exact bytes were restored from
 #  its own before-snapshot.
-#  /var/lab-scratch/apex-luks-live.ZAGaYm/engine-stdout.txt
+#  /var/lab-scratch/rime-luks-live.ZAGaYm/engine-stdout.txt
 #
 #  ═══ THE TWO INCIDENTS, AS THEY ACTUALLY HAPPENED ═══
 #
 #  Neither was a `--via-loopback` command, and this matters: the repository
 #  scan in tests/test-bootc-install-guard.sh keys on that literal string and
-#  would not have caught either one. Both were `installer/apex-install` doing
+#  would not have caught either one. Both were `installer/rime-install` doing
 #  `bootc install to-filesystem` against a LOOP DEVICE the test suite had
-#  already attached, inside `localhost/apex-os:daily`.
+#  already attached, inside `localhost/rime-os:daily`.
 #
 #    09:02:17 AWST  bootupd ran `efibootmgr -b 0000 -B` and then `--create
 #                   --disk /dev/loop1 --part 1`, replacing Boot0000 with
 #                   PARTUUID ee26313c-… — the ESP inside the image file being
 #                   built, which exists on no physical disk. Found at the next
 #                   power-on. Repaired from a live USB.
-#                   /var/lab-scratch/apex-luks-live.oRDxu4/engine-stdout.txt
+#                   /var/lab-scratch/rime-luks-live.oRDxu4/engine-stdout.txt
 #                   is that run's log. BOOT-BREAKAGE-2026-09-20.md.
 #    21:53:26       the same write, with the efivars mask in place and its
 #                   promise printed, four hours after the mask landed as "the
 #                   fix"; NVRAM had moved by 22:12:15. Caught by nvram-guard on
 #                   return; restored from its before-snapshot; never booted
-#                   broken. apex-luks-live.ZAGaYm/engine-stdout.txt
+#                   broken. rime-luks-live.ZAGaYm/engine-stdout.txt
 #
 #  What a caller must now pass: nothing. `--generic-image` is not an option on
 #  this script and cannot be switched off. What happens if the line is removed
@@ -78,7 +78,7 @@
 #
 #  ═══ WHAT THIS DOES NOT COVER ═══
 #
-#  Real installs onto real hardware (`installer/apex-install`, the live ISO)
+#  Real installs onto real hardware (`installer/rime-install`, the live ISO)
 #  MUST write the host's NVRAM — that is the entire point of installing an
 #  operating system. This wrapper is loopback-only and refuses a block device
 #  target, so the two paths cannot be confused for one another.
@@ -93,7 +93,7 @@
 #      --bootloader NAME   bootc --bootloader (omitted by default, so bootc
 #                          picks it). Rule 5 USED to say "GRUB stays the
 #                          default"; since Andre's 2026-09-20 decision it says
-#                          APEX moves to systemd-boot on every machine, and
+#                          Rime moves to systemd-boot on every machine, and
 #                          that only works on --composefs-backend — on the
 #                          ostree backend `--bootloader systemd` is refused
 #                          outright. So this flag is passed through, not
@@ -161,7 +161,7 @@ case "$TARGET" in
     /dev/*) refuse "target-is-a-device" \
         "TARGET is $TARGET, which is under /dev." \
         "This wrapper runs loopback installs into IMAGE FILES only." \
-        "Installing onto real hardware is installer/apex-install's job, from the live ISO." ;;
+        "Installing onto real hardware is installer/rime-install's job, from the live ISO." ;;
 esac
 if [ -b "$TARGET" ]; then
     refuse "target-is-a-device" \

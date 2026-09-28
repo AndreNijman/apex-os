@@ -1,7 +1,7 @@
 # ─────────────────────────────────────────────────────────────────────────────
-#  APEX-OS — default zsh configuration
+#  Rime OS — default zsh configuration
 #
-#  Seeded per-user by apex-shell-firstrun. This is a STARTING POINT, not a
+#  Seeded per-user by rime-shell-firstrun. This is a STARTING POINT, not a
 #  managed file: it is only written when ~/.zshrc does not already exist, so
 #  anything you change here survives updates and re-logins.
 #
@@ -36,7 +36,7 @@ unsetopt BEEP
 # completion menu. Without it `zstyle ... menu select` below is a silent NO-OP:
 # zsh falls back to dumping every match as a flat column list with no selection,
 # no highlight and no keys — which is exactly how this config shipped, and why
-# completion felt a decade out of date (apex-logs 14).
+# completion felt a decade out of date (rime-logs 14).
 zmodload zsh/complist
 
 autoload -Uz compinit
@@ -137,11 +137,11 @@ alias free='free -h'
 alias ..='cd ..'
 alias ...='cd ../..'
 
-# APEX-OS is image-based: these are the commands people actually need and
+# Rime OS is image-based: these are the commands people actually need and
 # usually have to look up.
-alias apex-update='sudo bootc upgrade'
-alias apex-status='bootc status'
-alias apex-rollback='sudo bootc rollback'
+alias rime-update='sudo bootc upgrade'
+alias rime-status='bootc status'
+alias rime-rollback='sudo bootc rollback'
 
 # ── tools ────────────────────────────────────────────────────────────────────
 # fzf here (it defines widgets, so it must come before syntax highlighting below).
@@ -178,12 +178,12 @@ command -v zoxide >/dev/null 2>&1 && eval "$(zoxide init zsh --cmd cd)"
 # the two can never drift, exactly like the greeting below.
 #
 # BEFORE the local overrides on purpose: everything it defines is a plain shell
-# function, so ~/.zshrc.local can redefine `a` or set APEX_NO_AGENT_ALIASES=1
+# function, so ~/.zshrc.local can redefine `a` or set RIME_NO_AGENT_ALIASES=1
 # and have it actually take effect.
-[[ -r /usr/share/apex/shell/agent.sh ]] && source /usr/share/apex/shell/agent.sh
+[[ -r /usr/share/rime/shell/agent.sh ]] && source /usr/share/rime/shell/agent.sh
 
 # ── local overrides ──────────────────────────────────────────────────────────
-# Anything you want that should NOT be touched by APEX. Sourced last so it wins.
+# Anything you want that should NOT be touched by Rime. Sourced last so it wins.
 [[ -r "$HOME/.zshrc.local" ]] && source "$HOME/.zshrc.local"
 
 # ── greeting ─────────────────────────────────────────────────────────────────
@@ -192,5 +192,5 @@ command -v zoxide >/dev/null 2>&1 && eval "$(zoxide init zsh --cmd cd)"
 # greeting meant nobody actually saw it.
 #
 # LAST on purpose, after the local overrides above: that is what lets you put
-# APEX_NO_GREETING=1 in ~/.zshrc.local and have it actually take effect.
-[[ -r /usr/share/apex/shell/greeting.sh ]] && source /usr/share/apex/shell/greeting.sh
+# RIME_NO_GREETING=1 in ~/.zshrc.local and have it actually take effect.
+[[ -r /usr/share/rime/shell/greeting.sh ]] && source /usr/share/rime/shell/greeting.sh

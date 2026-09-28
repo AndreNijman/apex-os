@@ -1,6 +1,6 @@
 #!/usr/bin/env bash
 #
-# APEX-OS — labwc (APEX Floating) session capability matrix.
+# Rime OS — labwc (Rime Floating) session capability matrix.
 #
 # The roadmap's labwc test matrix, for the part of it a machine can answer.
 # Everything here runs a REAL client against a REAL nested labwc using the
@@ -66,9 +66,9 @@ ok "labwc is installed ($(labwc --version 2>&1 | head -1))"
 # on the developer's active workspace and interrupted their work. So it now
 # requires saying so on purpose. A sweep skips it; a person who wants the
 # session matrix runs it deliberately.
-if [ "${APEX_LABWC_SESSION_TESTS:-0}" != "1" ]; then
+if [ "${RIME_LABWC_SESSION_TESTS:-0}" != "1" ]; then
     skp "opt-in: this suite opens nested compositor windows on your desktop"
-    printf '      run it deliberately with APEX_LABWC_SESSION_TESTS=1 %s\n' "$0"
+    printf '      run it deliberately with RIME_LABWC_SESSION_TESTS=1 %s\n' "$0"
     printf '\nlabwc-session: %d passed, %d failed, %d skipped\n' "$pass" "$fail" "$skip"
     exit 0
 fi
@@ -164,12 +164,12 @@ say screencopy "\$screencopy"
 
 # Clipboard and primary selection are separate mechanisms; a compositor can
 # serve one and not the other, and middle-click paste is the one people notice.
-if echo apex-clipboard | wl-copy 2>/dev/null && [ "\$(wl-paste 2>/dev/null)" = apex-clipboard ]; then
+if echo rime-clipboard | wl-copy 2>/dev/null && [ "\$(wl-paste 2>/dev/null)" = rime-clipboard ]; then
     say clipboard ok
 else
     say clipboard fail
 fi
-if echo apex-primary | wl-copy --primary 2>/dev/null && [ "\$(wl-paste --primary 2>/dev/null)" = apex-primary ]; then
+if echo rime-primary | wl-copy --primary 2>/dev/null && [ "\$(wl-paste --primary 2>/dev/null)" = rime-primary ]; then
     say primary ok
 else
     say primary fail
@@ -202,7 +202,7 @@ probe_client() {
     esac
 }
 
-# wlr-layer-shell. APEX Shell is a layer-shell client, so this is the single
+# wlr-layer-shell. Rime Shell is a layer-shell client, so this is the single
 # protocol the whole desktop depends on; swaybg is the smallest client that
 # exercises it.
 probe_client layer_shell 3 swaybg -c '#112233'
@@ -233,7 +233,7 @@ if [ -s "${WORK}/results" ]; then
     report screencopy        "screencopy works (screenshots, recording)"
     report clipboard         "clipboard round-trips"
     report primary           "primary selection round-trips"
-    report layer_shell       "layer-shell works (APEX Shell depends on it)"
+    report layer_shell       "layer-shell works (Rime Shell depends on it)"
     report session_lock      "ext-session-lock works (lock screen)"
     report idle              "ext-idle-notify works"
 else

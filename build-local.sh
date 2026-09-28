@@ -1,11 +1,11 @@
 #!/usr/bin/env bash
 # ─────────────────────────────────────────────────────────────────────────────
-#  build-local.sh — build APEX-OS images locally, with the kernel signed.
+#  build-local.sh — build Rime OS images locally, with the kernel signed.
 #
-#  WHY THIS EXISTS. Containerfile.core signs the CachyOS kernel with the APEX
+#  WHY THIS EXISTS. Containerfile.core signs the CachyOS kernel with the Rime
 #  MOK only when the key is mounted as a build secret:
 #
-#     podman build --secret id=apex_sb_key,src=… --secret id=apex_sb_crt,src=…
+#     podman build --secret id=rime_sb_key,src=… --secret id=rime_sb_crt,src=…
 #
 #  and when the secret is absent it stamps the image `unsigned` and carries on
 #  by design, so local builds keep working for people without the key. The
@@ -18,16 +18,16 @@
 #  explicitly ask for one with --allow-unsigned.
 #
 #  Usage:
-#     ./build-local.sh                 core + base + apex, signed
+#     ./build-local.sh                 core + base + rime, signed
 #     ./build-local.sh base            just the base (reuses the existing core)
 #     ./build-local.sh kernel          just the kernel tier (the ~45 min compile)
-#     ./build-local.sh apex            just the image tier
+#     ./build-local.sh rime            just the image tier
 #     ./build-local.sh --allow-unsigned base       no key needed
 #     ./build-local.sh --force-core                rebuild core even if present
 #
 #  ONE IMAGE. `daily`, `gaming-mesa` and `gaming-nvidia` are gone as build
 #  targets; there is a single image and the three names survive only as published
-#  tags pointing at it. They are still accepted here and map to `apex`, so a
+#  tags pointing at it. They are still accepted here and map to `rime`, so a
 #  habit or a stale script does not fail with "unknown target".
 #
 #  CORE vs BASE. The image is built in three tiers (see Containerfile.core's
@@ -43,16 +43,16 @@
 #  check below still passes, which is exactly how a validation build in this
 #  project reported green against an artifact that did not contain the change.
 #
-#  Key location: ~/.apex-signing/apex-mok.{key,crt}, overridable with
-#  APEX_SIGNING_DIR. The key is never copied, never committed, and never enters
+#  Key location: ~/.rime-signing/rime-mok.{key,crt}, overridable with
+#  RIME_SIGNING_DIR. The key is never copied, never committed, and never enters
 #  the image — --secret is a tmpfs mount that leaves no layer behind.
 # ─────────────────────────────────────────────────────────────────────────────
 set -euo pipefail
 cd "$(dirname "$0")"
 
-SIGNDIR="${APEX_SIGNING_DIR:-$HOME/.apex-signing}"
-KEY="$SIGNDIR/apex-mok.key"
-CRT="$SIGNDIR/apex-mok.crt"
+SIGNDIR="${RIME_SIGNING_DIR:-$HOME/.rime-signing}"
+KEY="$SIGNDIR/rime-mok.key"
+CRT="$SIGNDIR/rime-mok.crt"
 ALLOW_UNSIGNED=0
 FORCE_CORE=0
 TARGETS=()
@@ -66,7 +66,7 @@ for a in "$@"; do
         *) TARGETS+=("$a") ;;
     esac
 done
-[ "${#TARGETS[@]}" -gt 0 ] || TARGETS=(core base apex)
+[ "${#TARGETS[@]}" -gt 0 ] || TARGETS=(core base rime)
 
 # ── The signing key ──────────────────────────────────────────────────────────
 SECRET_ARGS=()
@@ -80,7 +80,7 @@ if [ -s "$KEY" ] && [ -s "$CRT" ]; then
     k=$(openssl rsa  -in "$KEY" -noout -modulus | sha256sum)
     c=$(openssl x509 -in "$CRT" -noout -modulus | sha256sum)
     [ "$k" = "$c" ] || { echo "FATAL: $KEY and $CRT are not a matching pair"; exit 1; }
-    SECRET_ARGS=(--secret "id=apex_sb_key,src=$KEY" --secret "id=apex_sb_crt,src=$CRT")
+    SECRET_ARGS=(--secret "id=rime_sb_key,src=$KEY" --secret "id=rime_sb_crt,src=$CRT")
     echo "signing key: $KEY (validated)"
 elif [ "$ALLOW_UNSIGNED" = 1 ]; then
     echo "WARNING: building UNSIGNED — the result cannot be used with Secure Boot."
@@ -92,7 +92,7 @@ Containerfile.core would silently produce an image whose kernel is unsigned,
 which cannot boot with Secure Boot on and gives users nothing to enrol. That is
 too easy to ship by accident, so this script refuses instead.
 
-Either put apex-mok.key and apex-mok.crt in $SIGNDIR (or set APEX_SIGNING_DIR),
+Either put rime-mok.key and rime-mok.crt in $SIGNDIR (or set RIME_SIGNING_DIR),
 or pass --allow-unsigned if you genuinely want an unsigned image.
 EOF
     exit 1
@@ -100,7 +100,7 @@ fi
 
 REV="$(git rev-parse HEAD 2>/dev/null || echo unknown)"
 
-CORE_IMG=localhost/apex-os-core:latest
+CORE_IMG=localhost/rime-os-core:latest
 # The kernel is its own tier now (docs/update-cost.md, "The fourth tier").
 # Containerfile.core consumes it by name and has NO COPR fallback, so a local
 # core build needs this image to exist first.
@@ -109,17 +109,17 @@ CORE_IMG=localhost/apex-os-core:latest
 # The default there is the digest of the kernel published to GHCR by
 # kernel-build.yml, because CI has no hand-built kernel image and a default
 # naming one stopped every image build in the project. build_core() below
-# therefore has to keep passing `--build-arg APEX_KERNEL_IMAGE="$KERNEL_IMG"`:
+# therefore has to keep passing `--build-arg RIME_KERNEL_IMAGE="$KERNEL_IMG"`:
 # drop that override and a local core build would silently install the
 # REGISTRY's kernel instead of the one just compiled here.
 # tests/check-kernel-image-pin.sh asserts both halves.
-KERNEL_IMG=localhost/apex-kernel:local
+KERNEL_IMG=localhost/rime-kernel:local
 
 # ── The shell ref, resolved rather than named ────────────────────────────────
-# Containerfile.base defaults APEX_SHELL_REF to `main`, and `git clone --branch
+# Containerfile.base defaults RIME_SHELL_REF to `main`, and `git clone --branch
 # main` is a cache hit forever: podman cannot know the remote moved, so a local
-# build silently vendors whatever apex-shell was at the first build and keeps
-# doing so. Observed directly — a base build begun minutes after apex-shell's
+# build silently vendors whatever rime-shell was at the first build and keeps
+# doing so. Observed directly — a base build begun minutes after rime-shell's
 # main advanced printed `Using cache` for the clone layer and shipped the old
 # shell.
 #
@@ -137,33 +137,33 @@ KERNEL_IMG=localhost/apex-kernel:local
 # appearance of one defect; the other two callers had already fixed it and left
 # their reasoning in place:
 #
-#   * build-image.yml `Pin apex-shell` — pinning main "vendored an apex-shell
-#     months behind the apex-os being built", and `base` then died in
+#   * build-image.yml `Pin rime-shell` — pinning main "vendored a rime-shell
+#     months behind the rime-os being built", and `base` then died in
 #     check-labwc-keybinds on W-A-s (screen reader) and W-A-v (voice), two
-#     keybinds roadmap/v2.2's rc.xml has and old apex-shell defaults do not
+#     keybinds roadmap/v2.2's rc.xml has and old rime-shell defaults do not
 #     generate.
-#   * pr-validation.yml — its input-parity check compared apex-os roadmap/v2.2
-#     against apex-shell main and reported drift while the two INTEGRATION
+#   * pr-validation.yml — its input-parity check compared rime-os roadmap/v2.2
+#     against rime-shell main and reported drift while the two INTEGRATION
 #     branches agreed perfectly.
 #
-# Measured here, 2026-09-19, four ways: apex-os roadmap/v2.2 + apex-shell
-# roadmap/v2.2 passes check-labwc-keybinds (70 defaults, 4 skipped); apex-os
-# roadmap/v2.2 + apex-shell main fails on exactly those two keybinds. So a local
+# Measured here, 2026-09-19, four ways: rime-os roadmap/v2.2 + rime-shell
+# roadmap/v2.2 passes check-labwc-keybinds (70 defaults, 4 skipped); rime-os
+# roadmap/v2.2 + rime-shell main fails on exactly those two keybinds. So a local
 # build of roadmap/v2.2 could never pass, and the answer is NOT to regenerate
 # rc.xml against the older shell — that reverts the accessibility work.
 #
 # THE MIDDLE RUNG. The chain is want -> roadmap/v2.2 -> main, which is
 # pr-validation.yml's three-rung chain rather than build-image.yml's two. That
 # is deliberate and the difference matters HERE more than in either workflow:
-# build-image.yml only ever runs on a branch that apex-shell also has, while
+# build-image.yml only ever runs on a branch that rime-shell also has, while
 # this script is run by a human from whatever worktree they are standing in,
-# and every `task/*` worktree in this program has no apex-shell twin. A
+# and every `task/*` worktree in this program has no rime-shell twin. A
 # two-rung chain would send all of them to `main` and reproduce the exact
 # failure above. pr-validation.yml's comment records the same finding.
 #
 # The `roadmap/v2.2` rung is a PROGRAM-LIFETIME rung, not a permanent one. Once
-# v2.2 lands in main and apex-shell deletes the branch, this degrades cleanly to
-# want -> main. If apex-shell keeps the branch after the program ends, a feature
+# v2.2 lands in main and rime-shell deletes the branch, this degrades cleanly to
+# want -> main. If rime-shell keeps the branch after the program ends, a feature
 # branch cut from a post-program `main` would vendor a stale shell from it —
 # delete the rung then. pr-validation.yml carries the identical hazard; this is
 # not a new one.
@@ -179,12 +179,14 @@ KERNEL_IMG=localhost/apex-kernel:local
 # anything else unreachable — and git's stderr is left alone so the user can
 # read it.
 #
-# APEX_SHELL_REMOTE exists so tests/test-build-local-shell-ref.sh can point this
+# RIME_SHELL_REMOTE exists so tests/test-build-local-shell-ref.sh can point this
 # at local fixture repositories and drive every rung offline. Nothing else
 # should set it.
-SHELL_REMOTE="${APEX_SHELL_REMOTE:-https://github.com/AndreNijman/apex-shell}"
+# The shell repository under its pre-rebrand name: GitHub redirects a renamed
+# repository's old name, and the new one resolves only once the rename is done.
+SHELL_REMOTE="${RIME_SHELL_REMOTE:-https://github.com/AndreNijman/apex-shell}"  # rime-rename: keep (works before and after the GitHub rename)
 
-# Resolve ONE branch on the apex-shell remote.
+# Resolve ONE branch on the rime-shell remote.
 #   0 -> found; the sha is in SHELL_REF_OUT
 #   2 -> the remote answered and has no such branch (try the next rung)
 #   unreachable -> FATAL, here, rather than a silent fallback
@@ -196,23 +198,23 @@ resolve_shell_branch() {  # $1 = branch name
     case "$rc" in
         0) ;;
         2) return 2 ;;
-        *) echo "FATAL: cannot reach apex-shell at $SHELL_REMOTE — git ls-remote exited $rc." >&2
+        *) echo "FATAL: cannot reach rime-shell at $SHELL_REMOTE — git ls-remote exited $rc." >&2
            echo "       Its error is above. A build that quietly vendors a stale shell is" >&2
-           echo "       what this refuses to do. Set APEX_SHELL_REF=<sha> to build offline." >&2
+           echo "       what this refuses to do. Set RIME_SHELL_REF=<sha> to build offline." >&2
            exit 1 ;;
     esac
     out="${out%%$'\n'*}"   # first line
     sha="${out%%$'\t'*}"   # first field
     [[ "$sha" =~ ^[0-9a-f]{40}$ ]] || {
-        echo "FATAL: apex-shell '$1' resolved to '$sha', which is not a 40-hex sha" >&2
+        echo "FATAL: rime-shell '$1' resolved to '$sha', which is not a 40-hex sha" >&2
         exit 1
     }
     SHELL_REF_OUT="$sha"
 }
 
-SHELL_REF="${APEX_SHELL_REF:-}"
+SHELL_REF="${RIME_SHELL_REF:-}"
 if [ -n "$SHELL_REF" ]; then
-    echo "== shell == pinned by APEX_SHELL_REF; the remote was not consulted"
+    echo "== shell == pinned by RIME_SHELL_REF; the remote was not consulted"
 else
     # A detached HEAD prints the literal string `HEAD`, which is not a branch
     # name and must not be asked for as one.
@@ -231,17 +233,17 @@ else
     done
 
     [ -n "$used" ] || {
-        echo "FATAL: apex-shell has none of the branches ${tried[*]-} — not even main." >&2
-        echo "       Set APEX_SHELL_REF=<sha> to build offline." >&2
+        echo "FATAL: rime-shell has none of the branches ${tried[*]-} — not even main." >&2
+        echo "       Set RIME_SHELL_REF=<sha> to build offline." >&2
         exit 1
     }
     if [ "$used" = "$want" ]; then
-        echo "== shell == pinned apex-shell branch '$used', which matches this apex-os branch"
+        echo "== shell == pinned rime-shell branch '$used', which matches this rime-os branch"
     else
-        echo "== shell == pinned apex-shell branch '$used' — apex-shell has no branch named '${want:-<detached HEAD>}'"
+        echo "== shell == pinned rime-shell branch '$used' — rime-shell has no branch named '${want:-<detached HEAD>}'"
     fi
 fi
-echo "== shell == vendoring apex-shell $SHELL_REF"
+echo "== shell == vendoring rime-shell $SHELL_REF"
 
 
 # Everything the shipped kernel's signature can be checked against. Used after
@@ -250,16 +252,16 @@ assert_signed() {  # $1 = image, $2 = label
     [ "${#SECRET_ARGS[@]}" -gt 0 ] || return 0
     local st
     st=$(sudo podman run --rm --entrypoint /bin/sh "$1" \
-           -c 'cat /usr/share/apex-os/secureboot/kernel-signed 2>/dev/null || echo missing')
+           -c 'cat /usr/share/rime-os/secureboot/kernel-signed 2>/dev/null || echo missing')
     [ "$st" = signed ] \
         || { echo "FATAL: $2 is stamped '$st' — refusing to continue with an unsigned kernel"; exit 1; }
     sudo podman run --rm --entrypoint /bin/sh "$1" -c \
-        'dnf5 -y install -q sbsigntools >/dev/null 2>&1; sbverify --list /usr/lib/modules/$(cat /usr/lib/apex-kver)/vmlinuz' \
-        | grep -qi 'signature certificates\|image signature issuers\|APEX' \
+        'dnf5 -y install -q sbsigntools >/dev/null 2>&1; sbverify --list /usr/lib/modules/$(cat /usr/lib/rime-kver)/vmlinuz' \
+        | grep -qi 'signature certificates\|image signature issuers\|Rime' \
         || { echo "FATAL: sbverify found no signature on $2's vmlinuz"; exit 1; }
     sudo podman run --rm --entrypoint /bin/sh "$1" \
-        -c 'test -s /usr/share/apex-os/secureboot/apex-mok.der' \
-        || { echo "FATAL: $2 has no apex-mok.der — users would have nothing to enrol"; exit 1; }
+        -c 'test -s /usr/share/rime-os/secureboot/rime-mok.der' \
+        || { echo "FATAL: $2 has no rime-mok.der — users would have nothing to enrol"; exit 1; }
     # The out-of-tree modules, checked the same way and for the same reason: a
     # marker file is a claim the build wrote about itself. `modinfo -F signer`
     # reads the PKCS#7 signature out of the module that will actually ship.
@@ -268,11 +270,11 @@ assert_signed() {  # $1 = image, $2 = label
     # and "no modules found" is precisely the failure this is here to catch.
     sudo podman run --rm --entrypoint /bin/sh "$1" -c '
         set -eu
-        KVER=$(cat /usr/lib/apex-kver)
+        KVER=$(cat /usr/lib/rime-kver)
         MODDIR=/usr/lib/modules/$KVER
-        [ "$(cat /usr/share/apex-os/secureboot/modules-signed 2>/dev/null || echo missing)" = signed ] || {
+        [ "$(cat /usr/share/rime-os/secureboot/modules-signed 2>/dev/null || echo missing)" = signed ] || {
             echo "modules-signed is not \"signed\""; exit 1; }
-        SIGNER=$(cat /usr/share/apex-os/secureboot/module-signer)
+        SIGNER=$(cat /usr/share/rime-os/secureboot/module-signer)
         OOT=""
         for d in extra updates; do [ -d "$MODDIR/$d" ] && OOT="$OOT $MODDIR/$d"; done
         [ -n "$OOT" ] || { echo "no out-of-tree module directory"; exit 1; }
@@ -288,14 +290,14 @@ assert_signed() {  # $1 = image, $2 = label
         done
         echo "  $n out-of-tree modules, all signed by \"$SIGNER\""
     ' || { echo "FATAL: $2 has unsigned or missing out-of-tree kernel modules"; exit 1; }
-    echo "$2: kernel signed, modules signed, apex-mok.der present"
+    echo "$2: kernel signed, modules signed, rime-mok.der present"
 }
 
 # The kernel compile. Reused unless --force-core, on the same reasoning as the
 # core reuse below: it is the slowest thing here and it only needs to move when
 # kernel/kernel.pin does. Unlike core, there is no fallback if it is missing --
 # Containerfile.core stops rather than quietly installing a kernel that never
-# went through apex-kernel-btf-gate.
+# went through rime-kernel-btf-gate.
 build_kernel() {
     if [ "$FORCE_CORE" = 0 ] && sudo podman image exists "$KERNEL_IMG"; then
         echo "== kernel == reusing existing $KERNEL_IMG (pass --force-core to rebuild)"
@@ -336,10 +338,10 @@ build_core() {
         return 0
     fi
     # Milliseconds, and it guards the one line whose failure costs a 45-minute
-    # local build: `FROM ${APEX_KERNEL_IMAGE}`. The override below means the
+    # local build: `FROM ${RIME_KERNEL_IMAGE}`. The override below means the
     # DEFAULT in Containerfile.core cannot break a local build -- but the other
     # half of that same line can and did: an ARG declared after the first FROM
-    # is invisible to every FROM including its own, so `FROM ${APEX_KERNEL_IMAGE}`
+    # is invisible to every FROM including its own, so `FROM ${RIME_KERNEL_IMAGE}`
     # expanded empty HERE too, with a freshly built kernel image sitting right
     # there and --build-arg passed correctly. CI grew this gate in the same
     # change; a local build should not have to be the one that finds out.
@@ -352,8 +354,8 @@ build_core() {
     echo "== core == (this is the slow one, ~45 min)"
     sudo podman build --isolation=chroot \
         "${SECRET_ARGS[@]}" \
-        --build-arg APEX_REVISION="$REV" \
-        --build-arg APEX_KERNEL_IMAGE="$KERNEL_IMG" \
+        --build-arg RIME_REVISION="$REV" \
+        --build-arg RIME_KERNEL_IMAGE="$KERNEL_IMG" \
         -f Containerfile.core -t "$CORE_IMG" .
 
     # Assert rather than trust. The Containerfile degrades to `unsigned` on any
@@ -369,30 +371,31 @@ build_base() {
     echo "== base =="
     sudo podman build --isolation=chroot \
         --build-arg CORE="$CORE_IMG" \
-        --build-arg APEX_REVISION="$REV" \
-        --build-arg APEX_SHELL_REF="$SHELL_REF" \
-        -f Containerfile.base -t localhost/apex-os-base:latest .
+        --build-arg RIME_REVISION="$REV" \
+        --build-arg RIME_SHELL_REF="$SHELL_REF" \
+        -f Containerfile.base -t localhost/rime-os-base:latest .
 
     # Catches building on a stale unsigned core.
-    assert_signed localhost/apex-os-base:latest base
+    assert_signed localhost/rime-os-base:latest base
 }
 
-build_image() {  # $1 = apex (or a legacy tag name, which maps to it)
+build_image() {  # $1 = rime (or a legacy tag name, which maps to it)
     local f=$1
     case "$f" in
-        apex|daily|gaming-mesa|gaming-nvidia) ;;
+        rime|apex|daily|gaming-mesa|gaming-nvidia) ;;  # rime-rename: keep (apex is a published tag)
         *) echo "unknown target: $f" >&2; exit 2 ;;
     esac
-    [ "$f" = apex ] || echo "note: '$f' is a published TAG, not a build target — building the one image"
-    echo "== apex =="
+    [ "$f" = rime ] || echo "note: '$f' is a published TAG, not a build target — building the one image"
+    echo "== rime =="
     sudo podman build --isolation=chroot \
-        --build-arg BASE=localhost/apex-os-base:latest \
-        --build-arg APEX_REVISION="$REV" \
-        -f Containerfile.apex -t localhost/apex-os:apex .
+        --build-arg BASE=localhost/rime-os-base:latest \
+        --build-arg RIME_REVISION="$REV" \
+        -f Containerfile.rime -t localhost/rime-os:rime .
     # The three published names all resolve to this one image in the registry;
     # tag them locally too so a local `bootc switch` against any of them works.
-    for t in daily gaming-mesa gaming-nvidia; do
-        sudo podman tag localhost/apex-os:apex "localhost/apex-os:$t"
+    # `apex` is the tag machines installed before the rebrand track. (rime-rename: keep)
+    for t in apex daily gaming-mesa gaming-nvidia; do  # rime-rename: keep (apex is a published tag)
+        sudo podman tag localhost/rime-os:rime "localhost/rime-os:$t"
     done
 
     # Then read them back. `podman tag` cannot plausibly fail here — the point
@@ -402,21 +405,21 @@ build_image() {  # $1 = apex (or a legacy tag name, which maps to it)
     # That regression is silent, and this is the only local thing that would
     # notice it. The registry-side equivalent lives in build-image.yml and can
     # only run on a real publish.
-    want="$(sudo podman image inspect --format '{{.Id}}' localhost/apex-os:apex)"
-    [ -n "$want" ] || { echo "FATAL: localhost/apex-os:apex has no image ID" >&2; exit 1; }
-    for t in apex daily gaming-mesa gaming-nvidia; do
-        got="$(sudo podman image inspect --format '{{.Id}}' "localhost/apex-os:$t" 2>/dev/null || echo MISSING)"
+    want="$(sudo podman image inspect --format '{{.Id}}' localhost/rime-os:rime)"
+    [ -n "$want" ] || { echo "FATAL: localhost/rime-os:rime has no image ID" >&2; exit 1; }
+    for t in rime apex daily gaming-mesa gaming-nvidia; do  # rime-rename: keep (apex is a published tag)
+        got="$(sudo podman image inspect --format '{{.Id}}' "localhost/rime-os:$t" 2>/dev/null || echo MISSING)"
         [ "$got" = "$want" ] || {
-            echo "FATAL: localhost/apex-os:$t resolves to '$got', expected '$want'" >&2
-            echo "       the four names must be ONE image; see docs/ci-release-tiers.md" >&2
+            echo "FATAL: localhost/rime-os:$t resolves to '$got', expected '$want'" >&2
+            echo "       the five names must be ONE image; see docs/ci-release-tiers.md" >&2
             exit 1
         }
     done
-    echo "tags: apex, daily, gaming-mesa, gaming-nvidia all resolve to $want"
+    echo "tags: rime, apex, daily, gaming-mesa, gaming-nvidia all resolve to $want"  # rime-rename: keep
 
     # The image inherits signing from core via the base, so this catches building
     # on top of a stale or unsigned tier — the same hole the CI job covers.
-    assert_signed localhost/apex-os:apex apex
+    assert_signed localhost/rime-os:rime rime
 }
 
 for t in "${TARGETS[@]}"; do

@@ -10,10 +10,10 @@ plugins {
 // The human-facing version. The build metadata after it — the commit count and
 // the short SHA — is appended by `android/tools/release-version.sh`; this is
 // the only half a person chooses, and it is bumped by editing this line.
-val APEX_MARKETING_VERSION = "0.1.0"
+val RIME_MARKETING_VERSION = "0.1.0"
 
 // Read an integer from the environment, or fail. NOT "or fall back": a
-// malformed `APEX_VERSION_CODE` silently becoming the default is how a release
+// malformed `RIME_VERSION_CODE` silently becoming the default is how a release
 // ships with versionCode 1 and makes every later release uninstallable over
 // it. An absent variable is a local build and takes the default; a variable
 // that is PRESENT and unusable is a broken pipeline and stops it.
@@ -29,7 +29,7 @@ fun intFromEnv(name: String, default: Int): Int {
 }
 
 android {
-    namespace = "com.apexos.remote"
+    namespace = "com.rimeos.remote"
     // 36, which is what AGP 9 wants and what is actually installed. An
     // earlier attempt at 35 failed with "Build properties not found": the
     // command-line tools' unzip of `platforms;android-35` crashed with a
@@ -38,7 +38,7 @@ android {
     compileSdk = 36
 
     defaultConfig {
-        applicationId = "com.apexos.remote"
+        applicationId = "com.rimeos.remote"
         // 28, and the number is a security decision rather than a reach
         // decision. It is the first release with `BiometricPrompt` in the
         // platform and with a keystore that can hold an AES key marked
@@ -71,9 +71,9 @@ android {
         // that it is one, and a developer without git history should still be
         // able to build. 1 is also the lowest possible code, so a release
         // always installs over a local build and never the reverse.
-        versionCode = intFromEnv("APEX_VERSION_CODE", default = 1)
-        versionName = System.getenv("APEX_VERSION_NAME")?.takeIf { it.isNotBlank() }
-            ?: "$APEX_MARKETING_VERSION-dev"
+        versionCode = intFromEnv("RIME_VERSION_CODE", default = 1)
+        versionName = System.getenv("RIME_VERSION_NAME")?.takeIf { it.isNotBlank() }
+            ?: "$RIME_MARKETING_VERSION-dev"
 
         // P1-060's first two criteria are claims about what ANDROID does with
         // this code — a screen reader reading a label, a rotation surviving, a
@@ -100,21 +100,21 @@ android {
     // "android". `verifyReleaseSigning` below is what refuses to call that
     // outcome success.
     val signingEnv = listOf(
-        "APEX_KEYSTORE",
-        "APEX_KEYSTORE_PASSWORD",
-        "APEX_KEY_ALIAS",
-        "APEX_KEY_PASSWORD",
+        "RIME_KEYSTORE",
+        "RIME_KEYSTORE_PASSWORD",
+        "RIME_KEY_ALIAS",
+        "RIME_KEY_PASSWORD",
     ).associateWith { System.getenv(it) }
     val signingReady = signingEnv.values.all { !it.isNullOrBlank() } &&
-        file(signingEnv["APEX_KEYSTORE"]!!).isFile
+        file(signingEnv["RIME_KEYSTORE"]!!).isFile
 
     signingConfigs {
         if (signingReady) {
             create("release") {
-                storeFile = file(signingEnv["APEX_KEYSTORE"]!!)
-                storePassword = signingEnv["APEX_KEYSTORE_PASSWORD"]
-                keyAlias = signingEnv["APEX_KEY_ALIAS"]
-                keyPassword = signingEnv["APEX_KEY_PASSWORD"]
+                storeFile = file(signingEnv["RIME_KEYSTORE"]!!)
+                storePassword = signingEnv["RIME_KEYSTORE_PASSWORD"]
+                keyAlias = signingEnv["RIME_KEY_ALIAS"]
+                keyPassword = signingEnv["RIME_KEY_PASSWORD"]
                 // v1 off, v2 and v3 on. minSdk is 28, so every phone this app
                 // supports verifies v2; v1 is the JAR-signature scheme whose
                 // Janus and Master Key families of bugs are the reason v2
@@ -299,8 +299,8 @@ tasks.register("verifyReleaseSigning") {
                 throw GradleException(
                     "${apk.name} is not signed, so it cannot be installed and must not be " +
                         "reported as a release build.\n" +
-                        "Set APEX_KEYSTORE, APEX_KEYSTORE_PASSWORD, APEX_KEY_ALIAS and " +
-                        "APEX_KEY_PASSWORD.\n" + text,
+                        "Set RIME_KEYSTORE, RIME_KEYSTORE_PASSWORD, RIME_KEY_ALIAS and " +
+                        "RIME_KEY_PASSWORD.\n" + text,
                 )
             }
             logger.lifecycle("signed: ${apk.name}")

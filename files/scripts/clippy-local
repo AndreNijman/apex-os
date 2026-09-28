@@ -4,7 +4,7 @@
 #
 #  WHY THIS EXISTS
 #
-#  APEX-OS is an atomic image: `rustup` is not installed and `cargo clippy` is
+#  Rime OS is an atomic image: `rustup` is not installed and `cargo clippy` is
 #  not available, so `cargo test` passing locally says nothing about the Clippy
 #  job. Five findings reached a PR that way — two `-D warnings` errors in one
 #  push and three more in the fix for them.
@@ -12,9 +12,9 @@
 #  So clippy runs in the same container image CI uses. Slower than a native run
 #  and much faster than a round trip through GitHub.
 #
-#  THE REPO ROOT IS MOUNTED, NOT apexd/
+#  THE REPO ROOT IS MOUNTED, NOT rimed/
 #
-#  apexd-core `include_str!`s ../../../config/sysprofiles/*.toml. Mounting only
+#  rimed-core `include_str!`s ../../../config/sysprofiles/*.toml. Mounting only
 #  the workspace gives six "couldn't read" errors that look like a code problem
 #  and are not.
 #
@@ -46,7 +46,7 @@ FIX=""
 echo "clippy-local: ${IMAGE}"
 exec podman run --rm \
     -v "${ROOT}":/repo:z \
-    -w /repo/apexd \
+    -w /repo/rimed \
     "${IMAGE}" \
     bash -c "
         set -e

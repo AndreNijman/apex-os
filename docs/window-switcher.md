@@ -3,16 +3,16 @@
 Two shortcuts follow one rule: **after the keyboard moves focus, the pointer
 goes with it.**
 
-| | Hyprland (APEX Tiling) | labwc (APEX Floating) | niri (APEX Scrolling) |
+| | Hyprland (Rime Tiling) | labwc (Rime Floating) | niri (Rime Scrolling) |
 |---|---|---|---|
 | `SUPER`+arrow | moves focus, cursor warps into the window | moves the window to that edge, cursor warps with it | moves focus along the scroll |
-| `ALT`+`Tab` | APEX Shell switcher | labwc's thumbnail switcher, all desktops | niri's recent-windows switcher |
+| `ALT`+`Tab` | Rime Shell switcher | labwc's thumbnail switcher, all desktops | niri's recent-windows switcher |
 | `ALT`+`SHIFT`+`Tab` | the same, backwards | the same, backwards | the same, backwards |
 
 ## The pointer follows keyboard focus
 
 The Hyprland and labwc sessions both give focus to the window under the pointer
-(`follow_mouse = 1`, `<followMouse>yes</followMouse>`). APEX sets this on
+(`follow_mouse = 1`, `<followMouse>yes</followMouse>`). Rime sets this on
 purpose, so focus never depends on where a click lands. The cost is that a
 focus change you make with the keyboard lasts only until you touch the mouse.
 Press `SUPER`+`Left`, take your hand off the keyboard, nudge the mouse, and
@@ -21,10 +21,10 @@ focus snaps back to the window the pointer was still sitting on.
 To stop that, the compositor carries the pointer to the middle of the window
 that has gained focus:
 
-* **Hyprland:** `cursor { no_warps = false }` in `apex/input-defaults.lua`.
-  Hyprland already defaults to this. APEX writes it down anyway, so a later
-  Hyprland release cannot change APEX's behaviour by changing its own default.
-* **labwc:** `/usr/libexec/apex-labwc-keybinds` generates
+* **Hyprland:** `cursor { no_warps = false }` in `rime/input-defaults.lua`.
+  Hyprland already defaults to this. Rime writes it down anyway, so a later
+  Hyprland release cannot change Rime's behaviour by changing its own default.
+* **labwc:** `/usr/libexec/rime-labwc-keybinds` generates
   `<action name="WarpCursor" to="window"/>` after each `MoveToEdge` and
   `SnapToEdge`. labwc has no directional-*focus* action (`Focus` takes no
   arguments), so `SUPER`+arrow moves the window, and the warp stops the move
@@ -32,7 +32,7 @@ that has gained focus:
 * **niri:** nothing to do. niri gives focus to the window under the pointer
   only when configured to, so nothing takes the focus back.
 
-`tests/test-apex-hypr-focus.sh` checks the *consequence* on a real nested
+`tests/test-rime-hypr-focus.sh` checks the *consequence* on a real nested
 Hyprland: the pointer ends up inside the newly focused window, and that window
 keeps focus after the test nudges the pointer. It does not check that a config file
 contains a line. It then tears the session down and runs everything again with
@@ -46,10 +46,10 @@ demand.
 
 | | suite | what it proves |
 |---|---|---|
-| apex-os | `tests/test-apex-hypr-focus.sh` | `SUPER`+arrow warps the pointer and holds focus; the control fails; every arrow combo is bound exactly once; the switcher's binds exist and the `Alt_L`/`Alt_R` ones are releases |
-| apex-shell | `tests/run-window-switcher-test.sh` | real `ALT` and `TAB` keys reach the switcher: stepping, wrapping, backwards, `ESCAPE`, commit, a tap with no pause at all, a stale flag repairing itself, and a window that has left the screen |
-| apex-shell | `tests/run-switcher-activate-test.sh` | committing focuses the selected window, puts the pointer inside it, holds focus through a nudge, and switches workspace for a window on another one |
-| apex-shell | `tests/run-niri-keybinds-test.sh` | the niri fragment carries `recent-windows` and `niri validate` accepts it |
+| rime-os | `tests/test-rime-hypr-focus.sh` | `SUPER`+arrow warps the pointer and holds focus; the control fails; every arrow combo is bound exactly once; the switcher's binds exist and the `Alt_L`/`Alt_R` ones are releases |
+| rime-shell | `tests/run-window-switcher-test.sh` | real `ALT` and `TAB` keys reach the switcher: stepping, wrapping, backwards, `ESCAPE`, commit, a tap with no pause at all, a stale flag repairing itself, and a window that has left the screen |
+| rime-shell | `tests/run-switcher-activate-test.sh` | committing focuses the selected window, puts the pointer inside it, holds focus through a nudge, and switches workspace for a window on another one |
+| rime-shell | `tests/run-niri-keybinds-test.sh` | the niri fragment carries `recent-windows` and `niri validate` accepts it |
 
 No headless suite can press a real `ALT`, hold it and let go. Hyprland 0.56.2
 accepts `wtype`'s virtual keyboard, reports it with `active keymap: error`, and
@@ -60,7 +60,7 @@ works.
 
 ## The Alt-Tab switcher
 
-`apex shell switcher next | prev | commit | cancel`
+`rime shell switcher next | prev | commit | cancel`
 
 Hold `ALT` and tap `Tab` to step through every window on every workspace, most
 recently used first, then release `ALT` to switch to the highlighted one.
@@ -86,7 +86,7 @@ release instead:
 
 That bind fires on *every* `ALT` release for as long as the machine is on, not
 only while the switcher is open. For that reason the keybind names
-`/usr/libexec/apex-switcher` rather than `apex shell switcher`: with nothing
+`/usr/libexec/rime-switcher` rather than `rime shell switcher`: with nothing
 open, the helper runs one `[ -e ]` on a flag file under `XDG_RUNTIME_DIR` and
 exits, and the shell hears nothing.
 
@@ -113,7 +113,7 @@ instance instead of trusting the config.
 
 A quick `ALT`+`Tab` lets go of `ALT` about 60 ms after `Tab` goes down, and the
 press and the release each start their own short-lived chain of processes: a
-spawn, an `apex`, and a `qs ipc call`. The switcher handles two consequences:
+spawn, an `rime`, and a `qs ipc call`. The switcher handles two consequences:
 
 * **The helper writes the flag file on `next`**, before anything reaches the shell.
   If the shell wrote it at the end of that chain, the release would arrive
@@ -156,14 +156,14 @@ the complaint this document opens with, in that session's `ALT`+`Tab`.
 after the cycle rather than at key-press time, and nothing here can tell which.
 labwc has no IPC, so a headless test cannot read the pointer's position back,
 and an unverified warp risks moving the pointer to the OLD window before the
-cycle starts. APEX leaves it undone and records it here.
+cycle starts. Rime leaves it undone and records it here.
 
 **niri** 26.04 ships `recent-windows`: hold-and-release, MRU ordering, live
 previews. niri has no key-release binding for the shell's switcher to borrow
-either, so the Scrolling session keeps niri's switcher. APEX Shell writes the
-two binds into `ApexShellKeybinds.kdl` instead of inheriting them, for the same
+either, so the Scrolling session keeps niri's switcher. Rime Shell writes the
+two binds into `RimeShellKeybinds.kdl` instead of inheriting them, for the same
 reason the Hyprland seed spells out `cursor { no_warps = false }` although it
-is upstream's default: this is APEX's `ALT`+`Tab`, and a later niri release
+is upstream's default: this is Rime's `ALT`+`Tab`, and a later niri release
 should not be able to change it.
 
 `ALT`+`Tab` therefore looks different in each session, by decision. Two of the
@@ -177,4 +177,4 @@ The Keybinds page does **not** list `ALT`+`Tab`. The shell's keybind model has
 no way to express a key *release*, so rebinding the opening shortcut there
 would move `next` and leave the commit on `ALT`: a switcher you can open and
 cannot close. Until the model can express a release, the combination stays
-fixed in `apex/keybindings.lua` and `rc.xml`.
+fixed in `rime/keybindings.lua` and `rc.xml`.

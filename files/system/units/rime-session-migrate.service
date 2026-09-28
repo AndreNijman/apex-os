@@ -1,0 +1,24 @@
+# Moves this account's APEX-era files to their Rime names before anything reads
+# them. Ordered before basic.target, which (a) precedes every normal user unit,
+# rime-agentd and rime-remoted included (they are After=basic.target by default),
+# and (b) is when the user manager reports READY, which logind waits for before
+# the login proceeds, so greetd has not exec'd the compositor yet. Measured on
+# the L16: "Reached target basic.target" 11.8109 s, "Started user@1000.service"
+# 11.8111 s, default.target units from 11.8119 s.
+#
+# rime-remoted creates a NEW identity key when it finds none: if it ever ran
+# before this, every paired phone would stop recognising the machine.
+[Unit]
+Description=Rime OS: move this account's APEX-era files to their Rime names
+Documentation=man:rime(1)
+DefaultDependencies=no
+Before=basic.target rime-agentd.service rime-remoted.service rime-aid.service rime-shell-firstrun.service
+ConditionPathExists=/usr/libexec/rime-session-migrate
+
+[Service]
+Type=oneshot
+ExecStart=/usr/libexec/rime-session-migrate --start-units
+TimeoutStartSec=90
+
+[Install]
+WantedBy=basic.target

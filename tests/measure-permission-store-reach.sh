@@ -5,12 +5,12 @@
 #
 #  ── The question, and why it was open ───────────────────────────────────────
 #
-#  `apex permissions revoke <app> camera` runs `flatpak permission-set devices
+#  `rime permissions revoke <app> camera` runs `flatpak permission-set devices
 #  camera <app> no`, which is `SetPermission` on
 #  `org.freedesktop.impl.portal.PermissionStore`. The model records the timing
 #  of that as `Timing::NextRequest` — "takes effect the next time the app asks"
 #  — and `Timing::Immediate` exists and is unreachable, held so by
-#  apex-perm-core's `nothing_claims_a_revocation_is_immediate`.
+#  rime-perm-core's `nothing_claims_a_revocation_is_immediate`.
 #
 #  The round that wrote that said, honestly, that the conservative answer was
 #  chosen because nobody had measured the other one: measuring it looked like
@@ -64,7 +64,7 @@
 #      ./tests/measure-permission-store-reach.sh
 #
 #  Needs pipewire, wireplumber, gcc, the libpipewire headers and the pipewire
-#  command-line tools. None of those are in the APEX image, so it SKIPS on a
+#  command-line tools. None of those are in the Rime image, so it SKIPS on a
 #  stock machine rather than failing. To run it there anyway, fetch the two
 #  packages without installing them and point this at the result:
 #
@@ -82,7 +82,7 @@ set -uo pipefail
 
 here="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
 
-APP="com.example.apex-perm-measure"
+APP="com.example.rime-perm-measure"
 
 need() {
     command -v "$1" >/dev/null 2>&1 || { echo "SKIP: $1 is not installed"; exit 0; }
@@ -155,9 +155,9 @@ chmod 0700 "$XDG_RUNTIME_DIR"
 # somebody is logged into, and the only two components this measures are the
 # permission-store module and the portal client-access script.
 mkdir -p "$XDG_CONFIG_HOME/wireplumber/wireplumber.conf.d"
-cat > "$XDG_CONFIG_HOME/wireplumber/wireplumber.conf.d/50-apex-measure.conf" <<'CONF'
+cat > "$XDG_CONFIG_HOME/wireplumber/wireplumber.conf.d/50-rime-measure.conf" <<'CONF'
 wireplumber.profiles = {
-  apex-permtest = {
+  rime-permtest = {
     inherits = [ base ]
     metadata.sm-settings = required
     metadata.sm-objects  = required
@@ -218,7 +218,7 @@ store yes || true
 [ "$(lookup)" != "" ] || { echo "SKIP: xdg-permission-store did not activate"; exit 0; }
 
 WIREPLUMBER_DEBUG="${WIREPLUMBER_DEBUG:-s-client:D,m-portal-permissionstore:D,I}" \
-    wireplumber -p apex-permtest > "$W/wireplumber.log" 2>&1 &
+    wireplumber -p rime-permtest > "$W/wireplumber.log" 2>&1 &
 echo $! > "$W/wireplumber.pid"
 sleep 3
 kill -0 "$(cat "$W/wireplumber.pid")" 2>/dev/null || {
@@ -235,7 +235,7 @@ echo "wireplumber: portal-permissionstore and access-portal.lua are loaded"
 # real /dev/video0 would mean opening the camera on the machine somebody is
 # using, which this has no business doing.
 pw-cli create-node spa-node-factory \
-    '{ factory.name=support.null-audio-sink node.name=apex-measure-cam media.class=Video/Source media.role=Camera object.linger=true }' \
+    '{ factory.name=support.null-audio-sink node.name=rime-measure-cam media.class=Video/Source media.role=Camera object.linger=true }' \
     >/dev/null 2>&1
 sleep 1
 
@@ -317,7 +317,7 @@ if [ "$before" = "$after" ]; then
 else
     echo "YES. The running client's permissions CHANGED after the store write."
     echo "     Before and after differ, so a camera revocation does reach a"
-    echo "     live client on this stack. apex-perm-core's Timing::Immediate"
+    echo "     live client on this stack. rime-perm-core's Timing::Immediate"
     echo "     and docs/app-permissions.md §2.4 both need revisiting — that is"
     echo "     a decision for a person, which is why this exits 0 either way."
 fi

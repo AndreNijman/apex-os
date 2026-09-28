@@ -1,15 +1,15 @@
 #!/usr/bin/env bash
 #
-# sign-module.sh — sign an out-of-tree kernel module (.ko) with the APEX key,
+# sign-module.sh — sign an out-of-tree kernel module (.ko) with the Rime key,
 # using the in-kernel `scripts/sign-file` helper. This is the reference command
-# the image pipeline (M1/M5) runs for every kmod shipped in an APEX-OS image.
+# the image pipeline (M1/M5) runs for every kmod shipped in a Rime OS image.
 #
 # NOTE ON ENFORCEMENT (see docs/m0-results.md, Spike D):
 # Module signatures are verified against the kernel's *keyring*
 # (.builtin_trusted_keys / .secondary_trusted_keys / .machine), NOT against the
-# UEFI db used for the boot chain. For the kernel to *accept* an APEX-signed
-# module, the APEX public key must be either:
-#   (a) built into the APEX kernel via CONFIG_SYSTEM_TRUSTED_KEYS / bundled as
+# UEFI db used for the boot chain. For the kernel to *accept* a Rime-signed
+# module, the Rime public key must be either:
+#   (a) built into the Rime kernel via CONFIG_SYSTEM_TRUSTED_KEYS / bundled as
 #       an additional MODULE_SIG_KEY at kernel build time, or
 #   (b) enrolled as a MOK and linked into the .machine keyring (needs shim +
 #       CONFIG_INTEGRITY_MACHINE_KEYRING, and CONFIG_MODULE_SIG=y).
@@ -18,8 +18,8 @@
 #
 # Usage:  sign-module.sh MODULE.ko [KEY CERT [HASH [SIGN_FILE]]]
 #   MODULE.ko   module to sign in place (must be decompressed .ko, not .ko.zst)
-#   KEY         private key   (default: $APEX_KEY or ./apex-mok.key)
-#   CERT        signing cert  (default: $APEX_CERT or ./apex-mok.crt; sign-file
+#   KEY         private key   (default: $RIME_KEY or ./rime-mok.key)
+#   CERT        signing cert  (default: $RIME_CERT or ./rime-mok.crt; sign-file
 #               wants DER — this wrapper converts PEM->DER automatically)
 #   HASH        digest        (default: sha512, matching the kernel's
 #               CONFIG_MODULE_SIG_HASH)
@@ -28,8 +28,8 @@
 set -euo pipefail
 
 MOD="${1:?need module .ko}"
-KEY="${2:-${APEX_KEY:-apex-mok.key}}"
-CERT="${3:-${APEX_CERT:-apex-mok.crt}}"
+KEY="${2:-${RIME_KEY:-rime-mok.key}}"
+CERT="${3:-${RIME_CERT:-rime-mok.crt}}"
 HASH="${4:-sha512}"
 SIGN_FILE="${5:-/lib/modules/$(uname -r)/build/scripts/sign-file}"
 

@@ -9,7 +9,7 @@
 //
 // What this does NOT cover, stated so nobody reads it as more than it is: the
 // hibernation handling and the forwarding in `index.js` have not been run.
-// `wrangler dev --local` against `apexd/apex-remoted/tests/relay.rs`'s client
+// `wrangler dev --local` against `rimed/rime-remoted/tests/relay.rs`'s client
 // is the pre-deploy step, and it is written down in
 // ROADMAP/state/agents/p1-052.md.
 
@@ -62,7 +62,7 @@ test("a path that is not a room is a 404 and never a route", () => {
 test("an id keeps the alphabet the desktop derives, and no separator", () => {
   // The id is URL-safe unpadded base64 by construction. Accepting a `/` would
   // let a room name carry a path, and accepting `+` or `=` would accept an id
-  // no APEX desktop derives.
+  // no Rime desktop derives.
   assert.ok("rendezvous" in target("/r/AbC_-019xyzQWERTY12", query("role=host")));
   for (const bad of ["a+b/cdefgh", "abcdefg=", "abcdef/g"]) {
     assert.equal(target(`/r/${bad}`, query("role=host")).status, 404, `${bad} was accepted`);
@@ -99,7 +99,7 @@ test("the room is decided by what is live, so a dead host does not hold it for e
 });
 
 test("the three notices are byte-for-byte what the desktop parses", () => {
-  // apex_remote_core::relay::Notice::text() produces these exact strings, and
+  // rime_remote_core::relay::Notice::text() produces these exact strings, and
   // a Rust test reads this file to check it. Two independently maintained
   // spellings of one wire value is the drift that would leave a desktop
   // waiting through a relay that had already paired it.

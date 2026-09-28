@@ -14,7 +14,7 @@
 #  asking for the passphrase -> the pivot into the real root.
 #
 #  This suite does exactly that: build the disk with the real engine, boot it
-#  under OVMF in the apex-bootlab container, type the passphrase on an
+#  under OVMF in the rime-bootlab container, type the passphrase on an
 #  emulated keyboard through QMP (installer/luks-boot-drive.py), and read the
 #  serial log for dracut's own "Switching root" line.
 #
@@ -29,8 +29,8 @@
 #  engine call) costs far less than the coupling of sharing it would.
 #
 #  WHAT IT NEEDS. Passwordless root, podman, /dev/kvm, ~25 GB of free disk on
-#  /var/lab-scratch, an APEX-OS image in ROOT podman storage
-#  (localhost/apex-os:daily or APEX_LUKS_BOOT_IMAGE=), and the apex-bootlab
+#  /var/lab-scratch, a Rime OS image in ROOT podman storage
+#  (localhost/rime-os:daily or RIME_LUKS_BOOT_IMAGE=), and the rime-bootlab
 #  container image (bootlab/Containerfile; built if absent). It cannot run on
 #  a GitHub runner and is listed in tests/suites-not-in-ci.txt.
 #
@@ -38,7 +38,7 @@
 #  target is a /dev/loop* node this script attached itself, this machine's
 #  UEFI boot variables are snapshotted and diffed by tests/lab/nvram-guard
 #  around the INSTALL phase only. The BOOT phase that follows needs no such
-#  guard: it is an unprivileged qemu process inside the apex-bootlab container
+#  guard: it is an unprivileged qemu process inside the rime-bootlab container
 #  reading two pflash FILES and one disk IMAGE FILE in a bind-mounted work
 #  directory — there is no host efivarfs anywhere near it, and every other
 #  OVMF scenario in this lab (files/scripts/boot-v2/run-scenarios) boots the
@@ -50,15 +50,15 @@ set -uo pipefail
 cd "$(dirname "$0")" || exit 1
 REPO=$(cd .. && pwd)
 
-ENGINE=./apex-install
-IMAGE="${APEX_LUKS_BOOT_IMAGE:-localhost/apex-os:daily}"
-LAB="${APEX_BOOTLAB_IMAGE:-localhost/apex-bootlab}"
-# us: no vconsole.keymap karg is added at all (apex-install omits it for
+ENGINE=./rime-install
+IMAGE="${RIME_LUKS_BOOT_IMAGE:-localhost/rime-os:daily}"
+LAB="${RIME_BOOTLAB_IMAGE:-localhost/rime-bootlab}"
+# us: no vconsole.keymap karg is added at all (rime-install omits it for
 # exactly `us`), so the passphrase below is typed as literal QMP qcodes with
 # no layout translation to reason about — that translation is
 # test-installer-keymap-boot.sh's subject, not this suite's.
 KEYMAP_XKB="us"
-PASSPHRASE="apexbootproof1"
+PASSPHRASE="rimebootproof1"
 DISK_SIZE=24G
 
 pass=0; fail=0
@@ -77,17 +77,17 @@ NVGUARD="../tests/lab/nvram-guard"
 This suite will not run a privileged loopback install without it — see
 BOOT-BREAKAGE-2026-09-20.md and AGENTS.md \"Touching a machine's boot path\"."
 sudo -n podman image exists "$IMAGE" 2>/dev/null \
-    || die "$IMAGE is not in ROOT podman storage. Build it, or set APEX_LUKS_BOOT_IMAGE."
+    || die "$IMAGE is not in ROOT podman storage. Build it, or set RIME_LUKS_BOOT_IMAGE."
 
 # /var/lab-scratch, never /tmp: /tmp on this machine is a 15 GB tmpfs, and a
-# disk image there is that much RAM. APEX_LUKS_BOOT_SCRATCH overrides it.
-SCRATCH_ROOT="${APEX_LUKS_BOOT_SCRATCH:-/var/lab-scratch}"
+# disk image there is that much RAM. RIME_LUKS_BOOT_SCRATCH overrides it.
+SCRATCH_ROOT="${RIME_LUKS_BOOT_SCRATCH:-/var/lab-scratch}"
 mkdir -p "$SCRATCH_ROOT" 2>/dev/null
 [ -d "$SCRATCH_ROOT" ] && [ -w "$SCRATCH_ROOT" ] || SCRATCH_ROOT=/var/tmp
 case "$(df -PT "$SCRATCH_ROOT" 2>/dev/null | awk 'NR==2{print $2}')" in
-  tmpfs|ramfs) die "$SCRATCH_ROOT is a RAM filesystem; a 24 GB image there would eat the machine. Set APEX_LUKS_BOOT_SCRATCH to somewhere on a real disk." ;;
+  tmpfs|ramfs) die "$SCRATCH_ROOT is a RAM filesystem; a 24 GB image there would eat the machine. Set RIME_LUKS_BOOT_SCRATCH to somewhere on a real disk." ;;
 esac
-WORK=$(mktemp -d "$SCRATCH_ROOT/apex-luks-boot.XXXXXX") || die "no scratch directory"
+WORK=$(mktemp -d "$SCRATCH_ROOT/rime-luks-boot.XXXXXX") || die "no scratch directory"
 chmod 755 "$WORK"
 IMG="$WORK/target.img"
 LOOP=""
@@ -107,7 +107,7 @@ cleanup() {
         done
     fi
     [ -n "$LOOP" ] && sudo -n losetup -d "$LOOP" 2>/dev/null
-    if [ "${fail:-1}" = 0 ] && [ "${APEX_LUKS_BOOT_KEEP:-0}" != 1 ]; then
+    if [ "${fail:-1}" = 0 ] && [ "${RIME_LUKS_BOOT_KEEP:-0}" != 1 ]; then
         sudo -n rm -rf "$WORK" 2>/dev/null
     else
         printf 'artefacts kept in %s\n' "$WORK" >&2
@@ -133,7 +133,7 @@ printf 'target: %s (%s, %s)\n\n' "$LOOP" "$IMG" "$DISK_SIZE"
 
 # ── the stand-in enrolment helper — same stub test-installer-luks-live.sh
 #    uses, the recovery-key half of the contract and nothing else ───────────
-HELPER="$WORK/apex-luks-enroll"
+HELPER="$WORK/rime-luks-enroll"
 cat > "$HELPER" <<'STUB'
 #!/usr/bin/env bash
 set -uo pipefail
@@ -162,7 +162,7 @@ ANS="$WORK/answers"
   printf 'disk=%s\n' "$LOOP"
   printf 'username=tester\n'
   printf 'password=loginpw123\n'
-  printf 'hostname=apexbootlab\n'
+  printf 'hostname=rimebootlab\n'
   printf 'encrypt=yes\n'
   printf 'lukspass=%s\n' "$PASSPHRASE"
   printf 'keymap=%s\n' "$KEYMAP_XKB"
@@ -181,16 +181,16 @@ echo "── running the installer (this is the slow part) ───────
 start=$(date +%s)
 # TEST-ONLY: makes the INSTALLED kernel and systemd visible on a serial
 # console — this is the entire reason this suite can read a verdict off the
-# guest at all. See apex-install's own comment on APEX_LUKS_EXTRA_KARGS.
+# guest at all. See rime-install's own comment on RIME_LUKS_EXTRA_KARGS.
 EXTRA_KARGS="console=ttyS0,115200 console=tty1 systemd.log_target=kmsg systemd.show_status=1 loglevel=7 rd.plymouth=0 plymouth.enable=0 rd.timeout=120"
 # shellcheck disable=SC2024
 sudo -n "$NVGUARD" --label "luks-boot-install" --out "$WORK/nvram" -- \
   env \
-    APEX_IMAGE="$IMAGE" \
-    APEX_LUKS_ENROLL_LOCAL="$HELPER" \
-    APEX_RECOVERY_DIR="$RECOVERY_DIR" \
-    APEX_LUKS_PBKDF_MEMORY=65536 \
-    APEX_LUKS_EXTRA_KARGS="$EXTRA_KARGS" \
+    RIME_IMAGE="$IMAGE" \
+    RIME_LUKS_ENROLL_LOCAL="$HELPER" \
+    RIME_RECOVERY_DIR="$RECOVERY_DIR" \
+    RIME_LUKS_PBKDF_MEMORY=65536 \
+    RIME_LUKS_EXTRA_KARGS="$EXTRA_KARGS" \
     "$ENGINE" --headless "$ANS" > "$OUT" 2>&1 </dev/null
 rc=$?
 echo "engine exit=$rc after $(( $(date +%s) - start ))s"
@@ -200,8 +200,8 @@ echo "── the install itself ────────────────
 if [ "$rc" = 0 ]; then ok "engine exit status" "0"
 else bad "engine exit status" "$rc — see $OUT"; fi
 lastproto=$(grep -v 'nvram-guard\[' "$OUT" | grep -v '^[[:space:]]*$' | tail -1)
-if [[ "$lastproto" == "APEX-INSTALL-OK" ]]; then ok "final protocol line is APEX-INSTALL-OK"
-else bad "final protocol line is APEX-INSTALL-OK" "got: $lastproto"; fi
+if [[ "$lastproto" == "RIME-INSTALL-OK" ]]; then ok "final protocol line is RIME-INSTALL-OK"
+else bad "final protocol line is RIME-INSTALL-OK" "got: $lastproto"; fi
 
 if [ "$rc" != 0 ]; then
     echo
@@ -249,7 +249,7 @@ FALLBACK_PRESENT=0
 # not enter into it; a superblock is global to the kernel.
 #
 # That is worse than a check that did not run, which is why this reports rather
-# than retries. apex-install mounts the ESP at $TROOT/boot/efi and unmounts it
+# than retries. rime-install mounts the ESP at $TROOT/boot/efi and unmounts it
 # with `umount -R … 2>/dev/null || true` — a failure there is silent by
 # construction. Twenty lines below, this file detaches the loop device and
 # hands the IMAGE FILE to a qemu in a different container, on the stated
@@ -301,9 +301,9 @@ sudo -n losetup -d "$LOOP" 2>/dev/null
 LOOP=""
 
 echo
-echo "── building the apex-bootlab image if it is not already there ─────────"
+echo "── building the rime-bootlab image if it is not already there ─────────"
 if ! sudo -n podman image exists "$LAB" 2>/dev/null; then
-    echo "note: building $LAB — qemu/OVMF are build-time tooling, deliberately not on APEX machines"
+    echo "note: building $LAB — qemu/OVMF are build-time tooling, deliberately not on Rime machines"
     # shellcheck disable=SC2024
     sudo -n podman build -t "$LAB" -f "$REPO/bootlab/Containerfile" "$REPO" >"$WORK/bootlab-build.log" 2>&1 \
         || die "could not build $LAB (see $WORK/bootlab-build.log)"
@@ -320,7 +320,7 @@ sudo -n chmod 644 "$IMG"
 # PK/db enrolled — see luks-boot-drive.py's header for why that is the right
 # choice here, and why it means UEFI Setup Mode rather than Secure Boot
 # enforcing). Done inside the container: edk2-ovmf lives there, never on an
-# APEX host, by AGENTS.md "Touching a machine's boot path".
+# Rime host, by AGENTS.md "Touching a machine's boot path".
 BOOTCMD='set -e
 qemu-img convert -O raw /usr/share/edk2/ovmf/OVMF_CODE_4M.secboot.qcow2 /w/OVMF_CODE.fd
 qemu-img convert -O raw /usr/share/edk2/ovmf/OVMF_VARS_4M.qcow2 /w/OVMF_VARS_template.fd
@@ -357,7 +357,7 @@ fi
 # installer wrote BOOT. That question is fully answered by the three assertions
 # above — the prompt was drawn, the passphrase was accepted, and dracut handed
 # off to the real root. Everything after `Switching root` belongs to the
-# INSTALLED SYSTEM, not to the installer: first-boot welcome is apex-shell's,
+# INSTALLED SYSTEM, not to the installer: first-boot welcome is rime-shell's,
 # it needs a graphical session this headless serial guest never starts, and
 # gating a LUKS boot test on it would make a shell regression read as an
 # encryption defect. The suite that owns first-boot welcome should assert it.

@@ -1,6 +1,6 @@
 [[customizations.user]]
 name = "root"
-password = "apex"
+password = "rime"
 
 [customizations.kernel]
 append = "console=ttyS0,115200 console=tty0"

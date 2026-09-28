@@ -7,7 +7,7 @@ WHY THIS EXISTS, AND HOW IT DIFFERS FROM keymap-boot-drive.py. That script
 boots the shipped initramfs directly (`-kernel`/`-initrd`) against a bare
 256 MB LUKS volume with no partition table, no ESP and no firmware at all — it
 measures the keymap-to-initrd channel and nothing about the bootloader. This
-script boots the WHOLE DISK apex-install wrote — GPT, ESP, plain /boot, the
+script boots the WHOLE DISK rime-install wrote — GPT, ESP, plain /boot, the
 LUKS2 root — through real UEFI firmware, exactly as a machine would: OVMF
 loads shim from the ESP, shim loads GRUB, GRUB loads the kernel and initrd
 named in the BLS entry bootupd wrote, and only then does dracut ask for the
@@ -15,7 +15,7 @@ passphrase. Nothing here is a lab fixture; every byte booted is what the
 engine put on the disk.
 
 WHY THE VARSTORE IS PRISTINE, NOT THE LAB'S SIGNED CHAIN. files/scripts/boot-
-v2/run-scenarios enrols an APEX TEST certificate into a fresh varstore for its
+v2/run-scenarios enrols a Rime TEST certificate into a fresh varstore for its
 own self-signed UKI scenarios. That chain would not trust the real Fedora
 shim/GRUB bootc actually installs, so using it here would fail Secure Boot for
 a reason that has nothing to do with this installer. The stock 4 MB OVMF

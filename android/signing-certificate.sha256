@@ -1,8 +1,8 @@
-# The certificate that signs every published APEX Remote APK.
+# The certificate that signs every published Rime Remote APK.
 #
 # This file is the PUBLISHED value. A person who has downloaded an APK can run
 #
-#     apksigner verify --print-certs apex-remote-<version>.apk
+#     apksigner verify --print-certs rime-remote-<version>.apk
 #
 # and compare the "certificate SHA-256 digest" it prints against the line(s)
 # below. Nothing secret is here: a certificate fingerprint is a public fact

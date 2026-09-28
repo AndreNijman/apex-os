@@ -5,7 +5,7 @@
 # BootOrder / boot entries survive between stages — this is what lets the spike
 # observe whether bootc/bootupd clobbered the incumbent's NVRAM entries.
 #
-# The disk is /dev/vda (ESP=vda1, alpine=vda2, apex=vda3); payload is /dev/vdb.
+# The disk is /dev/vda (ESP=vda1, alpine=vda2, rime=vda3); payload is /dev/vdb.
 # Guest stages end in `poweroff`, so qemu exits on its own; `timeout` is a
 # backstop (and is the normal exit for the bootc/incumbent boot-tests, which
 # don't power off).

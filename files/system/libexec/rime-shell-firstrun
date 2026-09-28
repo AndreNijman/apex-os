@@ -1,0 +1,1286 @@
+#!/usr/bin/env bash
+# ─────────────────────────────────────────────────────────────────────────────
+#  Rime OS — per-login user provisioner
+#  Installed to /usr/libexec/rime-shell-firstrun; driven by the per-user
+#  systemd unit rime-shell-firstrun.service (see files/system/units/).
+#
+#  Seeds the per-user config Rime Shell expects. It does NOT install the shell:
+#  since rime-logs 56 the shell itself ships INSIDE the image at
+#  /usr/share/rime-shell (see Containerfile.base "Stage 5b2").
+#
+#  WHAT CHANGED, AND WHY IT MATTERS HERE
+#  This script used to `git clone` github.com/AndreNijman/rime-shell into
+#  ~/.local/src/rime-shell on first login. That gave Rime OS two independent
+#  update channels (bootc for the OS, an in-app `git pull` for the entire UI) and
+#  made the desktop depend on the network at first login. Worse, it created an
+#  unwinnable race: greetd execs the compositor in PARALLEL with this unit, so the
+#  compositor's autostart fired against a directory this script had not finished
+#  cloning yet (measured 2-5s early — rime-logs 51), and the user landed in a bare
+#  compositor with no bar.
+#
+#  With the shell vendored into the image, ALL of that disappears:
+#    * one update channel — `rime update` moves the OS and the UI together;
+#    * the race is structurally impossible, not merely mitigated: the shell exists
+#      before the compositor is ever exec'd;
+#    * no network is needed at first login — this is now pure local file seeding;
+#    * the UI is covered by the image's cosign signature and by `rime rollback`.
+#
+#  So what is left here is cheap, local, and idempotent. There is deliberately NO
+#  `.provisioned` marker any more: the marker existed to gate the expensive
+#  network clone, and it is precisely what made every past silent defect permanent
+#  (it short-circuited the retry-at-next-login design — rime-logs 52). Everything
+#  below is safe to re-run, so it simply runs every login and self-heals.
+# ─────────────────────────────────────────────────────────────────────────────
+set -euo pipefail
+
+# The shell now lives in the image. Constant, read-only, always present.
+SRC_DIR="/usr/share/rime-shell"
+CFG_DIR="${HOME}/.config/rime-shell"
+SYS_WALLPAPER="/usr/share/backgrounds/rime/default.jpg"
+# Where the shell used to be cloned. Only referenced to MIGRATE away from it.
+LEGACY_SRC_DIR="${HOME}/.local/src/apex-shell"  # rime-rename: keep — the clone path pre-vendor machines have on disk
+
+log() { printf '[rime-shell-firstrun] %s\n' "$*"; }
+
+# Human users only. System/service accounts (greetd at ~uid 970, etc.) can get a
+# transient systemd --user manager and would otherwise seed config into their
+# state dir. Gate on the regular-user UID range so this only ever provisions real
+# logins (uid >= 1000). See rime-logs/18-greetd-provisioner-scope.md.
+if [ "$(id -u)" -lt 1000 ]; then
+    log "system user (uid $(id -u)) — not a human login; skipping."
+    exit 0
+fi
+
+# ── Before anything below creates a directory: the APEX-era names ──────────
+# An account first logging in on this image still has everything under the
+# APEX names: ~/.config/apex-shell, ~/.config/hypr/apex, ~/.local/state/apex
+# (the Remote identity key). Every block below creates or seeds the NEW names
+# (`mkdir -p "${CFG_DIR}"` is one of them), and a new directory existing is
+# precisely what makes a rename of the old one unsafe, so this goes first.
+#
+# rime-session-migrate.service normally ran it already, before basic.target,
+# which is what keeps the per-user daemons from ever seeing the empty new
+# names. This call is the fallback for an account whose unit did not run, and
+# a no-op otherwise. Output captured rather than piped, as for the migrator
+# below: a non-zero exit is a report, not a reason to abort the login.
+if [ -x /usr/libexec/rime-session-migrate ]; then
+    _sm_out="$(/usr/libexec/rime-session-migrate --start-units 2>&1 || true)"
+    if [ -n "${_sm_out}" ]; then
+        printf '%s\n' "${_sm_out}" | while IFS= read -r _line; do
+            log "${_line}"
+        done
+    fi
+fi
+
+# The image must actually contain the shell. If it does not, seeding a config that
+# points at it would produce a session with no UI and no explanation, so fail
+# loudly instead — this is an image-build defect, not a user problem.
+if [ ! -s "${SRC_DIR}/shell.qml" ]; then
+    log "FATAL: ${SRC_DIR}/shell.qml is missing — the image did not ship Rime Shell."
+    log "       this is an image-build bug; see Containerfile.base Stage 5b2."
+    exit 1
+fi
+
+# ── 0. Seed the compositor config FIRST — before ANYTHING that can block ─────
+# CRITICAL ORDERING (rime-logs 43). greetd execs Hyprland in parallel with this
+# user unit, and Hyprland writes its OWN stock config to ~/.config/hypr/
+# hyprland.conf within ~1s of starting if none exists. Step 1 below can burn 30s
+# in the network poll, so when the seeding lived down in step 5 Hyprland ALWAYS
+# won: the `[ ! -f ]` guard then saw a file and skipped the Rime template, and
+# the user landed in stock Hyprland with only the autostart block appended.
+# Measured on the first p5 install — Hyprland wrote the file at 14:35:05, the
+# provisioner did not reach step 5 until 14:35:38.
+#
+# Two changes make that unwinnable race harmless:
+#   a) seed here, before the network poll, so we normally win outright; and
+#   b) treat a Hyprland-autogenerated file as "no config at all", so even a lost
+#      race self-heals instead of persisting forever.
+# This block also sits ABOVE the marker check on purpose: config seeding is
+# cheap and idempotent, so an ALREADY-provisioned user whose config got
+# clobbered still gets repaired at the next login. Only the expensive clone
+# stays gated behind the marker.
+RIME_HYPR_TMPL="/usr/share/rime/hypr/hyprland.lua"
+RIME_HYPR_MODULES="/usr/share/rime/hypr/rime"
+HYPR_CONF="${HOME}/.config/hypr/hyprland.lua"
+# The hyprlang config this replaced. Still named here because the 0.54 directive
+# migration below and the Lua migration both have to find it.
+HYPR_LEGACY_CONF="${HOME}/.config/hypr/hyprland.conf"
+
+# Hyprland 0.54+ removed syntax shipped by older Rime images. Migrate only
+# those exact directives in place, so an upgrade keeps the user's customizations
+# while their config becomes valid for the new parser.
+#
+# Direction matters and was briefly reversed here. The reasoning at the time was
+# that the core image served Hyprland 0.51.1, which rejects the `match:` forms —
+# true of the PUBLISHED core, which was stale, but not of what
+# Containerfile.core builds: a local rebuild produced 0.56.2, where `match:` is
+# the only accepted form. The authority is the compositor in the image, and the
+# `Hyprland --verify-config` assertion in Containerfile.base is what enforces
+# that this block, the shipped template and the compositor all move together.
+hypr_migrated=0
+# The fragment is listed by the name an APEX image gave it: that is the file on
+# disk, and rime-session-migrate renames only its directory.
+for conf in "${HYPR_LEGACY_CONF}" "${HOME}/.config/rime-shell/RimeShellKeybinds.conf" \
+            "${HOME}/.config/rime-shell/ApexShellKeybinds.conf"; do  # rime-rename: keep — file name on disk
+    [ -f "$conf" ] || continue
+    # The togglesplit rewrite used to match its own output (`, layoutmsg,
+    # togglesplit` still ends in `, togglesplit`), so every login added another
+    # `layoutmsg, `: measured, 180 of them on one line of the L16's
+    # hyprland.conf. A line that already says `layoutmsg, togglesplit` is left
+    # alone now, and one that was grown is collapsed back to a single one.
+    if grep -qE 'pseudotile[[:space:]]*=|suppressevent maximize|nofocus,[[:space:]]*class:\^\$|(layoutmsg,[[:space:]]*){2,}togglesplit' "$conf" \
+       || grep -E ',[[:space:]]*togglesplit([[:space:]]*$|[[:space:]]*#)' "$conf" \
+          | grep -qvE 'layoutmsg,[[:space:]]*togglesplit'; then
+        # --follow-symlinks: rime-shell-migrate.sh leaves ApexShellKeybinds.conf
+        # as a symlink to its new name, and a plain `sed -i` would replace that
+        # link with a copy, which the shell's script then reports as a conflict.
+        sed -Ei --follow-symlinks \
+            -e '/^[[:space:]]*pseudotile[[:space:]]*=[[:space:]]*(true|yes|1)[[:space:]]*$/d' \
+            -e 's/(layoutmsg,[[:space:]]*){2,}togglesplit/layoutmsg, togglesplit/' \
+            -e '/layoutmsg,[[:space:]]*togglesplit/!s/,[[:space:]]*togglesplit([[:space:]]*(#.*)?)$/, layoutmsg, togglesplit\1/' \
+            -e 's/windowrule = suppressevent maximize, class:\.\*/windowrule = suppress_event maximize, match:class .*/' \
+            -e 's/windowrule = nofocus,[[:space:]]*class:\^\$,[[:space:]]*title:\^\$,[[:space:]]*xwayland:1,[[:space:]]*floating:1,[[:space:]]*fullscreen:0,[[:space:]]*pinned:0/windowrule = match:class ^$, match:title ^$, match:xwayland 1, match:float 1, match:fullscreen 0, match:pin 0, no_focus on/' \
+            "$conf"
+        log "migrated removed Hyprland directives in ${conf}"
+        hypr_migrated=1
+    fi
+done
+
+[ "$hypr_migrated" = 0 ] || hyprctl reload >/dev/null 2>&1 || true
+
+# ── Keyboard layout: take the SYSTEM keymap, never a hardcoded one ───────────
+# The template ships @KB_LAYOUT@/@KB_VARIANT@ instead of a literal `us` so a
+# non-US user does not silently get a US layout in their session (and then have
+# to type their password on it). Hyprland does NOT read
+# /etc/X11/xorg.conf.d/00-keyboard.conf itself — it only knows what its config
+# says — so the value has to be substituted in here, at seed time.
+#
+# That file is what `localectl set-x11-keymap` and Anaconda-class installers
+# write. If nothing has set a keymap, it will not exist and we fall back to
+# `us`, which is exactly the old behaviour — so this can only ever improve on
+# what shipped before, never regress it.
+XKB_CONF="/etc/X11/xorg.conf.d/00-keyboard.conf"
+read_xkb_option() {
+    # $1 = XkbLayout | XkbVariant. Prints the value, or nothing.
+    [ -r "${XKB_CONF}" ] || return 0
+    sed -n "s/.*Option[[:space:]]\+\"$1\"[[:space:]]\+\"\([^\"]*\)\".*/\1/p" \
+        "${XKB_CONF}" | head -n1
+}
+# NOTE: every substitution below is `|| true`-guarded on purpose. This script
+# runs under `set -euo pipefail`, so an unguarded failing command substitution
+# in an assignment aborts the whole provisioner — and with pipefail, a
+# `localectl | sed` pipeline fails whenever localectl cannot reach dbus, which
+# is a perfectly normal thing to happen this early in a first login.
+KB_LAYOUT="$(read_xkb_option XkbLayout || true)"
+KB_VARIANT="$(read_xkb_option XkbVariant || true)"
+# localectl is the fallback source (it answers from systemd-localed even when
+# the xorg.conf.d snippet is absent). Best-effort: no dbus, no answer, no harm.
+if [ -z "${KB_LAYOUT}" ] && command -v localectl >/dev/null 2>&1; then
+    KB_LAYOUT="$( { localectl status 2>/dev/null \
+        | sed -n 's/^[[:space:]]*X11 Layout:[[:space:]]*//p' | head -n1; } || true)"
+    KB_VARIANT="$( { localectl status 2>/dev/null \
+        | sed -n 's/^[[:space:]]*X11 Variant:[[:space:]]*//p' | head -n1; } || true)"
+fi
+# `localectl status` prints the human-readable placeholder "(unset)" — NOT an
+# empty string — for a field that is not configured:
+#
+#     $ localectl status
+#        System Locale: LANG=C.UTF-8
+#            VC Keymap: (unset)
+#           X11 Layout: (unset)
+#
+# The `[ -n ]` guard below only ever tested for EMPTINESS, so the literal string
+# "(unset)" passed it and was substituted straight into the seeded config as
+# `kb_layout = (unset)`. xkbcommon cannot compile that, so Hyprland silently
+# fell back to `us` internally while still REPORTING the bogus value through
+# `hyprctl getoption input:kb_layout` — and a non-US user got a US layout
+# anyway, which is the exact failure the @KB_LAYOUT@ placeholder exists to
+# prevent. Measured on the first p5-class install; the script logged
+# "keyboard layout for the seeded session: '(unset)'" and exited 0.
+# See rime-logs 47 / rimelogs/01-invalid-keyboard-layout.md.
+case "${KB_LAYOUT}" in
+    "(unset)"|"n/a"|"") KB_LAYOUT="" ;;
+esac
+case "${KB_VARIANT}" in
+    "(unset)"|"n/a") KB_VARIANT="" ;;
+esac
+
+# Belt-and-braces: validate whatever survived against the xkb database, so ANY
+# future unexpected value degrades to `us` here instead of landing in the user's
+# config and breaking their session. Skipped silently if base.lst is absent.
+if [ -n "${KB_LAYOUT}" ] && [ -r /usr/share/X11/xkb/rules/base.lst ]; then
+    if ! awk -v want="${KB_LAYOUT}" \
+        '/^! layout/{f=1;next} /^!/{f=0} f && $1==want{found=1} END{exit !found}' \
+        /usr/share/X11/xkb/rules/base.lst 2>/dev/null; then
+        log "WARN: '${KB_LAYOUT}' is not a known xkb layout — falling back to us"
+        KB_LAYOUT=""
+        KB_VARIANT=""
+    fi
+fi
+
+[ -n "${KB_LAYOUT}" ] || KB_LAYOUT="us"
+log "keyboard layout for the seeded session: '${KB_LAYOUT}' variant '${KB_VARIANT}'"
+
+# Hyprland stamps every config it generates; the Rime template never carries
+# that marker. So its presence is a reliable "this is a placeholder, not the
+# user's own work" signal, and we may replace it.
+#
+# Both spellings are matched. 0.56.2 writes a hyprland.LUA when it finds no
+# config — verified — and stamps it `hl.config({ autogenerated = true })` with
+# an AUTOGENERATED banner above it, where hyprlang used a bare
+# `autogenerated = 1`. Matching only the old form would have made the lost-race
+# self-heal below silently stop working the moment the seeded config became
+# Lua: Hyprland would win the race, write its own example config, and this
+# would read it as the user's own work and leave it forever.
+is_stock_hypr_conf() {
+    [ -f "$1" ] && grep -qE '^autogenerated[[:space:]]*=[[:space:]]*1|autogenerated[[:space:]]*=[[:space:]]*true' "$1"
+}
+
+# Single place that turns a shipped template into a real config, so the keymap
+# placeholders can never drift apart between call sites.
+#
+# @HOME@ is gone from the Hyprland tree since P0-025: Lua `require` resolves
+# against the config file's own directory and rime/session.lua reads
+# os.getenv("HOME") for the PATH it exports, so there is no absolute path left
+# to substitute. The substitution stays here because the labwc templates still
+# carry it.
+render_hypr_tmpl() {
+    sed -e "s|@HOME@|${HOME}|g" \
+        -e "s|@KB_LAYOUT@|${KB_LAYOUT}|g" \
+        -e "s|@KB_VARIANT@|${KB_VARIANT}|g" \
+        "$1"
+}
+
+# ── hyprlang -> Lua, before anything is seeded ───────────────────────────────
+# Hyprland 0.55 deprecated hyprlang with "1-2 releases" of life left; the image
+# ships 0.56.2. Every hyprland.conf Rime has seeded has to move, and it has to
+# move BEFORE the seeding below, because the seeder's own guard is "does
+# hyprland.lua exist" — seeding first would make the migration look unnecessary
+# and strand the user's edits in a file nothing reads.
+#
+# rime-hypr-migrate is idempotent by construction (it renames the legacy files
+# rather than copying them, and refuses when hyprland.lua exists), so this runs
+# unconditionally on every login like the rest of step 0.
+if [ -x /usr/libexec/rime-hypr-migrate ] && [ -f "${HYPR_LEGACY_CONF}" ]; then
+    # Output captured rather than piped into `log`: this script runs under
+    # `set -euo pipefail`, so a non-zero exit anywhere in a pipeline would abort
+    # the whole provisioner. The migrator exits 2 on a config it declines to
+    # touch, which is a normal outcome and must not take login down with it.
+    _mig_out="$(/usr/libexec/rime-hypr-migrate --home "${HOME}" 2>&1 || true)"
+    if [ -n "${_mig_out}" ]; then
+        printf '%s\n' "${_mig_out}" | while IFS= read -r _line; do
+            log "hypr-migrate: ${_line}"
+        done
+    fi
+fi
+
+seed_hypr_conf() {
+    [ -f "${RIME_HYPR_TMPL}" ] || return 1
+    mkdir -p "${HOME}/.config/hypr/shaders" "${HOME}/.config/hypr/rime"
+    render_hypr_tmpl "${RIME_HYPR_TMPL}" > "${HYPR_CONF}"
+    log "seeded Rime Hyprland config -> ${HYPR_CONF}"
+}
+
+# The Rime-owned modules, refreshed on EVERY login rather than seeded once.
+#
+# They are image-owned the way hypridle.conf is: `rime update` ships fixes to
+# the keybinds and window rules, and a module seeded once would freeze a user on
+# whatever the image said the day they first logged in. hyprland.lua itself is
+# the opposite — it is the user's file, seeded once and never touched again —
+# which is what makes this split safe. Anything the user writes goes in
+# hyprland.lua or rime/user-overrides.lua, neither of which is refreshed here.
+seed_hypr_modules() {
+    [ -d "${RIME_HYPR_MODULES}" ] || return 0
+    mkdir -p "${HOME}/.config/hypr/rime"
+    for _m in "${RIME_HYPR_MODULES}"/*.lua; do
+        [ -f "${_m}" ] || continue
+        render_hypr_tmpl "${_m}" > "${HOME}/.config/hypr/rime/$(basename "${_m}")"
+    done
+    log "refreshed the Rime Hyprland modules -> ~/.config/hypr/rime/"
+}
+
+if [ ! -f "${HYPR_CONF}" ]; then
+    seed_hypr_conf || log "WARN: no Rime Hyprland template; step 5 will fall back."
+elif is_stock_hypr_conf "${HYPR_CONF}"; then
+    log "found a Hyprland-autogenerated config — lost the startup race; replacing."
+    cp -a "${HYPR_CONF}" "${HYPR_CONF}.stock.bak" 2>/dev/null || true
+    seed_hypr_conf || log "WARN: no Rime Hyprland template; leaving stock config."
+    # Best-effort live repair: if Hyprland is already up it has the stock config
+    # loaded, so ask it to re-read. Silently a no-op when the instance signature
+    # is not in this unit's environment — the next login picks it up regardless.
+    hyprctl reload >/dev/null 2>&1 || true
+fi
+seed_hypr_modules
+
+# ── zsh + starship, themed to the running edition ───────────────────────────
+# Seeded here rather than /etc/skel because the starship theme carries an
+# @ACCENT@ placeholder that has to become chartreuse on Daily and gold on
+# Gaming — skel is a straight copy and cannot substitute anything.
+#
+# These are the user's dotfiles from the moment they first log in; Rime writes a
+# good starting point and then never touches anything the user has edited.
+#
+# WHY THIS IS NOT SIMPLY `[ ! -f ~/.zshrc ]` (rime-logs 14)
+# It was, and the consequence was that the Rime zsh config NEVER landed on ANY
+# machine. The `zsh` package ships /etc/skel/.zshrc, and useradd copies it into
+# every new home when the account is created — long before this unit first runs.
+# So ~/.zshrc always existed, the seed was always skipped, and every user got the
+# stock Fedora skeleton instead: a bare `compinit`, no starship, no
+# autosuggestions, no syntax highlighting. Both "starship does not work" and "tab
+# completion is useless" traced back to this single condition. The failure was
+# silent: the unit logged nothing and exited 0.
+#
+# So: seed when the file is ABSENT, or when it is provably the distro skeleton
+# that useradd wrote. A file the user has actually touched is never overwritten.
+ZSHRC_TMPL="/usr/share/rime/zsh/zshrc"
+STARSHIP_TMPL="/usr/share/rime/starship/starship.toml"
+
+# True when $1 is a zsh rc that Rime may safely replace. Deliberately
+# conservative: anything carrying our own header, or already using any of the
+# features we would be adding, is treated as the user's file and left alone.
+is_stock_zshrc() {
+    [ -f "$1" ] || return 1
+    grep -qE '(Rime OS|APEX-OS) — default zsh configuration' "$1" && return 1  # rime-rename: keep — the header APEX seeded
+    grep -qE 'starship|zsh-autosuggestions|zsh-syntax-highlighting' "$1" && return 1
+    # Byte-identical to the skeleton on this release -> useradd wrote it, not a human.
+    [ -f /etc/skel/.zshrc ] && cmp -s "$1" /etc/skel/.zshrc && return 0
+    # A different zsh release ships a slightly different skeleton, so byte equality
+    # alone would silently stop migrating after any zsh update. Fall back to
+    # recognising the skeleton by its opening line...
+    grep -q '^# \.zshrc is sourced in interactive shells' "$1" || return 1
+    # ...but then decide on the ACTIVE lines only. The stock file's entire substance
+    # is a bare compinit plus COMPLETE_IN_WORD; everything else in it is commented
+    # out. If every active line is one of those, there is nothing of the user's in
+    # here to lose. A single line we do not recognise means they have added
+    # something, and we keep our hands off it.
+    local active
+    active="$(grep -vE '^[[:space:]]*(#|$)' "$1" 2>/dev/null \
+        | grep -vxE '[[:space:]]*(autoload -U[a-z]* compinit|compinit|setopt COMPLETE_IN_WORD)[[:space:]]*')"
+    [ -z "${active}" ] && return 0
+    return 1
+}
+
+# Accent follows VARIANT_ID (docs/branding.md): the prompt should match the
+# greeter and the boot splash of the edition actually running.
+RIME_VARIANT="$(sed -n 's/^VARIANT_ID=//p' /etc/os-release 2>/dev/null | tr -d '"' | head -1)"
+case "${RIME_VARIANT}" in
+    gaming*) RIME_ACCENT="#FDE047" ;;   # gold
+    *)       RIME_ACCENT="#D9F99D" ;;   # chartreuse
+esac
+
+if [ -f "${ZSHRC_TMPL}" ]; then
+    if [ ! -f "${HOME}/.zshrc" ]; then
+        cp "${ZSHRC_TMPL}" "${HOME}/.zshrc"
+        log "seeded ~/.zshrc"
+    elif is_stock_zshrc "${HOME}/.zshrc"; then
+        cp -a "${HOME}/.zshrc" "${HOME}/.zshrc.stock.bak" 2>/dev/null || true
+        cp "${ZSHRC_TMPL}" "${HOME}/.zshrc"
+        log "replaced the distro skeleton ~/.zshrc with the Rime config (backup: ~/.zshrc.stock.bak)"
+        log "  open a new terminal to pick up starship and the completion setup"
+    fi
+fi
+
+# Repair an already-seeded ~/.zshrc that still carries the upper-case
+# autosuggestion colour. zle lower-cases a colour spec when it stores the
+# highlight in region_highlight, and zsh-autosuggestions removes its highlight by
+# comparing that stored entry against the string it built from the variable, so
+# with 'fg=#4A5162' the removal never matched and text stayed grey after being
+# accepted (measured on zsh 5.9 / zsh-autosuggestions 0.7.1: the entry survives
+# as '6 29 fg=#4a5162'). The file belongs to the user once seeded, so exactly one
+# line is rewritten, only when it is still byte-for-byte the line Rime wrote.
+ZSHRC_BAD_STYLE="ZSH_AUTOSUGGEST_HIGHLIGHT_STYLE='fg=#4A5162'"
+ZSHRC_GOOD_STYLE="ZSH_AUTOSUGGEST_HIGHLIGHT_STYLE='fg=#4a5162'"
+if [ -f "${HOME}/.zshrc" ] && grep -qxF "${ZSHRC_BAD_STYLE}" "${HOME}/.zshrc"; then
+    ZSHRC_TMP="$(mktemp "${HOME}/.zshrc.rime.XXXXXX")"
+    if awk -v bad="${ZSHRC_BAD_STYLE}" -v good="${ZSHRC_GOOD_STYLE}" \
+           '$0 == bad { print good; next } { print }' "${HOME}/.zshrc" > "${ZSHRC_TMP}" \
+       && [ -s "${ZSHRC_TMP}" ]; then
+        # Copied back into the existing file rather than renamed over it: the
+        # user's ~/.zshrc keeps its inode, mode and any ACL it carries.
+        cat "${ZSHRC_TMP}" > "${HOME}/.zshrc"
+        log "fixed the autosuggestion colour in ~/.zshrc — accepted suggestions stayed grey"
+    fi
+    rm -f "${ZSHRC_TMP}"
+fi
+# The prompt follows the wallpaper. Rime Shell's matugen renders
+# ~/.cache/rime-shell/starship.toml from the shell's own template on every
+# wallpaper change, and ~/.config/starship.toml is a SYMLINK to it — starship
+# re-reads its config for every prompt, so an open terminal recolours with the
+# wallpaper. It used to be a file seeded once with the static edition accent,
+# which is why the prompt stayed chartreuse while the bar, borders and greeting
+# followed the wallpaper.
+#
+#   * a real file the user wrote is never touched (it stops following the
+#     wallpaper, which is what replacing the link means);
+#   * a file that is byte-identical to what an earlier release seeded, for either
+#     edition accent, or still carries the @ACCENT@ placeholder, is Rime's own:
+#     it is kept as starship.toml.rime-seed and replaced by the link;
+#   * until matugen first runs, the cache is seeded from the same template with
+#     the edition accent, so the link never points at nothing.
+STARSHIP_CACHE="${HOME}/.cache/rime-shell/starship.toml"
+STARSHIP_MTMPL="${SRC_DIR}/src/config/starship.toml.template"
+is_rime_seeded_starship() {
+    [ -f "$1" ] && [ ! -L "$1" ] || return 1
+    grep -q '@ACCENT@' "$1" 2>/dev/null && return 0
+    [ -f "${STARSHIP_TMPL}" ] || return 1
+    local accent
+    for accent in "#D9F99D" "#FDE047"; do
+        sed "s|@ACCENT@|${accent}|g" "${STARSHIP_TMPL}" | cmp -s - "$1" && return 0
+    done
+    return 1
+}
+if [ -f "${STARSHIP_MTMPL}" ]; then
+    mkdir -p "${HOME}/.config" "$(dirname "${STARSHIP_CACHE}")"
+    if [ ! -s "${STARSHIP_CACHE}" ]; then
+        sed "s|{{colors.primary.default.hex}}|${RIME_ACCENT}|g" "${STARSHIP_MTMPL}" \
+            > "${STARSHIP_CACHE}.tmp" && mv -f "${STARSHIP_CACHE}.tmp" "${STARSHIP_CACHE}"
+        log "seeded ${STARSHIP_CACHE} (accent ${RIME_ACCENT} until the wallpaper palette renders)"
+    fi
+    _sc="${HOME}/.config/starship.toml"
+    if [ -L "${_sc}" ]; then
+        :   # already a link — ours, or one the user made; either way, leave it
+    elif [ ! -e "${_sc}" ]; then
+        ln -s "${STARSHIP_CACHE}" "${_sc}"
+        log "linked ~/.config/starship.toml -> ${STARSHIP_CACHE} (prompt follows the wallpaper)"
+    elif is_rime_seeded_starship "${_sc}"; then
+        mv -f "${_sc}" "${_sc}.rime-seed"
+        ln -s "${STARSHIP_CACHE}" "${_sc}"
+        log "replaced the static-accent ~/.config/starship.toml with a link to the wallpaper-themed one (old copy: ${_sc}.rime-seed)"
+    fi
+    unset _sc
+elif [ -f "${STARSHIP_TMPL}" ]; then
+    # A shell without the template (older vendored shell): the static seed.
+    if [ ! -e "${HOME}/.config/starship.toml" ] \
+       || grep -q '@ACCENT@' "${HOME}/.config/starship.toml" 2>/dev/null; then
+        mkdir -p "${HOME}/.config"
+        sed "s|@ACCENT@|${RIME_ACCENT}|g" "${STARSHIP_TMPL}" > "${HOME}/.config/starship.toml"
+        log "seeded ~/.config/starship.toml (accent ${RIME_ACCENT} for '${RIME_VARIANT:-daily}')"
+    fi
+fi
+
+# ── 1-2. (removed) network poll + git clone ──────────────────────────────────
+# Both are gone: the shell ships in the image now. What used to be a 30s network
+# poll followed by a shallow clone — the two steps that created the startup race
+# and the first-login network dependency — is simply not needed. Nothing below
+# touches the network, so there is nothing left to fail or retry.
+
+# ── 2b. MIGRATION: retire the old per-user clone ─────────────────────────────
+# Machines provisioned before rime-logs 56 have a real git checkout at
+# ~/.local/src/rime-shell, and a hyprland.conf whose $shellDir, $qsIpc and
+# autostart all point INTO it. If we leave those references alone, such a machine
+# keeps running the stale cloned shell forever and the whole point of the merge is
+# lost — it would still be on two channels.
+#
+# The rewrite below is deliberately narrow: it only rewrites the literal legacy
+# path, and only in files Rime itself seeded. The checkout is NOT deleted — that
+# is the user's data (they may have local commits or a stash from the old in-app
+# updater), and reclaiming ~30MB is not worth deleting something we did not create.
+migrate_legacy_paths() {
+    local f changed=0
+    for f in "${HOME}/.config/hypr/hyprland.conf" \
+             "${HOME}/.config/hypr/hypridle.conf" \
+             "${HOME}/.config/niri/config.kdl"; do
+        [ -f "${f}" ] || continue
+        # BOTH spellings have to be matched (rime-logs 14). This used to grep only
+        # for the absolute "${HOME}/.local/src/rime-shell", but hypridle.conf is
+        # written with a LITERAL TILDE — `lock_cmd = qs -c ~/.local/src/rime-shell`
+        # — so it never matched, hypridle.conf was never migrated, and the lock
+        # screen stayed pointed at the pre-vendor checkout on every upgraded
+        # machine. Silently: the file was then judged "customised" further down and
+        # deliberately preserved, which made the staleness permanent.
+        # LIVE lines only, in both the test and the rewrite. The seeded templates
+        # explain this very migration in their comments, so matching comment text
+        # made a pristine brand-new config look like a legacy one: it fired on every
+        # fresh install, left a spurious .pre-vendor.bak, logged a migration that had
+        # not happened, and rewrote the explanation into nonsense ("it used to be
+        # cloned per-user into /usr/share/rime-shell"). Comment markers: # for
+        # hypr/hypridle, // for niri's KDL.
+        if grep -vE '^[[:space:]]*(#|//)' "${f}" 2>/dev/null \
+           | grep -qE -- "(${LEGACY_SRC_DIR}|~/\.local/src/apex-shell)"; then  # rime-rename: keep — legacy clone path on disk
+            cp -a "${f}" "${f}.pre-vendor.bak" 2>/dev/null || true
+            # Detection is live-lines-only (above) but the REWRITE is global, comments
+            # included. Once a live line has proven this is a genuine legacy config,
+            # the comments must move with it: hypridle.conf documents itself with an
+            # `ln -sf <path>` line, and the shipped copy has that comment updated too.
+            # Leaving it behind keeps the file one line different from the image copy
+            # forever, so it is judged "customised", never adopted, and never picks up
+            # a later image change — the exact pinning this migration exists to undo.
+            #
+            # Match on the path SUFFIX rather than a ${HOME} prefix: /home is a symlink
+            # to /var/home on Fedora Atomic, so a seeded config can legitimately hold
+            # /home/user/.local/src/rime-shell while $HOME is /var/home/user, and a
+            # ${HOME}-anchored pattern misses those while still logging success. One
+            # expression covers the absolute, ~ and ${HOME} spellings.
+            sed -i -e "s|[^[:space:]]*\.local/src/apex-shell|${SRC_DIR}|g" "${f}"  # rime-rename: keep — legacy clone path on disk
+            log "migrated legacy shell path in ${f} (backup: ${f}.pre-vendor.bak)"
+            changed=1
+        fi
+    done
+    # Anything that still CALLS the old shim has to be repointed BEFORE we retire
+    # it below, or the retirement turns a seeded `exec-once` into a dead path and
+    # the session comes up with no bar, no idle management and no lock — which is
+    # exactly what happened (rime-logs 14). The seed rendered an absolute path, so
+    # cover that as well as the ~ and ${HOME} spellings.
+    for f in "${HOME}/.config/hypr/hyprland.conf" \
+             "${HOME}/.config/niri/config.kdl"; do
+        [ -f "${f}" ] || continue
+        if grep -vE '^[[:space:]]*(#|//)' "${f}" 2>/dev/null \
+           | grep -q -- '\.local/bin/apex-shell-autostart'; then  # rime-rename: keep — the retired shim's name on disk
+            cp -a "${f}" "${f}.pre-vendor.bak" 2>/dev/null || true
+            # Live-lines detection, global rewrite, suffix match — same reasoning as above.
+            sed -i -e "s|[^[:space:]]*\.local/bin/apex-shell-autostart|/usr/libexec/rime-shell-autostart|g" \
+                   "${f}"
+            log "repointed the retired autostart shim in ${f} -> /usr/libexec/rime-shell-autostart"
+            changed=1
+        fi
+    done
+    # The old ~/.local/bin/rime-shell-autostart shim (rime-logs 51) is superseded
+    # by /usr/libexec/rime-shell-autostart, which the seeded config now calls.
+    if [ -f "${HOME}/.local/bin/apex-shell-autostart" ]; then  # rime-rename: keep — the retired shim's name on disk
+        mv -f "${HOME}/.local/bin/apex-shell-autostart" \
+              "${HOME}/.local/bin/apex-shell-autostart.superseded" 2>/dev/null || true  # rime-rename: keep — as above
+        log "retired ~/.local/bin/apex-shell-autostart (now /usr/libexec/rime-shell-autostart)"  # rime-rename: keep — as above
+    fi
+    if [ -d "${LEGACY_SRC_DIR}" ] && [ "${changed}" = 1 ]; then
+        log "NOTE: ${LEGACY_SRC_DIR} is no longer used; the shell now runs from ${SRC_DIR}."
+        log "      it is left in place (your data); remove it by hand if you want the space."
+    fi
+}
+migrate_legacy_paths
+
+# ── 3. Render matugen.toml ───────────────────────────────────────────────────
+# matugen does NOT expand ~ or env vars in template paths, so the shipped
+# matugen.toml.in carries @SRCDIR@/@HOME@ placeholders we substitute here into
+# an absolute-path config. Matugen is REQUIRED for the shell's theming.
+mkdir -p "${CFG_DIR}"
+MATUGEN_TMPL="${SRC_DIR}/src/config/matugen.toml.in"
+if [ -f "${MATUGEN_TMPL}" ]; then
+    sed -e "s|@SRCDIR@|${SRC_DIR}|g" -e "s|@HOME@|${HOME}|g" \
+        "${MATUGEN_TMPL}" > "${CFG_DIR}/matugen.toml"
+    log "rendered ${CFG_DIR}/matugen.toml"
+else
+    log "WARN: matugen template not found at ${MATUGEN_TMPL}"
+fi
+
+# ── 4. Seed config dirs + defaults (install-arch.sh step 6) ──────────────────
+USER_DATA="${CFG_DIR}/src/user_data"
+mkdir -p "${USER_DATA}" \
+         "${HOME}/.config/hypr/shaders" \
+         "${HOME}/.config/matugen/templates" \
+         "${HOME}/.cache/rime-shell" \
+         "${HOME}/Pictures/Wallpapers"
+
+# configProvider=lua: this provisioner seeds a hyprland.lua, so the shell writes
+# keybind edits as a Lua module. It was "conf" until P0-025 for exactly the same
+# reason — the seeded config was hyprlang — and the two must be changed
+# together. A shell writing .conf fragments against a .lua config produces no
+# error anywhere: the files are written, nothing requires them, and the user
+# simply has no popup keybinds.
+[ -f "${USER_DATA}/config_Provider.json" ] || \
+    printf '{"configProvider": "lua"}\n' > "${USER_DATA}/config_Provider.json"
+
+# An existing home seeded by an older image says "conf" and would keep saying it
+# forever. The compositor config has moved, so the provider has to move with it.
+if [ -f "${USER_DATA}/config_Provider.json" ] \
+   && grep -q '"configProvider"[[:space:]]*:[[:space:]]*"conf"' "${USER_DATA}/config_Provider.json" \
+   && [ -f "${HYPR_CONF}" ]; then
+    printf '{"configProvider": "lua"}\n' > "${USER_DATA}/config_Provider.json"
+    log "config provider moved from conf to lua (the seeded config is hyprland.lua now)"
+fi
+
+# keybinds.json must NOT be seeded as '{}'.
+#
+# It is a SPARSE OVERRIDE MAP layered over KeybindService.qml's own `_defaults`
+# table (only `mods`/`key` are read from the JSON; label/group always come from
+# the defaults). So an empty object means "use every upstream default verbatim" —
+# and two of those upstream defaults collide with binds the Rime hyprland.conf
+# template sets itself:
+#
+#     dashboard-launcher  SUPER+Q   vs.  bind = $mainMod, Q, killactive
+#     wallpaper-toggle    SUPER+W   vs.  bind = $mainMod, W, exec, $browser
+#
+# Hyprland fires BOTH actions for a doubly-bound combo, so SUPER+Q closed the
+# focused window AND opened the launcher. The template's own NOTE comment already
+# claims the mapping is "launcher on ALT+SPACE, wallpaper picker on
+# SUPER+SHIFT+W" — but nothing ever implemented it, because that requires exactly
+# these overrides and the seed wrote '{}'. Keep this block and that comment in
+# sync. See rime-logs 48 / rimelogs/04-keybind-collisions.md.
+if [ ! -f "${USER_DATA}/keybinds.json" ]; then
+    cat > "${USER_DATA}/keybinds.json" <<'KEYBINDS'
+{
+  "dashboard-launcher": { "mods": "ALT", "key": "SPACE" },
+  "wallpaper-toggle": { "mods": "SUPER + SHIFT", "key": "W" }
+}
+KEYBINDS
+    log "seeded keybinds.json (launcher ALT+SPACE, wallpaper SUPER+SHIFT+W)"
+fi
+
+# RimeShellKeybinds.kdl is GENERATED by the shell at runtime
+# (KeybindService.qml `_writeFiles()`), so it does not exist until quickshell
+# has successfully run at least once — and niri treats an `include` of a missing
+# path as a hard parse error that takes the WHOLE config with it. Pre-creating
+# is the fix; the shell overwrites it on first run.
+# See rime-logs 49 / rimelogs/02-rimeshellkeybinds-source-error.md.
+#
+# The Hyprland half is no longer pre-created, and no longer lives here. It is
+# ~/.config/hypr/rime/shell-keybinds.lua now, and hyprland.lua's loader checks
+# package.searchpath before requiring it — an absent module is skipped in
+# silence instead of being the fatal `source= globbing error: found no match`
+# that made boot #1 unsurvivable. That is the whole reason the loader is shaped
+# the way it is; pre-creating a file to work around a fatal-on-missing include
+# is a workaround the Lua layout does not need.
+[ -f "${CFG_DIR}/RimeShellKeybinds.kdl" ] || : > "${CFG_DIR}/RimeShellKeybinds.kdl"
+
+# RimeShellInput.kdl is the niri half of exactly the same story: it is written
+# by /usr/libexec/rime-input-apply the first time the user changes an input
+# setting, and until then it does not exist. niri is STRICTER than Hyprland
+# about that — `include` of a path that is not there is a hard parse error
+#     failed to read included config from "…": No such file or directory
+# and it takes the WHOLE config with it, so a niri user would lose every
+# binding and window rule on boot #1. Verified against niri 26.04.
+#
+# (niri 26.04 does have `include optional=true`, but 25.11 — the release that
+# introduced includes at all — does not, and pre-creating is already the house
+# pattern here. An empty .kdl is a valid, empty niri config; also verified.)
+[ -f "${CFG_DIR}/RimeShellInput.kdl" ] || : > "${CFG_DIR}/RimeShellInput.kdl"
+
+# The generated settings modules — rime/input.lua and rime/monitors.lua, written
+# by /usr/libexec/rime-{input,display}-apply when the user first changes an input
+# or display setting — are deliberately NOT pre-created.
+#
+# They used to be, as empty rime-input.conf / rime-display.conf, because
+# hyprland.conf `source=`d them and Hyprland treats a source with no match as a
+# FATAL config error. hyprland.lua asks package.searchpath first and skips a
+# module that is not there, so the workaround has no job left. Creating empty
+# ones anyway would be worse than useless: an empty rime/monitors.lua is a
+# module that loads and does nothing, which is indistinguishable from a
+# generator that ran and produced nothing — and it would suppress the catch-all
+# monitor rule that rime-display-apply emits at the top of the real file.
+mkdir -p "${HOME}/.config/hypr/rime"
+
+[ -f "${HOME}/.cache/rime-shell/colors.json" ] || \
+    : > "${HOME}/.cache/rime-shell/colors.json"
+
+# ── Retire the shell's in-app updater: the image IS the update channel ───────
+# UpdateService.qml is the OTHER half of the two-channel problem. ~30s after the
+# shell starts it pings 1.1.1.1, runs `git fetch origin main` in Quickshell.shellDir,
+# counts `HEAD..origin/main`, and pops a dialog offering to `git pull`.
+#
+# shellDir is now /usr/share/rime-shell: read-only, and with no .git at all (the
+# Containerfile drops it after vendoring). So every one of those commands would
+# fail. Left enabled, the user would get either a permanently-checking spinner or
+# an error dialog offering an update that is impossible to apply — while the REAL
+# update path (`rime update`) sits elsewhere. That is worse than no updater.
+#
+# The whole check chain in UpdateService is gated on `autoUpdate`, so seeding it
+# false disables it cleanly with no upstream patching. Seeded only if absent, so a
+# user who deliberately re-enables it keeps their choice.
+#
+# `rime update` is the single channel: it moves the OS and the shell together, and
+# `rime rollback` reverts both. See rime-logs 56.
+[ -f "${USER_DATA}/update_prefs.json" ] || \
+    printf '{"autoUpdate":false}\n' > "${USER_DATA}/update_prefs.json"
+
+# ── hypridle: the IMAGE copy is authoritative (this is the LOCK SCREEN) ──────
+# This used to `cp -n` the shipped hypridle.conf into ~/.config/hypr/, and the
+# launcher then PREFERRED that copy. Net effect: a second update channel for the
+# most security-relevant config in the session.
+#
+# hypridle is what locks the machine. Its rules are:
+#     300s  dim         360s  display off
+#     330s  loginctl lock-session   ->  the Rime Shell lock screen
+#     900s  suspend
+# and lock_cmd/DpmsControl paths inside it point at the shell. Because the $HOME
+# copy won on every login, an image update that changed the lock timeout — or
+# fixed a broken lock_cmd — could never reach an already-provisioned user. The
+# lock screen was pinned to whatever shipped the day they first logged in.
+#
+# WHY THE IMAGE COPY CANNOT SIMPLY BE THE DEFAULT (rime-logs 14)
+# The intended design was: no copy in $HOME, the launcher passes
+# `hypridle -c ${SRC_DIR}/src/config/hypridle.conf`, and lock behaviour follows
+# the image like everything else. hypridle 0.1.7 makes that impossible. It lists
+#     -c, --config <path>   Specify a custom config file path
+# in its own --help and then IGNORES it: it only ever searches $HOME/.config/hypr,
+# $XDG_CONFIG_HOME/hypr and — per its error message — /etc/hypr. Verified against
+# the shipped binary: `-c` and `--config` with a valid readable path both abort
+# with "Could not find config in HOME, XDG_CONFIG_HOME, XDG_CONFIG_DIRS or
+# /etc/hypr", and it does not in fact read /etc/hypr either (a config placed there
+# is still reported missing). It does not exit cleanly — it throws and dumps core.
+#
+# So the ONLY location hypridle will load is under $HOME. That inverts the design:
+# deleting ~/.config/hypr/hypridle.conf does not "fall back to the image copy", it
+# leaves hypridle with NO config at all, so it core-dumps at session start and the
+# machine silently stops locking on idle, blanking the display and suspending.
+# That is a security regression that reports success — the exact failure class this
+# file exists to prevent.
+#
+# Therefore the file is now a MANAGED COPY: we write the image content into $HOME
+# and record its checksum. On a later login, if the file still matches what we
+# wrote, the user has not touched it and we refresh it from the image — so an
+# image update DOES reach an existing user, which was the whole point of vendoring.
+# If it differs from our stamp, the user edited it and we never touch it again.
+#
+# Revert to `-c` and drop the copy once hypridle honours the flag; the postcondition
+# below will keep us honest either way.
+HYPRIDLE_USER="${HOME}/.config/hypr/hypridle.conf"
+HYPRIDLE_IMG="${SRC_DIR}/src/config/hypridle.conf"
+RIME_STATE="${XDG_STATE_HOME:-${HOME}/.local/state}/rime"
+HYPRIDLE_STAMP="${RIME_STATE}/hypridle.conf.sha256"
+if [ -f "${HYPRIDLE_IMG}" ]; then
+    # Every step below is `|| true`: this script runs under `set -euo pipefail`, and
+    # a read-only or full $HOME must not abort provisioning half way through. A bad
+    # state here is caught by the postcondition instead of by a dead unit.
+    mkdir -p "${HOME}/.config/hypr" "${RIME_STATE}" 2>/dev/null || true
+    _img_sum="$(sha256sum "${HYPRIDLE_IMG}" 2>/dev/null | cut -d' ' -f1 || true)"
+    if [ ! -f "${HYPRIDLE_USER}" ]; then
+        cp "${HYPRIDLE_IMG}" "${HYPRIDLE_USER}" || true
+        printf '%s\n' "${_img_sum}" > "${HYPRIDLE_STAMP}" 2>/dev/null || true
+        log "installed the image lock/idle config -> ~/.config/hypr/hypridle.conf"
+    else
+        _cur_sum="$(sha256sum "${HYPRIDLE_USER}" 2>/dev/null | cut -d' ' -f1 || true)"
+        _was_sum="$(tr -d '[:space:]' < "${HYPRIDLE_STAMP}" 2>/dev/null || true)"
+        if [ "${_cur_sum}" = "${_img_sum}" ]; then
+            # Already current. Claim it as managed so the NEXT image change can
+            # refresh it — this is also how a pre-stamp machine gets adopted, since
+            # migrate_legacy_paths above has just rewritten it back to image content.
+            printf '%s\n' "${_img_sum}" > "${HYPRIDLE_STAMP}" 2>/dev/null || true
+        elif [ -n "${_was_sum}" ] && [ "${_cur_sum}" = "${_was_sum}" ]; then
+            cp "${HYPRIDLE_IMG}" "${HYPRIDLE_USER}" || true
+            printf '%s\n' "${_img_sum}" > "${HYPRIDLE_STAMP}" 2>/dev/null || true
+            log "refreshed ~/.config/hypr/hypridle.conf from the image (you had not modified it)"
+        else
+            log "keeping your customised ~/.config/hypr/hypridle.conf"
+            log "  delete it and log in again to return to the image lock/idle config"
+        fi
+    fi
+fi
+
+# Seed the shell's shipped wallpapers, plus the system Rime wallpaper the
+# greeter uses (/usr/share/backgrounds/rime/default.jpg) so shell + greeter
+# share one default look.
+cp -n -r "${SRC_DIR}/src/assets/wallpapers/." "${HOME}/Pictures/Wallpapers/" 2>/dev/null || true
+[ -f "${SYS_WALLPAPER}" ] && \
+    cp -n "${SYS_WALLPAPER}" "${HOME}/Pictures/Wallpapers/rime-os-default.jpg" 2>/dev/null || true
+
+# ...and actually SELECT it, or the copy above is decorative.
+#
+# WallpaperService.qml falls back to a HARDCODED upstream asset when
+# wallpaper.json carries no `currentWall`:
+#
+#     if (root.currentWall === "") {
+#         var defaultWall = Quickshell.shellDir
+#                         + "/src/assets/wallpapers/rime-shell-default-0.png"
+#         root.apply(defaultWall)
+#     }
+#
+# Nothing seeded wallpaper.json, so `currentWall` was always "" on a first boot,
+# the upstream png won — and then `apply()` calls `saveConfig()`, which PERSISTS
+# that choice as though the user had picked it. So it never self-corrected on a
+# later boot either, and the matugen palette (bar colours, window borders, GTK
+# and terminal themes) was derived from the wrong image too. Seeding the file is
+# what makes the "shell + greeter share one default look" intent above true.
+# See rime-logs 50 / rimelogs/05-default-wallpaper.md.
+RIME_WALL="${HOME}/Pictures/Wallpapers/rime-os-default.jpg"
+if [ ! -f "${USER_DATA}/wallpaper.json" ] && [ -f "${RIME_WALL}" ]; then
+    printf '{"currentWall":"%s","wallpaperDir":"~/Pictures/Wallpapers","scheme":"content"}\n' \
+        "${RIME_WALL}" > "${USER_DATA}/wallpaper.json"
+    log "seeded wallpaper.json -> rime-os-default.jpg"
+fi
+
+# ── 5. Hyprland autostart (install-arch.sh step 5, self-seeding) ─────────────
+# install-arch.sh appends the autostart block to a PRE-EXISTING config. A fresh
+# Rime OS user normally has one already: step 0 seeded hyprland.lua before the
+# network poll, and it carries the Rime Shell autostart in rime/session.lua. So
+# this is the fallback for the case step 0 could not cover — no template in the
+# image — and for a config that predates the autostart block entirely.
+#
+# Everything here is Lua. Writing a hyprland.conf would produce a file nothing
+# reads: 0.56.2 prefers hyprland.lua when both exist (verified), so the append
+# would land in the config that loses.
+if [ ! -f "${HYPR_CONF}" ]; then
+    if [ -f "${RIME_HYPR_TMPL}" ]; then
+        seed_hypr_conf
+        seed_hypr_modules
+    else
+        # No Rime template: a minimal base that guarantees a usable session with
+        # a terminal. The autostart block below is appended after it.
+        mkdir -p "${HOME}/.config/hypr"
+        cat > "${HYPR_CONF}" <<'HYPRDEF'
+-- Minimal Rime OS Hyprland base (seeded by rime-shell-firstrun).
+-- Extend freely — this only guarantees a usable session with a terminal.
+hl.monitor({ output = "", mode = "preferred", position = "auto", scale = 1.0 })
+hl.env("XCURSOR_SIZE", "24")
+hl.bind("SUPER + Return", hl.dsp.exec_cmd("alacritty"))
+hl.bind("SUPER + Q", hl.dsp.window.close())
+hl.bind("SUPER + SHIFT + E", hl.dsp.exit())
+HYPRDEF
+    fi
+fi
+# The marker is `rime-shell`, matching what the seeded tree carries in
+# rime/session.lua, so a config seeded by step 0 skips this and a config that
+# has never seen Rime gets the block appended once.
+# `apex-shell` counts too: a config seeded before the rename carries the block
+# under that name, and appending a second one would start everything twice.
+if ! grep -rqE '(rime|apex)-shell' "${HYPR_CONF}" "${HOME}/.config/hypr/rime" 2>/dev/null; then  # rime-rename: keep — APEX-era block marker
+    cat >> "${HYPR_CONF}" <<'HYPRRIME'
+
+-- ── Rime Shell autostarts (seeded by rime-shell-firstrun) ──
+-- There is no exec-once keyword in the Lua config; the replacement is a handler
+-- on the hyprland.start event, which fires once per compositor start and does
+-- not re-fire on `hyprctl reload` — the same semantics exec-once had.
+hl.on("hyprland.start", function()
+    hl.exec_cmd("awww-daemon")
+    -- hypridle + quickshell are started by a WAITING launcher, never pointed
+    -- straight at the source dir — see /usr/libexec/rime-shell-autostart and
+    -- rime-logs 51.
+    hl.exec_cmd("/usr/libexec/rime-shell-autostart")
+    hl.exec_cmd("/usr/libexec/polkit-mate-authentication-agent-1")
+    hl.exec_cmd("wl-paste --type text  --watch cliphist store")
+    hl.exec_cmd("wl-paste --type image --watch cliphist store")
+end)
+HYPRRIME
+    log "seeded Hyprland autostart -> ${HYPR_CONF}"
+fi
+
+# ── 6. niri autostart (Rime OS addition; the shell supports niri) ────────────
+# The shell's own installer only covers Hyprland, but Rime Shell auto-detects
+# niri (NiriService.qml) and the greeter offers a niri session, so seed a niri
+# config that launches the shell too. Only if niri is actually installed.
+if command -v niri >/dev/null 2>&1 || [ -x /usr/bin/niri ]; then
+    NIRI_CONF="${HOME}/.config/niri/config.kdl"
+    mkdir -p "${HOME}/.config/niri"
+    if [ ! -f "${NIRI_CONF}" ]; then
+        if [ -f /usr/share/doc/niri/default-config.kdl ]; then
+            cp /usr/share/doc/niri/default-config.kdl "${NIRI_CONF}"
+        elif [ -f /usr/share/niri/default-config.kdl ]; then
+            cp /usr/share/niri/default-config.kdl "${NIRI_CONF}"
+        else
+            : > "${NIRI_CONF}"
+        fi
+    fi
+    # `apex-shell` counts too, for the reason the Hyprland block gives.
+    if ! grep -qE '(rime|apex)-shell' "${NIRI_CONF}" 2>/dev/null; then  # rime-rename: keep — APEX-era block marker
+        cat >> "${NIRI_CONF}" <<NIRIRIME
+
+// ── Rime Shell autostarts (seeded by rime-shell-firstrun) ──
+spawn-at-startup "awww-daemon"
+// quickshell goes through the WAITING launcher, not straight at the checkout:
+// niri is spawned by greetd in parallel with this provisioner too, so a direct
+// spawn-at-startup hits the same clone race Hyprland did (rime-logs 51).
+spawn-at-startup "/usr/libexec/rime-shell-autostart"
+spawn-at-startup "wl-paste" "--type" "text" "--watch" "cliphist" "store"
+spawn-at-startup "wl-paste" "--type" "image" "--watch" "cliphist" "store"
+NIRIRIME
+        log "seeded niri autostart -> ${NIRI_CONF}"
+    fi
+
+    # Resolved, not assumed on PATH. Step 6's own guard is
+    # `command -v niri || [ -x /usr/bin/niri ]`, and the second half is there
+    # because a per-user systemd unit is exactly where a binary is installed but
+    # not on PATH. A bare `niri` there exits 127, `! niri validate` reads that
+    # as "invalid", and both blocks below would take the refusal branch and
+    # never act — silently, on every login, forever. That is the failure this
+    # whole section exists to remove, so it must not be reintroduced inside it.
+    NIRI_BIN="$(command -v niri 2>/dev/null || echo /usr/bin/niri)"
+
+    # ── 6a-pre. undo the ONE thing niri's stock config starts that Rime
+    #           replaces: waybar ──────────────────────────────────────────────
+    #
+    # MEASURED ON KATANA 2026-09-19 (evidence §5.4): the niri session ran TWO
+    # bars.
+    #
+    #     $ pgrep -a -u andre waybar     -> 21723 waybar
+    #     $ pgrep -a -u andre quickshell -> 21730 quickshell -c /usr/share/rime-shell
+    #
+    # The cause is upstream's own example config. Line 271 of
+    # niri's default-config.kdl is
+    #
+    #     // This line starts waybar, a commonly used bar for Wayland compositors.
+    #     spawn-at-startup "waybar"
+    #
+    # and that file is what lands in ~/.config/niri/config.kdl — whether niri
+    # writes it on first run or the block above copies it. Then step 6 appends
+    # the Rime autostarts, which start quickshell. Both bars, every login, on
+    # every niri machine.
+    #
+    # WHY THIS EDITS THE USER'S FILE RATHER THAN SHIPPING AN Rime CONFIG
+    # Shipping /usr/share/rime/niri/config.kdl, the way Hyprland and labwc are
+    # seeded, would fix the NEXT install and nothing else: every machine that
+    # already has a config.kdl — which is every machine niri has ever started
+    # on, including the one the defect was measured on — keeps its waybar line
+    # forever, because the seeding block above only writes a file that is
+    # absent. The defect is in files that already exist, so the fix has to be
+    # too. It also avoids vendoring 27 KB of someone else's GPL config into
+    # this repository and then owning it.
+    #
+    # WHAT IS AND IS NOT TOUCHED
+    # Exactly one line, matched in full, and only when it is upstream's own
+    # spelling at column 0 with no modifications. A user who edited that line
+    # meant it and keeps it. Nothing else in the file is changed — asserted
+    # below by hashing the file with that line removed and requiring the two
+    # hashes to be equal, which no substitution elsewhere could survive.
+    #
+    # Other things upstream's default turns on are deliberately NOT changed
+    # here; they are recorded in docs/gaming-and-sessions.md for a decision
+    # rather than taken silently: the "Important Hotkeys" pop-up at startup,
+    # and stock binds for alacritty, fuzzel, swaylock and orca. Those binds
+    # matter more than they look, because RimeShellKeybinds.kdl is created
+    # EMPTY and stays empty until Rime Settings writes it — so on a fresh
+    # machine the stock binds are the only binds there are.
+    NIRI_BAR_MARKER='disabled by Rime: quickshell is this system'"'"'s bar'
+    # The same edit made by an APEX image. Its waybar line is already commented
+    # out, so nothing below would match it; recognising the marker says so.
+    NIRI_BAR_MARKER_OLD='disabled by APEX: quickshell is this system'"'"'s bar'  # rime-rename: keep — marker on disk
+    NIRI_STOCK_WAYBAR='spawn-at-startup "waybar"'
+    if [ -f "${NIRI_CONF}" ] && ! grep -qF -e "${NIRI_BAR_MARKER}" -e "${NIRI_BAR_MARKER_OLD}" "${NIRI_CONF}"; then
+        _bar_line="$(grep -nxF "${NIRI_STOCK_WAYBAR}" "${NIRI_CONF}" | cut -d: -f1)"
+        _bar_count="$(printf '%s' "${_bar_line}" | grep -c . || true)"
+        if [ -z "${_bar_line}" ]; then
+            : # nothing to do: no stock waybar spawn in this config
+        elif [ "${_bar_count}" != "1" ]; then
+            # Two of them is not a config this block wrote or understands.
+            log "WARN: ${NIRI_CONF} has ${_bar_count} stock waybar spawns; leaving it alone"
+        elif ! "${NIRI_BIN}" validate --config "${NIRI_CONF}" >/dev/null 2>&1; then
+            # Already broken. Editing it would make this provisioner look like
+            # the cause of a failure it did not create.
+            log "WARN: ${NIRI_CONF} does not validate; refusing to disable the waybar spawn"
+        else
+            cp -a "${NIRI_CONF}" "${NIRI_CONF}.pre-rime-bar.bak" 2>/dev/null || true
+            _bar_before="$(sed "${_bar_line}d" "${NIRI_CONF}" | sha256sum | cut -d' ' -f1)"
+            _bar_lines="$(wc -l < "${NIRI_CONF}")"
+            # One line in, one line out. No line is added or removed, which is
+            # what makes the hash comparison below a complete check rather than
+            # a partial one.
+            _bar_tmp="${NIRI_CONF}.rimenew.$$"
+            awk -v n="${_bar_line}" -v repl="// ${NIRI_STOCK_WAYBAR}   // ${NIRI_BAR_MARKER}" \
+                'NR == n { print repl; next } { print }' \
+                "${NIRI_CONF}" > "${_bar_tmp}" && mv -f "${_bar_tmp}" "${NIRI_CONF}"
+            rm -f "${_bar_tmp}"
+            _bar_after="$(sed "${_bar_line}d" "${NIRI_CONF}" | sha256sum | cut -d' ' -f1)"
+            _bar_now="$(wc -l < "${NIRI_CONF}")"
+            if [ "${_bar_before}" != "${_bar_after}" ] || [ "${_bar_now}" -ne "${_bar_lines}" ]; then
+                cp -a "${NIRI_CONF}.pre-rime-bar.bak" "${NIRI_CONF}"
+                log "ERROR: ${NIRI_CONF} changed somewhere this block did not intend; restored the backup"
+            elif ! "${NIRI_BIN}" validate --config "${NIRI_CONF}" >/dev/null 2>&1; then
+                cp -a "${NIRI_CONF}.pre-rime-bar.bak" "${NIRI_CONF}"
+                log "ERROR: niri rejected config.kdl without the waybar spawn; restored the backup"
+            else
+                log "disabled niri's stock waybar spawn (line ${_bar_line}) -> ${NIRI_CONF}"
+            fi
+        fi
+    fi
+
+    # ── 6a. the generated configs must actually be INCLUDED ──────────────────
+    # This is niri's equivalent of the three `source =` lines the Hyprland
+    # template carries, and without it Rime Settings is a lie on niri: both
+    # generators write their file, report success, and nothing reads it.
+    #
+    #   RimeShellInput.kdl     <- /usr/libexec/rime-input-apply (Settings→Input)
+    #   RimeShellKeybinds.kdl  <- Rime Shell (KeybindService.qml `_writeFiles`)
+    #
+    # niri supports `include` at the top level since 25.11; the image ships
+    # 26.04. Includes are POSITIONAL and later definitions win — bind-for-bind
+    # for `binds`, option-for-option for `input` — so appending at the end of
+    # the file is what makes the generated values override the seeded config
+    # above them. niri watches every included file and live-reloads on change,
+    # so a setting applies without a logout.
+    #
+    # Guarded by its OWN marker, not the autostart block's: every install that
+    # already has the autostart block predates these includes and still needs
+    # them. This block only ever APPENDS — there is no substitution here, so
+    # there is no regex that can eat the file.
+    NIRI_INC_MARKER='Rime generated configs (rime-shell-firstrun)'
+    # An APEX image appended the same block under its own marker, with
+    # include lines naming ~/.config/apex-shell. rime-session-migrate rewrites
+    # that block to the new names when it can (it needs the new include targets
+    # to exist first, and creates them); either way the block is there, and a
+    # second one would include the generated files twice.
+    NIRI_INC_MARKER_OLD='APEX generated configs (apex-shell-firstrun)'  # rime-rename: keep — marker on disk
+    if [ -f "${NIRI_CONF}" ] && ! grep -qF -e "${NIRI_INC_MARKER}" -e "${NIRI_INC_MARKER_OLD}" "${NIRI_CONF}"; then
+        if [ ! -f "${CFG_DIR}/RimeShellInput.kdl" ] || \
+           [ ! -f "${CFG_DIR}/RimeShellKeybinds.kdl" ]; then
+            # A missing include target is a hard parse error, so writing the
+            # line first and hoping the file appears is how you brick a
+            # session. The pre-create block above runs earlier in this script
+            # precisely so this branch is unreachable in practice; it stays
+            # because "unreachable" is not "cannot happen".
+            log "WARN: niri include targets are missing; not adding include lines"
+        elif ! "${NIRI_BIN}" validate --config "${NIRI_CONF}" >/dev/null 2>&1; then
+            # Already broken before we got here. Appending would make this
+            # provisioner look like the cause of a failure it did not create,
+            # and would bury the user's real error under ours.
+            log "WARN: ${NIRI_CONF} does not validate; refusing to touch it"
+        else
+            cp -a "${NIRI_CONF}" "${NIRI_CONF}.pre-include.bak" 2>/dev/null || true
+            # A file with no trailing newline would have its last line joined
+            # to ours. Fix that BEFORE measuring, so the prefix check below
+            # compares like with like. The backup above already covers it.
+            if [ -s "${NIRI_CONF}" ] && [ "$(tail -c1 "${NIRI_CONF}" | wc -l)" -eq 0 ]; then
+                printf '\n' >> "${NIRI_CONF}"
+            fi
+            _niri_bytes="$(wc -c < "${NIRI_CONF}")"
+            _niri_lines="$(wc -l < "${NIRI_CONF}")"
+            _niri_sum="$(sha256sum < "${NIRI_CONF}" | cut -d' ' -f1)"
+            cat >> "${NIRI_CONF}" <<NIRIINC
+
+// ── ${NIRI_INC_MARKER} ──
+// Regenerated by Rime Settings and Rime Shell — do not hand-edit the targets.
+// Positional: these come last, so they win over the sections above.
+include "${CFG_DIR}/RimeShellInput.kdl"
+include "${CFG_DIR}/RimeShellKeybinds.kdl"
+NIRIINC
+            # Grepping for the lines just written cannot detect what was lost,
+            # so check the file's ENTIRE former content is still there,
+            # byte-for-byte, at the front — and that exactly six lines were
+            # added and nothing else moved.
+            _niri_prefix="$(head -c "${_niri_bytes}" "${NIRI_CONF}" | sha256sum | cut -d' ' -f1)"
+            _niri_now="$(wc -l < "${NIRI_CONF}")"
+            if [ "${_niri_prefix}" != "${_niri_sum}" ] || \
+               [ "${_niri_now}" -ne "$((_niri_lines + 6))" ]; then
+                cp -a "${NIRI_CONF}.pre-include.bak" "${NIRI_CONF}"
+                log "ERROR: ${NIRI_CONF} changed in a way this block did not intend; restored the backup"
+            elif ! "${NIRI_BIN}" validate --config "${NIRI_CONF}" >/dev/null 2>&1; then
+                # It validated a moment ago and does not now, so the includes
+                # are what broke it. Never leave a niri user with a config
+                # their compositor refuses.
+                cp -a "${NIRI_CONF}.pre-include.bak" "${NIRI_CONF}"
+                log "ERROR: niri rejected config.kdl with the includes; restored the backup"
+            else
+                log "included the generated input + keybind configs -> ${NIRI_CONF}"
+            fi
+        fi
+    fi
+fi
+
+# ── 6b. labwc config (Rime OS addition; labwc is offered as a third session) ─
+# labwc is installed in the base as the greeter's fallback host compositor, and
+# rime-labwc.desktop offers it as a user session. Unlike Hyprland and niri it has
+# NO IPC of any kind, so everything the compositor does for the shell has to be
+# declared in rc.xml up front — which makes seeding a correct config the whole
+# difference between a working session and a bare grey screen.
+#
+# Seeded per-user (not run from /usr/share) so it stays editable, matching the
+# Hyprland and niri handling. Marker-guarded on the autostart file so a user's
+# own edits are never overwritten.
+if command -v labwc >/dev/null 2>&1 || [ -x /usr/bin/labwc ]; then
+    LABWC_TMPL_DIR=/usr/share/rime/labwc
+    LABWC_DIR="${HOME}/.config/labwc"
+
+    if [ -d "${LABWC_TMPL_DIR}" ]; then
+        mkdir -p "${LABWC_DIR}"
+
+        # rc.xml / menu.xml: copy verbatim, they need no substitution.
+        for f in rc.xml menu.xml; do
+            if [ ! -f "${LABWC_DIR}/${f}" ] && [ -f "${LABWC_TMPL_DIR}/${f}" ]; then
+                cp "${LABWC_TMPL_DIR}/${f}" "${LABWC_DIR}/${f}"
+                log "seeded labwc ${f} -> ${LABWC_DIR}/${f}"
+            fi
+        done
+
+        # themerc-override carries only @ACCENT@, and is seeded so a FRESH boot
+        # already has Rime window chrome instead of labwc's built-in grey. Once
+        # the user changes wallpaper, matugen rewrites this same path from the
+        # live Material You palette; the [ ! -f ] guard above is what stops a
+        # later login from reverting that back to this static default.
+        if [ ! -f "${LABWC_DIR}/themerc-override" ] \
+           && [ -f "${LABWC_TMPL_DIR}/themerc-override" ]; then
+            sed "s|@ACCENT@|${RIME_ACCENT}|g" \
+                "${LABWC_TMPL_DIR}/themerc-override" > "${LABWC_DIR}/themerc-override"
+            log "seeded labwc themerc-override (accent ${RIME_ACCENT})"
+        fi
+
+        # autostart / environment carry @HOME@ and @KB_*@ placeholders, so they
+        # go through the same renderer the Hyprland template uses.
+        for f in autostart environment; do
+            if [ ! -f "${LABWC_DIR}/${f}" ] && [ -f "${LABWC_TMPL_DIR}/${f}" ]; then
+                render_hypr_tmpl "${LABWC_TMPL_DIR}/${f}" > "${LABWC_DIR}/${f}"
+                log "seeded labwc ${f} -> ${LABWC_DIR}/${f}"
+            fi
+        done
+
+        # labwc requires autostart to be executable; it is sourced, but labwc
+        # execs it on some versions and a non-executable file silently yields a
+        # session with no shell.
+        [ -f "${LABWC_DIR}/autostart" ] && chmod 0755 "${LABWC_DIR}/autostart"
+
+        # Self-heal an existing config that predates Rime Shell, or one a user
+        # created by hand: without this line the session starts with no bar and
+        # no way to discover why.
+        if [ -f "${LABWC_DIR}/autostart" ] \
+           && ! grep -qE '(rime|apex)-shell-autostart' "${LABWC_DIR}/autostart" 2>/dev/null; then  # rime-rename: keep — APEX-era autostart line
+            cat >> "${LABWC_DIR}/autostart" <<'LABWCRIME'
+
+# ── Rime Shell autostarts (appended by rime-shell-firstrun) ──
+awww-daemon &
+/usr/libexec/rime-shell-autostart &
+wl-paste --type text  --watch cliphist store &
+wl-paste --type image --watch cliphist store &
+LABWCRIME
+            log "appended Rime Shell autostarts -> ${LABWC_DIR}/autostart"
+        fi
+    fi
+fi
+
+# ── 7. Recover the CURRENT session, which almost certainly missed the clone ──
+# greetd execs the compositor in PARALLEL with this unit, so by the time we get
+# here the compositor has long since fired its autostarts — against a $SRC_DIR
+# that did not exist yet. /usr/libexec/rime-shell-autostart makes that harmless
+# for FUTURE logins, but it cannot help the login that is happening right now:
+# `hyprctl reload` deliberately does not re-run exec-once. Without this block the
+# user has to log out and back in to ever see a bar. It is idempotent (the
+# launcher refuses to start a second copy), so running it here is safe even in
+# the rare case the compositor did win the race.
+if [ -f "${SRC_DIR}/shell.qml" ] && [ -x /usr/libexec/rime-shell-autostart ]; then
+    if command -v hyprctl >/dev/null 2>&1 && hyprctl version >/dev/null 2>&1; then
+        setsid /usr/libexec/rime-shell-autostart >/dev/null 2>&1 &
+        log "compositor already running — started Rime Shell for this session"
+        # Re-read the config so the shell's keybinds work without a
+        # re-login too. `hyprctl reload` re-runs the whole Lua config, and
+        # hyprland.lua clears package.loaded for every rime.* module first, so
+        # a module written since login is genuinely re-read rather than served
+        # from Lua's cache.
+        hyprctl reload >/dev/null 2>&1 || true
+    elif command -v niri >/dev/null 2>&1 && niri msg version >/dev/null 2>&1; then
+        setsid /usr/libexec/rime-shell-autostart >/dev/null 2>&1 &
+        log "niri already running — started Rime Shell for this session"
+    fi
+fi
+
+# ── 8. Verify our own postconditions BEFORE claiming success ─────────────────
+# Every defect this script has shipped was a SILENT one: it wrote a bad value,
+# exited 0, logged "provisioning complete", and wrote a marker that then disabled
+# the retry-at-next-login mechanism meant to be the safety net.
+# `systemctl --failed` stayed empty while the desktop was unusable.
+#
+# The marker is gone entirely now (nothing expensive is left to gate), so this
+# script re-runs and self-heals every login. These checks therefore serve a
+# different purpose: make a broken seed VISIBLE — a non-zero exit shows up in
+# `systemctl --user status rime-shell-firstrun.service` instead of being reported
+# as success. See rime-logs 52 / rimelogs/06-orchestrator-root-cause.md.
+PROVISION_OK=1
+fail_check() { PROVISION_OK=0; log "POSTCONDITION FAILED: $*"; }
+
+[ -f "${SRC_DIR}/shell.qml" ] \
+    || fail_check "the shell entrypoint ${SRC_DIR}/shell.qml is missing"
+# Only LIVE settings count — comments must be stripped first (rime-logs 14).
+# This used to grep the whole file, which made it self-triggering: the template's
+# own comment block explains the original bug by quoting the broken line, so the
+# string appears legitimately in every seeded config and the check failed on a
+# BRAND-NEW install of a correct image. A postcondition that cannot pass is worse
+# than no postcondition — it trains you to ignore a red unit.
+#
+# The comment marker is `--` now, and the keymap lives in rime/input-defaults.lua
+# rather than in hyprland.lua, so the whole seeded tree is checked. Grepping only
+# hyprland.lua would have made this pass unconditionally: the file it used to
+# guard no longer contains the substitution it is guarding.
+for _f in "${HYPR_CONF}" "${HOME}/.config/hypr/rime"/*.lua; do
+    [ -f "${_f}" ] || continue
+    if grep -vE '^[[:space:]]*--' "${_f}" 2>/dev/null | grep -q '(unset)'; then
+        fail_check "${_f} has an '(unset)' placeholder in a live setting"
+    fi
+done
+for _j in config_Provider.json keybinds.json wallpaper.json update_prefs.json; do
+    [ -f "${USER_DATA}/${_j}" ] || continue
+    # python3 is in the image; fall back to a no-op if it ever is not.
+    if command -v python3 >/dev/null 2>&1; then
+        python3 -c "import json,sys; json.load(open(sys.argv[1]))" \
+            "${USER_DATA}/${_j}" 2>/dev/null \
+            || fail_check "${USER_DATA}/${_j} is not valid JSON"
+    fi
+done
+if command -v hyprctl >/dev/null 2>&1 && hyprctl version >/dev/null 2>&1; then
+    _cfgerr="$(hyprctl configerrors 2>/dev/null | tr -d '[:space:]')"
+    [ -z "${_cfgerr}" ] \
+        || fail_check "Hyprland reports config errors: $(hyprctl configerrors 2>/dev/null | head -3)"
+fi
+
+# Also verify the thing the whole lock screen depends on: hypridle's lock_cmd must
+# point at a shell that actually exists. A stale lock_cmd means the machine stops
+# locking on idle and NOTHING says so — the failure mode is silent and it is a
+# security one, so it gets an explicit check rather than trust.
+#
+# Every quickshell call in lock_cmd counts, not only the first. Since the rename
+# a customised copy carries two, `qs -c /usr/share/apex-shell … || qs -c  (rime-rename: keep)
+# /usr/share/rime-shell …` (rime-session-migrate), so a rollback to APEX still  (rime-rename: keep)
+# locks. On this image the first names the image's own ALIAS of the shell: it
+# has a shell.qml and reaches nothing, because quickshell finds an instance by
+# the path it is given, not the canonical one. So a path counts only when it
+# has a shell.qml and is not a link to ${SRC_DIR}.
+#
+# Prints the paths it read. Returns 1 when there were some and none counts; 0
+# when one counts, or when lock_cmd calls no quickshell at all (nothing to check).
+lock_cmd_reaches_shell() {
+    local conf="$1" cmd paths p qml ok=0
+    cmd="$(sed -n 's/^[[:space:]]*lock_cmd[[:space:]]*=[[:space:]]*//p' "${conf}" | head -1)"
+    paths="$(printf '%s\n' "${cmd}" \
+        | grep -oE '(^|[^[:alnum:]_.-])qs[[:space:]]+(-p|-c|--path|--config)[[:space:]=]+[^[:space:]|;&}#]+' \
+        | sed -E 's/^.*[[:space:]](-p|-c|--path|--config)[[:space:]=]+//' || true)"
+    printf '%s' "${paths}" | tr '\n' ' '
+    [ -n "${paths}" ] || return 0
+    while IFS= read -r p; do
+        # A leading ~ must be expanded by hand (rime-logs 14). "${p}/shell.qml"
+        # keeps the tilde LITERAL inside the quotes, so the -s test resolved a
+        # relative path named "~" and failed for every tilde-spelled lock_cmd —
+        # reporting a broken lock screen on machines whose lock screen was fine,
+        # while the genuinely stale path went unnoticed underneath the noise.
+        # shellcheck disable=SC2088  # these are `case` PATTERNS, matching the two
+        # literal characters `~/` at the start of a path read out of hypridle.conf.
+        # This is the code that expands the tilde; if the pattern expanded to
+        # $HOME first there would be nothing left to match and the branch would
+        # be dead.
+        case "${p}" in
+            "~")   p="${HOME}" ;;
+            "~/"*) p="${HOME}/${p#\~/}" ;;
+        esac
+        qml="${p}"; [ -d "${p}" ] && qml="${p}/shell.qml"
+        [ -s "${qml}" ] || continue
+        # This image's shell reached through another name (the alias, or a
+        # file inside it) does not count; only its own name does.
+        case "$(readlink -f -- "${p}")/" in
+            "$(readlink -f -- "${SRC_DIR}")"/*)
+                case "${p}/" in "${SRC_DIR}"/*) ;; *) continue ;; esac
+                ;;
+        esac
+        ok=1
+    done <<< "${paths}"
+    [ "${ok}" = 1 ]
+}
+_idle_conf="${SRC_DIR}/src/config/hypridle.conf"
+[ -f "${HOME}/.config/hypr/hypridle.conf" ] && _idle_conf="${HOME}/.config/hypr/hypridle.conf"
+if [ -f "${_idle_conf}" ] && ! _lock_paths="$(lock_cmd_reaches_shell "${_idle_conf}")"; then
+    fail_check "hypridle lock_cmd reaches no shell (${_lock_paths% }): none has a shell.qml, or it names ${SRC_DIR} only through a link — the session would stop locking on idle"
+fi
+
+# hypridle ignores -c (see the long note above), so a config under $HOME is the
+# only thing that makes idle lock, DPMS blank and auto-suspend run at all. Its
+# absence is silent and security-relevant, so it is a hard failure.
+# shellcheck disable=SC2088  # the `~` is inside the message a HUMAN reads. The
+# path this actually tests is "${HOME}/..." on the line above; writing $HOME in
+# the sentence too would print /var/home/andre at somebody else's machine.
+[ -s "${HOME}/.config/hypr/hypridle.conf" ] \
+    || fail_check "no ~/.config/hypr/hypridle.conf — hypridle ignores -c, so idle lock, display blank and suspend will not run"
+
+# The Rime zsh config must have actually landed. Skipped when the user clearly owns
+# the file, so a deliberately hand-written ~/.zshrc never turns the unit red.
+# shellcheck disable=SC2088  # three more tildes inside messages a human reads;
+# every path actually touched in this block is "${HOME}/.zshrc".
+if is_stock_zshrc "${HOME}/.zshrc"; then
+    fail_check "~/.zshrc is still the distro skeleton — the Rime zsh config did not seed (no starship, no completion setup)"
+elif [ -f "${HOME}/.zshrc" ] && grep -qE '(Rime OS|APEX-OS) — default zsh configuration' "${HOME}/.zshrc"; then  # rime-rename: keep — the header APEX seeded
+    grep -q 'starship init zsh' "${HOME}/.zshrc" \
+        || fail_check "~/.zshrc is the Rime config but does not initialise starship"
+    grep -q 'zmodload zsh/complist' "${HOME}/.zshrc" \
+        || fail_check "~/.zshrc is the Rime config but never loads zsh/complist — 'menu select' would be a no-op"
+fi
+
+if [ "${PROVISION_OK}" -ne 1 ]; then
+    log "provisioning INCOMPLETE — see the failures above; this login is not fully set up."
+    log "the unit runs again at every login, so fixing the cause is enough — no marker to clear."
+    exit 1
+fi
+
+# ── 9. Done ──────────────────────────────────────────────────────────────────
+# No marker is written. There is nothing expensive left to gate (the clone is gone),
+# and the marker is exactly what made every past silent defect permanent by
+# short-circuiting the retry design. Re-running this is cheap and idempotent.
+log "user provisioning complete (shell: ${SRC_DIR})"

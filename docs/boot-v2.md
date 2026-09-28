@@ -4,14 +4,14 @@ Roadmap §22. This is the reference for the systemd-boot + Unified Kernel Image
 path: what exists, what it was measured to do, how a machine gets onto it, and
 how to get back.
 
-**Andre decided on 2026-09-20 that APEX moves to systemd-boot on every
+**Andre decided on 2026-09-20 that Rime moves to systemd-boot on every
 machine.** The next section is that decision and the design it forces. The rest
 of the document (the ESP layout, the measurements, the enrolment procedure,
 recovery) is the ground the decision is built on.
 
 ## The pivot to systemd-boot — the decision, and what it costs
 
-**Decision, Andre, 2026-09-20: APEX moves to systemd-boot on every machine.**
+**Decision, Andre, 2026-09-20: Rime moves to systemd-boot on every machine.**
 He took it with the risks in front of him: it changes how every machine boots,
 on an ESP shared with Windows on at least one of them, and there is no rollback
 for an ESP something overwrote. This section does not argue the decision. It
@@ -41,7 +41,7 @@ cmdline carries a per-deployment `ostree=` and a per-machine `root=UUID=`,
 neither of which can be inside a UKI signed in CI.
 
 `bootc install … --bootloader systemd --composefs-backend` installs, boots and
-upgrades. So every APEX machine that boots systemd-boot is a machine whose root
+upgrades. So every Rime machine that boots systemd-boot is a machine whose root
 storage is composefs-backed.
 
 **That does not make it a reinstall. The sentence that used to stand here
@@ -58,17 +58,17 @@ Installing bootloader via systemd-boot
 Installation complete!
 ```
 
-The next section covers everything APEX had to add to make that safe.
+The next section covers everything Rime had to add to make that safe.
 
 ## Migrating a machine that already exists
 
 Andre, 2026-09-20, on being told the answer was a reinstall: *"it cannot be
-that. active machines should automitcally migrate with sudo apex install, not
+that. active machines should automitcally migrate with sudo rime install, not
 this dumbass reinstall shit. and also a failed or cancelled or power shut down
-or something sudo apex install in this change should not fully break the boot
+or something sudo rime install in this change should not fully break the boot
 and actual system or whatever, everything should safely migrate."*
 
-`files/system/libexec/apex-boot-migrate` is that, and `apex update` runs it
+`files/system/libexec/rime-boot-migrate` is that, and `rime update` runs it
 with no flag and nothing for the user to choose.
 
 ### What the bare bootc command does to a machine, measured
@@ -118,11 +118,11 @@ heals itself: the firmware consumes `BootNext` before it launches anything, so
 a machine that fails to come up on the new path boots the old one next, with
 nobody doing anything.
 
-**CONFIRM: one more write, after proof.** `apex-boot-migrate-confirm.service`
+**CONFIRM: one more write, after proof.** `rime-boot-migrate-confirm.service`
 runs after `boot-complete.target` on both paths while a migration is in flight.
 On systemd-boot it writes `BootOrder` with the new entry first and GRUB behind
-it. On GRUB it records the migration as **failed**, which stops `apex
-update` spending a reboot on the same broken loader every time; `apex-boot-
+it. On GRUB it records the migration as **failed**, which stops `rime
+update` spending a reboot on the same broken loader every time; `rime-boot-
 migrate retry` re-arms it deliberately.
 
 ### The machine's data comes with it
@@ -143,14 +143,14 @@ migrated guest came up with an empty `/var` and no user.
   rather than approximate only because the migration deploys **the digest the
   machine is already running**: same image, so the image's `/etc` is the same
   and the copy carries the local modifications and nothing else. New content
-  arrives on the next ordinary `apex update`, through the new path.
+  arrives on the next ordinary `rime update`, through the new path.
 
 ### What it costs
 
 Andre tracks this per machine, so here it is in full:
 
 * the ostree repo and its deployment **stay**, because they are the recovery
-  path, and on APEX that is most of 15 GB;
+  path, and on Rime that is most of 15 GB;
 * `/composefs` is a second copy of the image content on the same disk;
 * the install has to run as a container of the booted image, so the migration
   copies the image out of bootc's storage into podman's: a **third** copy. The
@@ -166,7 +166,7 @@ repo plus 512 MiB, and reports the figure as `root-space` when it passes.
 ### When it refuses
 
 A machine that cannot migrate safely stays on GRUB, working, and says why.
-Every refusal is named, and `apex update` carries on and takes its ordinary
+Every refusal is named, and `rime update` carries on and takes its ordinary
 image update.
 
 | refusal | what it means |
@@ -182,8 +182,8 @@ image update.
 The engine has more refusals than the table shows, each named the same way:
 `root-too-small` and `no-repo-size` (the root filesystem check above),
 `esp-is-windows` (the ESP it would write carries Windows' `bootmgfw.efi`; see
-`docs/apex-owns-its-esp.md`), `secure-boot-unknown`, `partial-install`,
-`no-kernel` and `not-root`. `apex-boot-migrate precheck --explain` prints every
+`docs/rime-owns-its-esp.md`), `secure-boot-unknown`, `partial-install`,
+`no-kernel` and `not-root`. `rime-boot-migrate precheck --explain` prints every
 check rather than stopping at the first refusal.
 
 
@@ -193,18 +193,18 @@ Two of the three machines in this program have two ESPs, and the answer is not
 the intuitive one.
 
 **The migration writes the ESP on the disk the ROOT FILESYSTEM is on, not the
-one the firmware is booting from.** `apex-boot-migrate`'s `find_esp` walks up
+one the firmware is booting from.** `rime-boot-migrate`'s `find_esp` walks up
 from `findmnt --target /sysroot` to a disk and scans that disk for the ESP type
 GUID. bootc does the same thing independently
 (`find_first_colocated_esp()` searches `find_all_roots()`, the disks backing the
 root device, `crates/blockdev/src/blockdev.rs:214`), so the firmware entry and
 the files it points at can never end up on different partitions.
 
-On **katana** that is a real improvement. It boots APEX from the 200 MiB ESP on
+On **katana** that is a real improvement. It boots Rime from the 200 MiB ESP on
 the **Windows** disk (`Boot0000* APEX-OS Primary`
 → `\EFI\APEX\SHIMX64.EFI`, `BootCurrent: 0000`) while its own disk carries an
-unused 512 MiB `EFI-SYSTEM`. Migrating moves APEX's boot onto its own disk, and
-APEX stops depending on another operating system's disk. That dependency is why
+unused 512 MiB `EFI-SYSTEM`. Migrating moves Rime's boot onto its own disk, and
+Rime stops depending on another operating system's disk. That dependency is why
 every brief this year has warned that one mistake on that ESP takes out two
 operating systems.
 
@@ -229,16 +229,16 @@ reached.
 | `bootc install --bootloader systemd --composefs-backend` | installs, and the guest reaches a login prompt under OVMF |
 | `bootc upgrade` on that machine | writes a correct new entry; dedupes the ESP directory when kernel+initramfs are unchanged, writes a second one when the initramfs moves |
 | rollback by boot counter | **proven**: at `+0-3` sd-boot selected the previous deployment by itself, with `systemd-bless-boot` masked throughout |
-| `systemd-bless-boot` on the APEX image | **was failing on an enforcing SELinux denial; repaired and proven in a boot** (see below) |
+| `systemd-bless-boot` on the Rime image | **was failing on an enforcing SELinux denial; repaired and proven in a boot** (see below) |
 | Secure Boot on this path | not measured yet; every lab boot was non-SB OVMF |
 | a sealed UKI on this path | not built yet; `bootc container ukify` exists and has not been run |
-| the ESP an existing APEX machine has | **big enough since the slim initramfs**: the requirement fell from ~1.1 GiB to 350 MiB (100.9 MiB per deployment, image `44c9a5cb`), and katana's `precheck` answers `OK esp-space: 503 MiB free, 350 MiB needed`. It was too small before: 600 MiB on the L16 against ~1.1 GiB |
+| the ESP an existing Rime machine has | **big enough since the slim initramfs**: the requirement fell from ~1.1 GiB to 350 MiB (100.9 MiB per deployment, image `44c9a5cb`), and katana's `precheck` answers `OK esp-space: 503 MiB free, 350 MiB needed`. It was too small before: 600 MiB on the L16 against ~1.1 GiB |
 
 ### `systemd-bless-boot` cannot rename an entry on a FAT ESP. Measured.
 
 Without blessing there is no pivot: the counter would run every deployment down
 to `+0-N` and roll it back, which is the failure the old default was avoiding.
-On the APEX image, installed composefs + systemd-boot, with the entry renamed
+On the Rime image, installed composefs + systemd-boot, with the entry renamed
 to carry a counter, the blessing fails:
 
 ```
@@ -255,7 +255,7 @@ A mount option or FAT itself would have failed for any process, and they did
 not: in the same boot, `mv` on the same file in the same directory succeeded,
 and re-running the same binary from a shell succeeded (`Marked boot as 'good'`,
 rc=0). The difference is the SELinux domain, and the cause lies in Fedora's
-policy rather than in an APEX mistake:
+policy rather than in a Rime mistake:
 
 * `/usr/lib/systemd/systemd-bless-boot` is labelled `init_exec_t`, so when PID 1
   runs it the process stays in `init_t`. Fedora 43's policy has
@@ -269,7 +269,7 @@ policy rather than in an APEX mistake:
   its domain `bootupd_t` **does** have full management of `dosfs_t`. Fedora
   built that domain for this job.
 
-APEX's fix sends the blessing into that domain rather than widening `init_t`:
+Rime's fix sends the blessing into that domain rather than widening `init_t`:
 a drop-in sets `SELinuxContext=-system_u:system_r:bootupd_t:s0` on
 `systemd-bless-boot.service`, and a one-rule policy module grants the only
 permission the transition is missing: `bootupd_t` may use `init_exec_t` as an
@@ -297,7 +297,7 @@ would have denied and nothing was logged; but the drop-in alone would probably
 work today even without the module. The module makes this correct rather than
 tolerated, and keeps it working on the day that domain becomes enforcing.
 
-**The symmetric change to `apex-boot-count` is wrong.** It was tried in the
+**The symmetric change to `rime-boot-count` is wrong.** It was tried in the
 same guest and reverted. `/usr/libexec` is `bin_t`, and the policy has
 `type_transition init_t bin_t:process unconfined_service_t` while `init_exec_t`
 has no transition at all. So the helper was already unconfined and could rename
@@ -318,7 +318,7 @@ unconfined and is fine. A machine that is **enforcing with the module missing**
 is not: `setexeccon` succeeds, the kernel denies the `execve`, the unit fails,
 and the deployment rolls itself back on the fourth boot. The guard against that
 is `Containerfile.base`, which asserts across the tier boundary that
-`semodule -l` still lists `apex_sdboot`. The policy module and the drop-in are
+`semodule -l` still lists `rime_sdboot`. The policy module and the drop-in are
 a pair, and removing either one alone is the dangerous edit.
 
 ### Per-machine configuration under a signed UKI
@@ -332,7 +332,7 @@ a user who cannot type their passphrase on a `us` layout is stranded at the
 LUKS prompt, and "regenerate the initramfs at install time" is what a
 signed UKI forbids.
 
-**APEX's mechanism is systemd credentials placed on the ESP.** The kernel
+**Rime's mechanism is systemd credentials placed on the ESP.** The kernel
 command line stays image-static inside the UKI; nothing per-machine goes into
 it.
 
@@ -351,7 +351,7 @@ Why, read out of the shipped systemd (258.10) rather than from memory:
   inside the signed PE.
 * **UKI addons are ruled out for per-machine use.** `systemd-stub(7)`: addons
   *"will be validated using keys in UEFI DB, Shim's DB or Shim's MOK, and only
-  loaded if the check passes"*. APEX's signing key is a CI secret that must
+  loaded if the check passes"*. Rime's signing key is a CI secret that must
   never reach a user's machine (`AGENTS.md`, and boot-path rule 4), so a
   machine cannot produce an addon its own firmware will accept. Addons remain
   useful for *image-wide* configuration signed in CI, which buys nothing over
@@ -393,7 +393,7 @@ Choosing credentials brings rules, and none of them is optional:
   and stop working when Secure Boot is turned on;
 * the keymap is written as `vconsole.keymap` in
   `<ESP>/loader/credentials/vconsole.keymap.cred`, plaintext, at install time;
-* the TPM2 unlock path stays `apex-luks-enroll`'s; a passphrase handed to the
+* the TPM2 unlock path stays `rime-luks-enroll`'s; a passphrase handed to the
   initrd as a credential must be TPM2-encrypted.
 
 ### How reversible this is for an existing machine: it is not, and here is why
@@ -401,8 +401,8 @@ Choosing credentials brings rules, and none of them is optional:
 > **Superseded on its headline claim, kept for its numbers.** "A migration is
 > impossible, back up and reinstall" was the conclusion when this was written,
 > and it is wrong: `bootc install to-existing-root --composefs-backend
-> --bootloader systemd` converts a running machine in place, and APEX drives it
-> from `apex update`. Read "Migrating a machine that already exists" above for
+> --bootloader systemd` converts a running machine in place, and Rime drives it
+> from `rime update`. Read "Migrating a machine that already exists" above for
 > what happens. What survives here is the **ESP arithmetic**, which was then
 > why the migration refused on the L16 (the slim initramfs retired it; see
 > "When it refuses").
@@ -427,31 +427,31 @@ That procedure is not a migration, for three measured reasons:
   rollback, plus a third transiently while an update stages: about **1.1 GiB**.
   The L16's ESP is **600 MiB**, and an ESP cannot be grown in place without
   moving the partition after it. bootc's own composefs default is 1 GiB, which
-  is itself under the transient peak, so APEX must ask for more than bootc's
+  is itself under the transient peak, so Rime must ask for more than bootc's
   default. The two unused 2 GiB XBOOTLDR partitions on the L16 cannot absorb
   this, and the reason is bootc rather than systemd-boot (see the next
   section).
 * **ostree → composefs has no converter.** So switching an existing machine is
   a reinstall with repartitioning, and its reverse is another reinstall.
 
-What this section told a user then: **migrating an existing APEX machine to
+What this section told a user then: **migrating an existing Rime machine to
 systemd-boot means backing up and reinstalling.** New installs get it from the
 installer, which creates the partition table anyway and can size the ESP
 correctly the first time.
 
-### SUPERSEDED IN PART, 2026-09-21: APEX builds its own ESP
+### SUPERSEDED IN PART, 2026-09-21: Rime builds its own ESP
 
 Everything below about XBOOTLDR and about squeezing into a 512 MiB ESP still
 holds, and the measurements stand. The question changed.
 
 Andre decided that Windows-side installs boot systemd-boot like every other
-machine, and that **APEX gets its own EFI System Partition rather than writing
+machine, and that **Rime gets its own EFI System Partition rather than writing
 into Windows'**. The 68.3 MiB-free figure stops being a constraint to defeat
 and becomes a reason not to borrow the partition at all. See
-`docs/apex-owns-its-esp.md` for the decision, what already exists to implement
+`docs/rime-owns-its-esp.md` for the decision, what already exists to implement
 it, and the four things that must be measured before it is claimed to work.
 
-The 512 MiB ceiling still binds on machines whose ESP is already APEX's own
+The 512 MiB ceiling still binds on machines whose ESP is already Rime's own
 (the L16 and every existing install), so the initramfs work is not retired.
 
 **Done, 2026-09-22.** The image built at `44c9a5cb` costs 100.9 MiB per
@@ -503,7 +503,7 @@ re-derive them:
   update and would have to be re-applied forever.
 
 Still open on upstream `main` (`65321ae`, 2026-09-21), and identical in **1.16.4**
-(the version inside `apex-os:daily` when this was read, and so the one that ran
+(the version inside `rime-os:daily` when this was read, and so the one that ran
 the migration then) as well as 1.16.10 and 1.16.13. Upstream states the
 design in words in merged PR **#2440** (2026-09-16): *"GrubCC and SystemdBoot
 both do not store anything inside of `/sysroot/boot` and will (should) always
@@ -511,7 +511,7 @@ have the ESP mounted at `/boot`."*
 
 Three corollaries follow:
 
-1. **APEX is already on Type #1.** `BootType::Bls` is the default, and an image
+1. **Rime is already on Type #1.** `BootType::Bls` is the default, and an image
    shipping a plain kernel under `/usr/lib/modules` gets it: that is phase 1,
    below. "Move to Type #1 entries" is not an available change; the files are
    already loose `vmlinuz` + `initrd` with a `.conf`. The only variable is which
@@ -524,19 +524,19 @@ Three corollaries follow:
 3. **An upstream fix is a six-site change**: `boot.rs:775`, `boot.rs:1422`,
    `bootloader.rs:287`, `store/mod.rs:396`, `status.rs:408`, and
    `finalize.rs:149` / `delete.rs:159`, all keyed off the same `boot_dir`
-   decision. APEX must not carry that as a fork.
+   decision. Rime must not carry that as a fork.
 
 `ROADMAP/evidence/sdboot-xbootldr-20260921.md` has the full transcript, the
-measured ESP of an APEX composefs guest, and what this means for a Windows
+measured ESP of a Rime composefs guest, and what this means for a Windows
 dual-boot machine.
 
 ### Legacy BIOS: what "all machines" costs
 
 systemd-boot is a UEFI application. There is no BIOS systemd-boot, so a machine
-that boots legacy BIOS cannot be on this path at all. What APEX supports today,
+that boots legacy BIOS cannot be on this path at all. What Rime supports today,
 checked in the tree:
 
-* `installer/apex-install` has two modes. **Disk mode** runs `bootc install
+* `installer/rime-install` has two modes. **Disk mode** runs `bootc install
   to-disk --wipe`, and bootc lays out the table itself, including a **1 MiB
   BIOS boot partition on every install, UEFI or not, on both backends**.
   An encrypted disk-mode install builds its own table instead
@@ -554,8 +554,8 @@ checked in the tree:
   builds an El Torito core image and an isohybrid MBR with a VESA `vga=791`
   handoff specifically for BIOS.
 
-So the cost is smaller than it looks, and it still needs saying: **APEX's
-installer media boots legacy BIOS; no APEX installation is known to have ever
+So the cost is smaller than it looks, and it still needs saying: **Rime's
+installer media boots legacy BIOS; no Rime installation is known to have ever
 booted legacy BIOS from disk**, because on whole-disk installs the bootloader
 was never written there and on partition-mode installs the partition does not
 exist. The pivot therefore drops a configuration that was created but never
@@ -579,7 +579,7 @@ calls it `bootType: Bls`. The initramfs is not signed and not measured
 differently from what GRUB does today, so **a karg still works here**, and
 that is the trap, because it stops working in phase 2.
 
-`apex-boot-count` is a phase-1 program: it parses `options` lines and renames
+`rime-boot-count` is a phase-1 program: it parses `options` lines and renames
 `.conf` files.
 
 **Phase 2: sealed UKI.** Kernel, initramfs and command line inside one signed
@@ -590,7 +590,7 @@ ukify` and `bootc container split-kernel-and-rootfs` exist in bootc
 been run. In phase 2 the credential mechanism stops being a preference and
 becomes the only way to configure a machine.
 
-**APEX ships phase 1 first and targets phase 2.** Phase 1 is a measured
+**Rime ships phase 1 first and targets phase 2.** Phase 1 is a measured
 install/boot/upgrade/rollback path that needs no firmware enrolment; phase 2
 needs a signing decision nobody has taken yet (below). Two consequences follow:
 
@@ -598,8 +598,8 @@ needs a signing decision nobody has taken yet (below). Two consequences follow:
   not do it for per-machine values. Use a credential, which works identically
   in both phases.
 * **Boot counting has to be redone for phase 2.** A UKI is counted by renaming
-  the `.efi` itself (`apex-<id>+3-0.efi`), not a `.conf`, and how `bootc`
-  names and stages UKIs is unmeasured. `apex-boot-count` will need a second
+  the `.efi` itself (`rime-<id>+3-0.efi`), not a `.conf`, and how `bootc`
+  names and stages UKIs is unmeasured. `rime-boot-count` will need a second
   branch, and its test suite a second fixture shape.
 
 ### Secure Boot: a decision, not a measurement
@@ -618,17 +618,17 @@ stock Microsoft CA (every machine out of the box), neither of those binaries
 validates, because `systemd-boot-unsigned` is what its name says. The two ways
 out are different products:
 
-1. **APEX-signed sd-boot, enrolled by the user.** Sign
-   `systemd-bootx64.efi` and the UKI with the APEX MOK in CI, and every user
-   enrols the APEX certificate in their firmware once. That is boot-path rule
+1. **Rime-signed sd-boot, enrolled by the user.** Sign
+   `systemd-bootx64.efi` and the UKI with the Rime MOK in CI, and every user
+   enrols the Rime certificate in their firmware once. That is boot-path rule
    4's documented, user-initiated procedure, and it is a real cost: a
    per-machine manual step with a firmware UI in it.
 2. **shim → sd-boot.** Keep Fedora's Microsoft-signed shim as the first stage
-   and have it load an APEX-MOK-signed systemd-boot. Fedora's shim is built
+   and have it load a RIME-MOK-signed systemd-boot. Fedora's shim is built
    with `grubx64.efi` as its second stage, so this means either a shim built
    with a different second stage, or shipping sd-boot under that name. And
    `bootc --bootloader systemd` lays down neither shim nor that filename, so
-   APEX would have to author the ESP rather than bootc.
+   Rime would have to author the ESP rather than bootc.
 
 Option 2 is the only one that keeps "install and it boots" true for a user who
 never opens firmware setup. Option 1 is the only one that needs no new
@@ -638,7 +638,7 @@ a product decision, not a build flag.
 ### What this needs from the kernel build
 
 `kernel-build` owns the kernel now, which makes UKIs easier: the
-kernel, the initramfs and the signing are all APEX's. This path needs the
+kernel, the initramfs and the signing are all Rime's. This path needs the
 kernel build to expose three things, listed now so they are designed in rather
 than retrofitted:
 
@@ -664,7 +664,7 @@ than retrofitted:
    The kernel unit (merge `74b777ac`) measured the pieces this needs:
    `vmlinuz` is a real `pei-x86-64` PE with
    `CONFIG_EFI_STUB=y` asserted, `sbsign` runs on it with rc=0 and `sbverify`
-   confirms, and `/usr/share/apex-os/kernel/{build.txt,kernel.pin}` carry
+   confirms, and `/usr/share/rime-os/kernel/{build.txt,kernel.pin}` carry
    consumable provenance. So the signing path works end to end; what must not
    happen is the signature staying on the kernel once the UKI becomes the boot
    object. `AGENTS.md`'s Secure Boot invariant (read the signature out of the
@@ -687,28 +687,28 @@ In order, and each one is required:
 
 1. **The Secure Boot chain decided, then measured.** bootc's ESP has no shim
    and no `/EFI/fedora`, and `systemd-boot-unsigned` is unsigned, so on a stock
-   `db` nothing on that ESP validates. Pick between an APEX-signed sd-boot the
-   user enrols and a shim → sd-boot chain APEX authors itself (see above), then
+   `db` nothing on that ESP validates. Pick between a Rime-signed sd-boot the
+   user enrols and a shim → sd-boot chain Rime authors itself (see above), then
    measure it in the VM lab under OVMF. Nothing above was measured with Secure
    Boot on at all.
-2. A sealed UKI built by `bootc container ukify` from the APEX image, booting
+2. A sealed UKI built by `bootc container ukify` from the Rime image, booting
    in that guest, with the credential mechanism above changing the keymap at a
    LUKS prompt. **The same change must move the MOK signature
    and the `sbverify` gate from the kernel to the UKI**, in one step: a build
    that emits a UKI while still signing and verifying only the inner kernel is
    green and unbootable.
-3. ~~The blessing fix proven on the APEX image.~~ **Done, 2026-09-20**: entry
+3. ~~The blessing fix proven on the Rime image.~~ **Done, 2026-09-20**: entry
    counted, booted, suffix stripped, zero AVCs, `LAB-bless-result: active /
    success`. What remains from this gate is the cheap half: the *reverted*
-   `apex-boot-count` renaming a staged entry in a guest. Both things it rests
+   `rime-boot-count` renaming a staged entry in a guest. Both things it rests
    on are measured; the shipped combination has not been through a boot.
 4. A Windows-entry assertion: an `efibootmgr -v` capture before and after an
    install into a lab disk that carries a `Windows Boot Manager` entry,
-   compared with `cmp`, failing if anything moved. Katana's APEX `Boot0000`
+   compared with `cmp`, failing if anything moved. Katana's Rime `Boot0000`
    lives on the **Windows** ESP, so this assertion protects two operating
    systems rather than one.
 5. An ESP sizing decision. When this list was written, 1 GiB was under the
-   peak APEX needs; since the slim initramfs of 2026-09-22 the peak is 350 MiB
+   peak Rime needs; since the slim initramfs of 2026-09-22 the peak is 350 MiB
    (see "When it refuses").
 
 Until all five are done, **no real machine is migrated**, and the L16 is not a
@@ -724,7 +724,7 @@ helper for those commands on **executable** lines and fails the build if one
 appears. What the pivot has added to the image so far is the machinery that has
 to exist *before* a default can move: `systemd-boot-unsigned` and
 `systemd-ukify` in `Containerfile.core`, the blessing fix, the boot-counting
-unit below, and `apex-boot-migrate`, which `apex update` runs to move a machine
+unit below, and `rime-boot-migrate`, which `rime update` runs to move a machine
 that passes its precheck (see "Migrating a machine that already exists").
 Enrolment is still the human procedure further down.
 
@@ -747,29 +747,29 @@ GRUB 2.12
 
 GRUB 2.12 sets `LoaderInfo` itself. A condition written against it (the
 obvious "is systemd-boot involved" test) would fire these units on **every**
-APEX machine, all of which boot GRUB. `LoaderBootCountPath` is set only by
+Rime machine, all of which boot GRUB. `LoaderBootCountPath` is set only by
 systemd-boot and only when a counter is in effect. Any further conditioned unit
 must use the same variable, or `entries.srel` where it cannot (see
-`apex-boot-count` below).
+`rime-boot-count` below).
 
-### Boot counting has to be written by APEX, because bootc writes none
+### Boot counting has to be written by Rime, because bootc writes none
 
 Four installs and two upgrades produced entry filenames of the form
 `bootc_<osid>-<ver>-<N>.conf` with **no `+N-M` counter**, and a `loader.conf`
 whose `timeout` and `console-mode` are both commented out. On a machine
 installed exactly as bootc leaves it, `LoaderBootCountPath` never appears,
-`apex-boot-health.service` and `apex-boot-notice.service` are both skipped by
+`rime-boot-health.service` and `rime-boot-notice.service` are both skipped by
 their condition, `systemd-bless-boot` never runs, and there is no automatic
 rollback. The health gate is inert until something writes the counter.
 
 Renaming the live entry does not survive an upgrade: `bootc upgrade` writes a
 fresh, uncounted set into `/boot/loader/entries.staged/` and
 `bootc-finalize-staged.service` replaces the whole `entries/` directory at
-shutdown, discarding anything APEX put in a filename. Renaming inside
+shutdown, discarding anything Rime put in a filename. Renaming inside
 `entries.staged/` **does** survive: measured across five boots, ending with
 sd-boot selecting the previous deployment by itself at `+0-3`.
 
-So APEX ships `apex-boot-count.service`: it renames the newest staged entry to
+So Rime ships `rime-boot-count.service`: it renames the newest staged entry to
 carry `+3-0`, and it runs at shutdown ordered so that its work happens **before**
 `bootc-finalize-staged.service` swaps the directory in. It is a rename in a
 directory bootc is about to install, not a write to a live boot path, and it is
@@ -780,53 +780,53 @@ machine and on a machine with nothing staged.
 
 | piece | file | what it does |
 | --- | --- | --- |
-| UKI builder | `files/scripts/boot-v2/apex-mkuki` | kernel + initramfs + signed cmdline + microcode + `.apexinf` metadata in one PE image |
-| stage an APEX root | `files/scripts/boot-v2/apex-stage-root` | copies kernel/initramfs/os-release out of a booted deployment or image |
-| ESP authoring | `files/scripts/boot-v2/apex-mkesp` | systemd-boot at `/EFI/APEX/`, UKIs at `/EFI/Linux/apex-<id>+N-M.efi` |
-| ephemeral keys | `files/scripts/boot-v2/apex-sb-keys` | Secure Boot, PCR-policy and deliberately-untrusted keypairs |
-| SB firmware vars | `files/scripts/boot-v2/apex-sb-vars` | an OVMF varstore with the APEX certificate as the only `db` entry |
-| LUKS2 + TPM, shipped | `files/system/libexec/apex-luks-enroll` | the enrolment path a machine uses: a recovery key always, and a TPM slot bound to whichever policy this machine can enforce |
-| LUKS2 + TPM, lab | `files/scripts/boot-v2/apex-luks-enroll` | signed PCR 11 policy plus a recovery key, against a software TPM. A different program from the row above; see "TPM-bound unlock" |
+| UKI builder | `files/scripts/boot-v2/rime-mkuki` | kernel + initramfs + signed cmdline + microcode + `.rimeinf` metadata in one PE image |
+| stage a Rime root | `files/scripts/boot-v2/rime-stage-root` | copies kernel/initramfs/os-release out of a booted deployment or image |
+| ESP authoring | `files/scripts/boot-v2/rime-mkesp` | systemd-boot at `/EFI/APEX/`, UKIs at `/EFI/Linux/rime-<id>+N-M.efi` |
+| ephemeral keys | `files/scripts/boot-v2/rime-sb-keys` | Secure Boot, PCR-policy and deliberately-untrusted keypairs |
+| SB firmware vars | `files/scripts/boot-v2/rime-sb-vars` | an OVMF varstore with the Rime certificate as the only `db` entry |
+| LUKS2 + TPM, shipped | `files/system/libexec/rime-luks-enroll` | the enrolment path a machine uses: a recovery key always, and a TPM slot bound to whichever policy this machine can enforce |
+| LUKS2 + TPM, lab | `files/scripts/boot-v2/rime-luks-enroll` | signed PCR 11 policy plus a recovery key, against a software TPM. A different program from the row above; see "TPM-bound unlock" |
 | VM harness | `files/scripts/boot-v2/run-scenarios` | 21 scenarios (`--list`): 12 in the default run and 9 requested by name. The guests boot under Secure Boot enforcing; the four `enroll-*` scenarios need only swtpm and cryptsetup and boot no guest |
-| health gate | `files/system/libexec/apex-boot-health` | the `boot-complete.target` gate, and the rollback notice |
-| boot counter | `files/system/libexec/apex-boot-count` | renames the STAGED entry to `+3-0` so bootc's uncounted set gets a counter; picks the entry by composefs digest, refuses on ambiguity |
-| blessing repair | `files/system/selinux/apex_sdboot.te` + `files/system/units/10-apex-bless-boot-esp.conf` | lets `systemd-bless-boot` rename an entry on a FAT ESP, which `init_t` cannot |
-| reporting | `apex boot status` | read-only; what verified this boot and what the counter believes |
+| health gate | `files/system/libexec/rime-boot-health` | the `boot-complete.target` gate, and the rollback notice |
+| boot counter | `files/system/libexec/rime-boot-count` | renames the STAGED entry to `+3-0` so bootc's uncounted set gets a counter; picks the entry by composefs digest, refuses on ambiguity |
+| blessing repair | `files/system/selinux/rime_sdboot.te` + `files/system/units/10-rime-bless-boot-esp.conf` | lets `systemd-bless-boot` rename an entry on a FAT ESP, which `init_t` cannot |
+| reporting | `rime boot status` | read-only; what verified this boot and what the counter believes |
 | CI | `.github/workflows/boot-v2.yml` | builds the lab, boots the scenarios, publishes nothing |
 
 Build-time tooling (`ukify`, `qemu`, `sbsign`, `swtpm`) lives in the
-`apex-bootlab` container built from `bootlab/Containerfile`, never as packages
-on a host. Installing it onto an APEX box is the machine drift `AGENTS.md`
-prohibits, and the build box is a real APEX machine.
+`rime-bootlab` container built from `bootlab/Containerfile`, never as packages
+on a host. Installing it onto a Rime box is the machine drift `AGENTS.md`
+prohibits, and the build box is a real Rime machine.
 
-## The ESP layout, and the one directory APEX does not own
+## The ESP layout, and the one directory Rime does not own
 
 ```
-/EFI/APEX/systemd-bootx64.efi        the loader, at an APEX-owned path
+/EFI/APEX/systemd-bootx64.efi        the loader, at a Rime-owned path
 /EFI/BOOT/BOOTX64.EFI                the removable-media fallback
-/EFI/Linux/apex-<deployment>+N-M.efi the UKIs
+/EFI/Linux/rime-<deployment>+N-M.efi the UKIs
 /loader/loader.conf                  timeout 0, editor no
 ```
 
-§22 asks for "APEX-owned EFI paths, not Fedora-named paths". `\EFI\Linux` is
+§22 asks for "Rime-owned EFI paths, not Fedora-named paths". `\EFI\Linux` is
 the systemd-boot interface (a spec path, unlike the vendor name `\EFI\fedora`
-that §22 is reacting to), and APEX owns the **filenames**, which are what the
-menu, `bootctl list` and `apex boot status` display.
+that §22 is reacting to), and Rime owns the **filenames**, which are what the
+menu, `bootctl list` and `rime boot status` display.
 
 A fully `/EFI/APEX`-named UKI path is also possible, and a measurement made the
 choice. Measured with systemd-boot 258.10-1.fc43:
 
 | entry | boot counter applied? |
 | --- | --- |
-| type #2, `/EFI/Linux/apex-t2+3-0.efi` | **yes** → `+2-1` |
-| type #1 `.conf` with `efi /EFI/APEX/uki/apex-t1.efi` | **no** (the entry booted fine) |
-| type #1 `.conf` with `linux /EFI/APEX/uki/apex-t3.efi` | **yes** → `+2-1` |
+| type #2, `/EFI/Linux/rime-t2+3-0.efi` | **yes** → `+2-1` |
+| type #1 `.conf` with `efi /EFI/APEX/uki/rime-t1.efi` | **no** (the entry booted fine) |
+| type #1 `.conf` with `linux /EFI/APEX/uki/rime-t3.efi` | **yes** → `+2-1` |
 
 So the entry type does not decide the tally: systemd-boot skips it for entries
 named with the `efi` key. Type #2 is the default anyway, because `bootctl`
 reports the tally, the `.osrel`-derived title and the embedded kernel version
-only for entries it recognises as UKIs, and `apex boot status` reads
-`bootctl list --json`. A type #1 layout would need APEX to author an entry file
+only for entries it recognises as UKIs, and `rime boot status` reads
+`bootctl list --json`. A type #1 layout would need Rime to author an entry file
 per deployment *in addition to* the UKI, which is the two-artifacts-must-agree
 drift a UKI exists to remove. The suite asserts all three rows, so a future
 systemd that starts counting `efi` entries fails it instead of changing the
@@ -834,17 +834,17 @@ trade-off unnoticed.
 
 ## Boot counting and automatic rollback
 
-APEX writes no boot counter, and cannot. The boots that need counting are the
+Rime writes no boot counter, and cannot. The boots that need counting are the
 ones that never reach userspace: a kernel that panics, an initramfs that
 cannot find its root, a driver that hangs before the display comes up. Nothing
 in userspace can increment a counter for a boot that never got there.
 
 systemd-boot decrements the count **before the kernel starts**, by renaming the
-entry file in the ESP. APEX contributes the definition of a healthy boot,
+entry file in the ESP. Rime contributes the definition of a healthy boot,
 through the upstream extension point:
 
 ```
-apex-boot-health.service   Before=boot-complete.target, RequiredBy= it
+rime-boot-health.service   Before=boot-complete.target, RequiredBy= it
         ↓ non-zero exit
 boot-complete.target       not reached
         ↓
@@ -862,12 +862,12 @@ with *"do not mark an update successful merely because the kernel started."*
 **Health is an explicit short list.** It is neither `systemctl is-system-running`
 nor upstream's `systemd-boot-check-no-failures`, both of which fail on *any*
 failed unit. `AGENTS.md` requires optional hardware and services to fail without
-degrading the boot transaction, so an APEX machine can legitimately be
+degrading the boot transaction, so a Rime machine can legitimately be
 `degraded`: an absent fan controller, a Bluetooth adapter that did not appear.
 Rolling the OS back over one of those would be worse than the fault. The list:
 
 * the default target (`systemctl get-default`) is active
-* `apexd.service` is active
+* `rimed.service` is active
 * `systemd-logind.service` is active
 * the system bus (`dbus-broker.service`, or `dbus.service` if that is what the
   image has) is active
@@ -875,10 +875,10 @@ Rolling the OS back over one of those would be worse than the fault. The list:
   `graphical.target`, because requiring a greeter on a deliberately headless
   machine would roll it back for working as configured
 
-`apex-boot-notice.service` runs *after* `boot-complete.target`, so the notice
+`rime-boot-notice.service` runs *after* `boot-complete.target`, so the notice
 it writes always reads "you were rolled back and the machine is now working"
 rather than appearing on a machine that is still failing. There is deliberately
-no `apex boot ack` verb: the notice is cleared automatically on a boot where no
+no `rime boot ack` verb: the notice is cleared automatically on a boot where no
 entry is exhausted, so it tracks reality instead of tracking whether somebody
 dismissed it.
 
@@ -895,7 +895,7 @@ signatures as `.pcrsig` with the public half as `.pcrpkey`.
 `systemd-cryptenroll --tpm2-public-key=` then binds the LUKS2 keyslot to the
 **public key**, through a TPM2 `PolicyAuthorize`, rather than to a measurement.
 Any UKI signed by that key satisfies the policy, so a kernel update needs no
-re-enrollment and no user interaction. The trust anchor becomes a key APEX
+re-enrollment and no user interaction. The trust anchor becomes a key Rime
 already owns and already protects, the same shape as the Secure Boot chain.
 
 **Rejected: `systemd-pcrlock`.** It predicts the firmware PCRs (0, 2, 4, 7)
@@ -912,30 +912,30 @@ It has three problems, all about the update path rather than the security model:
 **The limitation**: signed PCR 11 attests the UKI and the boot *phase*.
 It does not attest the firmware or the Secure Boot state. What stops an attacker
 substituting their own UKI is Secure Boot enforcing, the layer that makes only
-APEX-signed images loadable. The two are complementary and neither alone is
+Rime-signed images loadable. The two are complementary and neither alone is
 enough.
 
 ## What was measured
 
 **Two machines and two dates, because one header covered both for four rounds
 and had stopped being true.** The UKI, Secure Boot, reproducibility and
-boot-counting figures are from the katana on 2026-09-03: a real APEX machine,
+boot-counting figures are from the katana on 2026-09-03: a real Rime machine,
 `VARIANT_ID=gaming`, kernel `7.1.5-cachyos1.fc43.x86_64`. The LUKS and TPM edge
 cases below them, from 2026-09-14 onward, ran on the L16 against a root staged
-from kernel `7.2.3-cachyos2.fc43.x86_64`, which is what each run's `.apexinf`
+from kernel `7.2.3-cachyos2.fc43.x86_64`, which is what each run's `.rimeinf`
 line records. Every guest ran under `OVMF_CODE_4M.secboot` with only the
-ephemeral APEX certificate enrolled as PK/KEK/db. Nothing here is a
+ephemeral Rime certificate enrolled as PK/KEK/db. Nothing here is a
 prediction.
 
-**A UKI from the real APEX image boots.** Kernel 16,758,856 bytes, the real
-APEX initramfs 386,072,073 bytes, the signed UKI ~390 MB. sd-stub printed
-`Booting initrd of APEX-OS dracut-107-8.fc43 (Initramfs)`, the real APEX
-initramfs ran to dracut's `pre-mount` hook, reported `NAME="APEX-OS"` from
+**A UKI from the real Rime image boots.** Kernel 16,758,856 bytes, the real
+Rime initramfs 386,072,073 bytes, the signed UKI ~390 MB. sd-stub printed
+`Booting initrd of Rime OS dracut-107-8.fc43 (Initramfs)`, the real Rime
+initramfs ran to dracut's `pre-mount` hook, reported `NAME="Rime OS"` from
 `/etc/initrd-release` and the command line the image was signed with, and
-powered off cleanly. `.apexinf` recorded `microcode=embedded-in-initrd`, which
+powered off cleanly. `.rimeinf` recorded `microcode=embedded-in-initrd`, which
 is how §22's "microcode in the UKI" is satisfied on the real image: dracut
 prepends an uncompressed `kernel/x86/microcode` cpio (`AuthenticAMD.bin` 304,866
-bytes, `GenuineIntel.bin` 16,778,240 bytes) and `apex-mkuki` detects it rather
+bytes, `GenuineIntel.bin` 16,778,240 bytes) and `rime-mkuki` detects it rather
 than demanding a duplicate `--ucode`.
 
 **Secure Boot refuses everything else.** Unsigned, foreign-signed, and
@@ -963,8 +963,8 @@ harness reports whether the signed bytes happened to match without asserting it
 either way: a lucky run must not read as evidence of a property that does not
 hold.
 
-**Boot counting.** Four boots walked `apex-new+3-0.efi` →`+2-1` →`+1-2`
-→`+0-3`, the fifth selected the unsuffixed `apex-good.efi`, and a sixth stayed
+**Boot counting.** Four boots walked `rime-new+3-0.efi` →`+2-1` →`+1-2`
+→`+0-3`, the fifth selected the unsuffixed `rime-good.efi`, and a sixth stayed
 there. Exact filename pairs are asserted at every step, in both directions: the
 counted entry decrements and the blessed entry never grows a suffix.
 
@@ -1081,7 +1081,7 @@ places it:
 
 Turning Secure Boot and SMM off changes nothing; going back one edk2 version
 fixes it. So the S3 criterion is measurable, on the older firmware, and neither
-APEX nor the lab is at fault. `APEX_BOOTLAB_FW` points the harness at a
+Rime nor the lab is at fault. `RIME_BOOTLAB_FW` points the harness at a
 pre-converted firmware cache, which is how the harness takes the older build.
 Each build's version comes out of the binary itself (`strings … | grep edk2-`),
 not from its filename.
@@ -1115,7 +1115,7 @@ L-002 and L-003 blocked behind it.
 
 Read the table with its one caveat in front of you: **an emulated TPM is the
 subject of every row.** `swtpm` is a faithful implementation of the TPM 2.0
-command set, so everything above is a real statement about APEX's policy, the
+command set, so everything above is a real statement about Rime's policy, the
 LUKS2 header shape and systemd's behaviour. It says nothing about anybody's
 silicon.
 
@@ -1140,7 +1140,7 @@ silicon.
   fail halfway.
 * **Dictionary-attack lockout.** Real TPMs count failed authorisations and lock
   out, with vendor-set thresholds and recovery times. Nothing above ever
-  triggered it. This matters the moment APEX adds a PIN to the unlock path.
+  triggered it. This matters the moment Rime adds a PIN to the unlock path.
 * **fTPM and PTT quirks.** AMD's fTPM has a documented stutter; a BIOS update
   can reset an fTPM and take every sealed object with it, which is a TPM clear
   the user did not ask for; Intel PTT is a different implementation again. A
@@ -1163,7 +1163,7 @@ to be cleared and its boot path is not to be touched.
 1. **The machine must already boot through a signed UKI.** The enrolment
    procedure below this section is that work. The check is required:
    `cat /sys/class/tpm/tpm0/pcr-sha256/11` must not be 64 zeros. On a stock
-   APEX install it **is** zeros (measured on the L16 on 2026-09-13), because
+   Rime install it **is** zeros (measured on the L16 on 2026-09-13), because
    the shipped image boots GRUB through bootupd and only `sd-stub` extends
    PCR 11. A signed PCR 11 policy on a GRUB machine binds to nothing.
 2. **Write the recovery key down, store it somewhere that is not that disk, and
@@ -1275,7 +1275,7 @@ And one that is not about TPMs at all: **`/dev/nvme0n1` is not a stable name on
 this machine.** Three boots were logged; the first two enumerated the two NVMe
 controllers one way and the third (an ordinary reboot with nothing special
 about it) enumerated them the other way, so the disk that had been Windows's
-took APEX's name. The kernel probes the controllers asynchronously and the index
+took Rime's name. The kernel probes the controllers asynchronously and the index
 falls out of the race. **Any procedure that protects a disk by device name
 protects the wrong one sooner or later**: use the serial, the PCI function, the
 PARTUUID or the filesystem label. The advice applies beyond katana; katana is
@@ -1290,7 +1290,7 @@ Four things the lab could not have told us, all measured here:
    that used to be quoted here are gone on purpose: a citation into a file that
    keeps changing goes stale silently, so the property is asserted instead.
    `Containerfile.base` refuses to build an image in which
-   `/usr/libexec/apex-luks-enroll` names a TPM2 device on an executable line
+   `/usr/libexec/rime-luks-enroll` names a TPM2 device on an executable line
    with no PCR selection beside it, `tests/test-boot-v2.sh` asserts the same
    thing on every pull request with both controls, and the shipped script reads
    the token back after enrolling and refuses one with no policy. Reproduced in
@@ -1322,9 +1322,9 @@ asked:
 * **Dictionary-attack lockout is no longer untriggered.** Intel PTT here:
   `MAX_AUTH_FAIL` 32, `LOCKOUT_INTERVAL` 7200 s, `LOCKOUT_RECOVERY` 86400 s, and
   **a successful authorisation does not clear the counter**. Only the 2-hour
-  decay or `TPM2_DictionaryAttackLockReset`, which needs `lockoutAuth`, does. If APEX
+  decay or `TPM2_DictionaryAttackLockReset`, which needs `lockoutAuth`, does. If Rime
   ever ships `--tpm2-with-pin`, a user who mistypes 32 times over any span of
-  time locks the TPM for up to a day and APEX cannot reset it.
+  time locks the TPM for up to a day and Rime cannot reset it.
 * **`deep` being offered is not the same as `deep` working.** This machine lists
   `[s2idle] deep` and suspends as s2idle. The TPM came back from s2idle intact.
   S3 remains untested on silicon.
@@ -1340,14 +1340,14 @@ TPM-bound volume.
 
 **Read this whole section before running any of it.** There is no rollback for
 an ESP you overwrote or an EFI variable you replaced, because the thing that
-would perform the rollback is what you broke. Nothing in APEX automates these
+would perform the rollback is what you broke. Nothing in Rime automates these
 steps, and that is deliberate.
 
 Irreversible, in order of how bad it is to get wrong:
 
 1. **Enrolling a Secure Boot key writes your firmware.** It is done from the
    firmware's own setup UI or with `mokutil`, by you, on a machine you can put
-   into Setup Mode. APEX ships no script that touches `db`, `KEK` or `PK`, and
+   into Setup Mode. Rime ships no script that touches `db`, `KEK` or `PK`, and
    CI and VMs only ever get ephemeral keys.
 2. **`bootctl install` writes the ESP** and creates an EFI boot entry. If the
    machine shares its ESP with another OS, this is where that OS's loader gets
@@ -1361,16 +1361,16 @@ and have a live USB you have booted at least once.
 
 ```bash
 # ── 0. what is the machine doing now? ──
-apex boot status                    # expect: Bootloader grub, boot counting not in effect
+rime boot status                    # expect: Bootloader grub, boot counting not in effect
 sudo bootc status                   # note the booted and rollback deployments
 sudo ostree admin pin 0             # pin the current deployment before anything risky
 
 # ── 1. build a UKI from THIS machine's image, in the boot lab ──
-git clone https://github.com/AndreNijman/apex-os.git ~/build/apex-os
-cd ~/build/apex-os
-podman build -t apex-bootlab -f bootlab/Containerfile .
+git clone https://github.com/AndreNijman/apex-os.git ~/build/rime-os
+cd ~/build/rime-os
+podman build -t rime-bootlab -f bootlab/Containerfile .
 mkdir -p ~/bootlab-work
-sudo files/scripts/boot-v2/apex-stage-root --output ~/bootlab-work/apex-root
+sudo files/scripts/boot-v2/rime-stage-root --output ~/bootlab-work/rime-root
 #   ^ reads /usr/lib/modules/<kver>/{vmlinuz,initramfs.img} and os-release.
 #     Root because initramfs.img is mode 0600. It writes only the output dir.
 
@@ -1388,15 +1388,17 @@ cat /proc/cmdline
 # HERE and not inside run-scenarios, because inside the container there are no
 # host EFI variables to read.
 ./tests/lab/nvram-guard -- \
-podman run --rm -v ~/bootlab-work:/work:z apex-bootlab -c '
-  /work/apex-os/files/scripts/boot-v2/apex-mkuki \
-      --output /work/apex-<deployment>.efi \
-      --from-root /work/apex-root \
+podman run --rm -v ~/bootlab-work:/work:z rime-bootlab -c '
+  /work/rime-os/files/scripts/boot-v2/rime-mkuki \
+      --output /work/rime-<deployment>.efi \
+      --from-root /work/rime-root \
       --cmdline "<the cmdline from /proc/cmdline>" \
       --deployment "<a short id: the ostree deployment checksum works>" \
       --variant "$(. /etc/os-release; echo "$VARIANT_ID")" \
       --sb-key /work/keys/sb/key.pem --sb-cert /work/keys/sb/cert.pem'
 ```
+
+(The repository's pre-rebrand name: GitHub redirects it after the rename.) <!-- rime-rename: keep -->
 
 `--sb-key`/`--sb-cert` are **your** key, from outside the repository. A private
 key never enters the tree, and `.gitignore` blocks the patterns.
@@ -1413,7 +1415,7 @@ mokutil --list-enrolled | grep -i "<your CN>"
 # ── 3. check the ESP has room, BEFORE writing anything to it ──
 #   A UKI is the kernel plus the initramfs: 374 MiB on the L16 today. Know the
 #   number for this machine and the free space you have, and stop here if it
-#   does not fit. This is a ONE-deployment test, not a migration — two APEX
+#   does not fit. This is a ONE-deployment test, not a migration — two Rime
 #   deployments plus a staged third need about 1.1 GiB of ESP.
 du -b "/usr/lib/modules/$(uname -r)"/{vmlinuz,initramfs.img}
 df -h /boot/efi
@@ -1427,8 +1429,8 @@ sudo efibootmgr -v | tee ~/efibootmgr.before
 sudo bootctl install
 sudo mkdir -p /boot/efi/EFI/Linux
 #   +3-0 is the boot counter: three tries, none used.
-sudo cp ~/bootlab-work/apex-<deployment>.efi \
-        /boot/efi/EFI/Linux/apex-<deployment>+3-0.efi
+sudo cp ~/bootlab-work/rime-<deployment>.efi \
+        /boot/efi/EFI/Linux/rime-<deployment>+3-0.efi
 sudo bootctl list                   # the entry must appear, with 3 tries left
 
 #   Per-machine settings go beside the UKI as credentials, because a signed
@@ -1463,10 +1465,10 @@ sudo efibootmgr | grep -i 'Linux Boot Manager'     # note its BootXXXX number
 sudo efibootmgr --bootnext XXXX
 sudo systemctl reboot
 #   after it comes up:
-apex boot status
+rime boot status
 #   expect: Bootloader systemd-boot · Signed UKI yes · Boot counting in effect
 #           and the entry listed as "good" — systemd-bless-boot stripped the
-#           +N-M suffix because apex-boot-health.service passed.
+#           +N-M suffix because rime-boot-health.service passed.
 ```
 
 If it does **not** come up, the boot counter is doing its job: after three
@@ -1479,16 +1481,16 @@ UKI you placed in step 4 is a snapshot of one deployment. `bootc upgrade` on thi
 machine keeps writing ostree BLS entries under `/boot`, which systemd-boot
 cannot read, so the UKI goes stale at the next update and nothing refreshes it.
 Getting a machine onto systemd-boot *permanently* means moving it onto the
-composefs backend. `apex update` does that in place, through
-`/usr/libexec/apex-boot-migrate auto`, on a machine that passes its precheck:
+composefs backend. `rime update` does that in place, through
+`/usr/libexec/rime-boot-migrate auto`, on a machine that passes its precheck:
 see "Migrating a machine that already exists".
 
 ### TPM-bound unlock
 
-There are **two scripts called `apex-luks-enroll`** and they are different
+There are **two scripts called `rime-luks-enroll`** and they are different
 programs. This section exists to stop you confusing them.
 
-| | `files/scripts/boot-v2/apex-luks-enroll` | `/usr/libexec/apex-luks-enroll` |
+| | `files/scripts/boot-v2/rime-luks-enroll` | `/usr/libexec/rime-luks-enroll` |
 | --- | --- | --- |
 | who runs it | the boot lab | the installer, or you |
 | what it targets | an image file it creates itself | a LUKS2 volume that already exists |
@@ -1499,9 +1501,9 @@ programs. This section exists to stop you confusing them.
 On a real machine:
 
 ```bash
-sudo /usr/libexec/apex-luks-enroll \
+sudo /usr/libexec/rime-luks-enroll \
      --device /dev/<your-luks-partition> \
-     --recovery-out /root/apex-recovery-key.txt
+     --recovery-out /root/rime-recovery-key.txt
 ```
 
 It enrols a recovery key first, before anything else, on every path. A volume
@@ -1533,7 +1535,7 @@ that half: the signature it needs ships in the UKI's `.pcrsig` section and is
 public, PCR 11 starts at zero on every boot, `tpm2_pcrextend 11`
 works from plain root, and every digest that reaches the signed value is a hash
 of public material. An attacker who can boot any kernel replays the extends and
-unseals without APEX's private key. Secure Boot stops them, by refusing to
+unseals without Rime's private key. Secure Boot stops them, by refusing to
 load their kernel. If Secure Boot cannot be enabled on a machine, `--with-pin`
 is the other route; read what it prints about the lockout counter first.
 
@@ -1544,7 +1546,7 @@ zero bytes. That token is sealed to the TPM storage key and nothing else, so any
 OS on that hardware unseals it. To check a volume somebody else enrolled:
 
 ```bash
-sudo /usr/libexec/apex-luks-enroll --check --device /dev/<partition>
+sudo /usr/libexec/rime-luks-enroll --check --device /dev/<partition>
 ```
 
 which exits 2 and says what is wrong if the TPM slot carries no policy.
@@ -1556,9 +1558,9 @@ matching `.pcrsig`. The policy refuses a UKI without one, by design.
 
 | situation | what to do |
 | --- | --- |
-| the new deployment will not boot | do nothing for three attempts; systemd-boot selects the previous blessed entry itself. `apex boot status` then shows the failed entry as `OUT OF TRIES` and announces the rollback. |
-| the machine boots but the desktop does not | `apex-boot-health.service` fails, the entry is never blessed, and the same automatic rollback happens. `journalctl -u apex-boot-health` names the unit that was not active. |
-| you want GRUB back | GRUB was never removed. Select it from the firmware boot menu, then `sudo efibootmgr` (as yourself, deliberately) to put it back at the front of `BootOrder`. Delete `/boot/efi/EFI/Linux/apex-*.efi` to stop offering the UKI path. |
+| the new deployment will not boot | do nothing for three attempts; systemd-boot selects the previous blessed entry itself. `rime boot status` then shows the failed entry as `OUT OF TRIES` and announces the rollback. |
+| the machine boots but the desktop does not | `rime-boot-health.service` fails, the entry is never blessed, and the same automatic rollback happens. `journalctl -u rime-boot-health` names the unit that was not active. |
+| you want GRUB back | GRUB was never removed. Select it from the firmware boot menu, then `sudo efibootmgr` (as yourself, deliberately) to put it back at the front of `BootOrder`. Delete `/boot/efi/EFI/Linux/rime-*.efi` to stop offering the UKI path. |
 | TPM unlock stops working after a firmware update | the recovery key. Then re-check: with a **signed** PCR 11 policy a firmware update should not break unlock, because the keyslot is bound to the signing key and PCR 11 measures the UKI, not the firmware. The lab has now measured both halves of a firmware change and neither breaks it: the Secure Boot policy register (`luks-firmware-change`, a real `DBXUpdate`) and the firmware code register (`luks-firmware-code`, two edk2 revisions). Nobody has tried it on silicon with a vendor capsule yet: katana was asked on 2026-09-19 and `fwupdmgr get-updates` offers nothing for its System Firmware, so there was no capsule to apply. What katana *did* show is the half that matters: re-signing for a moved PCR 11 restores unlock on real Intel PTT. If a vendor capsule ever breaks it, record that finding here. |
 | TPM unlock stops working after a kernel update | this should not happen: it is the property the policy was chosen for, and the `luks-tpm` scenario measures it. Use the recovery key, then check that the new UKI carries a `.pcrsig` signed by the enrolled key: `python3 files/scripts/boot-v2/pe-section.py <uki> .pcrsig`. |
 | you rotated the PCR signing key | every existing keyslot is bound to the old public key. Enroll the new one with `systemd-cryptenroll --tpm2-public-key=<new>` **before** removing the old, and keep the recovery key usable throughout. |
@@ -1606,12 +1608,12 @@ unchanged blob is a named failure.
 
 * **Step 6, encryption by default: on in the graphical installer, and the
   owner can decline it.** §22 gates it on "once recovery and hardware edge
-  cases are proven". The graphical installer (`installer/apex-installer-gui`)
+  cases are proven". The graphical installer (`installer/rime-installer-gui`)
   now offers disk encryption with the box ticked, and declining it is a plain
-  answer; `installer/apex-install` creates the LUKS2 volume itself
+  answer; `installer/rime-install` creates the LUKS2 volume itself
   (`cryptsetup luksFormat`) and refuses the install unless both the passphrase
   and a recovery key open it. `docs/disk-encryption.md` is the reference. The
-  unattended (CI) path keeps encryption off and refuses `apex.encrypt=yes`,
+  unattended (CI) path keeps encryption off and refuses `rime.encrypt=yes`,
   because nobody is there to be shown a recovery key.
 
   In the lab, a TPM clear, a PCR 7 change, a PCR 0 change, an S3 cycle and a
@@ -1633,31 +1635,31 @@ unchanged blob is a named failure.
   PTT has been through an enrol-and-recover cycle (runs 1 and 2 of the MSI
   Katana section, 2026-09-19, on a loopback LUKS volume); run 5, the TPM going
   away, has not run on silicon yet.
-* **No NVRAM management in the lab tools.** `apex-mkesp` writes
+* **No NVRAM management in the lab tools.** `rime-mkesp` writes
   `/EFI/BOOT/BOOTX64.EFI` so the VM boots by the removable-media path, because
   creating a real boot entry means `efibootmgr`, and no lab script runs that
   near a real machine. On a real machine the one shipped helper that writes
-  boot variables is `apex-boot-migrate`, under the discipline in "Migrating a
+  boot variables is `rime-boot-migrate`, under the discipline in "Migrating a
   machine that already exists": an entry created with `--create-only`, one
   `BootNext`, and `BootOrder` only after a good boot. For the manual procedure
   above, `bootctl install` creates the entry and the operator runs it.
 * **The image now carries `systemd-boot-unsigned` and `systemd-ukify`, and
-  puts the loader on a machine only through `apex-boot-migrate`.** They went into `Containerfile.core` with
+  puts the loader on a machine only through `rime-boot-migrate`.** They went into `Containerfile.core` with
   the pivot, because `bootc install --bootloader systemd` copies the loader
   *out of the image being installed*: an image without it produces an ESP with
   no loader binary and an install that exits 0. That is a `core` rebuild and
   therefore a real fleet-update cost, recorded in `docs/update-cost.md`'s terms.
-  `bootctl` in the shipped path is still read-only: `apex boot status` calls
+  `bootctl` in the shipped path is still read-only: `rime boot status` calls
   `bootctl list` and nothing else.
 * **"composefs" means two different things, on two different kinds of
-  machine.** §23's row names composefs, and APEX already boots on a
+  machine.** §23's row names composefs, and Rime already boots on a
   composefs-backed **ostree** root; the katana does, today, through GRUB. That
   is not bootc's `--composefs-backend`, which is a different storage backend
   with its own deployment layout, its own `bootc status` shape (`bootType:
   Bls`, `softRebootCapable: true`) and the ESP mounted at `/boot`. The pivot is
   a move to the latter. Reading the katana's existing composefs root as "the
   katana is already on the new backend" would be a serious mistake.
-* **The `apex boot status` entry list needs root**, because the ESP is mode
+* **The `rime boot status` entry list needs root**, because the ESP is mode
   0700. Without it the command reports `entries: unavailable` **with the
   reason**, never an empty list: an empty list is indistinguishable from "no
   deployment has failed", which is the answer that would hide a rollback.
@@ -1683,26 +1685,26 @@ Two practical notes, both learned the hard way:
   missing it reports `could-not-snapshot` and **refuses to run the command at
   all**, which is correct and is why `boot-v2.yml` installs it on the runner.
 * **`sudo` in front of `podman` changes which image store is used.** The
-  commands below build `apex-bootlab` rootless and run it rootless. If you
+  commands below build `rime-bootlab` rootless and run it rootless. If you
   build as root, run as root: an image in the other store looks like an image
   that does not exist.
 
 ```bash
 # on the katana, or any box with /dev/kvm and podman
-podman build -t apex-bootlab -f bootlab/Containerfile .
+podman build -t rime-bootlab -f bootlab/Containerfile .
 mkdir -p ~/bootlab-work/out
 ./tests/lab/nvram-guard --label bootlab -- \
 podman run --rm --device /dev/kvm -v ~/bootlab-work:/work:z \
-    -v "$PWD:/work/repo:z" apex-bootlab -c \
+    -v "$PWD:/work/repo:z" rime-bootlab -c \
     '/work/repo/files/scripts/boot-v2/run-scenarios --work /work/out'
 
-# the two scenarios that need a real APEX image are requested by name, and
+# the two scenarios that need a real Rime image are requested by name, and
 # hard-fail rather than skipping if the staged root is missing:
-sudo files/scripts/boot-v2/apex-stage-root --output ~/bootlab-work/out/apex-root
-./tests/lab/nvram-guard --label bootlab-apex -- \
+sudo files/scripts/boot-v2/rime-stage-root --output ~/bootlab-work/out/rime-root
+./tests/lab/nvram-guard --label bootlab-rime -- \
 podman run --rm --device /dev/kvm -v ~/bootlab-work:/work:z \
-    -v "$PWD:/work/repo:z" apex-bootlab -c \
-    '/work/repo/files/scripts/boot-v2/run-scenarios --work /work/out apex-image luks-tpm'
+    -v "$PWD:/work/repo:z" rime-bootlab -c \
+    '/work/repo/files/scripts/boot-v2/run-scenarios --work /work/out rime-image luks-tpm'
 ```
 
 `run-scenarios --list` prints every scenario name, and
@@ -1718,8 +1720,8 @@ image's, because moving PCR 0 needs two firmwares differing only in code:
 # the older Fedora build, extracted from its rpm — any different revision works
 ./tests/lab/nvram-guard --label bootlab-fw-alt -- \
 podman run --rm --device /dev/kvm -v ~/bootlab-work:/work:z \
-    -v "$PWD:/work/repo:z" -e APEX_BOOTLAB_FW_ALT=/work/OVMF_CODE_4M.secboot.qcow2 \
-    apex-bootlab -c \
+    -v "$PWD:/work/repo:z" -e RIME_BOOTLAB_FW_ALT=/work/OVMF_CODE_4M.secboot.qcow2 \
+    rime-bootlab -c \
     '/work/repo/files/scripts/boot-v2/run-scenarios --work /work/out luks-firmware-code'
 ```
 
@@ -1730,5 +1732,5 @@ reporting a result: both are checked before anything rests on the input. The
 toolchain-free assertions (unit conditions, the boot-path tripwire, the health
 gate's exit codes, the writer/reader schema parity) are `./tests/test-boot-v2.sh`,
 which needs no VM and runs on every pull request in `pr-validation.yml`'s
-`static` job. `./tests/test-boot-v2.sh --with-binary` adds the `apex boot status`
+`static` job. `./tests/test-boot-v2.sh --with-binary` adds the `rime boot status`
 fixture cases and runs in the `rust` job.

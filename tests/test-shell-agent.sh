@@ -12,7 +12,7 @@
 #
 #  Nothing touches the developer's own configuration. Each shell is pointed at a
 #  fixture XDG_DATA_HOME / XDG_CONFIG_HOME / XDG_STATE_HOME under $WORK, and
-#  `apex` on PATH is a stub that records what it was asked. The real daemon is
+#  `rime` on PATH is a stub that records what it was asked. The real daemon is
 #  never contacted and no session is ever started.
 #
 #      ./tests/test-shell-agent.sh
@@ -47,20 +47,20 @@ for tool in python3; do
     }
 done
 
-FISH_CONF="${ROOT}/files/desktop/fish/apex-agent.fish"
+FISH_CONF="${ROOT}/files/desktop/fish/rime-agent.fish"
 FISH_COMP="${ROOT}/files/desktop/fish/completions"
-NU_FILE="${ROOT}/files/desktop/nushell/apex.nu"
+NU_FILE="${ROOT}/files/desktop/nushell/rime.nu"
 
 # ── the fixture ──────────────────────────────────────────────────────────────
 #
-# A stub `apex` that answers the four queries the integrations make, and — the
+# A stub `rime` that answers the four queries the integrations make, and — the
 # point of it — APPENDS EVERY INVOCATION to a log. That log is what makes the
 # "the prompt indicator forks nothing" assertion real rather than a claim about
 # the source.
 BIN="${WORK}/bin"; mkdir -p "$BIN"
-CALLS="${WORK}/apex-calls.log"
+CALLS="${WORK}/rime-calls.log"
 : > "$CALLS"
-cat > "${BIN}/apex" <<EOF
+cat > "${BIN}/rime" <<EOF
 #!/bin/sh
 printf '%s\n' "\$*" >> "${CALLS}"
 case "\$*" in
@@ -75,28 +75,46 @@ case "\$*" in
     *) printf 'STUB %s\n' "\$*" ;;
 esac
 EOF
-chmod +x "${BIN}/apex"
+chmod +x "${BIN}/rime"
 
 # A second stub for the case that matters most in practice: the runtime is not
 # running, so every query fails. Completion must stay silent.
 DOWN="${WORK}/down"; mkdir -p "$DOWN"
-cat > "${DOWN}/apex" <<'EOF'
+cat > "${DOWN}/rime" <<'EOF'
 #!/bin/sh
-echo "apex: the agent runtime is not running" >&2
+echo "rime: the agent runtime is not running" >&2
 exit 1
 EOF
-chmod +x "${DOWN}/apex"
+chmod +x "${DOWN}/rime"
 
-# A PATH with no `apex` at all — a partial image, a container. Symlinks rather
-# than the real /usr/bin, because that is where `apex` lives on a developer
+# The pre-rename CLI name, stubbed on BOTH fixture PATHs, and it only records.
+# On a machine still running APEX, /usr/share/fish/vendor_conf.d/apex-agent.fish
+# (rime-rename: keep — the host's file name) is the host's copy of the
+# pre-rename integration, and it defines `a` as `apex agent run`. Its name no
+# longer matches the file under test, so fish sourced both, the host's `a` won,
+# and `a --agent claude "fix the tests"` reached the real /usr/bin/apex: a live
+# agent session on the developer's machine, measured. The fixture's vendor dir
+# now shadows that name (below); this stub is the second wall, and the fish
+# section fails if anything ever reaches it.
+for d in "$BIN" "$DOWN"; do
+    cat > "${d}/apex" <<EOF
+#!/bin/sh
+printf 'APEX-STUB %s\n' "\$*" >> "${WORK}/apex-stub.log"
+exit 1
+EOF
+    chmod +x "${d}/apex"
+done
+
+# A PATH with no `rime` at all — a partial image, a container. Symlinks rather
+# than the real /usr/bin, because that is where `rime` lives on a developer
 # machine and including it would test nothing.
-NOAPEX="${WORK}/noapex"; mkdir -p "$NOAPEX"
+NORIME="${WORK}/norime"; mkdir -p "$NORIME"
 for b in fish nu bash sh sed cat tail printf date env; do
-    p="$(command -v "$b" 2>/dev/null)" && ln -sf "$p" "${NOAPEX}/${b}"
+    p="$(command -v "$b" 2>/dev/null)" && ln -sf "$p" "${NORIME}/${b}"
 done
 
 # Where `fish` and `nu` actually are. Every scrubbed PATH below is a fixture
-# directory plus `/usr/bin:/bin` — the fixture is what makes "apex is absent"
+# directory plus `/usr/bin:/bin` — the fixture is what makes "rime is absent"
 # and "the runtime is down" mean something, and `/usr/bin:/bin` was standing in
 # for "and the interpreter, obviously". It is not obvious: it is an assumption
 # about the machine. On this image both shells are in /usr/bin; nushell is in
@@ -107,7 +125,7 @@ done
 # guard and the invocations were asking different questions, so the section
 # neither ran nor said it had not.
 #
-# Symlinks, the same idiom as $NOAPEX, rather than adding /usr/local/bin: this
+# Symlinks, the same idiom as $NORIME, rather than adding /usr/local/bin: this
 # directory can contain nothing but the two interpreters, so it cannot leak a
 # stray binary into a fixture that is testing an absence. It is appended LAST
 # everywhere for the same reason — it can never shadow $BIN's or $DOWN's stub.
@@ -123,7 +141,7 @@ OUTSIDE="${WORK}/outside"; mkdir -p "$OUTSIDE"
 # space indent. The prompt parsers read these directly, so a fixture in any
 # other shape would test a format nothing writes.
 STATE="${WORK}/state"
-SESS="${STATE}/apex/agent/sessions"
+SESS="${STATE}/rime/agent/sessions"
 mkdir -p "$SESS"
 record() { # id project state exit_code
     cat > "${SESS}/$1.json" <<EOF
@@ -146,7 +164,7 @@ record 7 "$OUTSIDE" working          null
 record 8 "$PROJ"    working          0
 
 # An empty state directory, for "nothing running".
-EMPTY="${WORK}/state-empty"; mkdir -p "${EMPTY}/apex/agent/sessions"
+EMPTY="${WORK}/state-empty"; mkdir -p "${EMPTY}/rime/agent/sessions"
 
 # ── what bash says, to compare against ───────────────────────────────────────
 # The parity target is not a description of the prompt format, it is the bytes
@@ -154,8 +172,24 @@ EMPTY="${WORK}/state-empty"; mkdir -p "${EMPTY}/apex/agent/sessions"
 bash_prompt() { # cwd state_home
     (cd "$1" && env -i PATH="${BIN}:/usr/bin:/bin:${SHELLS}" HOME="${WORK}/home" \
         XDG_STATE_HOME="$2" bash --noprofile --norc -c \
-        ". '${ROOT}/files/desktop/shell/agent.sh'; apex_agent_prompt" 2>/dev/null)
+        ". '${ROOT}/files/desktop/shell/agent.sh'; rime_agent_prompt" 2>/dev/null)
 }
+
+# ── the bash/zsh opt-out, under both of its names ────────────────────────────
+# APEX_NO_AGENT_ALIASES is what a user set before the rename (rime-rename: keep),
+# in a ~/.zshrc.local or ~/.bashrc that no image rewrites. Honouring only the new
+# name would hand them back shortcuts that shadow their own `a`.
+section "bash opt-out"
+sh_has_a() { # extra-env…
+    env -i PATH="${BIN}:/usr/bin:/bin" HOME="${WORK}/home" "$@" bash --noprofile --norc -c \
+        ". '${ROOT}/files/desktop/shell/agent.sh'; type a >/dev/null 2>&1 && echo has-a || echo no-a" 2>/dev/null
+}
+[ "$(sh_has_a)" = has-a ] \
+    && ok "bash gets the shortcuts by default" || bad "bash gets the shortcuts by default"
+for v in RIME_NO_AGENT_ALIASES APEX_NO_AGENT_ALIASES; do
+    [ "$(sh_has_a "$v=1")" = no-a ] \
+        && ok "$v=1 drops the bash shortcuts" || bad "$v=1 drops the bash shortcuts"
+done
 
 # ─────────────────────────────────────────────────────────────────────────────
 #  fish
@@ -175,6 +209,9 @@ else
     FD="${WORK}/fishdata"
     mkdir -p "${FD}/fish/vendor_conf.d" "${FD}/fish/vendor_completions.d"
     cp "$FISH_CONF" "${FD}/fish/vendor_conf.d/"
+    # Shadows a host's pre-rename copy: fish sources the first file of each
+    # name across its vendor directories, and this directory comes first.
+    : > "${FD}/fish/vendor_conf.d/apex-agent.fish"  # rime-rename: keep — the host file it shadows
     cp "${FISH_COMP}"/*.fish "${FD}/fish/vendor_completions.d/"
 
     # Every shipped file must parse. A syntax error in a vendor_conf.d file is a
@@ -210,13 +247,13 @@ end')"
     : > "$CALLS"
     fishrun "$PROJ" -- 'a --agent claude "fix the tests"' >/dev/null
     grep -qx 'agent run --agent claude fix the tests' "$CALLS" \
-        && ok "fish \`a\` runs \`apex agent run\` with its arguments" \
-        || { bad "fish \`a\` runs \`apex agent run\` with its arguments"; sed 's/^/      /' "$CALLS"; }
+        && ok "fish \`a\` runs \`rime agent run\` with its arguments" \
+        || { bad "fish \`a\` runs \`rime agent run\` with its arguments"; sed 's/^/      /' "$CALLS"; }
 
     : > "$CALLS"
     fishrun "$PROJ" -- 'ap layout show' >/dev/null
     grep -qx 'project layout show' "$CALLS" \
-        && ok "fish \`ap\` forwards to \`apex project\`" || bad "fish \`ap\` forwards to \`apex project\`"
+        && ok "fish \`ap\` forwards to \`rime project\`" || bad "fish \`ap\` forwards to \`rime project\`"
 
     : > "$CALLS"
     out="$(fishrun "$PROJ" -- 'aw')"
@@ -239,23 +276,29 @@ end')"
         || { bad "fish \`aa\` attaches to the only running session"; sed 's/^/      /' "$CALLS"; }
 
     # ── the opt-out ──────────────────────────────────────────────────────────
-    out="$(fishrun "$PROJ" APEX_NO_AGENT_ALIASES=1 -- 'functions -q a; and echo BAD; or echo gone
-functions -q apex_agent_prompt; and echo prompt-kept; or echo BAD-PROMPT')"
+    out="$(fishrun "$PROJ" RIME_NO_AGENT_ALIASES=1 -- 'functions -q a; and echo BAD; or echo gone
+functions -q rime_agent_prompt; and echo prompt-kept; or echo BAD-PROMPT')"
     printf '%s' "$out" | grep -q '^gone$' && printf '%s' "$out" | grep -q 'prompt-kept' \
-        && ok "APEX_NO_AGENT_ALIASES drops the shortcuts and keeps the prompt" \
-        || { bad "APEX_NO_AGENT_ALIASES drops the shortcuts and keeps the prompt"; printf '      %s\n' "$out"; }
+        && ok "RIME_NO_AGENT_ALIASES drops the shortcuts and keeps the prompt" \
+        || { bad "RIME_NO_AGENT_ALIASES drops the shortcuts and keeps the prompt"; printf '      %s\n' "$out"; }
 
-    out="$(fishrun "$PROJ" APEX_NO_AGENT_ALIASES=1 -- 'complete -C "apex agent attach "')"
+    # …and under its pre-rename name (rime-rename: keep — what users already set).
+    out="$(fishrun "$PROJ" APEX_NO_AGENT_ALIASES=1 -- 'functions -q a; and echo BAD; or echo gone')"
+    printf '%s' "$out" | grep -q '^gone$' \
+        && ok "APEX_NO_AGENT_ALIASES, the pre-rename name, drops them too" \
+        || { bad "APEX_NO_AGENT_ALIASES, the pre-rename name, drops them too"; printf '      %s\n' "$out"; }
+
+    out="$(fishrun "$PROJ" RIME_NO_AGENT_ALIASES=1 -- 'complete -C "rime agent attach "')"
     printf '%s' "$out" | grep -q '^4' \
         && ok "completion survives the opt-out" || bad "completion survives the opt-out"
 
-    # ── no apex installed ────────────────────────────────────────────────────
-    out="$( (cd "$PROJ" && env -i PATH="$NOAPEX" HOME="${WORK}/home" XDG_DATA_HOME="$FD" \
-        XDG_CONFIG_HOME="${WORK}/fishcfg" "${NOAPEX}/fish" -c \
+    # ── no rime installed ────────────────────────────────────────────────────
+    out="$( (cd "$PROJ" && env -i PATH="$NORIME" HOME="${WORK}/home" XDG_DATA_HOME="$FD" \
+        XDG_CONFIG_HOME="${WORK}/fishcfg" "${NORIME}/fish" -c \
         'functions -q a; and echo BAD; or echo none; echo alive' 2>&1) )"
     printf '%s' "$out" | grep -q '^none$' && printf '%s' "$out" | grep -q '^alive$' \
-        && ok "a machine with no apex gets no shortcuts and a working shell" \
-        || { bad "a machine with no apex gets no shortcuts and a working shell"; printf '      %s\n' "$out"; }
+        && ok "a machine with no rime gets no shortcuts and a working shell" \
+        || { bad "a machine with no rime gets no shortcuts and a working shell"; printf '      %s\n' "$out"; }
 
     # ── the double-source guard ──────────────────────────────────────────────
     # Both fish itself and a user who copied the file into ~/.config/fish/conf.d
@@ -266,7 +309,7 @@ functions -q apex_agent_prompt; and echo prompt-kept; or echo BAD-PROMPT')"
         || { bad "sourcing the fish file twice is harmless"; printf '      %s\n' "$out"; }
 
     # ── the prompt indicator ─────────────────────────────────────────────────
-    got="$(fishrun "$PROJ" XDG_STATE_HOME="$STATE" -- 'apex_agent_prompt')"
+    got="$(fishrun "$PROJ" XDG_STATE_HOME="$STATE" -- 'rime_agent_prompt')"
     want="$(bash_prompt "$PROJ" "$STATE")"
     [ -n "$want" ] && [ "$got" = "$want" ] \
         && ok "the fish prompt is byte-identical to the bash one" \
@@ -276,22 +319,22 @@ functions -q apex_agent_prompt; and echo prompt-kept; or echo BAD-PROMPT')"
     # $OUTSIDE has exactly one session of its own, and $PROJ has three. Neither
     # may see the other's — which is the whole reason the prompt matches on the
     # recorded project root instead of just counting session files.
-    got="$(fishrun "$OUTSIDE" XDG_STATE_HOME="$STATE" -- 'apex_agent_prompt')"
+    got="$(fishrun "$OUTSIDE" XDG_STATE_HOME="$STATE" -- 'rime_agent_prompt')"
     want="$(bash_prompt "$OUTSIDE" "$STATE")"
     [ -n "$want" ] && [ "$got" = "$want" ] \
         && ok "another project's prompt counts only its own sessions" \
         || { bad "another project's prompt counts only its own sessions"
              printf '      fish: %s\n      bash: %s\n' "$got" "$want"; }
 
-    got="$(fishrun "${WORK}" XDG_STATE_HOME="$STATE" -- 'apex_agent_prompt')"
+    got="$(fishrun "${WORK}" XDG_STATE_HOME="$STATE" -- 'rime_agent_prompt')"
     [ -z "$got" ] && ok "a directory no session is working in shows nothing" \
                   || bad "a directory no session is working in shows nothing (got '${got}')"
 
-    got="$(fishrun "$PROJ" XDG_STATE_HOME="$EMPTY" -- 'apex_agent_prompt')"
+    got="$(fishrun "$PROJ" XDG_STATE_HOME="$EMPTY" -- 'rime_agent_prompt')"
     [ -z "$got" ] && ok "an empty session directory prints nothing" \
                   || bad "an empty session directory prints nothing (got '${got}')"
 
-    got="$(fishrun "$PROJ" XDG_STATE_HOME="${WORK}/no-such-state" -- 'apex_agent_prompt; echo rc=$status')"
+    got="$(fishrun "$PROJ" XDG_STATE_HOME="${WORK}/no-such-state" -- 'rime_agent_prompt; echo rc=$status')"
     [ "$got" = "rc=0" ] && ok "no state directory at all is not an error" \
                         || bad "no state directory at all is not an error (got '${got}')"
 
@@ -299,38 +342,38 @@ functions -q apex_agent_prompt; and echo prompt-kept; or echo BAD-PROMPT')"
     # it must not fork. Asserted against the stub's own call log, not against
     # the source.
     : > "$CALLS"
-    fishrun "$PROJ" XDG_STATE_HOME="$STATE" -- 'apex_agent_prompt' >/dev/null
-    [ ! -s "$CALLS" ] && ok "the fish prompt never runs apex" \
-                      || { bad "the fish prompt never runs apex"; sed 's/^/      /' "$CALLS"; }
+    fishrun "$PROJ" XDG_STATE_HOME="$STATE" -- 'rime_agent_prompt' >/dev/null
+    [ ! -s "$CALLS" ] && ok "the fish prompt never runs rime" \
+                      || { bad "the fish prompt never runs rime"; sed 's/^/      /' "$CALLS"; }
 
     # ── completion ───────────────────────────────────────────────────────────
     comp() { fishrun "$PROJ" -- "complete -C \"$1\""; }
 
-    printf '%s' "$(comp 'apex ')" | grep -q '^agent' \
+    printf '%s' "$(comp 'rime ')" | grep -q '^agent' \
         && ok "completion offers the top-level verbs" || bad "completion offers the top-level verbs"
-    printf '%s' "$(comp 'apex agent ')" | grep -q '^attach' \
+    printf '%s' "$(comp 'rime agent ')" | grep -q '^attach' \
         && ok "completion offers the agent verbs" || bad "completion offers the agent verbs"
-    out="$(comp 'apex agent attach ')"
+    out="$(comp 'rime agent attach ')"
     printf '%s' "$out" | grep -q '^4' && printf '%s' "$out" | grep -q '^7' \
         && ok "completion offers session ids, exited ones included" \
         || { bad "completion offers session ids, exited ones included"; printf '      %s\n' "$out"; }
-    printf '%s' "$(comp 'apex agent default ')" | grep -q '^claude' \
+    printf '%s' "$(comp 'rime agent default ')" | grep -q '^claude' \
         && ok "completion offers agent names with the default marker stripped" \
         || bad "completion offers agent names with the default marker stripped"
-    printf '%s' "$(comp 'apex request ask ')" | grep -q 'pkg.install' \
+    printf '%s' "$(comp 'rime request ask ')" | grep -q 'pkg.install' \
         && ok "completion asks the CLI for the requestable verbs" \
         || bad "completion asks the CLI for the requestable verbs"
-    printf '%s' "$(comp 'apex secret grant ')" | grep -q '^github' \
+    printf '%s' "$(comp 'rime secret grant ')" | grep -q '^github' \
         && ok "completion asks the CLI for the stored services" \
         || bad "completion asks the CLI for the stored services"
-    printf '%s' "$(comp 'apex secret grant github ')" | grep -q 'repo.read' \
+    printf '%s' "$(comp 'rime secret grant github ')" | grep -q 'repo.read' \
         && ok "completion asks the CLI for the capability vocabulary" \
         || bad "completion asks the CLI for the capability vocabulary"
-    printf '%s' "$(comp 'apex project layout ')" | grep -q '^restore' \
+    printf '%s' "$(comp 'rime project layout ')" | grep -q '^restore' \
         && ok "completion offers the layout verbs" || bad "completion offers the layout verbs"
-    printf '%s' "$(comp 'apex project layout ')" | grep -q '^templates' \
+    printf '%s' "$(comp 'rime project layout ')" | grep -q '^templates' \
         && ok "completion offers the template verbs" || bad "completion offers the template verbs"
-    printf '%s' "$(comp 'apex project layout open ')" | grep -q '^dev' \
+    printf '%s' "$(comp 'rime project layout open ')" | grep -q '^dev' \
         && ok "completion asks the CLI for the layout templates" \
         || bad "completion asks the CLI for the layout templates"
     printf '%s' "$(comp 'aa ')" | grep -q '^4' \
@@ -344,7 +387,7 @@ functions -q apex_agent_prompt; and echo prompt-kept; or echo BAD-PROMPT')"
 
     # `list` is a verb under agent, project, request AND secret. A completion
     # that matched on "the word list was typed" would fire in all four.
-    out="$(comp 'apex project ')"
+    out="$(comp 'rime project ')"
     printf '%s' "$out" | grep -q '^worktrees' && ! printf '%s' "$out" | grep -q '^adapters' \
         && ok "the project verbs do not leak the agent verbs" \
         || { bad "the project verbs do not leak the agent verbs"; printf '      %s\n' "$out"; }
@@ -352,9 +395,16 @@ functions -q apex_agent_prompt; and echo prompt-kept; or echo BAD-PROMPT')"
     # ── the runtime is down ──────────────────────────────────────────────────
     out="$( (cd "$PROJ" && env -i PATH="${DOWN}:/usr/bin:/bin:${SHELLS}" HOME="${WORK}/home" \
         XDG_DATA_HOME="$FD" XDG_CONFIG_HOME="${WORK}/fishcfg" fish -c \
-        'complete -C "apex agent attach "' 2>&1) )"
+        'complete -C "rime agent attach "' 2>&1) )"
     [ -z "$out" ] && ok "completion with the runtime down prints nothing at all" \
                   || { bad "completion with the runtime down prints nothing at all"; printf '      %s\n' "$out"; }
+fi
+
+# Nothing in any section may have reached the pre-rename CLI (see the stub).
+if [ -s "${WORK}/apex-stub.log" ]; then
+    bad "no shortcut reached the pre-rename apex CLI"; sed 's/^/      /' "${WORK}/apex-stub.log"
+else
+    ok "no shortcut reached the pre-rename apex CLI"
 fi
 
 # ─────────────────────────────────────────────────────────────────────────────
@@ -399,19 +449,19 @@ $1" 2>&1)
     : > "$CALLS"
     nurun "$PROJ" -- 'a --agent claude "fix the tests"' >/dev/null
     grep -qx 'agent run --agent claude fix the tests' "$CALLS" \
-        && ok "nushell \`a\` runs \`apex agent run\` with its arguments" \
-        || { bad "nushell \`a\` runs \`apex agent run\` with its arguments"; sed 's/^/      /' "$CALLS"; }
+        && ok "nushell \`a\` runs \`rime agent run\` with its arguments" \
+        || { bad "nushell \`a\` runs \`rime agent run\` with its arguments"; sed 's/^/      /' "$CALLS"; }
 
     : > "$CALLS"
     nurun "$PROJ" -- 'al --all' >/dev/null
     grep -qx 'agent list --all' "$CALLS" \
-        && ok "nushell \`al\` forwards flags to \`apex agent list\`" \
-        || bad "nushell \`al\` forwards flags to \`apex agent list\`"
+        && ok "nushell \`al\` forwards flags to \`rime agent list\`" \
+        || bad "nushell \`al\` forwards flags to \`rime agent list\`"
 
     : > "$CALLS"
     nurun "$PROJ" -- 'ap layout show' >/dev/null
     grep -qx 'project layout show' "$CALLS" \
-        && ok "nushell \`ap\` forwards to \`apex project\`" || bad "nushell \`ap\` forwards to \`apex project\`"
+        && ok "nushell \`ap\` forwards to \`rime project\`" || bad "nushell \`ap\` forwards to \`rime project\`"
 
     : > "$CALLS"
     nurun "$PROJ" -- 'aa' >/dev/null
@@ -441,71 +491,71 @@ $1" 2>&1)
     # argument the CLI accepts would be strictly worse than no completion: it
     # would make a working command look unsupported.
     : > "$CALLS"
-    nurun "$PROJ" -- 'apex agent attach 3 --json --not-a-real-flag extra' >/dev/null
+    nurun "$PROJ" -- 'rime agent attach 3 --json --not-a-real-flag extra' >/dev/null
     grep -qx 'agent attach 3 --json --not-a-real-flag extra' "$CALLS" \
-        && ok "an extern passes unknown flags straight through to apex" \
-        || { bad "an extern passes unknown flags straight through to apex"; sed 's/^/      /' "$CALLS"; }
+        && ok "an extern passes unknown flags straight through to rime" \
+        || { bad "an extern passes unknown flags straight through to rime"; sed 's/^/      /' "$CALLS"; }
 
     : > "$CALLS"
-    nurun "$PROJ" -- 'apex doctor --deep' >/dev/null
+    nurun "$PROJ" -- 'rime doctor --deep' >/dev/null
     grep -qx 'doctor --deep' "$CALLS" \
         && ok "a subcommand with no extern is untouched" || bad "a subcommand with no extern is untouched"
 
     # ── the prompt indicator ─────────────────────────────────────────────────
-    got="$(nurun "$PROJ" XDG_STATE_HOME="$STATE" -- 'print -n (apex-agent-prompt)')"
+    got="$(nurun "$PROJ" XDG_STATE_HOME="$STATE" -- 'print -n (rime-agent-prompt)')"
     want="$(bash_prompt "$PROJ" "$STATE")"
     [ -n "$want" ] && [ "$got" = "$want" ] \
         && ok "the nushell prompt is byte-identical to the bash one" \
         || { bad "the nushell prompt is byte-identical to the bash one"
              printf '      nu:   %s\n      bash: %s\n' "$got" "$want"; }
 
-    got="$(nurun "$OUTSIDE" XDG_STATE_HOME="$STATE" -- 'print -n (apex-agent-prompt)')"
+    got="$(nurun "$OUTSIDE" XDG_STATE_HOME="$STATE" -- 'print -n (rime-agent-prompt)')"
     want="$(bash_prompt "$OUTSIDE" "$STATE")"
     [ -n "$want" ] && [ "$got" = "$want" ] \
         && ok "another project's prompt counts only its own sessions (nushell)" \
         || { bad "another project's prompt counts only its own sessions (nushell)"
              printf '      nu:   %s\n      bash: %s\n' "$got" "$want"; }
 
-    got="$(nurun "${WORK}" XDG_STATE_HOME="$STATE" -- 'print -n (apex-agent-prompt)')"
+    got="$(nurun "${WORK}" XDG_STATE_HOME="$STATE" -- 'print -n (rime-agent-prompt)')"
     [ -z "$got" ] && ok "a directory no session is working in shows nothing (nushell)" \
                   || bad "a directory no session is working in shows nothing (nushell) (got '${got}')"
 
-    got="$(nurun "$PROJ" XDG_STATE_HOME="${WORK}/no-such-state" -- 'print -n (apex-agent-prompt)')"
+    got="$(nurun "$PROJ" XDG_STATE_HOME="${WORK}/no-such-state" -- 'print -n (rime-agent-prompt)')"
     [ -z "$got" ] && ok "no state directory at all is not an error (nushell)" \
                   || bad "no state directory at all is not an error (nushell) (got '${got}')"
 
     : > "$CALLS"
-    nurun "$PROJ" XDG_STATE_HOME="$STATE" -- 'apex-agent-prompt | ignore' >/dev/null
-    [ ! -s "$CALLS" ] && ok "the nushell prompt never runs apex" \
-                      || { bad "the nushell prompt never runs apex"; sed 's/^/      /' "$CALLS"; }
+    nurun "$PROJ" XDG_STATE_HOME="$STATE" -- 'rime-agent-prompt | ignore' >/dev/null
+    [ ! -s "$CALLS" ] && ok "the nushell prompt never runs rime" \
+                      || { bad "the nushell prompt never runs rime"; sed 's/^/      /' "$CALLS"; }
 
     # ── completion sources ───────────────────────────────────────────────────
     nucomp() { nurun "$PROJ" -- "print (($1) | str join ' ')"; }
-    [ "$(nucomp 'nu-complete apex sessions')" = "4 7" ] \
+    [ "$(nucomp 'nu-complete rime sessions')" = "4 7" ] \
         && ok "nushell completes session ids, exited ones included" \
-        || bad "nushell completes session ids, exited ones included (got '$(nucomp 'nu-complete apex sessions')')"
-    [ "$(nucomp 'nu-complete apex agents')" = "claude codex" ] \
+        || bad "nushell completes session ids, exited ones included (got '$(nucomp 'nu-complete rime sessions')')"
+    [ "$(nucomp 'nu-complete rime agents')" = "claude codex" ] \
         && ok "nushell completes agent names with the default marker stripped" \
         || bad "nushell completes agent names with the default marker stripped"
-    [ "$(nucomp 'nu-complete apex services')" = "github openai" ] \
+    [ "$(nucomp 'nu-complete rime services')" = "github openai" ] \
         && ok "nushell asks the CLI for the stored services" \
         || bad "nushell asks the CLI for the stored services"
-    [ "$(nucomp 'nu-complete apex capabilities')" = "repo.read repo.write" ] \
+    [ "$(nucomp 'nu-complete rime capabilities')" = "repo.read repo.write" ] \
         && ok "nushell asks the CLI for the capability vocabulary" \
         || bad "nushell asks the CLI for the capability vocabulary"
-    [ "$(nucomp 'nu-complete apex operations')" = "pkg.install service.restart" ] \
+    [ "$(nucomp 'nu-complete rime operations')" = "pkg.install service.restart" ] \
         && ok "nushell asks the CLI for the requestable verbs" \
         || bad "nushell asks the CLI for the requestable verbs"
-    [ "$(nucomp 'nu-complete apex templates')" = "dev agents" ] \
+    [ "$(nucomp 'nu-complete rime templates')" = "dev agents" ] \
         && ok "nushell asks the CLI for the layout templates" \
-        || bad "nushell asks the CLI for the layout templates (got '$(nucomp 'nu-complete apex templates')')"
-    printf '%s' "$(nucomp 'nu-complete apex layout')" | grep -q 'templates' \
+        || bad "nushell asks the CLI for the layout templates (got '$(nucomp 'nu-complete rime templates')')"
+    printf '%s' "$(nucomp 'nu-complete rime layout')" | grep -q 'templates' \
         && ok "nushell offers the new layout verbs" || bad "nushell offers the new layout verbs"
 
     # ── the runtime is down ──────────────────────────────────────────────────
     out="$( (cd "$PROJ" && env -i PATH="${DOWN}:/usr/bin:/bin:${SHELLS}" HOME="${WORK}/home" \
         nu -n -c "source ${NU_FILE}
-print -n ((nu-complete apex sessions) | str join ' ')" 2>&1) )"
+print -n ((nu-complete rime sessions) | str join ' ')" 2>&1) )"
     [ -z "$out" ] && ok "nushell completion with the runtime down is silent and empty" \
                   || { bad "nushell completion with the runtime down is silent and empty"; printf '      %s\n' "$out"; }
 
@@ -529,7 +579,7 @@ cmd = sys.argv[1:]
 pid, fd = pty.fork()
 if pid == 0:
     os.execvp(cmd[0], cmd)
-script = [b'print $"AUTOLOAD-(apex-agent-prompt | describe)"\r', b"exit\r"]
+script = [b'print $"AUTOLOAD-(rime-agent-prompt | describe)"\r', b"exit\r"]
 # Sends are keyed on the shell's own OSC 133 markers, never on a timer. A timed
 # send races reedline: the second line arrives before the first was submitted,
 # the two concatenate, and the failure then looks like a missing command when it

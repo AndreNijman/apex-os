@@ -1,11 +1,11 @@
 #!/usr/bin/env python3
-"""Render the APEX boot splash offline, as plymouth would draw it.
+"""Render the Rime boot splash offline, as plymouth would draw it.
 
     render-preview.py THEME_DIR OUT_DIR [--res 1920x1200] [--seconds 6]
                       [--mode boot|shutdown] [--password] [--refresh-log LOG]
                       [--gif PATH] [--gif-width 600]
 
-A frame-exact simulation of apex-os.script on plymouth's script plugin, so the
+A frame-exact simulation of rime-os.script on plymouth's script plugin, so the
 splash can be judged without booting and without touching a real display:
 
   - the script's logic is ported line for line below (keep them in step: the
@@ -126,7 +126,7 @@ class Screen:
         return len(rects)
 
 # ── the script, ported ──────────────────────────────────────────────────────
-# Every method below mirrors the function of the same name in apex-os.script.
+# Every method below mirrors the function of the same name in rime-os.script.
 
 def odd(v): return 2 * math.floor(v / 2) + 1
 def clamp01(x): return 0.0 if x < 0 else 1.0 if x > 1 else x
@@ -145,7 +145,7 @@ def bump(t, tp):
     if t <= 0: return 0.0
     u = t / tp; return 7.3890561 * u * u * expn(2 * u)
 
-# The lines of apex-os.script this port reproduces. If any is missing, the
+# The lines of rime-os.script this port reproduces. If any is missing, the
 # script was retuned without the port and a preview would show the old curves:
 # refuse rather than render something the splash does not do.
 PORTED = [
@@ -185,7 +185,7 @@ def script_constants(path):
     src = open(path).read()
     missing = [l for l in PORTED if l not in src]
     if missing:
-        sys.exit("render-preview: apex-os.script no longer matches this port; update both:\n  "
+        sys.exit("render-preview: rime-os.script no longer matches this port; update both:\n  "
                  + "\n  ".join(missing))
     m = re.search(r"^RATE = (\d+);", src, re.M)
     return {"RATE": int(m.group(1)), "src": src}
@@ -383,7 +383,7 @@ def main():
     a = ap.parse_args()
     W, H = map(int, a.res.split("x"))
     os.makedirs(a.out, exist_ok=True)
-    consts = script_constants(os.path.join(a.theme, "apex-os.script"))
+    consts = script_constants(os.path.join(a.theme, "rime-os.script"))
     fontpath = subprocess.run(["fc-match", "-f", "%{file}"], capture_output=True, text=True).stdout.strip()
     sp = Splash(a.theme, W, H, a.mode, consts["RATE"], fontpath)
 

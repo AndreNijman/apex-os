@@ -1,13 +1,13 @@
-# Why `apex update` used to download the whole OS, and what changed
+# Why `rime update` used to download the whole OS, and what changed
 
 ## The measurement
 
 On the author's L16, running the published `:daily` image, against the registry:
 
 ```
-$ sudo apex update --check
-apex: running: bootc upgrade --check
-Update available for: docker://ghcr.io/andrenijman/apex-os:daily
+$ sudo rime update --check
+rime: running: bootc upgrade --check
+Update available for: docker://ghcr.io/andrenijman/rime-os:daily
   Version: daily
   Digest: sha256:2bc521664ed5b673392317d4ee01bcab54b16a6999d808bfadc683378a36776d
 Total new layers: 153   Size: 5.3 GB
@@ -27,10 +27,10 @@ guarantee it never held one:
 1. **Everything lived in one image.** `Containerfile.base` carried the CachyOS
    kernel, the firmware set, the whole desktop stack, codecs, the baked
    applications, the font stack, the dev toolchain, and also the branding
-   files, the apexd binaries and the vendored shell.
+   files, the rimed binaries and the vendored shell.
 
 2. **Its rebuild trigger was almost every commit.** The base job's path filter
-   covered `files/**`, `apexd/**` and `config/**`, the directories that change
+   covered `files/**`, `rimed/**` and `config/**`, the directories that change
    most.
 
 3. **A rebuild produces new digests even for identical content.** CI builds with
@@ -51,8 +51,8 @@ kernel tier came later and has its own section below:
 |------|------|----------|---------------|
 | **kernel** | `Containerfile.kernel` | the kernel itself, compiled from pinned source with a pinned `dwarves` | `kernel/**` changes, i.e. `kernel/kernel.pin` moves |
 | **core** | `Containerfile.core` | kernel *install* + MOK signing, firmware, desktop/greeter stack, scx, Bazaar, codecs, baked apps, printing, input methods, fonts, dev toolchain, zsh/starship, awww/matugen/yazi, OS branding & locale | `Containerfile.core` or `kernel/**` differ from the revision the published `core` was built from · `force_core` · the weekly cron finds a **new** `fedora-bootc` digest |
-| **base** | `Containerfile.base` | apexd + apex CLI, sysprofiles, D-Bus/polkit/units, every `files/**` COPY, the vendored APEX Shell (the apex-shell commit the run's "Pin apex-shell" step resolved: `main` on a `main` build) | every run: the path filter still computes a `base` output, but no job reads it |
-| **image** | `Containerfile.apex` | edition stamp, gaming-session files, Plymouth theme, final initramfs | every run |
+| **base** | `Containerfile.base` | rimed + rime CLI, sysprofiles, D-Bus/polkit/units, every `files/**` COPY, the vendored Rime Shell (the rime-shell commit the run's "Pin rime-shell" step resolved: `main` on a `main` build) | every run: the path filter still computes a `base` output, but no job reads it |
+| **image** | `Containerfile.rime` | edition stamp, gaming-session files, Plymouth theme, final initramfs | every run |
 
 The GPU stack, the Mesa leg and `power-profiles-daemon` used to sit in the
 flavor tier. They are in `core` now, and the move changed the download: measured
@@ -64,7 +64,7 @@ machine. In `core` they are inside a digest-pinned parent nobody re-downloads,
 so collapsing three images into one, while *adding* the NVIDIA driver to every
 machine, made the per-update download smaller.
 
-The base is built `FROM ghcr.io/andrenijman/apex-os:core@sha256:…`. **A digest-pinned `FROM` reuses
+The base is built `FROM ghcr.io/andrenijman/rime-os:core@sha256:…`. **A digest-pinned `FROM` reuses
 the parent's layer descriptors verbatim**: the derived manifest lists the same
 digests, so `bootc` recognises blobs it already has and downloads none of them.
 
@@ -75,15 +75,15 @@ it does not, they do not.
 ### The one row that rebuilds every run got 275 MiB smaller
 
 The `image` row above rebuilds on every run, and CI builds it `--layers=false`:
-one squashed layer for the whole of `Containerfile.apex`. Its digest therefore
+one squashed layer for the whole of `Containerfile.rime`. Its digest therefore
 moves every build and **every machine re-downloads all of it on every update**.
-Measured with `skopeo inspect --raw` across all 14 published `apex-<sha>` tags
+Measured with `skopeo inspect --raw` across all 14 published `rime-<sha>` tags
 (manifests only, nothing pulled):
 
-| apex-tier layer, compressed | |
+| rime-tier layer, compressed | |
 |---|---|
 | the 13 builds up to 2026-09-21 | **358.1 – 359.5 MiB** |
-| `apex-44c9a5cb`, first with the slim initramfs | **84.5 MiB** |
+| `rime-44c9a5cb`, first with the slim initramfs | **84.5 MiB** |
 
 **~275 MiB off every `bootc upgrade`**, for free, as a side effect of
 `initramfs-slim`. It is the cheapest recurring win on this page, because unlike
@@ -97,14 +97,14 @@ Two things that measurement also settled, both in
   bootc's `find_vmlinuz_initrd_duplicate`, which digests content, *can* make a
   second deployment cost zero extra ESP.
 * **It has never had the chance.** Every one of the 14 published images sits on
-  its own `base-<same sha>`; no two APEX image builds have ever shared a
+  its own `base-<same sha>`; no two Rime image builds have ever shared a
   parent. The lever for both the ESP cost and this download is *"do not
   rebuild `base` when nothing in it changed"*, and dracut has nothing to do
   with it.
 
 ### The fourth tier: the kernel
 
-APEX builds its own kernel (`ROADMAP/evidence/kernel-build-20260920.md` says
+Rime builds its own kernel (`ROADMAP/evidence/kernel-build-20260920.md` says
 why: every kernel it shipped before was unable to load a sched-ext scheduler).
 That compile is ~45 minutes, and the obvious place for it is `core`, because
 the rule below says anything that compiles a third-party program goes there.
@@ -129,11 +129,11 @@ separately published image, pinned by digest. `Containerfile.core` keeps the
 about) and gets them from the kernel image:
 
 ```dockerfile
-ARG APEX_KERNEL_IMAGE=localhost/apex-kernel:local
-FROM ${APEX_KERNEL_IMAGE} AS kernel-rpms
+ARG RIME_KERNEL_IMAGE=localhost/rime-kernel:local
+FROM ${RIME_KERNEL_IMAGE} AS kernel-rpms
 …
-COPY --from=kernel-rpms /rpms     /tmp/apex-kernel-rpms
-COPY --from=kernel-rpms /manifest /tmp/apex-kernel-manifest
+COPY --from=kernel-rpms /rpms     /tmp/rime-kernel-rpms
+COPY --from=kernel-rpms /manifest /tmp/rime-kernel-manifest
 ```
 
 **The fleet download cost is unchanged.** `core` moving is a full multi-gigabyte
@@ -142,10 +142,10 @@ the `core` build. The change is that `core` stops moving for kernel reasons
 and the kernel stops moving for `core` reasons.
 
 Two things cross this new tier boundary and must survive any future edit, in the
-same way `/usr/lib/apex-kver` crosses core → image: the manifest's `btf_scx`
+same way `/usr/lib/rime-kver` crosses core → image: the manifest's `btf_scx`
 verdict, which `core` refuses to install without, and its `kver`, which `core`
 checks against the kernel that landed in the rpmdb. Both are copied to
-`/usr/share/apex-os/kernel/` so a running machine can answer what it is booting
+`/usr/share/rime-os/kernel/` so a running machine can answer what it is booting
 and what built its BTF.
 
 #### What owning the kernel obliges us to, permanently
@@ -154,9 +154,9 @@ This is the half of the decision that is not a build cost, and it is the half
 that outlives whoever took it.
 
 Before, security updates arrived by themselves: CachyOS tagged a release, the
-COPR rebuilt `kernel-cachyos`, and APEX picked it up on the next `force_core`.
+COPR rebuilt `kernel-cachyos`, and Rime picked it up on the next `force_core`.
 Nobody had to do anything. Now `KERNEL_TAG` and `KERNEL_SRC_SHA256` in
-`kernel/kernel.pin` decide which kernel APEX ships, and they move when a person
+`kernel/kernel.pin` decide which kernel Rime ships, and they move when a person
 moves them.
 
 The failure mode is quiet. **An unbumped pin is a kernel that stops receiving
@@ -192,7 +192,7 @@ price of owning the kernel, and it is per security update, not per year.
 **When this section was written, nothing built the kernel image in CI, and
 that needed a decision rather than an implementation.** The plan was a `kernel`
 job in `.github/workflows/build-image.yml` that ran before `core` and passed its
-digest as `--build-arg APEX_KERNEL_IMAGE=…@sha256:…`. Writing that job is an
+digest as `--build-arg RIME_KERNEL_IMAGE=…@sha256:…`. Writing that job is an
 afternoon. Running it was the problem:
 
 > **The build tree is ~100 GB**, measured: `/var` on the development machine
@@ -205,7 +205,7 @@ starts. The two realistic options, with what each costs:
 | option | what it costs | what it changes about the product |
 |---|---|---|
 | **Self-hosted runner on katana** | 20 cores and podman are already there, so the compile is roughly what it is locally. Needs ≥120 GB free on katana's `/var`, which is *tight*; check before committing. Adds a machine the release path depends on being up, and a self-hosted runner executing untrusted PR code is its own security decision. | Nothing. Same kernel, same config. |
-| **Restructure the spec to build far fewer modules** (`_build_minimal 1` plus a `modprobed.db`) | Brings the tree within a hosted runner's disk. | **Changes what hardware the kernel supports**, because the module set is built from one machine's `modprobed.db`. That is a product decision about which machines APEX boots on, not a CI optimisation. |
+| **Restructure the spec to build far fewer modules** (`_build_minimal 1` plus a `modprobed.db`) | Brings the tree within a hosted runner's disk. | **Changes what hardware the kernel supports**, because the module set is built from one machine's `modprobed.db`. That is a product decision about which machines Rime boots on, not a CI optimisation. |
 
 ##### ANSWERED 2026-09-20: the self-hosted runner, and the disk objection went away
 
@@ -229,7 +229,7 @@ The standing costs of this choice:
 * **A release now depends on katana being up**, the cost this table exists to
   make visible. The dependency moved from "somebody's laptop, by hand" to "a
   named machine, automatically", which is better and still a cost.
-* **The security decision that row flagged was taken.** `apex-os`
+* **The security decision that row flagged was taken.** `rime-os`
   is public, so fork pull requests are untrusted code. They never reach the
   runner: the repository requires approval for **all** external contributors,
   and every self-hosted job additionally refuses a PR whose head is a fork.
@@ -239,12 +239,12 @@ The standing costs of this choice:
   Details, including what is *not* covered, are in the evidence file.
 
 `.github/workflows/kernel-build.yml` is what runs there, and it is now the
-producer. It builds `localhost/apex-kernel:ci`, pushes it once to an immutable
+producer. It builds `localhost/rime-kernel:ci`, pushes it once to an immutable
 tag (`kernel-<kver>-<sha7>`), moves the floating `:kernel` tag on `main` and
-`roadmap/**`, and prints the `ARG APEX_KERNEL_IMAGE=…` line for that digest in
+`roadmap/**`, and prints the `ARG RIME_KERNEL_IMAGE=…` line for that digest in
 its run summary. The job holds `packages: write` for its own length only; the
 runner stays unprivileged and ephemeral, and no credential outlives the job.
-`Containerfile.core` pins the digest (`ARG APEX_KERNEL_IMAGE=ghcr.io/andrenijman/apex-os@sha256:…`,
+`Containerfile.core` pins the digest (`ARG RIME_KERNEL_IMAGE=ghcr.io/andrenijman/rime-os@sha256:…`,
 from run 35557283953), and `build-image.yml`'s core job reads that line and
 fails unless it names a digest. Moving the kernel therefore takes two steps: a
 kernel-build run, then a commit that pastes its `ARG` line into
@@ -253,7 +253,7 @@ kernel-build run, then a commit that pastes its `ARG` line into
 ### The rule for new content
 
 > If it runs `dnf`, downloads, or compiles a third-party program, it belongs in
-> `Containerfile.core`. The base may only COPY repo content, compile apexd, and
+> `Containerfile.core`. The base may only COPY repo content, compile rimed, and
 > assert against those.
 
 Split a `RUN` that needs both **across the two files**; do not move it
@@ -265,9 +265,9 @@ wholesale. Four in the original file straddled the line and are now pairs:
 - the Hyprland template guards (base)
 
 Two contracts cross the tier boundary and must survive any future edit:
-`/usr/lib/apex-kver` (core → `Containerfile.apex`'s initramfs rebuild, the image
+`/usr/lib/rime-kver` (core → `Containerfile.rime`'s initramfs rebuild, the image
 job's `sbverify` and `Containerfile.release`) and
-`/usr/share/apex-os/secureboot/kernel-signed` (core → the core, base and image
+`/usr/share/rime-os/secureboot/kernel-signed` (core → the core, base and image
 jobs' verification, `Containerfile.release` and the installer). Both are plain
 files under `/usr`, and CI asserts both.
 
@@ -290,7 +290,7 @@ user's next update, which is the problem this whole document is about.
 
 The smallest thing `core` has taken, recorded because the pivot sounds
 expensive and the packages are not what makes it so. Measured with
-`dnf5 install --assumeno` inside `ghcr.io/andrenijman/apex-os:daily`:
+`dnf5 install --assumeno` inside `ghcr.io/andrenijman/rime-os:daily`:
 
 ```
 Installing:  systemd-boot-unsigned  248.9 KiB
@@ -305,7 +305,7 @@ installed**. The transaction names them only to make the dependency explicit,
 the way it names `efibootmgr`, so a future change that drops them fails the
 build instead of turning the boot blessing into a silent rollback loop.
 
-The `apex_sdboot` SELinux module is the other half. `semodule -N -i` grows
+The `rime_sdboot` SELinux module is the other half. `semodule -N -i` grows
 `/etc/selinux` by **466 bytes**, but rewrites `policy.35`, which is **3.8 MB**,
 and an OCI layer carries a changed file whole. That is why `core` compiles the
 module and the files tier does not: 4 MB once, instead of 4 MB in every
@@ -324,7 +324,7 @@ The other end of the same scale, recorded next to the AI apps because it is
 the opposite case. P2-003's acceptance line names a screen reader, and until
 `Containerfile.core`'s `5a-a11y` stanza there was none in the image. Measured
 the same way (`dnf5 install --assumeno orca` inside
-`ghcr.io/andrenijman/apex-os:daily`):
+`ghcr.io/andrenijman/rime-os:daily`):
 
     Installing:            orca              21.3 MiB
     Installing dependencies:
@@ -351,7 +351,7 @@ The cron used to rebuild unconditionally. That would now be the dominant cost:
 six days of ~50 MiB updates and one Monday of 5 GB, most weeks for nothing.
 
 Core therefore stamps the digest of the `fedora-bootc` image it was built from
-as `org.apexos.fedora-bootc.digest`, and the scheduled run compares that label
+as `org.rimeos.fedora-bootc.digest`, and the scheduled run compares that label
 against the live upstream digest. Same digest → no rebuild. Security updates
 still arrive: a Fedora base respin *changes* the digest, which is the trigger.
 The weekly run does not pick up COPR or RPMFusion moving without a Fedora respin
@@ -377,11 +377,11 @@ Every image build writes an update-cost table into the GitHub Actions run
 summary (the "Report update cost" step): total layers, how many are inherited
 from core, and how many are new. If a future change pushes content back down
 into core, that number climbs, and the regression shows the week it happens
-instead of the month someone next runs `apex update` on a hotel connection.
+instead of the month someone next runs `rime update` on a hotel connection.
 
-## Also changed: the firmware half of `apex update`
+## Also changed: the firmware half of `rime update`
 
-`apex update` ran, unconditionally, on every invocation:
+`rime update` ran, unconditionally, on every invocation:
 
 ```sh
 fwupdmgr refresh --force     # re-download the entire LVFS metadata index
@@ -397,43 +397,43 @@ Now:
 
 - `fwupdmgr refresh` **without** `--force`, honouring fwupd's own cache window;
 - `fwupdmgr get-updates` first, and the update pass only if it reports something;
-- `apex update` reads fwupd's exit codes correctly. `fwupdmgr` returns **2** for
+- `rime update` reads fwupd's exit codes correctly. `fwupdmgr` returns **2** for
   "nothing to do" and **3** for "nothing found", and both are the *normal*
   outcome on a current laptop. The old code took the maximum of every exit code,
-  so dropping `--force` alone would have made `apex update` report failure on
+  so dropping `--force` alone would have made `rime update` report failure on
   its most common path.
 
-New flags: `apex update --check` (report only, download nothing),
+New flags: `rime update --check` (report only, download nothing),
 `--skip-firmware`, `--firmware-only`.
 
-## Also changed: `apex update` requires root
+## Also changed: `rime update` requires root
 
 `update`, `rollback`, `pin` and `fan restore --local` now refuse to run
 unprivileged, before any hardware probe or subprocess:
 
 ```
-$ apex update --check
-apex: 'update' changes the booted system and must run as root.
-       try:  sudo apex update --check
+$ rime update --check
+rime: 'update' changes the booted system and must run as root.
+       try:  sudo rime update --check
        (being in the wheel group is not enough — bootc writes to /ostree and /boot,
         so the command itself has to run with privileges.)
 ```
 
 Previously they reached `bootc`/`ostree` and failed there with a bare permission
-error that never mentioned sudo, and `apex update` then ran its firmware half
+error that never mentioned sudo, and `rime update` then ran its firmware half
 anyway, printing a wall of output and possibly exiting 0 having updated
 nothing.
 
-The rule covers those verbs and no others. `apex tier`, `status`, `battery`,
-`fan`, `game` and `doctor` stay usable unprivileged: APEX Shell's power tab
-shells out to `apex tier` as the session user, and mutations go through apexd's
+The rule covers those verbs and no others. `rime tier`, `status`, `battery`,
+`fan`, `game` and `doctor` stay usable unprivileged: Rime Shell's power tab
+shells out to `rime tier` as the session user, and mutations go through rimed's
 polkit-authorised D-Bus API, which is how an unprivileged desktop is supposed to
 change power state. Gating those would break the desktop's power controls to
 improve an error message.
 
 ## Also changed: the one update that migrates the boot path
 
-`apex update` on a machine still booting GRUB runs the in-place move to
+`rime update` on a machine still booting GRUB runs the in-place move to
 composefs + systemd-boot **instead of** `bootc upgrade` (docs/boot-v2.md,
 "Migrating a machine that already exists"). Two facts about its cost, written
 down here so that nobody finds them out on a full disk:
@@ -448,7 +448,7 @@ down here so that nobody finds them out on a full disk:
   `/composefs` is a second copy of the same content. The migration never deletes
   the old copy: a machine that can still boot GRUB cannot be bricked by this
   change. Reclaiming the space is a later, separate decision, and until somebody
-  takes it a migrated APEX machine carries about 15 GB it did not carry before.
+  takes it a migrated Rime machine carries about 15 GB it did not carry before.
 
 That is a disk cost, so it does not move the download numbers above; on katana,
 whose `/var` is tight, it is the number that matters.

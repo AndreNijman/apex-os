@@ -6,7 +6,7 @@
 #  power-loss-during-update — the update note, torn in half.
 #
 #  P1-062 criterion 1's first named fault, aimed at the one piece of state an
-#  `apex update` leaves behind on the machine itself.
+#  `rime update` leaves behind on the machine itself.
 #
 #  ═══ WHY THIS FILE AND NOT THE OSTREE DEPLOYMENT ═══
 #
@@ -18,12 +18,12 @@
 #  a fixture tree. `tests/chaos/chaos-loop` is what repeats it.
 #
 #  This is the OTHER half, and it is the half that is reachable in two seconds
-#  on any machine: `apex update` writes
-#  /var/lib/apex/channel/last-update.json, and that write is a plain
+#  on any machine: `rime update` writes
+#  /var/lib/rime/channel/last-update.json, and that write is a plain
 #  `std::fs::write` — no temp file, no rename. A power loss during it leaves a
 #  file that exists, is the right length or shorter, and is not JSON.
 #
-#  What that file feeds is §26's update health gate: the next `apex update`
+#  What that file feeds is §26's update health gate: the next `rime update`
 #  reads it to decide whether this machine has just come back from an update
 #  that broke it. A file the machine cannot parse therefore disarms the gate,
 #  and the surface that reports on it has to say so — "nothing recorded yet"
@@ -44,8 +44,8 @@
 #  what remains be a strict prefix of what was written. `truncate` exiting 0
 #  proves neither.
 #
-#  SUBJECT     `apex channel status`, the surface that reports how the last
-#              update went, and `--json`, which is what APEX Settings reads.
+#  SUBJECT     `rime channel status`, the surface that reports how the last
+#              update went, and `--json`, which is what Rime Settings reads.
 #  SURVIVAL    the machine must say the record is unreadable. It must not say
 #              "nothing recorded yet", because an update DID run. It must not
 #              crash, and it must not rewrite or delete the damaged file behind
@@ -55,7 +55,7 @@
 
 CASE_TITLE="the update record torn mid-write by a power loss"
 CASE_CRITERION="1 (power loss during update), 3 (diagnostics, no silent corruption)"
-CASE_NEEDS="apex-binary"
+CASE_NEEDS="rime-binary"
 
 RECORD=""
 ORIG_BYTES=0
@@ -64,9 +64,9 @@ case_setup() {
     chaos_mk_trust_root "$CASE_ROOT"
     # A record left by an update that has NOT been rebooted into: from_digest
     # equals the booted digest, which is the state a machine is in between
-    # `apex update` and the reboot — the exact window a power loss falls in.
+    # `rime update` and the reboot — the exact window a power loss falls in.
     chaos_write_update_record "$CASE_ROOT" "$CHAOS_DIGEST"
-    RECORD="$CASE_ROOT/var/lib/apex/channel/last-update.json"
+    RECORD="$CASE_ROOT/var/lib/rime/channel/last-update.json"
     ORIG_BYTES="$(wc -c < "$RECORD")"
     [[ "$ORIG_BYTES" -gt 20 ]] || { echo "record is only $ORIG_BYTES bytes" >&2; return 1; }
     echo "record: $ORIG_BYTES bytes at $RECORD"
@@ -81,9 +81,9 @@ case_setup() {
 # has to see, and everything else reads the document.
 _surface() {
     local tag="$1"
-    APEX_TRUST_ROOT="$CASE_ROOT" "$APEX_BIN" channel status 2>&1
+    RIME_TRUST_ROOT="$CASE_ROOT" "$RIME_BIN" channel status 2>&1
     local rc=$?
-    APEX_TRUST_ROOT="$CASE_ROOT" "$APEX_BIN" channel status --json \
+    RIME_TRUST_ROOT="$CASE_ROOT" "$RIME_BIN" channel status --json \
         > "$CASE_DIR/$tag.json" 2>/dev/null || true
     printf '\n--- channel status --json is in %s.json ---\n' "$tag"
     return "$rc"
@@ -150,7 +150,7 @@ case_judge() {
 
     # The honesty clause. An update ran; the note about it is damaged. A `null`
     # lastUpdate with a `null` error is the document saying "no update has ever
-    # run here", which is false and is what APEX Settings would render.
+    # run here", which is false and is what Rime Settings would render.
     expect_json "a damaged record is not reported as no record" \
         "$CASE_DIR/observe.json" 'd["lastUpdate"]' "None"
     expect_json_nonempty "…the document carries the reason instead" \
@@ -171,11 +171,11 @@ case_judge() {
     expect_differs_from_baseline "the surface reacted to the fault at all" \
         "$CASE_BASELINE_OUT" "$CASE_OBSERVED"
     # The corruption clause: reading a broken machine must not break it
-    # further. `apex channel status` is a report; the damaged file must still
+    # further. `rime channel status` is a report; the damaged file must still
     # be there, byte for byte, for whoever debugs this next.
     expect_no_corruption "the damaged record was left intact for a human to look at" \
         "$CASE_DIR/state.before" "$CASE_DIR/state.after" \
-        '^[<>] [0-9a-f]{64} var/lib/apex/channel/last-update\.json$'
+        '^[<>] [0-9a-f]{64} var/lib/rime/channel/last-update\.json$'
     local now_sha torn_sha
     torn_sha="$(cat "$CASE_DIR/record.torn.sha" 2>/dev/null || echo missing)"
     now_sha="$(sha256sum < "$RECORD" 2>/dev/null | cut -d' ' -f1 || echo gone)"

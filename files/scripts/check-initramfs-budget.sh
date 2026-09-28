@@ -5,7 +5,7 @@
 #
 #  WHY THIS FILE EXISTS
 #
-#  These gates used to live inline in Containerfile.apex, which makes them the
+#  These gates used to live inline in Containerfile.rime, which makes them the
 #  one kind of test that cannot be run by running the test suite: they only
 #  exist inside a build. That is the defect family this repo has already paid
 #  five days of image builds for, and it bit again here — the stanza shipped
@@ -40,7 +40,7 @@
 #
 #  TWO MODES, and the second is the point
 #
-#    --initrd IMG          runs `lsinitrd` itself. What Containerfile.apex uses.
+#    --initrd IMG          runs `lsinitrd` itself. What Containerfile.rime uses.
 #    --list FILE           reads a SAVED `lsinitrd` listing. What tests/ uses,
 #                          because a GitHub runner has no lsinitrd, no initramfs
 #                          and no kernel to make one from.
@@ -172,7 +172,7 @@ echo "initramfs gates: $(wc -l < "$MODF") dracut modules, $(wc -l < "$FILF") ent
 # ══ 1. THE ESP BUDGET ════════════════════════════════════════════════════════
 # systemd-boot puts the kernel and initramfs ON the ESP and bootc implements no
 # XBOOTLDR Type #1 entries, so there is no second partition to move them to.
-# apex-boot-migrate needs 3 × (vmlinuz + initramfs) + 48 MiB — booted, rollback,
+# rime-boot-migrate needs 3 × (vmlinuz + initramfs) + 48 MiB — booted, rollback,
 # and the one an update stages alongside them.
 #
 # The figure is printed whether it passes or fails, because migrate-preconditions
@@ -182,10 +182,10 @@ if [ -n "$INITRD_BYTES" ]; then
     PER=$(( INITRD_BYTES + ${VMLINUZ_BYTES:-0} ))
     NEED=$(( PER * 3 / 1048576 + 48 ))
     echo "initramfs-budget: vmlinuz $(mib "${VMLINUZ_BYTES:-0}") MiB + initramfs $(mib "$INITRD_BYTES") MiB = $(mib "$PER") MiB per deployment (ceiling ${BUDGET_MIB} MiB)"
-    echo "initramfs-budget: apex-boot-migrate needs 3 x $(mib "$PER") + 48 = ${NEED} MiB of ESP"
+    echo "initramfs-budget: rime-boot-migrate needs 3 x $(mib "$PER") + 48 = ${NEED} MiB of ESP"
     if [ "$PER" -gt $(( BUDGET_MIB * 1048576 )) ]; then
         fail "esp-budget: $(mib "$PER") MiB per deployment exceeds the ${BUDGET_MIB} MiB ceiling" \
-             "apex-boot-migrate would refuse a 512 MiB ESP with esp-too-small." \
+             "rime-boot-migrate would refuse a 512 MiB ESP with esp-too-small." \
              "The usual cause is a driver re-entering the initramfs and dragging" \
              "its firmware with it. Biggest entries:"
         sort -k5 -n -r "$FILF" | head -15 | awk '{printf "          %10d  %s\n", $5, $NF}'
@@ -225,7 +225,7 @@ fi
 
 # ══ 4. NO NETWORK ════════════════════════════════════════════════════════════
 # Three assertions, because the property has three halves and the old one-line
-# path grep was none of them. APEX roots are local block devices; nothing in
+# path grep was none of them. Rime roots are local block devices; nothing in
 # this repo sets rd.neednet, netroot, nfsroot or iscsi.
 net_bad=()
 for m in network network-manager kernel-network-modules nfs nvmf; do
@@ -292,9 +292,9 @@ fi
 has_path 'usr/lib(64)?/plymouth' \
     && pass "plymouth-engine" \
     || fail "plymouth-engine: the plymouth engine is not in the initramfs"
-has_path 'plymouth/themes/apex-os-chartreuse' \
+has_path 'plymouth/themes/rime-os-chartreuse' \
     && pass "plymouth-theme" \
-    || fail "plymouth-theme: the APEX plymouth theme is not in the initramfs"
+    || fail "plymouth-theme: the Rime plymouth theme is not in the initramfs"
 
 # ══ 7. THE DISK-UNLOCK CHAIN ═════════════════════════════════════════════════
 # Nothing here is about size; these are the things whose ABSENCE this branch
@@ -310,13 +310,13 @@ check_path unlock-tpm2-token 'libcryptsetup-token-systemd-tpm2\.so' \
     "a TPM keyslot would be unusable"
 check_path unlock-keymaps 'kbd/keymaps/.*/de\.map' \
     "every unlock prompt would be a US one"
-check_path unlock-hint 'usr/bin/apex-unlock-hint' \
+check_path unlock-hint 'usr/bin/rime-unlock-hint' \
     "the prompt could not say which keyboard it is using"
-check_path unlock-hint-wants 'initrd\.target\.wants/apex-unlock-hint\.service' \
+check_path unlock-hint-wants 'initrd\.target\.wants/rime-unlock-hint\.service' \
     "the hint is present but nothing pulls it in — it would never run"
-check_path unlock-vconsole 'usr/bin/apex-vconsole-credential' \
+check_path unlock-vconsole 'usr/bin/rime-vconsole-credential' \
     "a UKI machine could not be told its keyboard layout"
-check_path unlock-vconsole-wants 'sysinit\.target\.wants/apex-vconsole-credential\.service' \
+check_path unlock-vconsole-wants 'sysinit\.target\.wants/rime-vconsole-credential\.service' \
     "it would run after the keymap was already loaded, or never"
 
 has_mod crypt \

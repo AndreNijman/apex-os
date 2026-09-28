@@ -6,7 +6,7 @@
 #  full-disk — the machine records a result onto a filesystem with no space
 #  left on it.
 #
-#  P1-062 criterion 1's "full disk". The subject is `apex qualify record`,
+#  P1-062 criterion 1's "full disk". The subject is `rime qualify record`,
 #  chosen because it is the shape of write this criterion is really about: a
 #  small persistent document that is REPLACED rather than appended to, holding
 #  state a person cannot reconstruct — which check on their machine was tried
@@ -30,7 +30,7 @@
 #              real disk instead cannot reach the subject.
 #  EXPOSURE    the baseline is the same subject on the same kind of tmpfs with
 #              room on it, and it must have recorded the result. That proves
-#              `apex qualify record` really writes into the filesystem this
+#              `rime qualify record` really writes into the filesystem this
 #              case fills, rather than somewhere the fault does not reach.
 #  SURVIVAL    three things, and the third is the one that was wrong.
 #              1. The verb must FAIL and name ENOSPC. A record that silently
@@ -69,8 +69,8 @@
 #  Nine other writers in this tree share the temp-then-rename shape and were
 #  NOT touched — a survey is not a fix, and changing code this case does not
 #  exercise would be nine assertions nobody made:
-#      apex/src/{host,task,blueprint}.rs
-#      apex-agent-core/src/{config,checkpoint,project,request}.rs
+#      rime/src/{host,task,blueprint}.rs
+#      rime-agent-core/src/{config,checkpoint,project,request}.rs
 #  A case that drives one of those is the way to close them.
 #
 #  ═══ WHAT THE MUTANT SHOWED ═══
@@ -88,7 +88,7 @@
 
 CASE_TITLE="a result recorded onto a filesystem with no space left"
 CASE_CRITERION="1 (full disk), 3 (diagnostics, no silent corruption)"
-CASE_NEEDS="apex-binary userns tmpfs-ns"
+CASE_NEEDS="rime-binary userns tmpfs-ns"
 
 # The check the baseline records and the check the fault refuses. Two different
 # rows, so "the record changed" and "the record did not change" are about
@@ -109,7 +109,7 @@ FAULT_CHECK="audio"
 _run_on_tmpfs() {
     local size="$1" fill="$2" check="$3" tag="$4"
     unshare --user --map-root-user --mount -- bash -s -- \
-        "$APEX_BIN" "$CASE_ROOT" "$CASE_DIR" "$size" "$fill" "$check" "$tag" <<'INNER'
+        "$RIME_BIN" "$CASE_ROOT" "$CASE_DIR" "$size" "$fill" "$check" "$tag" <<'INNER'
 set -uo pipefail
 bin="$1"; root="$2"; out="$3"; size="$4"; fill="$5"; check="$6"; tag="$7"
 mnt="$root/mnt"
@@ -122,9 +122,9 @@ mount -t tmpfs -o "size=$size" tmpfs "$mnt" || { echo "the tmpfs would not mount
 
 export XDG_STATE_HOME="$mnt/state" HOME="$mnt" \
        XDG_CONFIG_HOME="$mnt/config" XDG_CACHE_HOME="$mnt/cache" \
-       APEX_QUALIFY_ROOT="$root/machine"
-store="$mnt/state/apex/qualification.json"
-mkdir -p "$mnt/state/apex" "$mnt/config" "$mnt/cache"
+       RIME_QUALIFY_ROOT="$root/machine"
+store="$mnt/state/rime/qualification.json"
+mkdir -p "$mnt/state/rime" "$mnt/config" "$mnt/cache"
 
 # A machine that has already recorded something, because the property under
 # test is that an EXISTING document survives. An empty store would make "the
@@ -156,7 +156,7 @@ echo $? > "$out/$tag.subject.rc"
 sha256sum < "$store" 2>/dev/null | cut -d' ' -f1 > "$out/$tag.store.sha.after"
 # The store directory exactly as it stands, modes included, which is where the
 # leftover and its permissions show up.
-ls -l "$mnt/state/apex/" > "$out/$tag.storedir" 2>&1
+ls -l "$mnt/state/rime/" > "$out/$tag.storedir" 2>&1
 # And the document itself, out of the namespace, so a human reading the bundle
 # can see what survived rather than taking the sha's word for it.
 cp "$store" "$out/$tag.store.json" 2>/dev/null || true

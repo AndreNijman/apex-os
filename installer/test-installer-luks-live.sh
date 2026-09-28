@@ -20,15 +20,15 @@
 #  running this suite is somebody's working computer.
 #
 #  WHAT IT NEEDS. Passwordless root, podman, ~20 GB of free disk, and an
-#  APEX-OS image in ROOT podman storage (localhost/apex-os:daily, or
-#  APEX_LIVE_IMAGE=...). A GitHub runner has none of those, which is why this
+#  Rime OS image in ROOT podman storage (localhost/rime-os:daily, or
+#  RIME_LIVE_IMAGE=...). A GitHub runner has none of those, which is why this
 #  suite is listed in tests/suites-not-in-ci.txt and why its fast half —
 #  test-installer-luks.sh, the refusals and the keymap conversion — is a
 #  separate file that CI does run.
 #
-#  THE ENROLMENT HELPER. /usr/libexec/apex-luks-enroll belongs to the boot-v2
+#  THE ENROLMENT HELPER. /usr/libexec/rime-luks-enroll belongs to the boot-v2
 #  work and is not in the image yet, so this suite supplies a stand-in through
-#  the engine's APEX_LUKS_ENROLL_LOCAL test hook. The stand-in does exactly the
+#  the engine's RIME_LUKS_ENROLL_LOCAL test hook. The stand-in does exactly the
 #  part of the contract the installer depends on — `systemd-cryptenroll
 #  --recovery-key`, writing the key to --recovery-out — and nothing else. When
 #  the real helper lands, delete the stub and point the hook at it; every
@@ -45,8 +45,8 @@
 set -uo pipefail
 cd "$(dirname "$0")" || exit 1
 
-ENGINE=./apex-install
-IMAGE="${APEX_LIVE_IMAGE:-localhost/apex-os:daily}"
+ENGINE=./rime-install
+IMAGE="${RIME_LIVE_IMAGE:-localhost/rime-os:daily}"
 # `bg` on purpose: it is one of the 36 XKB layout names that is NOT a loadable
 # console keymap, so an install that ends up with KEYMAP=bg_bds-utf8 proves the
 # conversion ran, and one that ends up with `bg` or `us` proves it did not.
@@ -68,12 +68,12 @@ command -v losetup   >/dev/null || die "losetup is not installed."
 #
 # This suite points a `--privileged --pid=host` container at a loopback file on
 # a developer's own machine. That is the exact shape of the run that deleted a
-# laptop's `APEX-OS` boot entry on 2026-09-20 and left it unbootable until it
+# laptop's `Rime OS` boot entry on 2026-09-20 and left it unbootable until it
 # was repaired from a live USB (BOOT-BREAKAGE-2026-09-20.md).
 #
 # There are now two independent layers and this suite uses both:
 #
-#   1. PREVENTION, in the engine. `apex-install` passes bootc
+#   1. PREVENTION, in the engine. `rime-install` passes bootc
 #      `--generic-image` whenever the install target is loop-backed, which
 #      skips the firmware step while still installing every bootloader type,
 #      and additionally masks /sys/firmware/efi/efivars in the container.
@@ -96,18 +96,18 @@ This suite will not run a privileged loopback install without it — see
 BOOT-BREAKAGE-2026-09-20.md and AGENTS.md \"Touching a machine's boot path\"."
 command -v cryptsetup>/dev/null || die "cryptsetup is not installed."
 sudo -n podman image exists "$IMAGE" 2>/dev/null \
-    || die "$IMAGE is not in ROOT podman storage. Build it, or set APEX_LIVE_IMAGE."
+    || die "$IMAGE is not in ROOT podman storage. Build it, or set RIME_LIVE_IMAGE."
 
 # /var/lab-scratch, not /tmp and not /var/tmp. /tmp on the build machine is a
 # tmpfs — a 30 GB disk image there is 30 GB of RAM, and it took the whole
-# machine's shell down once already. APEX_LUKS_SCRATCH overrides it.
-SCRATCH_ROOT="${APEX_LUKS_SCRATCH:-/var/lab-scratch}"
+# machine's shell down once already. RIME_LUKS_SCRATCH overrides it.
+SCRATCH_ROOT="${RIME_LUKS_SCRATCH:-/var/lab-scratch}"
 mkdir -p "$SCRATCH_ROOT" 2>/dev/null
 [ -d "$SCRATCH_ROOT" ] && [ -w "$SCRATCH_ROOT" ] || SCRATCH_ROOT=/var/tmp
 case "$(df -PT "$SCRATCH_ROOT" 2>/dev/null | awk 'NR==2{print $2}')" in
-  tmpfs|ramfs) die "$SCRATCH_ROOT is a RAM filesystem; a 30 GB image there would eat the machine. Set APEX_LUKS_SCRATCH to somewhere on a real disk." ;;
+  tmpfs|ramfs) die "$SCRATCH_ROOT is a RAM filesystem; a 30 GB image there would eat the machine. Set RIME_LUKS_SCRATCH to somewhere on a real disk." ;;
 esac
-WORK=$(mktemp -d "$SCRATCH_ROOT/apex-luks-live.XXXXXX") || die "no scratch directory"
+WORK=$(mktemp -d "$SCRATCH_ROOT/rime-luks-live.XXXXXX") || die "no scratch directory"
 chmod 755 "$WORK"
 IMG="$WORK/target.img"
 LOOP=""
@@ -143,7 +143,7 @@ cleanup() {
     # the engine's output and its log — are what a failure needs, and they are
     # kept whenever anything failed.
     sudo -n rm -f "$IMG" 2>/dev/null
-    if [ "${fail:-1}" = 0 ] && [ "${APEX_LUKS_KEEP:-0}" != 1 ]; then
+    if [ "${fail:-1}" = 0 ] && [ "${RIME_LUKS_KEEP:-0}" != 1 ]; then
         sudo -n rm -rf "$WORK" 2>/dev/null
     else
         printf 'artefacts kept in %s (engine output: %s)\n' "$WORK" "$WORK/engine-stdout.txt" >&2
@@ -170,10 +170,10 @@ esac
 printf 'target: %s (%s, %s)\n\n' "$LOOP" "$IMG" "$DISK_SIZE"
 
 # ── the stand-in enrolment helper ───────────────────────────────────────────
-HELPER="$WORK/apex-luks-enroll"
+HELPER="$WORK/rime-luks-enroll"
 cat > "$HELPER" <<'STUB'
 #!/usr/bin/env bash
-# Stand-in for /usr/libexec/apex-luks-enroll: the recovery-key half of the
+# Stand-in for /usr/libexec/rime-luks-enroll: the recovery-key half of the
 # contract, and nothing else. No TPM: a loopback file has none, and TPM policy
 # is the enrolment agent's subject, not the installer's.
 set -uo pipefail
@@ -204,7 +204,7 @@ ANS="$WORK/answers"
   printf 'disk=%s\n' "$LOOP"
   printf 'username=tester\n'
   printf 'password=loginpw123\n'
-  printf 'hostname=apexluks\n'
+  printf 'hostname=rimeluks\n'
   printf 'encrypt=yes\n'
   printf 'lukspass=%s\n' "$PASSPHRASE"
   printf 'keymap=%s\n' "$KEYMAP_XKB"
@@ -228,14 +228,14 @@ start=$(date +%s)
 # shellcheck disable=SC2024
 sudo -n "$NVGUARD" --label "luks-live-install" --out "$WORK/nvram" -- \
   env \
-    APEX_IMAGE="$IMAGE" \
-    APEX_LUKS_ENROLL_LOCAL="$HELPER" \
-    APEX_RECOVERY_DIR="$RECOVERY_DIR" \
-    APEX_LUKS_PBKDF_MEMORY=65536 \
+    RIME_IMAGE="$IMAGE" \
+    RIME_LUKS_ENROLL_LOCAL="$HELPER" \
+    RIME_RECOVERY_DIR="$RECOVERY_DIR" \
+    RIME_LUKS_PBKDF_MEMORY=65536 \
     "$ENGINE" --headless "$ANS" > "$OUT" 2>&1 </dev/null
 rc=$?
 echo "engine exit=$rc after $(( $(date +%s) - start ))s"
-sudo -n cp /var/log/apex-install.log "$LOGCOPY" 2>/dev/null || : > "$LOGCOPY"
+sudo -n cp /var/log/rime-install.log "$LOGCOPY" 2>/dev/null || : > "$LOGCOPY"
 sudo -n chmod 644 "$LOGCOPY" 2>/dev/null
 
 echo
@@ -247,8 +247,8 @@ else bad "engine exit status" "$rc — see $OUT"; fi
 # a plain `tail -1` reads the guard's line and reports a clean install as a
 # protocol failure. The guard's lines are prefixed and are dropped here.
 lastproto=$(grep -v 'nvram-guard\[' "$OUT" | grep -v '^[[:space:]]*$' | tail -1)
-if [[ "$lastproto" == "APEX-INSTALL-OK" ]]; then ok "final protocol line is APEX-INSTALL-OK"
-else bad "final protocol line is APEX-INSTALL-OK" "got: $lastproto"; fi
+if [[ "$lastproto" == "RIME-INSTALL-OK" ]]; then ok "final protocol line is RIME-INSTALL-OK"
+else bad "final protocol line is RIME-INSTALL-OK" "got: $lastproto"; fi
 if grep -q 'Unexpected error on line' "$OUT"; then bad "the ERR trap did not fire" "it did"
 else ok "the ERR trap did not fire"; fi
 
@@ -315,7 +315,7 @@ fi
 # into a UKI world with nothing to migrate. GRUB ignores the file entirely.
 #
 # What it CANNOT show is that the credential is then honoured — a .cred is
-# inert without files/dracut/apex-unlock-hint's apex-vconsole-credential, which
+# inert without files/dracut/rime-unlock-hint's rime-vconsole-credential, which
 # is measured by booting a guest in installer/test-installer-keymap-boot.sh.
 # This assertion is only that the installer wrote the file with the right name
 # and the right content.
@@ -344,7 +344,7 @@ LUKS_UUID=$(sudo -n cryptsetup luksUUID "$LUKS_PART" 2>/dev/null)
 if [ -n "$LUKS_UUID" ]; then ok "the header has a UUID" "$LUKS_UUID"
 else bad "the header has a UUID"; fi
 
-RECOVERY_FILE=$(find "$RECOVERY_DIR" -type f -name 'apex-recovery-key-*.txt' -print -quit 2>/dev/null)
+RECOVERY_FILE=$(find "$RECOVERY_DIR" -type f -name 'rime-recovery-key-*.txt' -print -quit 2>/dev/null)
 RECOVERY_KEY=""
 if [ -n "$RECOVERY_FILE" ]; then
     ok "a recovery-key file was written where the user can find it" "$(basename "$RECOVERY_FILE")"
@@ -365,7 +365,7 @@ if [ -n "$RECOVERY_FILE" ]; then
 else
     bad "a recovery-key file was written where the user can find it" "nothing in $RECOVERY_DIR"
 fi
-SHOWN_KEY=$(grep -m1 '^APEX-INSTALL-RECOVERY-KEY: ' "$OUT" | sed 's/^APEX-INSTALL-RECOVERY-KEY: //')
+SHOWN_KEY=$(grep -m1 '^RIME-INSTALL-RECOVERY-KEY: ' "$OUT" | sed 's/^RIME-INSTALL-RECOVERY-KEY: //')
 if [ -n "$SHOWN_KEY" ]; then ok "the key was put on screen for the user"
 else bad "the key was put on screen for the user" "no protocol line in the engine's output"; fi
 if [ -n "$SHOWN_KEY" ] && [ "$SHOWN_KEY" = "$RECOVERY_KEY" ]; then
@@ -399,7 +399,7 @@ else ok "a wrong passphrase is refused"; fi
 
 echo
 echo "── what is inside, once it is open ────────────────────────────────────"
-MAPPER="apexluks-test-$$"
+MAPPER="rimeluks-test-$$"
 if printf '%s' "$PASSPHRASE" | sudo -n cryptsetup open --key-file - "$LUKS_PART" "$MAPPER" 2>/dev/null; then
     ok "the volume opens for real, not just --test-passphrase"
 else

@@ -12,7 +12,7 @@
 #
 #  ═══ THE SUBJECT THAT DID NOT WORK, AND WHY IT IS RECORDED HERE ═══
 #
-#  The obvious subject is `apex trust --verify`: it answers a SECURITY question
+#  The obvious subject is `rime trust --verify`: it answers a SECURITY question
 #  by contacting a registry, so under network loss its failure mode is a
 #  verdict rather than an error message, and a machine reporting "no signature"
 #  when the truth is "nobody could ask" has told its owner their operating
@@ -28,7 +28,7 @@
 #
 #  ═══ THE SUBJECT THAT DOES ═══
 #
-#  `apex doctor` is the one status verb in APEX that opens a socket:
+#  `rime doctor` is the one status verb in Rime that opens a socket:
 #  `TcpStream::connect_timeout` to the metrics endpoint on 127.0.0.1:9723. It
 #  is a loopback connection, which is what makes this case cheap and hermetic —
 #  no route to the internet is needed, on this laptop or on a runner — and it
@@ -68,14 +68,14 @@
 #              when the daemon is simply not running — and must leave the
 #              fixture tree untouched.
 #
-#  ═══ WHAT `apex doctor` READS ═══
+#  ═══ WHAT `rime doctor` READS ═══
 #
 #  Stated because a reader will otherwise assume the fixture root covers the
-#  whole subject, and it does not. `apex doctor` is a report on THIS machine:
-#  its storage and firmware rows honour `APEX_STORAGE_ROOT` and
-#  `APEX_FIRMWARE_ROOT` (which is what satisfies the harness's fixture-root
+#  whole subject, and it does not. `rime doctor` is a report on THIS machine:
+#  its storage and firmware rows honour `RIME_STORAGE_ROOT` and
+#  `RIME_FIRMWARE_ROOT` (which is what satisfies the harness's fixture-root
 #  guard), and its hardware rows read the live /sys and /proc. That is safe
-#  here for the reason it is safe in tests/test-apex-recover.sh: `apex doctor`
+#  here for the reason it is safe in tests/test-rime-recover.sh: `rime doctor`
 #  spawns nothing and writes nothing. HOME and the XDG directories are still
 #  redirected into the bundle, and the corruption clause is asserted over the
 #  fixture tree, which is the only tree this case may change.
@@ -83,9 +83,9 @@
 
 CASE_TITLE="the network gone while the machine is asked what it can reach"
 CASE_CRITERION="1 (network loss), 3 (diagnostics, no silent corruption)"
-CASE_NEEDS="apex-binary userns netns"
+CASE_NEEDS="rime-binary userns netns"
 
-# The port `apex doctor` probes. Hard-coded in main.rs; named once here so the
+# The port `rime doctor` probes. Hard-coded in main.rs; named once here so the
 # listener and the assertions cannot drift apart from each other.
 METRICS_PORT=9723
 
@@ -99,12 +99,12 @@ case_setup() {
 
 # ── state C: the control, and the exposure proof ────────────────────────────
 #
-# Deliberately NOT the host. On this laptop apexd is running and 9723 answers;
+# Deliberately NOT the host. On this laptop rimed is running and 9723 answers;
 # on a runner it does not, and a baseline that depended on which machine it ran
 # on would make the control meaningless on one of them. Inside the namespace
 # the harness owns both facts.
 case_baseline() {
-    unshare --user --map-root-user --net -- bash -s -- "$APEX_BIN" "$METRICS_PORT" <<'INNER'
+    unshare --user --map-root-user --net -- bash -s -- "$RIME_BIN" "$METRICS_PORT" <<'INNER'
 set -uo pipefail
 bin="$1"; port="$2"
 ip link set lo up || { echo "could not bring the loopback up" >&2; exit 1; }
@@ -134,7 +134,7 @@ done
 env HOME="$CASE_ROOT/home" XDG_CONFIG_HOME="$CASE_ROOT/home/.config" \
     XDG_STATE_HOME="$CASE_ROOT/home/.local/state" \
     XDG_CACHE_HOME="$CASE_ROOT/home/.cache" \
-    APEX_STORAGE_ROOT="$CASE_ROOT/machine" APEX_FIRMWARE_ROOT="$CASE_ROOT/machine" \
+    RIME_STORAGE_ROOT="$CASE_ROOT/machine" RIME_FIRMWARE_ROOT="$CASE_ROOT/machine" \
     "$bin" doctor --json
 rc=$?
 kill "$listener" 2>/dev/null || true
@@ -184,18 +184,18 @@ case_observe() {
         env HOME="$CASE_ROOT/home" XDG_CONFIG_HOME="$CASE_ROOT/home/.config" \
             XDG_STATE_HOME="$CASE_ROOT/home/.local/state" \
             XDG_CACHE_HOME="$CASE_ROOT/home/.cache" \
-            APEX_STORAGE_ROOT="$CASE_ROOT/machine" \
-            APEX_FIRMWARE_ROOT="$CASE_ROOT/machine" \
-            "$APEX_BIN" doctor --json > "$CASE_DIR/observe.json" 2>"$CASE_DIR/observe.jsonerr"
+            RIME_STORAGE_ROOT="$CASE_ROOT/machine" \
+            RIME_FIRMWARE_ROOT="$CASE_ROOT/machine" \
+            "$RIME_BIN" doctor --json > "$CASE_DIR/observe.json" 2>"$CASE_DIR/observe.jsonerr"
     local rc=$?
-    unshare --user --map-root-user --net -- bash -s -- "$APEX_BIN" <<'INNER' > "$CASE_DIR/refused.json" 2>/dev/null
+    unshare --user --map-root-user --net -- bash -s -- "$RIME_BIN" <<'INNER' > "$CASE_DIR/refused.json" 2>/dev/null
 set -uo pipefail
 bin="$1"
 ip link set lo up
 env HOME="$CASE_ROOT/home" XDG_CONFIG_HOME="$CASE_ROOT/home/.config" \
     XDG_STATE_HOME="$CASE_ROOT/home/.local/state" \
     XDG_CACHE_HOME="$CASE_ROOT/home/.cache" \
-    APEX_STORAGE_ROOT="$CASE_ROOT/machine" APEX_FIRMWARE_ROOT="$CASE_ROOT/machine" \
+    RIME_STORAGE_ROOT="$CASE_ROOT/machine" RIME_FIRMWARE_ROOT="$CASE_ROOT/machine" \
     "$bin" doctor --json
 INNER
     # The diagnostic a person reads is the rendered line, so it goes to stdout
@@ -229,7 +229,7 @@ METRICS_ROW='[c for c in d["checks"] if "9723" in c["check"]][0]'
 #
 # Runs after the subject, which is the whole reason it is a separate step: the
 # question "did the subject meet the fault?" cannot be asked before the subject
-# has run. State C is the answer — if `apex doctor` reports the metrics
+# has run. State C is the answer — if `rime doctor` reports the metrics
 # endpoint reachable when a listener is bound INSIDE the namespace, then it
 # really opened that socket there, and its answer in state A is about the
 # namespace and not about something else.
@@ -268,7 +268,7 @@ case_judge() {
 
     # The defect is the sentence. "Nobody could ask" and "we asked and the
     # answer was no" are different facts about the machine, and the person
-    # reading `apex doctor` is reading it precisely because they do not yet
+    # reading `rime doctor` is reading it precisely because they do not yet
     # know which one they are in.
     local a b
     a="$(python3 -c '

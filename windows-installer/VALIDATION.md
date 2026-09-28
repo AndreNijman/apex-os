@@ -24,7 +24,7 @@ There is one. `windows-installer/lab/winlab` builds it end to end:
 | artefact | what it is |
 | --- | --- |
 | `ws2022-eval.iso` | Windows Server 2022 Evaluation, **5044094976 bytes**, from Microsoft's own `https://go.microsoft.com/fwlink/p/?LinkID=2195280`. Size checked against that constant on every fetch. |
-| `apex-winsetup.iso` | the same media re-authored: `autounattend.xml` and `apexlab-agent.ps1` in the root, EFI El Torito image replaced with `efisys_noprompt.bin`, `install.wim` split into `install.swm` + `install2.swm`. |
+| `apex-winsetup.iso` | the same media re-authored: `autounattend.xml` and `apexlab-agent.ps1` in the root, EFI El Torito image replaced with `efisys_noprompt.bin`, `install.wim` split into `install.swm` + `install2.swm`. | <!-- rime-rename: keep: the lab artifact names -->
 | `golden.raw` + `golden-VARS.fd` | Windows Server 2022 Standard (Core), installed **headlessly in 3 qemu phases, about 150 seconds**. |
 | `fixture-a.raw`, `fixture-b.raw` | the target disks. |
 
@@ -47,16 +47,16 @@ BootOrder 0005, 0003, 0000, 0001, 0004
 Fixtures, on two different buses so the enumeration order can be changed:
 
 ```
-fixture-a  AHCI, model APEX-FIXTURE-A, serial FIXA00000001
-   1  17 GiB  Linux filesystem type, every byte zero      "APEX-TARGET-A"
+fixture-a  AHCI, model RIME-FIXTURE-A, serial FIXA00000001
+   1  17 GiB  Linux filesystem type, every byte zero      "RIME-TARGET-A"
    2   1 GiB  basic data, real NTFS, label WINDATA        "Windows data"
    3  17 GiB  basic data, every byte zero                 "Blank basic"
 fixture-b  NVMe, serial FIXB00000002
-   1  17 GiB  Linux filesystem type, every byte zero      "APEX-TARGET-B"
+   1  17 GiB  Linux filesystem type, every byte zero      "RIME-TARGET-B"
 ```
 
 17 GiB and not something convenient, because the tool refuses anything under
-16 decimal GB, the number `installer/apex-install` refuses too. Fixtures small
+16 decimal GB, the number `installer/rime-install` refuses too. Fixtures small
 enough to be quick would have exercised every rule except the one that fires in
 real life. The images are sparse.
 
@@ -64,7 +64,7 @@ real life. The images are sparse.
 
 ## The suite, run end to end
 
-`APEX_WINLAB_GUEST=1 ./tests/test-windows-installer.sh`, one uninterrupted run,
+`RIME_WINLAB_GUEST=1 ./tests/test-windows-installer.sh`, one uninterrupted run,
 two Windows guest boots:
 
 ```
@@ -94,10 +94,10 @@ two Windows guest boots:
     PASS  guest: the exclusivity check was re-asked immediately before reading
     PASS  guest: the confirmation named the disk by its serial number
     PASS  guest: the firmware variables were unchanged by the run
-    PASS  guest: Windows numbered APEX-FIXTURE-A as disk 2 and then as disk 1
+    PASS  guest: Windows numbered RIME-FIXTURE-A as disk 2 and then as disk 1
     PASS  guest: the confirmation text is identical across both enumeration orders
     PASS  guest: the confirmation text contains no device index
-    apex-windows-installer: 29 passed, 0 failed, 0 could-not-run
+    rime-windows-installer: 29 passed, 0 failed, 0 could-not-run
 ```
 
 ---
@@ -132,9 +132,9 @@ two Windows guest boots:
 
 ### A difference from the Linux installer worth knowing
 
-The 16 decimal GB minimum is borrowed from `installer/apex-install`, but not
+The 16 decimal GB minimum is borrowed from `installer/rime-install`, but not
 applied to the same thing. That installer checks **`$DISK`** in both of its
-modes (`installer/apex-install:849-855`), so in partition mode it never sizes
+modes (`installer/rime-install:849-855`), so in partition mode it never sizes
 the target partition at all: a 40 GB disk with a 2 GB free partition passes its
 check. This program applies the number to the **partition**, and is therefore
 **stricter than the Linux installer**, not equal to it.
@@ -178,7 +178,7 @@ number is that disk numbers move. So the job runs twice, and the second run
 puts fixture A on a different AHCI port:
 
 ```
-guest: Windows numbered APEX-FIXTURE-A as disk 2 and then as disk 1
+guest: Windows numbered RIME-FIXTURE-A as disk 2 and then as disk 1
 guest: the confirmation text is identical across both enumeration orders
 ```
 

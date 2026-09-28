@@ -171,10 +171,12 @@ PY
 
 # ── the fake registry ────────────────────────────────────────────────────────
 # FAKE_CORE / FAKE_LEGACY hold "revision|fedora-bootc-digest" for
-# $IMAGE:core and $LEGACY_CORE:latest; the word FAIL makes that ref
-# unreadable. FAKE_UPSTREAM is the fedora-bootc digest. The --format asked for
-# decides which fields are printed, so the pre-fix step (which asked for the
-# digest label alone) is served correctly too.
+# $IMAGE:core and $LEGACY_CORE; the word FAIL makes that ref unreadable.
+# FAKE_UPSTREAM is the fedora-bootc digest. The --format asked for decides
+# which fields are printed, so the pre-fix step (which asked for the digest
+# label alone) is served correctly too. The legacy core is the pre-rebrand
+# one, so its digest is served under the pre-rebrand label spelling
+# (org.apexos.…) and the new name's under the new one. (rime-rename: keep)
 mkdir -p "$WORK/bin"
 cat > "$WORK/bin/skopeo" <<'SH'
 #!/usr/bin/env bash
@@ -190,13 +192,17 @@ done
 echo "$ref" >> "$FAKE_LOG"
 case "$ref" in
     "$UPSTREAM_BASE") [ "$FAKE_UPSTREAM" = FAIL ] && exit 1; echo "$FAKE_UPSTREAM"; exit 0 ;;
-    "$IMAGE:$TAG_CORE") meta="$FAKE_CORE" ;;
-    "$LEGACY_CORE:latest") meta="$FAKE_LEGACY" ;;
+    "$IMAGE:$TAG_CORE") meta="$FAKE_CORE" old=0 ;;
+    "$LEGACY_CORE") meta="$FAKE_LEGACY" old=1 ;;
     *) echo "fake skopeo: unexpected ref $ref" >&2; exit 2 ;;
 esac
 [ "$meta" = FAIL ] && { echo "manifest unknown" >&2; exit 1; }
 rev="${meta%%|*}" dig="${meta#*|}"
+new_dig="$dig" old_dig='<no value>'
+[ "$old" = 1 ] && { new_dig='<no value>'; old_dig="$dig"; }
+[ -z "$dig" ] && { new_dig='<no value>'; old_dig='<no value>'; }
 case "$fmt" in
+    *image.revision*rimeos.fedora-bootc*apexos.fedora-bootc*) echo "$rev|$new_dig|$old_dig" ;;  # rime-rename: keep
     *image.revision*fedora-bootc*) echo "$rev|$dig" ;;
     *fedora-bootc*image.revision*) echo "$dig|$rev" ;;
     *image.revision*) echo "$rev" ;;
@@ -219,8 +225,8 @@ R="$WORK/repo"
 (
     set -e
     git init -q -b main "$R"
-    git -C "$R" config user.email 'ci@apex.test'
-    git -C "$R" config user.name 'apex ci'
+    git -C "$R" config user.email 'ci@rime.test'
+    git -C "$R" config user.name 'rime ci'
     git -C "$R" config commit.gpgsign false
     mkdir -p "$R/kernel" "$R/tests" "$R/docs"
     echo 'FROM x'  > "$R/Containerfile.core"
@@ -248,6 +254,9 @@ c() { git -C "$R" rev-parse "$1"; }
 C0="$(c main~4)"; C1="$(c main~3)"; C2="$(c main~2)"; C3="$(c main~1)"; C4="$(c main)"; SIDE="$(c side)"; SIDE_OLD="$(c side~1)"
 mapfile -t FILTER < "$WORK/filter-core"
 
+# Where the core lived before the rebrand: build-image.yml's LEGACY_CORE.
+LEGACY_REF=ghcr.io/test/apex-os:core  # rime-rename: keep (the pre-rebrand name)
+
 # gate EVENT BEFORE SHA FORCE CORE_META LEGACY_META UPSTREAM
 gate() {
     local event="$1" before="$2" sha="$3" force="$4" filter=false out="$WORK/out" rc
@@ -264,7 +273,7 @@ json.dump({
     'steps.filter.outputs.core': filt,
     'github.event_name': event,
     'github.sha': sha,
-    'github.actor': 'apex-ci',
+    'github.actor': 'rime-ci',
     'secrets.GITHUB_TOKEN': 'not-a-token',
 }, open(w + '/ctx.json', 'w'))
 PY
@@ -275,7 +284,7 @@ PY
         PATH="$WORK/bin:$PATH" GITHUB_OUTPUT="$out" RUNNER_TEMP="$WORK" \
         FAKE_LOG="$WORK/skopeo.log" FAKE_CORE="$FAKE_CORE" FAKE_LEGACY="$FAKE_LEGACY" \
         FAKE_UPSTREAM="$FAKE_UPSTREAM" INSPECT_BACKOFF=0 \
-        IMAGE=ghcr.io/test/apex-os TAG_CORE=core LEGACY_CORE=ghcr.io/test/apex-os-core \
+        IMAGE=ghcr.io/test/rime-os TAG_CORE=core LEGACY_CORE="$LEGACY_REF" \
         UPSTREAM_BASE=quay.io/test/fedora-bootc:43 \
         bash "$WORK/gate.sh"
     ) > "$WORK/log" 2>&1
@@ -350,6 +359,13 @@ expect 'weekly cron, published core current, upstream unmoved -> REUSE' \
     'rc=0 core=false' "$(gate schedule '' "$C4" '' "$C4|$D1" FAIL "$D1")"
 expect 'weekly cron, published core current, upstream moved -> REBUILD' \
     'rc=0 core=true' "$(gate schedule '' "$C4" '' "$C4|$D1" FAIL "$D2")"
+# The rebrand: the first weekly run finds core only under its pre-rebrand
+# name, stamped with the pre-rebrand label. Reading only org.rimeos.… would call
+# that "no fedora-bootc digest" and rebuild a current core for nothing.
+expect 'weekly cron, core only under the legacy name with the old label, upstream unmoved -> REUSE' \
+    'rc=0 core=false' "$(gate schedule '' "$C4" '' FAIL "$C4|$D1" "$D1")" 'upstream fedora-bootc has not moved'
+expect 'weekly cron, core only under the legacy name with the old label, upstream moved -> REBUILD' \
+    'rc=0 core=true' "$(gate schedule '' "$C4" '' FAIL "$C4|$D1" "$D2")" 'upstream fedora-bootc moved'
 expect 'weekly cron, published core carries no fedora-bootc digest -> REBUILD' \
     'rc=0 core=true' "$(gate schedule '' "$C4" '' "$C4|" FAIL "$D1")"
 expect 'weekly cron, published core stale -> REBUILD whatever upstream did' \

@@ -1,5 +1,5 @@
 #!/bin/sh
-# APEX-OS M0 Spike E — shared config/helpers for the dual-boot to-filesystem rehearsal.
+# Rime OS M0 Spike E — shared config/helpers for the dual-boot to-filesystem rehearsal.
 # Sourced by the numbered stage scripts. POSIX sh.
 #
 # SAFETY: every destructive operation here targets ONLY files inside $SPIKE_WORK
@@ -9,7 +9,7 @@
 set -eu
 
 # Work dir holding all big artifacts (NOT in the git repo).
-: "${SPIKE_WORK:=/home/andre/apex-os-m0-work/spike-e}"
+: "${SPIKE_WORK:=/home/andre/rime-os-m0-work/spike-e}"
 
 # Inputs (fetched by the operator / earlier stages).
 : "${ALPINE_VER:=3.24.1}"
@@ -20,11 +20,11 @@ set -eu
 : "${BOOTC_IMAGE_TAR:=$SPIKE_WORK/fedora-bootc-43.tar}"
 
 # Disk geometry.
-: "${DISK_IMG:=$SPIKE_WORK/apex-dualboot.img}"
+: "${DISK_IMG:=$SPIKE_WORK/rime-dualboot.img}"
 : "${DISK_SIZE:=30G}"
 : "${ESP_SIZE:=1024MiB}"          # 1 GiB ESP (roomy, mimics a real shared ESP)
 : "${INCUMBENT_SIZE:=12GiB}"      # incumbent (Alpine) root
-# apex root = remainder of the disk
+# rime root = remainder of the disk
 
 # Payload disk (carries the bootc image tar + in-guest scripts, receives output).
 : "${PAYLOAD_IMG:=$SPIKE_WORK/payload.img}"

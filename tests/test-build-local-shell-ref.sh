@@ -1,12 +1,12 @@
 #!/usr/bin/env bash
 # ─────────────────────────────────────────────────────────────────────────────
-#  test-build-local-shell-ref.sh — build-local.sh pins the apex-shell branch
-#  that MATCHES the apex-os branch being built, and says which one it used.
+#  test-build-local-shell-ref.sh — build-local.sh pins the rime-shell branch
+#  that MATCHES the rime-os branch being built, and says which one it used.
 #
 #  WHY. build-local.sh asked the remote for `refs/heads/main` unconditionally,
 #  while build-image.yml and pr-validation.yml had both already been changed to
 #  pin the matching branch — the third appearance of one defect. The cost is not
-#  theoretical: apex-os roadmap/v2.2 + apex-shell main dies in
+#  theoretical: rime-os roadmap/v2.2 + rime-shell main dies in
 #  check-labwc-keybinds on W-A-s (screen reader) and W-A-v (voice), 157 steps
 #  into Containerfile.base, roughly an hour in. A local build of the integration
 #  branch could never pass.
@@ -37,7 +37,7 @@
 #  into dispatch, rather than dying early and printing nothing — which is how a
 #  check of this shape passes over nothing at all.
 #
-#  The remote is a LOCAL BARE REPOSITORY, through APEX_SHELL_REMOTE, which
+#  The remote is a LOCAL BARE REPOSITORY, through RIME_SHELL_REMOTE, which
 #  exists in build-local.sh for this suite. Each fixture branch gets its own
 #  commit, so the assertion is on the resolved SHA and not merely on the label
 #  printed beside it — a message naming the right branch while pinning the
@@ -47,9 +47,9 @@
 #  taken on a task/* branch; the main rung is taken and ANNOUNCES ITSELF when
 #  the remote lacks roadmap/v2.2; a detached HEAD is not asked for as a branch
 #  name; an unreachable remote is a loud FATAL and not a fallback; a remote with
-#  no usable branch at all is also fatal; and an explicit APEX_SHELL_REF is
+#  no usable branch at all is also fatal; and an explicit RIME_SHELL_REF is
 #  honoured without consulting the remote at all — proved by pointing
-#  APEX_SHELL_REMOTE at a path that does not exist and still succeeding.
+#  RIME_SHELL_REMOTE at a path that does not exist and still succeeding.
 # ─────────────────────────────────────────────────────────────────────────────
 set -uo pipefail
 cd "$(dirname "$0")/.." || exit 1
@@ -67,13 +67,13 @@ WORK="$(mktemp -d)"
 trap 'rm -rf "$WORK"' EXIT
 mkdir -p "$WORK/nokey"
 
-export GIT_AUTHOR_NAME=apex-test GIT_AUTHOR_EMAIL=apex@test.invalid
-export GIT_COMMITTER_NAME=apex-test GIT_COMMITTER_EMAIL=apex@test.invalid
-unset APEX_SHELL_REF APEX_SHELL_REMOTE 2>/dev/null || true
+export GIT_AUTHOR_NAME=rime-test GIT_AUTHOR_EMAIL=rime@test.invalid
+export GIT_COMMITTER_NAME=rime-test GIT_COMMITTER_EMAIL=rime@test.invalid
+unset RIME_SHELL_REF RIME_SHELL_REMOTE 2>/dev/null || true
 
 # ── fixtures ────────────────────────────────────────────────────────────────
 
-# A bare "apex-shell" carrying exactly the named branches, each on its own
+# A bare "rime-shell" carrying exactly the named branches, each on its own
 # commit so the branches have distinct shas.
 seed_remote() {  # $1 = bare path, $2.. = branch names
     local bare="$1"; shift
@@ -111,15 +111,15 @@ seed_repo() {  # $1 = branch name, or DETACHED
 }
 
 out=""; err=""; rc=0
-runbl() {  # $1 = repo dir, $2 = APEX_SHELL_REMOTE, $3 = APEX_SHELL_REF ("" for unset)
+runbl() {  # $1 = repo dir, $2 = RIME_SHELL_REMOTE, $3 = RIME_SHELL_REF ("" for unset)
     local repo="$1" remote="$2" ref="${3:-}"
     rc=0
     if [ -n "$ref" ]; then
-        out="$(APEX_SIGNING_DIR="$WORK/nokey" APEX_SHELL_REMOTE="$remote" \
-               APEX_SHELL_REF="$ref" \
+        out="$(RIME_SIGNING_DIR="$WORK/nokey" RIME_SHELL_REMOTE="$remote" \
+               RIME_SHELL_REF="$ref" \
                "$repo/build-local.sh" --allow-unsigned bogus-target 2>"$WORK/err")" || rc=$?
     else
-        out="$(APEX_SIGNING_DIR="$WORK/nokey" APEX_SHELL_REMOTE="$remote" \
+        out="$(RIME_SIGNING_DIR="$WORK/nokey" RIME_SHELL_REMOTE="$remote" \
                "$repo/build-local.sh" --allow-unsigned bogus-target 2>"$WORK/err")" || rc=$?
     fi
     err="$(cat "$WORK/err" 2>/dev/null)"
@@ -134,7 +134,7 @@ expect_pinned() {  # $1 label, $2 expected sha, $3 substring the message must co
     else
         bad "$label: reached dispatch without building (rc 2)" "rc=$rc err=${err:0:160}"
     fi
-    if grep -qF "== shell == vendoring apex-shell $want" <<<"$out"; then
+    if grep -qF "== shell == vendoring rime-shell $want" <<<"$out"; then
         ok "$label: pinned $want"
     else
         bad "$label: pinned $want" "$(grep '== shell ==' <<<"$out" | tr '\n' ' ')"
@@ -168,26 +168,26 @@ fi
 
 printf '\n── the matching branch wins ──────────────────────────────────\n'
 
-# 1. apex-shell HAS task/build-verify -> the exact match is taken, not v2.2.
+# 1. rime-shell HAS task/build-verify -> the exact match is taken, not v2.2.
 repo="$(seed_repo task/build-verify)"
 runbl "$repo" "$FULL"
 expect_pinned "exact match" "$(sha_of "$FULL" task/build-verify)" \
-    "matches this apex-os branch"
+    "matches this rime-os branch"
 
-# 2. apex-shell has no task/build-verify -> the roadmap/v2.2 rung. This is the
+# 2. rime-shell has no task/build-verify -> the roadmap/v2.2 rung. This is the
 #    rung every worktree in this program actually takes, and the one whose
 #    absence killed the build this suite exists for.
 repo="$(seed_repo task/build-verify)"
 runbl "$repo" "$NOTASK"
 expect_pinned "task/* -> roadmap/v2.2" "$(sha_of "$NOTASK" roadmap/v2.2)" \
-    "apex-shell has no branch named 'task/build-verify'"
+    "rime-shell has no branch named 'task/build-verify'"
 
 # 3. Standing ON roadmap/v2.2, the exact match is that same branch — and it must
 #    be reported as a match, not as a fallback.
 repo="$(seed_repo roadmap/v2.2)"
 runbl "$repo" "$NOTASK"
 expect_pinned "on roadmap/v2.2" "$(sha_of "$NOTASK" roadmap/v2.2)" \
-    "branch 'roadmap/v2.2', which matches this apex-os branch"
+    "branch 'roadmap/v2.2', which matches this rime-os branch"
 
 printf '\n── the main fallback still fires, and still announces itself ──\n'
 
@@ -197,7 +197,7 @@ printf '\n── the main fallback still fires, and still announces itself ─�
 repo="$(seed_repo task/build-verify)"
 runbl "$repo" "$NARROW"
 expect_pinned "main fallback" "$(sha_of "$NARROW" main)" \
-    "apex-shell has no branch named 'task/build-verify'"
+    "rime-shell has no branch named 'task/build-verify'"
 if grep -qF "branch 'main'" <<<"$out"; then
     ok "main fallback: names main specifically"
 else
@@ -220,10 +220,10 @@ runbl "$repo" "$GONE"
 [ "$rc" = 1 ] \
     && ok "unreachable remote: exits 1" \
     || bad "unreachable remote: exits 1" "rc=$rc"
-grep -q 'cannot reach apex-shell' <<<"$err" \
+grep -q 'cannot reach rime-shell' <<<"$err" \
     && ok "unreachable remote: says so on stderr" \
     || bad "unreachable remote: says so on stderr" "err=${err:0:200}"
-grep -q 'vendoring apex-shell' <<<"$out" \
+grep -q 'vendoring rime-shell' <<<"$out" \
     && bad "unreachable remote: vendors nothing" "it printed a vendoring line anyway" \
     || ok "unreachable remote: vendors nothing"
 grep -q 'unknown target' <<<"$err" \
@@ -238,7 +238,7 @@ runbl "$repo" "$EMPTY"
     && ok "remote with no branches: fatal, and names what it tried" \
     || bad "remote with no branches: fatal, and names what it tried" "rc=$rc err=${err:0:200}"
 
-printf '\n── APEX_SHELL_REF still wins, offline ────────────────────────\n'
+printf '\n── RIME_SHELL_REF still wins, offline ────────────────────────\n'
 
 # 8. An explicit ref must short-circuit the remote entirely. Proved rather than
 #    asserted: the remote is a path that does not exist, so any lookup at all
@@ -246,7 +246,7 @@ printf '\n── APEX_SHELL_REF still wins, offline ─────────�
 repo="$(seed_repo task/build-verify)"
 EXPLICIT=0123456789abcdef0123456789abcdef01234567
 runbl "$repo" "$GONE" "$EXPLICIT"
-expect_pinned "explicit APEX_SHELL_REF" "$EXPLICIT" \
+expect_pinned "explicit RIME_SHELL_REF" "$EXPLICIT" \
     "the remote was not consulted"
 
 printf '\n──────────────────────────────────────────────────────────────\n'

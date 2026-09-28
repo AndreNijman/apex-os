@@ -1,6 +1,6 @@
 #!/usr/bin/env bash
 #
-# APEX-OS — a rebound key actually fires after the config is reloaded.
+# Rime OS — a rebound key actually fires after the config is reloaded.
 #
 # ── The bug this exists for ──────────────────────────────────────────────────
 # Quoted at the top of tests/test-labwc-keybinds.sh:
@@ -24,7 +24,7 @@
 #
 # ── Why this is a new file and not a section in either of those ──────────────
 # test-labwc-session.sh nests inside the PARENT display and says so: it is
-# gated behind APEX_LABWC_SESSION_TESTS=1 because it opens visible windows on
+# gated behind RIME_LABWC_SESSION_TESTS=1 because it opens visible windows on
 # the developer's desktop, and it is in no workflow, so anything added there
 # runs on no machine unless a human asks for it.
 #
@@ -66,7 +66,7 @@ set -uo pipefail
 set +e
 
 ROOT="$(cd "$(dirname "${BASH_SOURCE[0]}")/.." && pwd)"
-TOOL="${ROOT}/files/system/libexec/apex-labwc-keybinds"
+TOOL="${ROOT}/files/system/libexec/rime-labwc-keybinds"
 RC_TMPL="${ROOT}/files/desktop/labwc/rc.xml"
 
 pass=0
@@ -86,14 +86,14 @@ finish() {
 # ── what this needs ──────────────────────────────────────────────────────────
 section "environment"
 
-# The shell's keybind model lives in apex-shell, which is a SEPARATE REPO. The
+# The shell's keybind model lives in rime-shell, which is a SEPARATE REPO. The
 # tool reads it with --shell-dir. Without a checkout beside this one there is
 # no model to generate from, and inventing one would test this file's idea of a
 # keybind rather than the product's.
-SHELL_DIR="${APEX_SHELL_DIR:-}"
+SHELL_DIR="${RIME_SHELL_DIR:-}"
 if [ -z "$SHELL_DIR" ]; then
-    for cand in "${ROOT}/../wt-base-shell" "${ROOT}/../apex-shell" \
-                "${ROOT}/../../apex-shell" "${HOME}/Projects/apex-shell"; do
+    for cand in "${ROOT}/../wt-base-shell" "${ROOT}/../rime-shell" \
+                "${ROOT}/../../rime-shell" "${HOME}/Projects/rime-shell"; do
         [ -f "${cand}/src/services/config_tab/KeybindService.qml" ] && {
             SHELL_DIR="$(cd "$cand" && pwd)"; break; }
     done
@@ -108,7 +108,7 @@ if [ -n "$missing" ]; then
     finish; exit 0
 fi
 if [ -z "$SHELL_DIR" ]; then
-    skp "no apex-shell checkout found; set APEX_SHELL_DIR to the shell repo"
+    skp "no rime-shell checkout found; set RIME_SHELL_DIR to the shell repo"
     finish; exit 0
 fi
 ok "labwc, wtype and python3 are all present"

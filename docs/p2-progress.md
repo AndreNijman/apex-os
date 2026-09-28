@@ -12,7 +12,7 @@ Branched from `p1/integration-2` at `c4d026d`, **not** from `main`. `main` is at
 handling need the capsules, resolver and modes that P1 built, so a branch cut
 from `main` would develop against a tree missing its own foundations.
 
-Same rule as P1: nothing merged to `apex-os/main` until Andre asks for the
+Same rule as P1: nothing merged to `rime-os/main` until Andre asks for the
 image build. P1's build is still unspent, so the first one will carry both.
 
 ## The constraint most likely to get silently inverted
@@ -22,8 +22,8 @@ image build. P1's build is still unspent, so the first one will carry both.
 §23's one-line table says "Boot v2: composefs + systemd-boot + UKIs + measured
 boot", and read alone that sounds like a bootloader swap. §22 itself says the
 opposite, starting with its own title (*"do not switch to Limine as the main
-path"*), and its recommendation is to **keep GRUB for the current APEX
-generation**, targeting systemd-boot + signed UKIs "once APEX is ready to move
+path"*), and its recommendation is to **keep GRUB for the current Rime
+generation**, targeting systemd-boot + signed UKIs "once Rime is ready to move
 to the bootc/composefs path". Its anti-goal is explicit: *do not switch
 bootloaders for aesthetics; change the boot architecture only when it improves
 reliability, verification and rollback.*
@@ -34,7 +34,7 @@ Its migration sequence is seven numbered steps, and the numbers matter:
 | --- | --- | --- |
 | 1 | Stabilize existing GRUB + bootc/OSTree install and recovery | already shipped; preserved |
 | 2 | **Prototype composefs/systemd-boot in CI and VMs** | built and VM-proven |
-| 3 | Signed UKIs and APEX-owned EFI paths | built |
+| 3 | Signed UKIs and Rime-owned EFI paths | built |
 | 4 | Boot counting and health-based automatic rollback | built |
 | 5 | Measured boot + TPM-bound unlock **as an opt-in developer feature** | built, opt-in, not defaulted |
 | 6 | Encryption default *once recovery and hardware edge cases are proven* | **not** done: the proof does not exist yet |
@@ -47,13 +47,13 @@ boot-path rules added to `AGENTS.md` in `baf25f4` carry this as rule 5.
 
 ## Sequencing, and why it is not 9a → 9b → 10
 
-§20's remote compute is three verbs (`apex build --on desktop`,
-`apex ai run --on desktop`, `apex agent run --host desktop claude`), and two of
+§20's remote compute is three verbs (`rime build --on desktop`,
+`rime ai run --on desktop`, `rime agent run --host desktop claude`), and two of
 them are dispatch wrappers over things §14 and P0's agent runtime already own.
-Building `apex ai run` locally first and then adding `--on` means rebuilding its
+Building `rime ai run` locally first and then adding `--on` means rebuilding its
 argument handling once the transport exists.
 
-1. **Transport and trust first** (`apex host`): trusted-device registry, SSH
+1. **Transport and trust first** (`rime host`): trusted-device registry, SSH
    primitives, capability probe. Nothing above it can be built honestly without
    knowing what a remote host is.
 2. **§14 local AI** on top of that, so `--on` is a target from the start.
@@ -71,7 +71,7 @@ build box for images and the host for boot VMs. It is faster than waiting on
 GitHub, and using it keeps the one image build reserved for the end from being
 spent on iteration.
 
-It is also a real APEX machine, which is why `AGENTS.md` now has a boot-path
+It is also a real Rime machine, which is why `AGENTS.md` now has a boot-path
 section, and why boot work touches guest ESPs only.
 
 ## Status
@@ -80,16 +80,16 @@ section, and why boot work touches guest ESPs only.
 | --- | --- |
 | Boot-path rules in `AGENTS.md` | `baf25f4` |
 | This tracker | in progress |
-| 9.1 `apex host`: trust and transport | done: `0650db6`, `e3e742e`, `355c946` |
+| 9.1 `rime host`: trust and transport | done: `0650db6`, `e3e742e`, `355c946` |
 | 9.2 §14 local AI service | in progress |
 | 9.3 §20 dispatch, handoff, remote status | OS side done (`7636431`, `781378a`, `5e42a49`, `5d72b5e`, `fdeef1e`); shell side in progress |
 | 10 Boot v2 | in progress |
 
 ## 9.1, and what it decided for everything above it
 
-`apexd-core/src/host.rs` (37 tests) owns the registry, the validation and the
-argv construction; `apex/src/host.rs` (31 tests) does the I/O;
-`tests/test-apex-host.sh` (53 assertions) drives the shipped binary with a fake
+`rimed-core/src/host.rs` (37 tests) owns the registry, the validation and the
+argv construction; `rime/src/host.rs` (31 tests) does the I/O;
+`tests/test-rime-host.sh` (53 assertions) drives the shipped binary with a fake
 `ssh` that records every argv.
 
 **The transport is the user's own ssh configuration.** A host entry names an ssh
@@ -98,13 +98,13 @@ beyond brevity: a real entry is often something other than "a hostname". The
 `katana` alias here resolves over the LAN when the LAN is up, otherwise a VPS
 port, otherwise a jump host into a reverse tunnel. An `address` field would
 work at home and fail everywhere else, which is exactly when remote compute is
-worth having. It also means APEX generates no key and holds no passphrase, so
+worth having. It also means Rime generates no key and holds no passphrase, so
 it cannot produce a credential prompt.
 
 Three keys exist only to be refused, so the refusal can say where the setting
 lives: `identity_file`, `strict_host_key_checking`, `ssh_options`.
 
-Verified against the katana over real ssh rather than a mock. Its installed apex
+Verified against the katana over real ssh rather than a mock. Its installed rime
 0.1.0 does not know `host describe`, so the live run took the fallback path and
 read 20 cpu / 62 GiB / cuda+vulkan / podman off it. The self-describe path was
 then confirmed by running the new binary there, and **its actual output is the
@@ -113,7 +113,7 @@ parser accepts what I imagine the other end sends.
 
 ## Where a project is on the far side: the 9.3 decision
 
-§20's `apex build --on desktop` and `apex agent run --host desktop` need the
+§20's `rime build --on desktop` and `rime agent run --host desktop` need the
 project, and the files are on the laptop while the compute is on the desktop.
 Three options were on the table:
 
@@ -127,7 +127,7 @@ Three options were on the table:
 the remote path exists and is the same repository (`git remote get-url origin`
 compared on both ends), and a mismatch is a refusal naming both values, with
 `--remote-path` as the explicit override. For one developer with the same
-username on two APEX boxes this needs no configuration, and when the assumption
+username on two Rime boxes this needs no configuration, and when the assumption
 is wrong it fails loudly instead of quietly.
 
 **Uncommitted changes are not transferred, and the command says so.** A build on
@@ -140,18 +140,18 @@ not do by default.
 
 | §20 asks for | verb | state |
 | --- | --- | --- |
-| Run builds on a more powerful desktop | `apex build --on <host>` | done |
-| Run agents there | `apex agent run --host <host>` | done |
-| Continue a terminal or agent session elsewhere | `apex agent attach --host`, `apex agent list --host` | done |
-| Run local-model inference there | `apex ai run --on <host>` | forwarder built; wired when §14 lands |
-| Send clipboard and files between devices | `apex send <host> [paths…] \| --clipboard` | done |
-| Open a browser tab or project on another device | `apex open <host> <target>` | done |
-| Show remote agent status in APEX Shell | apex-shell `p2/remote-agent-status` | done |
+| Run builds on a more powerful desktop | `rime build --on <host>` | done |
+| Run agents there | `rime agent run --host <host>` | done |
+| Continue a terminal or agent session elsewhere | `rime agent attach --host`, `rime agent list --host` | done |
+| Run local-model inference there | `rime ai run --on <host>` | forwarder built; wired when §14 lands |
+| Send clipboard and files between devices | `rime send <host> [paths…] \| --clipboard` | done |
+| Open a browser tab or project on another device | `rime open <host> <target>` | done |
+| Show remote agent status in Rime Shell | rime-shell `p2/remote-agent-status` | done |
 
-`apex host run <host> -- <argv>` remains the general escape hatch §24 asks APEX
+`rime host run <host> -- <argv>` remains the general escape hatch §24 asks Rime
 to keep, and the specific verbs are thin wrappers over it.
 
-### apex open took three attempts, and each fault was invisible in a green test
+### rime open took three attempts, and each fault was invisible in a green test
 
 The first version printed `opened on katana` while **nothing opened**.
 
@@ -187,12 +187,12 @@ confound made attempt 2 look like it worked.
 
 | suite | count |
 | --- | --- |
-| `apexd-core::host` | 37 |
-| `apexd-core::dispatch` | 34 |
-| `apex::host` | 31 |
-| `apex::dispatch` | 18 |
-| `tests/test-apex-host.sh` | 53 |
-| `tests/test-apex-dispatch.sh` | 55 |
+| `rimed-core::host` | 37 |
+| `rimed-core::dispatch` | 34 |
+| `rime::host` | 31 |
+| `rime::dispatch` | 18 |
+| `tests/test-rime-host.sh` | 53 |
+| `tests/test-rime-dispatch.sh` | 55 |
 
 Both shell suites are shellcheck-clean at `-S warning` and wired into the
 `rust` job of `pr-validation.yml`. They sit there rather than in `static`
@@ -238,24 +238,24 @@ Per-suite, all green: blueprint 139, env 253, plugin 117, gaming 113, resolve
 secret-broker 47, privilege-requests 38, labwc-keybinds 37, input 31, display
 26, project-layout 22, labwc-session 18.
 
-**`tests/test-apex-ai.sh` does not exist yet.** The branch building §14 still
+**`tests/test-rime-ai.sh` does not exist yet.** The branch building §14 still
 owes its shell suite; the 944 Rust tests include its unit tests, but no
-artifact-level suite drives `apex ai` as a process the way `host` and
+artifact-level suite drives `rime ai` as a process the way `host` and
 `dispatch` have. Recorded here rather than left for someone to notice.
 
 ## Known rough edge in the dispatch verbs
 
-`apex ai run --on katana` currently ends in the katana's own
-`error: unrecognized subcommand 'ai'`, because that machine runs apex 0.1.0
+`rime ai run --on katana` currently ends in the katana's own
+`error: unrecognized subcommand 'ai'`, because that machine runs rime 0.1.0
 from the last published image and the verb is new. The message is truthful and
 comes from the remote, and it resolves as soon as both ends carry this build.
 
 The local side does not catch it, because the capability check only refuses
-when the cached probe came from an **APEX peer that described itself**. The
+when the cached probe came from an **Rime peer that described itself**. The
 katana's cached probe came from the portable shell fallback, which cannot
-report an `apex_version`, so `is_apex()` is false and the check is skipped:
+report an `rime_version`, so `is_rime()` is false and the check is skipped:
 "unknown is not absent", by design. The alternative would be refusing dispatch
-to any host whose `apex` is too old to self-describe, which is worse: it would
+to any host whose `rime` is too old to self-describe, which is worse: it would
 refuse the machines that most need probing again.
 
 ## Open items found by review, not by a test
@@ -263,7 +263,7 @@ refuse the machines that most need probing again.
 Both are recorded here so they cannot be quietly forgotten.
 
 1. **`docs/boot-v2.md` is a 14-byte placeholder** (`# placeholder`) and
-   `Containerfile.base` ships it to `/usr/share/doc/apex/boot-v2.md` while
+   `Containerfile.base` ships it to `/usr/share/doc/rime/boot-v2.md` while
    claiming, in the comment directly above the `COPY`, that enrollment is "a
    documented, user-initiated procedure in docs/boot-v2.md, not a script".
    The document is the whole safety argument for the boot work (enrollment
@@ -272,7 +272,7 @@ Both are recorded here so they cannot be quietly forgotten.
    unrecoverable. `AGENTS.md` also forbids it directly: documentation must
    state current behaviour, not aspiration.
 
-2. ~~`tests/test-apex-ai.sh` does not exist.~~ **Closed** in `f25c8e8`: 43
+2. ~~`tests/test-rime-ai.sh` does not exist.~~ **Closed** in `f25c8e8`: 43
    assertions, shellcheck-clean, wired into the `rust` job. It was written here
    rather than by the §14 branch because transient API errors interrupted that
    branch five times and a missing suite was the worse outcome.
@@ -291,7 +291,7 @@ than read off the commit messages:
 The last one is stronger than the rule required. The rule asked for a
 loopback-mounted image; mtools does not mount anything at all, so there is no
 mountpoint that could resolve to the host's ESP even by mistake. Entries land
-under `/EFI/APEX/`, which is §22's own requirement for an APEX identity rather
+under `/EFI/APEX/`, which is §22's own requirement for a Rime identity rather
 than a Fedora-named path.
 
 ## The boot-v2 CI workflow, checked against the release-tier rules
@@ -312,7 +312,7 @@ The permissions line is the load-bearing part. A workflow that *does not* push
 today can start pushing with one careless step; one that has no
 `packages: write` token cannot.
 
-## 9.3's shell half: apex-shell `p2/remote-agent-status`
+## 9.3's shell half: rime-shell `p2/remote-agent-status`
 
 Four commits off `origin/main` (`6f2e55d`), 10 files, +2718/-8. Pushed, not
 merged. Counts re-run here rather than taken on trust:
@@ -326,7 +326,7 @@ merged. Counts re-run here rather than taken on trust:
 
 ### Two defects it avoided that would have shipped quietly
 
-**`apex host list --json` returns an object keyed by host name, not an array.**
+**`rime host list --json` returns an object keyed by host name, not an array.**
 The pattern next door in `AgentService` is `if (Array.isArray(fresh))`, used
 twice. Copying it reflexively would have left the remote section permanently
 empty *with nothing logged*, the worst kind of failure, because it looks like
@@ -337,7 +337,7 @@ future CLI change fails loudly instead.
 controls call `AgentService.kill(session.id)`, and a remote id belongs to
 another machine's runtime, so Stop on a remote row would have terminated an
 unrelated *local* agent. Remote rows are read-only, and the page prints the
-`apex host run -t …` line instead.
+`rime host run -t …` line instead.
 
 ### Where it went, and why not the top bar
 
@@ -351,7 +351,7 @@ read.
 
 **Zero remote queries at idle, measured:** 22 s with the page closed against a
 15 s sweep interval produced 0 registry reads and 0 device queries, counted by a
-shim `apex` that logs every invocation. A device whose `caps.agentd` is false,
+shim `rime` that logs every invocation. A device whose `caps.agentd` is false,
 and one that has never been probed, were queried 0 times.
 
 ### Stated as reasoned, not observed
@@ -365,23 +365,23 @@ reasoned. Both statements are the agent's own words, and both are accurate.
 ## Verification checkpoint
 
 Run against the committed tree (`git archive HEAD`, so no agent's in-progress
-edits could contaminate it), in the `apex-rust` container on the katana:
+edits could contaminate it), in the `rime-rust` container on the katana:
 
 ```
 cargo clippy --all-targets --locked -- -D warnings
 ```
 
-**Clean** across all six crates: `apexd-core`, `apexd`, `apex`,
-`apex-agent-core`, `apex-agentd`, `apex-aid`. That is what CI runs, verbatim.
+**Clean** across all six crates: `rimed-core`, `rimed`, `rime`,
+`rime-agent-core`, `rime-agentd`, `rime-aid`. That is what CI runs, verbatim.
 
 | | count | failures |
 | --- | --- | --- |
 | Rust tests | 944 | 0 |
 | `tests/test-boot-v2.sh` (no argument, `static` job) | 60 | 0 |
 | `tests/test-boot-v2.sh --with-binary` (`rust` job) | 85 | 0 |
-| `tests/test-apex-ai.sh` | 43 | 0 |
-| `tests/test-apex-host.sh` | 53 | 0 |
-| `tests/test-apex-dispatch.sh` | 55 | 0 |
+| `tests/test-rime-ai.sh` | 43 | 0 |
+| `tests/test-rime-host.sh` | 53 | 0 |
+| `tests/test-rime-dispatch.sh` | 55 | 0 |
 
 The boot suite's last assertion is worth copying elsewhere: it hashes its
 fixture tree before and after and asserts the digest is unchanged, which is how
@@ -404,9 +404,9 @@ Measured on the katana, kernel `7.1.5-cachyos1.fc43.x86_64`.
 
 | step | what was measured |
 | --- | --- |
-| 2, prototype in CI and VMs | a UKI built from the booted APEX deployment (kernel 16,758,856 B, initramfs 386,072,073 B, ~390 MB signed PE) boots under `OVMF_CODE_4M.secboot` with only the ephemeral APEX cert in db. sd-stub printed `Booting initrd of APEX-OS dracut-107-8.fc43`; the real initramfs ran to dracut's `pre-mount` hook and powered off cleanly |
-| 3, signed UKIs and APEX EFI paths | unsigned, foreign-signed and one-byte-tampered `.cmdline` UKIs each failed to reach userspace; the foreign one proven *validly* signed by a key not in db. `microcode=embedded-in-initrd`, detected in dracut's leading cpio rather than demanded again |
-| 4, boot counting and rollback | four boots walked `apex-new+3-0.efi` → `+2-1` → `+1-2` → `+0-3`; the fifth selected the unsuffixed `apex-good.efi`; a sixth stayed there. Exact filename pairs asserted at every step |
+| 2, prototype in CI and VMs | a UKI built from the booted Rime deployment (kernel 16,758,856 B, initramfs 386,072,073 B, ~390 MB signed PE) boots under `OVMF_CODE_4M.secboot` with only the ephemeral Rime cert in db. sd-stub printed `Booting initrd of Rime OS dracut-107-8.fc43`; the real initramfs ran to dracut's `pre-mount` hook and powered off cleanly |
+| 3, signed UKIs and Rime EFI paths | unsigned, foreign-signed and one-byte-tampered `.cmdline` UKIs each failed to reach userspace; the foreign one proven *validly* signed by a key not in db. `microcode=embedded-in-initrd`, detected in dracut's leading cpio rather than demanded again |
+| 4, boot counting and rollback | four boots walked `rime-new+3-0.efi` → `+2-1` → `+1-2` → `+0-3`; the fifth selected the unsuffixed `rime-good.efi`; a sixth stayed there. Exact filename pairs asserted at every step |
 | 5, measured boot + TPM LUKS2, opt-in | PCR 11 **changes** between two UKIs signed by the same PCR key and the same keyslot still opens with no re-enrollment; a `.pcrsig` from a different key is refused; the **recovery key unlocks in the same boot that was refused**; a marker written through the mapper in boot 1 is read back in boot 2 |
 | 6, encryption by default | **not done, deliberately**: §22 gates it on recovery and hardware edge cases being proven, and one software TPM in one VM is not that |
 | 7, legacy BIOS on GRUB | preserved; nothing installs a bootloader |
@@ -427,7 +427,7 @@ converts the 4 MB pair once and **refuses to fall back**.
 **`OVMF_VARS.secboot.fd` ships Red Hat *and Microsoft* certificates
 pre-enrolled**, and `virt-fw-vars --no-microsoft` only means "add no more". A
 varstore built on it leaves the firmware trusting Microsoft's UEFI CA, so
-"only APEX-signed images load" becomes **unfalsifiable**: the test passes while
+"only Rime-signed images load" becomes **unfalsifiable**: the test passes while
 proving nothing, because a foreign image would have loaded too. Only the
 pristine `OVMF_VARS_4M.qcow2` is correct. This is the most consequential
 vacuous-pass this project has found, because the assertion it defeats is the
@@ -439,7 +439,7 @@ Secure Boot product invariant itself.
 type #2 UKIs *and* type #1 entries that use the `linux` key, and does **not**
 count type #1 entries that use `efi`. A fully `/EFI/APEX`-named UKI path is
 therefore possible; type #2 remains the default only because
-`bootctl list --json` (what `apex boot status` reads) reports the tally and
+`bootctl list --json` (what `rime boot status` reads) reports the tally and
 `.osrel` title only for entries it recognises as UKIs. All three rows are
 asserted.
 
@@ -447,7 +447,7 @@ asserted.
 
 Every one had a green-looking symptom:
 
-* `apex-boot-health` was non-executable in the repo, so every exit-code check
+* `rime-boot-health` was non-executable in the repo, so every exit-code check
   got 126 and read as "the gate refused". The assertions now demand rc **1**
   rather than any non-zero code: "it failed" was true while "it failed for the
   reason under test" was not.
@@ -457,7 +457,7 @@ Every one had a green-looking symptom:
   stale notices.
 * A dotted JSON accessor returned `null` for every entry-level check, because
   entry ids contain a literal dot.
-* **The APEX initramfs has `cat` and `tr` but not `dd`**, and `2>/dev/null`
+* **The Rime initramfs has `cat` and `tr` but not `dd`**, and `2>/dev/null`
   turned "command not found" into a written marker, so the probe reported
   success from a missing binary.
 * A 29-byte write to a dm-crypt mapper is `EINVAL`.
@@ -477,7 +477,7 @@ checks that the daemon, the CLI and the unit agree about socket names, store
 root, protocol version and the TCP refusal, across three languages) now runs
 in the **`static`** job, with `--self-test`. It is in `static` rather than
 `rust` because the selectors would skip it there: a PR touching only
-`files/system/units/apex-aid.service` does not set `rust=true`, and that unit
+`files/system/units/rime-aid.service` does not set `rust=true`, and that unit
 is one of the files the check reads. Its self-test mutates each constant to
 prove the check catches it *and* asserts a comment mentioning the forbidden
 token does not trip it: 4 mutations caught, 2 comments correctly ignored.
@@ -490,7 +490,7 @@ that this does not spend the reserved image build: `build-image.yml` fires on
 build an image.
 
 **The catalogue has a real entry.** §14's own example is
-`apex ai pull qwen3-coder`, which cannot work against an empty catalogue. Qwen2.5
+`rime ai pull qwen3-coder`, which cannot work against an empty catalogue. Qwen2.5
 Coder 1.5B Instruct Q4_K_M is now in it, with every number read off the file:
 the whole 1,117,320,768 bytes fetched and hashed, and the GGUF v3 header parsed
 for `block_count` 28, `context_length` 32768, `head_count_kv` 2 and
@@ -500,7 +500,7 @@ tokens at f16.
 
 **composefs was never undone.** It was reported as "no composefs work", but
 §23's row names composefs because it is part of the target architecture, and
-APEX already boots on it. Verified directly: `findmnt -no FSTYPE,SOURCE /`
+Rime already boots on it. Verified directly: `findmnt -no FSTYPE,SOURCE /`
 returns `overlay composefs` on **both** the laptop and the katana. Nothing
 needed changing, which is different from nothing having been done.
 
@@ -528,7 +528,7 @@ hardware `bootctl install` does it and the operator runs it.
 **Ollama and vLLM are recognised and refused rather than adapted.** §14 says
 "abstract runtimes such as llama.cpp, Ollama, vLLM or future engines", and the
 *abstraction* does accommodate them: `Runtime` is an enum with a launch planner
-per variant. APEX declines to adopt their model stores, because each owns its
+per variant. Rime declines to adopt their model stores, because each owns its
 own and adopting one means two provenance stories for the same weights, which
 is the thing the catalogue exists to prevent. This is a deliberate deviation
 from a literal reading of §14, stated here rather than buried.
@@ -536,7 +536,7 @@ from a literal reading of §14, stated here rather than buried.
 **APU VRAM is under-reported.** `mem_info_vram_total` on an integrated GPU is
 the BIOS carveout rather than what the driver can allocate, measured on the
 laptop as `1024 MiB total, 0 spendable`. It is a hardware reporting limitation
-that APEX cannot fix; `plan_fit` planning against *measured free* VRAM keeps it
+that Rime cannot fix; `plan_fit` planning against *measured free* VRAM keeps it
 from becoming a crash.
 
 ## P2 close-out: verified on GitHub, not only on the katana
@@ -547,35 +547,35 @@ which was checked before opening either.
 
 | | PR | checks |
 | --- | --- | --- |
-| apex-os rows 9 + 10 | **#36** | `pr-validation` green: Static, Select, Rust, Package engine and the aggregate gate |
-| apex-os boot v2 VM job | **#36** | `boot-v2.yml` **success**, 46 passed / 0 failed |
-| apex-shell §20 shell half | **apex-shell #15** | all three jobs green |
+| rime-os rows 9 + 10 | **#36** | `pr-validation` green: Static, Select, Rust, Package engine and the aggregate gate |
+| rime-os boot v2 VM job | **#36** | `boot-v2.yml` **success**, 46 passed / 0 failed |
+| rime-shell §20 shell half | **rime-shell #15** | all three jobs green |
 
 **The boot VM job ran accelerated, not emulated.** The workflow warns and falls
 back to TCG when `/dev/kvm` is absent; on the runner it printed
 `/dev/kvm is present; guests run accelerated`. Having built its own UKI from a
 Fedora kernel, because a runner has no ostree deployment, it proved:
 
-* the signed UKI reached userspace: `APEX-BOOTLAB: userspace-reached`,
-  `clean-poweroff`, `StubInfo=systemd-stub`, `LoaderEntrySelected=apex-good.efi`;
+* the signed UKI reached userspace: `RIME-BOOTLAB: userspace-reached`,
+  `clean-poweroff`, `StubInfo=systemd-stub`, `LoaderEntrySelected=rime-good.efi`;
 * the unsigned UKI reached nothing: `qemu rc=137`, and the serial log does
   *not* contain the userspace marker;
 * the foreign UKI is *validly signed by a key that is not in db* and fails
-  against the APEX certificate, which is the assertion that would be
+  against the Rime certificate, which is the assertion that would be
   unfalsifiable on a varstore carrying Microsoft's CA;
 * two identical builds hash identically
   (`ddd3e56f6c2c361f904eb9235a33f9119906fa03ba0ede1c93271382985880f2`) and a
   different `SOURCE_DATE_EPOCH` changes the bytes;
-* the counter walked `apex-new+3-0.efi` → `+2-1` → `+1-2` → `+0-3` and the next
-  boot selected `apex-good`.
+* the counter walked `rime-new+3-0.efi` → `+2-1` → `+1-2` → `+0-3` and the next
+  boot selected `rime-good`.
 
-The katana proved the same chain against the **real APEX image**: a 390 MB
+The katana proved the same chain against the **real Rime image**: a 390 MB
 signed UKI from the booted deployment's own kernel and 386 MB initramfs. CI
 proves it stays true; the katana proves it is true of the thing that ships.
 
 ### One assertion CI caught that three local runs could not
 
-`test-apex-host.sh` asserted `describe --json` carries `accel` unconditionally.
+`test-rime-host.sh` asserted `describe --json` carries `accel` unconditionally.
 `HostCaps` declares `gpus` and `accel` with
 `skip_serializing_if = "Vec::is_empty"`, so a machine with no accelerator omits
 them. That is intended behaviour, since a host that cannot demonstrate a
@@ -590,8 +590,8 @@ the PR was worth opening rather than trusting a local sweep.
 | | count | failures |
 | --- | --- | --- |
 | Rust tests | 947 | 0 |
-| Shell assertions, 19 suites (apex-os) | 1314 | 0 |
+| Shell assertions, 19 suites (rime-os) | 1314 | 0 |
 | `boot-v2.yml` VM scenarios (GitHub, KVM) | 46 | 0 |
-| apex-shell, pre-existing | 864 | 0 |
-| apex-shell, new | 89 + 48 + 18 | 0 |
+| rime-shell, pre-existing | 864 | 0 |
+| rime-shell, new | 89 + 48 + 18 | 0 |
 | `cargo clippy --all-targets --locked -- -D warnings` | clean, six crates | none |

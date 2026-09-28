@@ -3,8 +3,8 @@
 
 1. An assertion that reads a path before the COPY that creates it.
 
-   `RUN ... test -s /usr/share/apex/labwc/rc.xml` placed above
-   `COPY files/desktop/labwc/ /usr/share/apex/labwc/` fails the build — but only
+   `RUN ... test -s /usr/share/rime/labwc/rc.xml` placed above
+   `COPY files/desktop/labwc/ /usr/share/rime/labwc/` fails the build — but only
    once the builder reaches that layer, which on this image is hours in. This
    shipped exactly once: the context-menu assertions read rc.xml about 240 lines
    above the COPY that provides it.
@@ -58,7 +58,7 @@ PATTERN_ARG_RE = re.compile(
     re.X,
 )
 
-VOLATILE_MARKERS = ("--from=apex-builder",)
+VOLATILE_MARKERS = ("--from=rime-builder",)
 VOLATILE_MIN_POSITION = 0.75
 
 
@@ -158,12 +158,12 @@ def referenced_paths(line):
     # whole question this checker asks. On run 34727364060 this line of
     # Containerfile.base:
     #
-    #   grep -q '^ExecStart=/usr/bin/apex lid watch$' \
-    #       /usr/lib/systemd/system/apex-lid.service
+    #   grep -q '^ExecStart=/usr/bin/rime lid watch$' \
+    #       /usr/lib/systemd/system/rime-lid.service
     #
-    # was reported as "RUN reads /usr/bin/apex, but the COPY that creates it is
+    # was reported as "RUN reads /usr/bin/rime, but the COPY that creates it is
     # at line 2952". It reads the unit file — which IS a read, is kept below,
-    # and is correctly provided nine lines above — and mentions /usr/bin/apex
+    # and is correctly provided nine lines above — and mentions /usr/bin/rime
     # only as a string to look for. The Containerfile even says so in the
     # comment directly above it. That false positive reddened `Validate
     # Containerfile layer order` and, because a failed step skips every step
@@ -214,11 +214,11 @@ def check(path, repo_root):
         if from_flag:
             # A cross-stage COPY has no source in the repository, so walking it
             # is impossible. But an earlier stage that does
-            # `install -D... /out/usr/bin/apex` has TOLD us what it produces, so
+            # `install -D... /out/usr/bin/rime` has TOLD us what it produces, so
             # map those staged paths through this COPY's source prefix.
             #
             # This is not a nicety. Moving the binaries to the end of the file
-            # left an assertion that sources a script which self-gates on `apex`
+            # left an assertion that sources a script which self-gates on `rime`
             # being on PATH; it silently defined nothing and the check failed for
             # the wrong reason. Blind cross-stage COPYs could not see that.
             for staged in staged_outputs:

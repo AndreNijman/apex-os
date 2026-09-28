@@ -1,6 +1,6 @@
 # The browser automation capsule
 
-`apex browser` runs a browser that automates a site without letting it near the
+`rime browser` runs a browser that automates a site without letting it near the
 browser you use yourself.
 
 P2-012's acceptance line is "isolated browser profile/cookies/downloads and
@@ -10,38 +10,38 @@ built.
 
 ## A composition of existing boundaries
 
-Nothing here invents confinement. Every property below is an existing APEX
+Nothing here invents confinement. Every property below is an existing Rime
 guarantee pointed at a browser:
 
 | the property | what it rests on |
 |---|---|
-| the profile you use is unreachable | the agent sandbox's `--tmpfs $HOME` (`apex-agent-core/src/sandbox.rs`) |
+| the profile you use is unreachable | the agent sandbox's `--tmpfs $HOME` (`rime-agent-core/src/sandbox.rs`) |
 | headless is structural, not a flag | the same sandbox's `--tmpfs /run` and masked `$XDG_RUNTIME_DIR`: there is no compositor socket to open a window on |
-| the browser reaches only named hosts | `NetworkPolicy::Allowlist`: `--unshare-net` plus agentd's CONNECT proxy, which asks `destination::Allowlist` twice (`apex-agentd/src/egress.rs`) |
+| the browser reaches only named hosts | `NetworkPolicy::Allowlist`: `--unshare-net` plus agentd's CONNECT proxy, which asks `destination::Allowlist` twice (`rime-agentd/src/egress.rs`) |
 | ignoring the proxy opens nothing | the same `--unshare-net`: the namespace has only `lo`, so there is no route to try and no resolver to ask |
-| downloads leave only when nominated | `apex vm run`'s egress rule: the loop runs over the **nominations**, never over the directory's contents |
-| nothing survives the run | `apex vm run`'s four-way fence on a recursive removal: narrow name pattern, final component not a symlink, `realpath`, and the resolved path equal to exactly `<root>/<name>` |
+| downloads leave only when nominated | `rime vm run`'s egress rule: the loop runs over the **nominations**, never over the directory's contents |
+| nothing survives the run | `rime vm run`'s four-way fence on a recursive removal: narrow name pattern, final component not a symlink, `realpath`, and the resolved path equal to exactly `<root>/<name>` |
 
-`apex browser` is a client of `apex agent`, not a second sandbox. It builds a
+`rime browser` is a client of `rime agent`, not a second sandbox. It builds a
 capsule directory and a profile, asks the runtime for a confined allowlisted
 session whose working directory is that capsule, waits for it, copies out the
 files that were nominated, and deletes the capsule.
 
 ## Why not a VM
 
-`apex vm run` is the stronger boundary and the wrong one here, for three
+`rime vm run` is the stronger boundary and the wrong one here, for three
 recorded reasons:
 
 * **No guest image carries a browser.** P2-009 landed `partial` for the same
   reason one step over: no guest image carries an agent CLI either, and
   `docs/virtualization.md` says building one is separate work.
-* **`apex vm run` refuses `--network` on purpose**, because an outbound
+* **`rime vm run` refuses `--network` on purpose**, because an outbound
   interface would make its file-egress boundary decorative. A browser with no
   network is not a browser, so a VM-tier browser capsule is not that verb with
   a flag added. It is a different design, with a different argument about what
   the network is allowed to be.
 * **The virt stack is not in the image**, and `Containerfile.base` asserts its
-  absence. `bwrap`, `apex-agentd` and Firefox are all in the image, so the
+  absence. `bwrap`, `rime-agentd` and Firefox are all in the image, so the
   capsule described here works on a stock machine with nothing installed.
 
 A VM-tier browser capsule is listed under "what is not built".
@@ -49,21 +49,21 @@ A VM-tier browser capsule is listed under "what is not built".
 ## Checking the machine can run one
 
 ```
-apex browser doctor
+rime browser doctor
 ```
 
 Reports each part a capsule needs and names the one that is missing, so a run
 does not fail halfway through: the browser binary (present, present but not
-executable, or missing), `apex` itself, and whether the agent runtime answers.
+executable, or missing), `rime` itself, and whether the agent runtime answers.
 A fresh machine is most likely to be missing the runtime, so for that one it
-prints the `systemctl --user enable --now apex-agentd` that fixes it. It exits
+prints the `systemctl --user enable --now rime-agentd` that fixes it. It exits
 non-zero when anything is absent, so you can use it as a precondition in a
 script.
 
 ## The capsule
 
 ```
-apex browser run --allow example.com:443 \
+rime browser run --allow example.com:443 \
     --download page.png --download-to /home/u/results \
     -- --screenshot {capsule}/page.png https://example.com/
 ```
@@ -76,7 +76,7 @@ does not rewrite `--screenshot`, because the engine does not know which of a
 browser's flags take paths, and guessing would mean a list to keep correct for
 every browser and every version.
 
-A run makes one directory, `$XDG_STATE_HOME/apex/browser/<name>`, mode `0700`,
+A run makes one directory, `$XDG_STATE_HOME/rime/browser/<name>`, mode `0700`,
 and everything the browser is allowed to keep lives in it:
 
 ```
@@ -103,7 +103,7 @@ The layout guarantees it; no check has to be remembered.
 
 ### The profile is fresh, and no flag changes that
 
-`apex browser` writes a new profile for every run. There is no `--profile`
+`rime browser` writes a new profile for every run. There is no `--profile`
 naming one you already have, and no way to point it at `~/.mozilla`: the engine
 derives the path from the capsule name, and your own profile is not in the
 mount namespace to be pointed at.
@@ -147,7 +147,7 @@ Downloads reach the host the same way a disposable VM's files do:
 * `--download-to DIR` is the only thing that makes anything leave at all.
   Without it nothing does, however much is nominated.
 * The copy loop runs over the nominations. It never lists the capsule and
-  copies what it finds, which is the same direction `apex vm run` documents as
+  copies what it finds, which is the same direction `rime vm run` documents as
   its security property.
 * A nominated file that would land on top of an existing one is not copied
   unless `--force` says so. The file came from a page you did not trust enough
@@ -165,17 +165,17 @@ empty allowlist: a browser that can reach nothing while reporting a destination
 policy is a mode that lies.
 
 Each `--allow` destination must already be on the runtime's allowlist
-(`apex agent allow <host>`), and the refusal names the exact line to add. This
+(`rime agent allow <host>`), and the refusal names the exact line to add. This
 narrows the set the daemon enforces; it is not a second grant path.
 
 **The destinations a capsule names are the only ones it can reach** (P2-012,
 protocol 9). They travel to the daemon as `RunRequest::allow`. The daemon
 proves every line is covered by a rule the runtime's own list already carries,
 and the egress proxy enforces the narrowed list, not the runtime's, which is
-also what `apex agent status <id>` prints as `destinations`. Before protocol 9
+also what `rime agent status <id>` prints as `destinations`. Before protocol 9
 the daemon snapshotted the runtime's whole allowlist for every session, so a
 capsule started to visit one host could reach every destination the machine had
-ever been told to permit, and the check in `apex browser` was a check in a
+ever been told to permit, and the check in `rime browser` was a check in a
 shell script and no boundary at all. The engine's check is still there, because
 a refusal before a capsule directory exists names the line to add and costs
 nothing to show, but it no longer confines the capsule.
@@ -218,7 +218,7 @@ Two consequences follow. They are limits, and neither is a hole:
   `--present` (P2-012, route B, protocol 11). For a capsule that named a
   credential, the runtime terminates that credential's ONE pinned destination
   instead of tunnelling it, so for that destination the runtime reads the
-  request and `apex-secretd` reads the request and the answer. Every other
+  request and `rime-secretd` reads the request and the answer. Every other
   `CONNECT` the same capsule makes is opaque as before. A test demonstrates this
   by asking which certificate the capsule was handed. A capsule that names no
   credential has no terminated destination at all.
@@ -240,21 +240,21 @@ Nothing depends on them.
 ## Firefox keeps its own sandbox, and that needed a measurement
 
 Firefox confines its own content processes with a user namespace, which means
-writing `/proc/self/uid_map` from inside APEX's sandbox. Measured, not assumed:
+writing `/proc/self/uid_map` from inside Rime's sandbox. Measured, not assumed:
 with `/proc` inherited read-only from the host, that write fails `EROFS`, every
 content process dies on `SIGSEGV`, and the run produces no output at all while
 the parent exits 0.
 
 The agent sandbox already mounts a fresh procfs (`--proc /proc`, beside
 `--unshare-pid`), so the nesting works and the browser's own sandbox survives
-inside APEX's. The capsule therefore has two boundaries, and the suite asserts
+inside Rime's. The capsule therefore has two boundaries, and the suite asserts
 the fresh `/proc` is there, so removing it fails a test instead of silently
 removing a layer.
 
 ## Headless, and no flag makes it otherwise
 
-`apex browser` has no `--headed`, no `--display` and no viewer verb, the same
-way `apex vm` has no `--graphics`. A test asserts the absence.
+`rime browser` has no `--headed`, no `--display` and no viewer verb, the same
+way `rime vm` has no `--graphics`. A test asserts the absence.
 
 The guarantee is structural: the capsule's `/run` and `$XDG_RUNTIME_DIR` are
 tmpfs, so `$WAYLAND_DISPLAY` names a socket that does not exist, and a browser
@@ -264,7 +264,7 @@ cannot put a window on anybody's screen, because the socket is missing.
 
 ## Capability auth: what it decides, and what it does not
 
-`--capability NAME` names a credential already in `apex-secretd`'s root-owned
+`--capability NAME` names a credential already in `rime-secretd`'s root-owned
 store. It binds the capsule's destination to that credential's **pin**:
 
 * the run is refused if no credential of that name is stored;
@@ -275,17 +275,17 @@ store. It binds the capsule's destination to that credential's **pin**:
   endpoint.
 
 `tests/browserlab/run-browserlab`'s `capability` flow exercises the pin against
-a real `apex-secretd`, with the falsifying control the claim needs: an engine
+a real `rime-secretd`, with the falsifying control the claim needs: an engine
 that looks the capability up and then does not apply it sends the capsule
 wherever the call site asked.
 
 That flow exists because the first version could not work at all. It read the
-pin out of the second column of `apex secret list`, which is `scheme://host`
+pin out of the second column of `rime secret list`, which is `scheme://host`
 and has no port in it, so against a real secret service the destination came
 out as `https://intranet.example` and every capsule naming a capability was
 refused. The suite did not catch it because its stub printed a bare host there:
 the stub agreed with the engine and not with the CLI. The engine now reads the
-pin from `apex secret list --json`, the form with the fields in it.
+pin from `rime secret list --json`, the form with the fields in it.
 
 The capability decides where the browser may go. That is the half of §13's
 model a browser can use without overstating it: the framework's rule is that a
@@ -294,12 +294,12 @@ caller does not choose where the capsule can reach.
 
 **The capsule is never given the credential's value.** The engine does not
 write it into the profile, put it in the environment, or pass it on the command
-line. `apex secret list` never prints a value, and this engine never asks for
+line. `rime secret list` never prints a value, and this engine never asks for
 one.
 
 ### And with `--present`, it can spend it (P2-012, route B)
 
-`apex browser run --capability NAME --present` adds the second half: the
+`rime browser run --capability NAME --present` adds the second half: the
 capsule's requests to that credential's pinned destination **carry the
 credential**, and the capsule still never holds it.
 
@@ -311,20 +311,20 @@ can reach. `--present` asks the runtime to authenticate it.
 summarises it because it changes a property stated above. The daemon mints a
 certificate authority and one leaf for that destination, installs the authority
 in this capsule's browser the way `--trust-ca` does, and **terminates that one
-`CONNECT`** instead of tunnelling it. The plaintext crosses to `apex-secretd`,
+`CONNECT`** instead of tunnelling it. The plaintext crosses to `rime-secretd`,
 the only process on the machine that holds credentials, which adds the
 `Authorization` header and opens its own validated TLS connection to the site.
 
 **Neither the capsule nor the agent runtime ever holds the value.** The second
-half is the design: `apex-agentd` runs as the user, so any value it held, an
-unconfined session of that user could read. `apex-secretd`'s own note states
+half is the design: `rime-agentd` runs as the user, so any value it held, an
+unconfined session of that user could read. `rime-secretd`'s own note states
 the property this rests on (no verb in its protocol returns a credential), and
 that sentence is still true.
 
 It needs a grant, like every other way of spending a credential:
 
 ```
-apex secret grant NAME browser.present --everywhere
+rime secret grant NAME browser.present --everywhere
 ```
 
 `--everywhere` and not a project, because a capsule's working directory is the
@@ -343,7 +343,7 @@ out.
 ## One private CA, for one capsule (P2-012, gap 5)
 
 ```
-apex browser run --allow intranet.corp:443 --trust-ca ~/corp-root.pem \
+rime browser run --allow intranet.corp:443 --trust-ca ~/corp-root.pem \
     --download page.png --download-to ~/results \
     -- --screenshot {capsule}/page.png https://intranet.corp/
 ```
@@ -397,7 +397,7 @@ no cause named anywhere:
 
 ### How it is measured
 
-`apexd/apex-agentd/tests/browser_ca_bind.rs` starts a private daemon and lets
+`rimed/rime-agentd/tests/browser_ca_bind.rs` starts a private daemon and lets
 the SESSION do the measuring: it copies out what it finds at
 `/etc/firefox/policies/policies.json` inside its own namespace, reads the path
 that document names, and copies that out too. The assertions are about bytes a
@@ -420,7 +420,7 @@ question that is asked once.
 daemon below that revision. It is the first guarded field on that list whose
 dropped key fails CLOSED (the capsule trusts less, never more), and it has a
 number anyway, because the closed failure is the silence above and nobody
-would see a refusal. `apex-agent-core/src/protocol.rs` argues it at
+would see a refusal. `rime-agent-core/src/protocol.rs` argues it at
 `PROTOCOL_VERSION`.
 
 ## What is not built

@@ -103,9 +103,9 @@ def summarise(offsets):
 
 # ─────────────────────────────── fixture-a: where the mechanisms ran ────────
 print('=== fixture-a: the disk both mechanisms were run against ===')
-MODE = os.environ.get('APEX_GPT_MODE', 'm2')
-FA  = os.environ.get('APEX_GPT_FA',  '/o/gptmech-fa.raw')
-MAP = os.environ.get('APEX_GPT_MAP', '/o/gptmech-fa-map.json')
+MODE = os.environ.get('RIME_GPT_MODE', 'm2')
+FA  = os.environ.get('RIME_GPT_FA',  '/o/gptmech-fa.raw')
+MAP = os.environ.get('RIME_GPT_MAP', '/o/gptmech-fa-map.json')
 FAP = '/w/fixture-a.raw'
 print(f'(mechanism under test: {MODE.upper()}; image {FA})')
 size = os.path.getsize(FAP)

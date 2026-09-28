@@ -13,9 +13,9 @@
 #
 #  WHAT IT EMITS, next to each other in --out:
 #
-#      apex-remote-<versionName>.apk          the thing you install
-#      apex-remote-<versionName>.apk.sha256   what you check it against
-#      apex-remote-<versionName>.json         what the app's updater reads
+#      rime-remote-<versionName>.apk          the thing you install
+#      rime-remote-<versionName>.apk.sha256   what you check it against
+#      rime-remote-<versionName>.json         what the app's updater reads
 #
 #  The `.json` is a contract, not a convenience: the in-app updater fetches it
 #  to decide whether a newer build exists, and verifies the APK it then
@@ -34,8 +34,8 @@
 #                                         [--tag android-vN]
 #
 #  Signing comes from the environment, exactly as `app/build.gradle.kts`
-#  expects: APEX_KEYSTORE, APEX_KEYSTORE_PASSWORD, APEX_KEY_ALIAS,
-#  APEX_KEY_PASSWORD. Nothing here prints any of them.
+#  expects: RIME_KEYSTORE, RIME_KEYSTORE_PASSWORD, RIME_KEY_ALIAS,
+#  RIME_KEY_PASSWORD. Nothing here prints any of them.
 # ─────────────────────────────────────────────────────────────────────────────
 set -uo pipefail
 
@@ -73,7 +73,7 @@ repo=$(dirname "$android")
 # Read out of the source rather than repeated here, and a refusal if the line
 # has moved — a metadata file that quietly claims the wrong protocol revision
 # would send a user to update the wrong side.
-client="$android/core/src/main/kotlin/com/apexos/remote/core/Client.kt"
+client="$android/core/src/main/kotlin/com/rimeos/remote/core/Client.kt"
 [ -f "$client" ] || fatal "$client is missing, so the protocol revision cannot be read"
 protocol=$(sed -n 's/^const val REMOTE_PROTOCOL_VERSION: Int = \([0-9]*\).*/\1/p' "$client" | head -1)
 [ -n "$protocol" ] || fatal "no REMOTE_PROTOCOL_VERSION line in $client; it was renamed or removed"
@@ -117,18 +117,18 @@ esac
 # configured". The same reasoning as the Secure Boot step in build-image.yml:
 # "Fail now rather than ship an unsigned image because a secret was pasted in
 # mangled."
-for var in APEX_KEYSTORE APEX_KEYSTORE_PASSWORD APEX_KEY_ALIAS APEX_KEY_PASSWORD; do
+for var in RIME_KEYSTORE RIME_KEYSTORE_PASSWORD RIME_KEY_ALIAS RIME_KEY_PASSWORD; do
     eval "value=\${$var:-}"
     [ -n "$value" ] || fatal "$var is not set. A release APK must be signed: an unsigned one cannot be installed, and falling back to the debug key would ship an artefact signed by a key whose password is the word 'android'."
 done
-[ -f "$APEX_KEYSTORE" ] || fatal "APEX_KEYSTORE points at '$APEX_KEYSTORE', which is not a file"
+[ -f "$RIME_KEYSTORE" ] || fatal "RIME_KEYSTORE points at '$RIME_KEYSTORE', which is not a file"
 
 # Prove the keystore really holds the alias before building. `keytool -list`
 # with the wrong password fails here in two seconds instead of failing inside
 # Gradle after the whole app has compiled.
-if ! keytool -list -keystore "$APEX_KEYSTORE" -alias "$APEX_KEY_ALIAS" \
-        -storepass:env APEX_KEYSTORE_PASSWORD >/dev/null 2>&1; then
-    fatal "the keystore did not open with the supplied password, or it has no key called '$APEX_KEY_ALIAS'. Nothing about the key material is printed here on purpose."
+if ! keytool -list -keystore "$RIME_KEYSTORE" -alias "$RIME_KEY_ALIAS" \
+        -storepass:env RIME_KEYSTORE_PASSWORD >/dev/null 2>&1; then
+    fatal "the keystore did not open with the supplied password, or it has no key called '$RIME_KEY_ALIAS'. Nothing about the key material is printed here on purpose."
 fi
 
 # ── And it must be the key we PUBLISHED ──────────────────────────────────────
@@ -137,14 +137,14 @@ fi
 # says nothing about WHICH key is in there, and a secret replaced by a
 # different key passes every other gate in this script: the build signs, the
 # signature verifies, the release publishes, and every phone that already holds
-# an APEX Remote build refuses the update for the rest of time. Android accepts
+# a Rime Remote build refuses the update for the rest of time. Android accepts
 # an update only from the key that signed what is installed, and the owner's
 # only escape is uninstalling — which destroys their pairing.
 #
 # So the keystore is compared against the fingerprint this repository
 # publishes, here in two seconds, and the APK is compared again after the build
 # against the same value. See android/signing-certificate.sha256.
-"$here/verify-signing-identity.sh" --keystore "$APEX_KEYSTORE" --alias "$APEX_KEY_ALIAS" \
+"$here/verify-signing-identity.sh" --keystore "$RIME_KEYSTORE" --alias "$RIME_KEY_ALIAS" \
     || fatal "the signing key is not the one this repository publishes (above). Refusing before the build."
 
 command -v python3 >/dev/null 2>&1 || fatal "python3 is required to write the metadata"
@@ -155,8 +155,8 @@ out=$(cd "$out" && pwd)
 # ── Build ────────────────────────────────────────────────────────────────────
 cd "$android" || fatal "cannot enter $android"
 
-export APEX_VERSION_CODE="$code"
-export APEX_VERSION_NAME="$name"
+export RIME_VERSION_CODE="$code"
+export RIME_VERSION_NAME="$name"
 
 ./gradlew --no-daemon --stacktrace :app:assembleRelease :app:bundleRelease \
     || fatal "the release build failed"
@@ -174,7 +174,7 @@ case "$built" in
 esac
 
 # ── The name a person sees in their downloads ────────────────────────────────
-apk="$out/apex-remote-$name.apk"
+apk="$out/rime-remote-$name.apk"
 cp "$built" "$apk" || fatal "cannot copy the APK to $out"
 
 # ── Who signed the file that is about to be uploaded ─────────────────────────
@@ -198,26 +198,26 @@ commit=$(git -C "$repo" rev-parse HEAD 2>/dev/null) || fatal "cannot read the re
 # Written by python rather than by hand, so a version name containing a
 # character JSON cares about produces valid JSON instead of a file the
 # updater cannot parse.
-APEX_JSON_CODE="$code" APEX_JSON_NAME="$name" APEX_JSON_TAG="$tag" \
-APEX_JSON_APK="$(basename "$apk")" APEX_JSON_SHA="$digest" APEX_JSON_SIZE="$size" \
-APEX_JSON_PROTOCOL="$protocol" APEX_JSON_COMMIT="$commit" APEX_JSON_WINDOW="$window" \
+RIME_JSON_CODE="$code" RIME_JSON_NAME="$name" RIME_JSON_TAG="$tag" \
+RIME_JSON_APK="$(basename "$apk")" RIME_JSON_SHA="$digest" RIME_JSON_SIZE="$size" \
+RIME_JSON_PROTOCOL="$protocol" RIME_JSON_COMMIT="$commit" RIME_JSON_WINDOW="$window" \
 python3 -c '
 import json, os
 print(json.dumps({
-    "versionCode": int(os.environ["APEX_JSON_CODE"]),
-    "versionName": os.environ["APEX_JSON_NAME"],
-    "tag": os.environ["APEX_JSON_TAG"],
-    "commit": os.environ["APEX_JSON_COMMIT"],
-    "apk": os.environ["APEX_JSON_APK"],
-    "sha256": os.environ["APEX_JSON_SHA"],
-    "sizeBytes": int(os.environ["APEX_JSON_SIZE"]),
-    "remoteProtocolPreferred": int(os.environ["APEX_JSON_PROTOCOL"]),
-    "remoteProtocolSupported": [int(v) for v in os.environ["APEX_JSON_WINDOW"].split(",")],
+    "versionCode": int(os.environ["RIME_JSON_CODE"]),
+    "versionName": os.environ["RIME_JSON_NAME"],
+    "tag": os.environ["RIME_JSON_TAG"],
+    "commit": os.environ["RIME_JSON_COMMIT"],
+    "apk": os.environ["RIME_JSON_APK"],
+    "sha256": os.environ["RIME_JSON_SHA"],
+    "sizeBytes": int(os.environ["RIME_JSON_SIZE"]),
+    "remoteProtocolPreferred": int(os.environ["RIME_JSON_PROTOCOL"]),
+    "remoteProtocolSupported": [int(v) for v in os.environ["RIME_JSON_WINDOW"].split(",")],
 }, indent=2))
-' > "$out/apex-remote-$name.json" || fatal "could not write the metadata"
+' > "$out/rime-remote-$name.json" || fatal "could not write the metadata"
 
 echo "apk=$apk"
 echo "sha256=$digest"
-echo "json=$out/apex-remote-$name.json"
+echo "json=$out/rime-remote-$name.json"
 echo "protocol=$protocol"
 echo "window=$window"

@@ -1,7 +1,7 @@
-// The Android client for APEX Remote.
+// The Android client for Rime Remote.
 //
-// It lives inside apex-os rather than in a repository of its own because
-// `queue.json`'s `apex-android` does not exist and creating it would mean a
+// It lives inside rime-os rather than in a repository of its own because
+// `queue.json`'s `rime-android` does not exist and creating it would mean a
 // new `main`, which the roadmap program forbids until final integration.
 // Splitting it out later costs one `git filter-repo`; splitting it out now
 // costs a rule.
@@ -28,7 +28,7 @@ dependencyResolutionManagement {
     }
 }
 
-rootProject.name = "apex-remote-android"
+rootProject.name = "rime-remote-android"
 
 // `core` is deliberately a plain Kotlin/JVM module and not an Android library.
 // The protocol, the framing and the handshake have nothing Android in them,

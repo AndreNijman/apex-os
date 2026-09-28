@@ -2,17 +2,17 @@
   "reply": "projects",
   "projects": [
     {
-      "root": "/var/home/andre/Projects/apex/apex-os",
-      "name": "apex-os",
-      "slug": "apex-os-1a2b3c4d",
+      "root": "/var/home/andre/Projects/rime/rime-os",
+      "name": "rime-os",
+      "slug": "rime-os-1a2b3c4d",
       "languages": ["container", "kotlin", "rust"],
       "last_opened": 1758499200,
       "capsule": "rust"
     },
     {
-      "root": "/var/home/andre/Projects/apex/apex-shell",
-      "name": "apex-shell",
-      "slug": "apex-shell-5e6f7a8b",
+      "root": "/var/home/andre/Projects/rime/rime-shell",
+      "name": "rime-shell",
+      "slug": "rime-shell-5e6f7a8b",
       "languages": ["qml"],
       "last_opened": 1758412800,
       "capsule": null

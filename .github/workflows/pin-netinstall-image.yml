@@ -1,8 +1,8 @@
 # Pin the image a netinstall ISO was qualified against.
 #
-# A netinstall ISO does not download `:apex`. It downloads the exact digest it
+# A netinstall ISO does not download `:rime`. It downloads the exact digest it
 # was tested with (build-live-iso.sh stamps it into the ISO), so the ISO keeps
-# installing the build it was qualified on. The moment `:apex` moves on, that
+# installing the build it was qualified on. The moment `:rime` moves on, that
 # digest is untagged — and an untagged version is exactly what a GHCR cleanup
 # policy or a `delete-package-versions` step removes. Every published ISO
 # pinned to it would then fail at the first pull, on someone else's machine.
@@ -31,7 +31,7 @@ on:
         required: true
 
 concurrency:
-  group: apex-image-publish
+  group: apex-image-publish  # rime-rename: keep (build-image.yml's group; see there)
   cancel-in-progress: false
 
 permissions:
@@ -40,7 +40,7 @@ permissions:
 
 env:
   REGISTRY: ghcr.io
-  IMAGE: ghcr.io/andrenijman/apex-os
+  IMAGE: ghcr.io/andrenijman/rime-os
 
 jobs:
   pin:
@@ -81,12 +81,15 @@ jobs:
           DIGEST: ${{ inputs.digest }}
         run: |
           set -euo pipefail
-          IDENTITY="https://github.com/${{ github.repository }}/.github/workflows/build-image.yml@refs/heads/main"
+          # This repository under either name: a build signed before the GitHub
+          # rename names apex-os, one signed after it rime-os. Anchored both  (rime-rename: keep)
+          # ends, so no other repository, workflow or ref matches.
+          IDENTITY_RE='^https://github\.com/AndreNijman/(apex|rime)-os/\.github/workflows/build-image\.yml@refs/heads/main$'  # rime-rename: keep (accepts the pre-rename repository)
           cosign verify \
-            --certificate-identity "$IDENTITY" \
+            --certificate-identity-regexp "$IDENTITY_RE" \
             --certificate-oidc-issuer https://token.actions.githubusercontent.com \
             "$IMAGE@$DIGEST" > /dev/null
-          echo "signed by $IDENTITY"
+          echo "$IMAGE@$DIGEST is signed by build-image.yml on main"
 
       - name: Tag it netinstall-<release> (write-once)
         env:

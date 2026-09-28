@@ -1,0 +1,3469 @@
+#!/usr/bin/env bash
+# ─────────────────────────────────────────────────────────────────────────────
+#  rime-install — the Rime OS install ENGINE
+#
+#  A deliberately small, transparent alternative to Anaconda. Runs in the live
+#  environment and installs the embedded Rime OS image to the disk the user
+#  chose, using `bootc install to-disk` (bootupd static bootloader — NOT
+#  grub2-mkconfig, which is what silently killed the Anaconda install; see
+#  rime-logs 40).
+#
+#  This file is an ENGINE, not a user interface. It used to double as a
+#  whiptail text UI, reached as a fallback whenever the graphical installer
+#  failed to start — and that fallback is exactly where real users kept getting
+#  stranded, so the text UI was deleted outright (not hidden behind a flag;
+#  a hidden path nobody tests is how the stranding happened). There are three
+#  ways to run this engine, and only the first two touch a disk:
+#
+#    rime-install --headless ANSWERS   driven by the graphical front end
+#                                      (rime-installer-gui, started via
+#                                      rime-installer-launch). The GUI collects
+#                                      the answers, then reads this engine's
+#                                      stdout line by line as status text.
+#                                      Final-line protocol: `RIME-INSTALL-OK`
+#                                      on total success, `RIME-INSTALL-FAILED:
+#                                      <reason>` on any failure.
+#    rime.unattended (kernel cmdline)  TEST/CI only — see the marker-file gate
+#                                      below.
+#    rime-install --check-passphrase   a one-shot, no-disk advisory check the
+#      LAYOUT [VARIANT] <<< PASSPHRASE GUI calls from the encrypt page, before
+#                                      the confirm step: can this keyboard
+#                                      layout type this passphrase at the
+#                                      unlock prompt? Prints one line, always
+#                                      exits 0. See the case arm for why.
+#
+#  Run with no arguments it refuses (exit 2) and points at the graphical
+#  installer. It never prompts for anything.
+#
+#  Design rules:
+#   1. It can NEVER fail silently. Every step goes to stdout and to
+#      /var/log/rime-install.log; on ANY error it emits the exact message + the
+#      log path and refuses to report success.
+#   2. It NEVER writes a disk the user didn't explicitly choose and confirm in
+#      the front end — and it does not trust the front end: every disk guard
+#      (live/boot device mounted, LVM/LUKS/RAID membership, ESP checks) is
+#      re-validated here before anything is written.
+# ─────────────────────────────────────────────────────────────────────────────
+set -uo pipefail
+
+# ── One engine at a time — decided before ANYTHING else runs ─────────────────
+# The graphical front end can die while an install is running: a VT switch
+# (Ctrl+Alt+F2 and back) can make cage's next display commit fail, and the
+# launcher then starts a fresh front end. The old engine keeps going — it
+# ignores SIGPIPE on purpose so a dead front end cannot strand a half-written
+# disk. Before this lock, nothing stopped the fresh front end from starting a
+# SECOND engine on the same disk, and that engine's first acts would have been
+# to truncate the running install's log (the line right below) and, in
+# preflight, unmount "leftover" targets — which would have been the live
+# install's own mounts.
+#
+# So the lock is taken here, above the log truncation, and a refusal touches
+# nothing at all: no log, no mounts, no result file, just the sentinel the
+# front end already understands. --check-passphrase is exempt: it reads no disk
+# and the encrypt page calls it while no install runs. Root only, and only
+# where flock exists, so an unprivileged `rime-install` still reaches its own
+# "must run as root" refusal instead of a misleading "already running".
+RIME_HOLDS_LOCK=0
+if [ "${1:-}" != --check-passphrase ] && [ "$(id -u)" = 0 ] && command -v flock >/dev/null 2>&1; then
+  RIME_INSTALL_LOCK="${RIME_INSTALL_LOCK:-/run/rime-install.lock}"
+  if exec 9>>"$RIME_INSTALL_LOCK"; then
+    if ! flock -n 9; then
+      echo "RIME-INSTALL-FAILED: Another Rime OS installation is already running on this machine. Nothing was touched; let it finish." >&2
+      echo "RIME-INSTALL-FAILED: Another Rime OS installation is already running on this machine. Nothing was touched; let it finish."
+      exit 1
+    fi
+    RIME_HOLDS_LOCK=1
+  fi
+fi
+
+# ── Outlive the front end's pipe ─────────────────────────────────────────────
+# The GUI reads this engine's stdout and stderr through one pipe. When the GUI
+# dies mid-install (see above), every later write to that pipe fails with EPIPE,
+# and under the ERR trap a failed bare `echo` is a die(). SIGPIPE is ignored and
+# note()/log() swallow the error, but not every write goes through them.
+# Measured in a VM: cage was killed mid-download, the install ran to the end,
+# and then its last line, `echo "RIME-INSTALL-OK"`, failed. The install was
+# recorded as FAILED on a disk that was completely installed.
+#
+# So when stdout is a pipe, it goes through a relay. The relay forwards each
+# line while the GUI is reading and drops lines once it is gone, so no write of
+# ours ever meets the broken pipe. stderr joins it when it shares the pipe, as
+# it does under the GUI. relay_flush lets the relay drain before exit, so the
+# GUI sees the last line before it sees the process end. The relay closes its
+# copy of the lock fd.
+#
+# The shared-pipe test reads /proc/$$, not /proc/self. Inside $(readlink ...)
+# /proc/self is readlink, whose fd 1 is the capture pipe, so an earlier version
+# of this comparison could never match and stderr stayed on the dead pipe. The
+# outcome is logged below ("stderr merged: yes") and the suite checks for it.
+RIME_RELAY_PID=
+RIME_STDERR_MERGED=no
+if [ "${1:-}" != --check-passphrase ] && [ -p /proc/$$/fd/1 ]; then
+  _rime_share=no
+  [ /proc/$$/fd/1 -ef /proc/$$/fd/2 ] && _rime_share=yes
+  exec 1> >(exec 9>&-; trap '' PIPE
+            while IFS= read -r _l || [ -n "$_l" ]; do printf '%s\n' "$_l" 2>/dev/null || :; done)
+  RIME_RELAY_PID=$!
+  if [ "$_rime_share" = yes ]; then exec 2>&1; RIME_STDERR_MERGED=yes; fi
+fi
+relay_flush() {
+  [ -n "$RIME_RELAY_PID" ] || return 0
+  exec 1>&- 2>&-
+  local i=0
+  # Bounded: a child that inherited the pipe keeps the relay open, and the
+  # exit must not wait on it indefinitely.
+  while kill -0 "$RIME_RELAY_PID" 2>/dev/null && [ "$i" -lt 50 ]; do sleep 0.1; i=$((i + 1)); done
+}
+trap relay_flush EXIT
+
+LOG=/var/log/rime-install.log
+: > "$LOG" 2>/dev/null || LOG=/tmp/rime-install.log
+
+# ── The result a reattaching front end reads ─────────────────────────────────
+# stdout is the front end's only channel, and a front end that died mid-install
+# never sees the ending — including the disk recovery key, which is shown on
+# screen and nowhere else on the machine. So a real run (lock held, not a dry
+# run) also records its outcome here, root-only, on /run (RAM, this boot only).
+# A fresh front end that finds the lock held follows the log until it is
+# released, then shows this; one that finds no lock but a result shows the
+# result. The previous run's result is cleared as this one starts.
+RESULT_FILE="${RIME_RESULT_FILE:-/run/rime-installer/result}"
+RESULT_ON=0
+RESULT_RECOVERY_KEY=""; RESULT_RECOVERY_SAVED=""; RESULT_RECOVERY_UNSAVED=""
+if [ "$RIME_HOLDS_LOCK" = 1 ] && [ "${RIME_DRY_RUN:-0}" != 1 ] && [ "${1:-}" != --check-passphrase ]; then
+  RESULT_ON=1
+  rm -f "$RESULT_FILE" 2>/dev/null || true
+fi
+write_result() {  # $1=ok|failed  $2=message (first line kept)
+  [ "$RESULT_ON" = 1 ] || return 0
+  # An install that recorded success stays a success. Nothing after that
+  # point writes the disk, so a later die() is a defect in reporting, not an
+  # install failure. That was how a finished install once read as "failed".
+  if [ "$1" != ok ] && [ "${RESULT_OK_WRITTEN:-0}" = 1 ]; then
+    log "not recording '$1' over a result that already says ok: ${2:-}"
+    return 0
+  fi
+  if [ "$1" = ok ]; then RESULT_OK_WRITTEN=1; fi
+  local dir tmp msg
+  dir=$(dirname "$RESULT_FILE"); msg=$(printf '%s' "${2:-}" | head -1)
+  mkdir -p "$dir" 2>/dev/null || return 0
+  tmp="$RESULT_FILE.tmp.$$"
+  ( umask 077
+    { printf 'status=%s\n' "$1"
+      printf 'message=%s\n' "$msg"
+      printf 'mode=%s\n' "${INSTALL_MODE:-}"
+      printf 'disk=%s\n' "${DISK:-}"
+      printf 'target=%s\n' "${TARGET:-}"
+      printf 'username=%s\n' "${USERNAME:-}"
+      printf 'hostname=%s\n' "${HOSTNAME:-}"
+      printf 'recovery_key=%s\n' "$RESULT_RECOVERY_KEY"
+      printf 'recovery_saved=%s\n' "$RESULT_RECOVERY_SAVED"
+      printf 'recovery_unsaved=%s\n' "$RESULT_RECOVERY_UNSAVED"
+    } > "$tmp" ) 2>/dev/null && mv -f "$tmp" "$RESULT_FILE" 2>/dev/null
+  rm -f "$tmp" 2>/dev/null
+  return 0
+}
+# Which tag this ISO installs. build-live-iso.sh stamps it; a missing stamp
+# falls back to `rime`, the one image every edition converged into. `:daily`,
+# `:gaming-mesa` and `:gaming-nvidia` survive only as aliases of the same digest.
+#
+# This MUST drive TARGET_IMAGE. It is not cosmetic: TARGET_IMAGE is written into
+# the installed system as its `bootc upgrade` origin, so a stale tag here is a
+# machine that follows an alias instead of the canonical image forever.
+EDITION="${RIME_EDITION:-$(cat /usr/lib/rime-installer/edition 2>/dev/null || echo rime)}"
+# The image to install. The live env preloads it into podman storage as this ref
+# (see the ISO build); override with RIME_IMAGE=... for testing.
+IMAGE="${RIME_IMAGE:-localhost/rime-os:${EDITION}}"
+# Update origin recorded in the INSTALLED system (so `bootc upgrade` works).
+TARGET_IMAGE="${RIME_TARGET_IMAGE:-ghcr.io/andrenijman/rime-os:${EDITION}}"
+# What a network install DOWNLOADS, as opposed to what the installed system
+# FOLLOWS. A production netinstall ISO pins this to the digest it was qualified
+# against (see the preflight below), so a push to :rime between the ISO build
+# and somebody's install cannot swap the payload under a tested ISO. The origin
+# recorded on the disk stays TARGET_IMAGE, the tag, or the machine never updates.
+NET_SOURCE_IMAGE="$TARGET_IMAGE"
+ROOTFS_TYPE="${RIME_ROOTFS:-btrfs}"
+
+# NETWORK INSTALL. The full ISO embeds the OS image twice (an OCI dir on the ISO
+# and a copy in the live env's container storage) so an install needs no network
+# at all — but that is what makes it 12 GB, which is too big to publish anywhere
+# convenient and far too big to download casually. The netinstall ISO ships the
+# live environment only, about a tenth of the size, and pulls the OS from the
+# public registry while the user watches. build-live-iso.sh writes this marker
+# when it builds one.
+NETINSTALL=0
+[ -f /usr/lib/rime-installer/netinstall ] && NETINSTALL=1
+# Overridable for tests only, the same way RIME_EDITION/RIME_IMAGE are: nothing
+# else can exercise the netinstall guards on a machine that booted the offline
+# ISO, and those guards run before anything is written.
+[ -n "${RIME_NETINSTALL:-}" ] && NETINSTALL="$RIME_NETINSTALL"
+
+# ── Where a network install stages the image, and why it is not RAM ──────────
+#
+# `podman pull` writes into the live environment's containers-storage, which on
+# a booted ISO is the RAM-backed overlay. That is ~12 GB of decompressed layers
+# in RAM. bootc then re-tars every layer into the container's /var/tmp — also
+# the RAM overlay — for another several GB. A 16 GB laptop dies; an 8 GB one
+# never had a chance. The offline ISO never had this problem because it installs
+# straight from the OCI directory on the ISO (`--source-imgref oci:…`), which
+# streams COMPRESSED blobs and never decompresses to a temporary tree.
+#
+# So a network install now does the same thing: skopeo fetches the compressed
+# blobs into an OCI directory ON A REAL DISK, and bootc installs from that. The
+# only thing still needing containers-storage is the container bootc itself runs
+# in, and that store is pointed at the same disk.
+#
+# Sizes, measured 2026-09-25 with the live env's own skopeo 1.22.2 against
+# ghcr.io/andrenijman/rime-os@sha256:a754443e… (123 layers): 6.5 GB for the OCI
+# directory, 15.0 GB for the runner's store, and — because the runner copy now
+# stages on this disk too (SKOPEO_TMP, below) — a transient copy of every
+# compressed blob while that store is written. Peak: 27.7 GB, 27.4 GiB.
+# The earlier figure of 22 was sized for a 5.8 GB / 12 GB image and had no
+# headroom left at all; 32 GiB is the measured peak plus ~17%. NEED_SCRATCH_GB
+# stays deliberately generous — running out halfway through leaves a
+# half-written disk, which is the worst outcome here.
+NEED_SCRATCH_GB="${RIME_NEED_SCRATCH_GB:-32}"
+
+# A filesystem that can hold the staged image: writable, real (not a RAM
+# overlay), big enough, and NOT on the disk we are about to repartition.
+#
+# `df -P` output is used rather than findmnt because the live env is minimal and
+# df is already a hard dependency of this script.
+scratch_fs_ok() {
+  local dir="$1" avail_gb src fstype
+  [ -d "$dir" ] || return 1
+  [ -w "$dir" ] || return 1
+  src="$(df -P "$dir" 2>/dev/null | awk 'NR==2{print $1}')"
+  fstype="$(df -PT "$dir" 2>/dev/null | awk 'NR==2{print $2}')"
+  case "$fstype" in
+    tmpfs|ramfs|devtmpfs|overlay|squashfs|iso9660|"") return 1 ;;
+  esac
+  # Never stage onto the disk that is about to be wiped.
+  case "$src" in "${DISK:-__none__}"*) return 1 ;; esac
+  avail_gb="$(df -PBG "$dir" 2>/dev/null | awk 'NR==2{gsub(/G/,"",$4); print $4+0}')"
+  [ "${avail_gb:-0}" -ge "$NEED_SCRATCH_GB" ]
+}
+
+# ── When there is no scratch volume at all: stage INSIDE the target root ─────
+#
+# The rules above are right about WHERE NOT to stage and wrong about what to do
+# when nothing qualifies. On the commonest machine this installer will ever meet
+# — a laptop with ONE internal disk, booted from a plain single-partition USB —
+# every candidate fails by construction: the live session automounts nothing
+# under /run/media because the stick has no second partition, /mnt and /media
+# are empty, and /var/tmp IS the RAM overlay this whole section exists to
+# refuse. The install then aborted, telling the user to fetch "the full offline
+# ISO" — which has never been published. That is a dead end, not a refusal.
+#
+# There is in fact a disk with room on that machine: the one about to be
+# installed to. The v1.0.0 installer that shipped on the published ISO staged
+# there and installed successfully on real hardware. stage_setup() below is that
+# design; pick_scratch says when to use it by answering with the sentinel
+# STAGE_TARGET instead of a directory.
+#
+# This is a FALLBACK and not the new default. A separate volume is still chosen
+# first whenever one exists, because staging on the target means the target is
+# partitioned and formatted BEFORE the download — so a download that fails
+# leaves an erased disk, where the external-scratch path leaves it untouched.
+# Trading that guarantee away is worth it only when the alternative is refusing
+# to install at all.
+STAGE_TARGET='@target'
+
+# Keep this much of the target free for the OS being installed. The staged store
+# and the install live on the same filesystem at the same time: ~28 GB at peak
+# plus the deployed system, and the blobs only go away at stage_teardown.
+STAGE_RESERVE_GB="${RIME_STAGE_RESERVE_GB:-15}"
+
+# Returns a usable scratch DIRECTORY on stdout, or the sentinel STAGE_TARGET
+# when there is none and the target root must be used instead. Returns non-zero
+# ONLY when the user named a staging directory explicitly and it is unusable —
+# a bad override is an error to report, never a silent fallback.
+pick_scratch() {
+  local c
+  if [ -n "${RIME_OCI_SCRATCH:-}" ]; then
+    mkdir -p "$RIME_OCI_SCRATCH" 2>/dev/null || true
+    scratch_fs_ok "$RIME_OCI_SCRATCH" && { printf '%s\n' "$RIME_OCI_SCRATCH"; return 0; }
+    return 1
+  fi
+  # Any mounted, writable, real filesystem with room. /run/media/* is where the
+  # live session automounts a second partition on the USB stick.
+  #
+  # RIME_SCRATCH_CANDIDATES is a TEST SEAM, in the same spirit as
+  # RIME_SYSFS_BLOCK above: it replaces the list of places to look, so a suite
+  # can present the single-disk USB-boot machine (nothing qualifies) and the
+  # machine with a spare drive (something does) without inventing filesystems.
+  # It cannot weaken scratch_fs_ok — every candidate still goes through it, so
+  # a tmpfs named here is refused exactly as /var/tmp on a live ISO is.
+  for c in ${RIME_SCRATCH_CANDIDATES:-/run/media/*/* /run/media/* /mnt/* /media/* /var/tmp}; do
+    [ -d "$c" ] || continue
+    if scratch_fs_ok "$c"; then printf '%s\n' "${c%/}/rime-install-scratch"; return 0; fi
+  done
+  printf '%s\n' "${STAGE_TARGET:-@target}"
+  return 0
+}
+
+# How big a staging image the target root can afford, in KB, or non-zero if it
+# cannot afford one at all. Split out from stage_setup because it is the ONLY
+# part of staging-on-target that can be exercised without a block device, and
+# because the same rule has to be applied twice: once against the raw device
+# size BEFORE the disk is touched (so a too-small disk is refused while it is
+# still intact), and once against the real free space after mkfs.
+#
+# The image is SPARSE, so this is a ceiling and not an allocation. The reserve
+# is what guarantees the OS still fits beside it.
+stage_budget_kb() {   # $1 = available KB on the target root
+  local avail_kb="${1:-0}" stage_kb
+  case "$avail_kb" in ''|*[!0-9]*) return 1 ;; esac
+  stage_kb=$(( avail_kb - STAGE_RESERVE_GB * 1024 * 1024 ))
+  [ "$stage_kb" -ge $(( NEED_SCRATCH_GB * 1024 * 1024 )) ] || return 1
+  printf '%s\n' "$stage_kb"
+}
+
+# ── Staging on the target root, as the shipped v1.0.0 installer did it ───────
+# Three details here are not obvious and each one cost a measured install to
+# find. They are recorded so nobody simplifies them back out.
+#
+# 1. The store must NOT be visible inside the target root. `bootc install
+#    to-filesystem` checks the target is empty, and its own error names the only
+#    exception: "Requiring directory contains only mount points". A plain
+#    directory of image layers fails that check. So the backing file is created
+#    on the target filesystem (the only place with room), handed to a loop
+#    device, and then UNLINKED — the inode stays alive for as long as the loop
+#    device holds it, the directory entry is gone, the target root is pristine,
+#    and the space is released automatically at losetup -d.
+#
+# 2. The staging filesystem is xfs, not ext4. The store is hundreds of thousands
+#    of small files and ext4 fixes its inode count at mkfs time: measured with
+#    `-T largefile4`, the pull died with "mkdir …: no space left on device" 5 GB
+#    in, with 35 GB of free BLOCKS. It had run out of inodes. xfs allocates them
+#    dynamically. (xfsprogs is in Containerfile.installer's package list.)
+#
+# 3. TMPDIR has to move too, and this is the one that made the first real test
+#    of the staging fix fail with the SAME out-of-space error it was written to
+#    remove — with 788 GB free in the store. containers/image does not download
+#    a blob straight into its destination; it writes each one to a scratch file
+#    in $TMPDIR, falling back to /var/tmp, which on the live ISO is the RAM
+#    overlay. Proven directly by pointing TMPDIR at a 200 MB tmpfs with a 100 GB
+#    store: `writing blob: storing blob to file "…/4": no space left on device`.
+#
+# The mount point is OUTSIDE $TROOT on purpose — see detail 1.
+STAGE_MNT=""; STAGE_LOOP=""; STAGE_TMPDIR=""
+STAGE_DIR=/run/rime-stage
+# Where the neighbour's \EFI\fedora boot files are backed up on a shared ESP.
+# It kept its APEX name through the rebrand, on purpose: an earlier APEX (rime-rename: keep)
+# install on that ESP already put the TRUE originals there, and the `cp -n`
+# that fills it is what keeps a later install from overwriting them with files
+# an install has already rewritten. A new name would start an empty directory
+# and "back up" the rewritten files as the originals.
+ESP_BACKUP_DIR=EFI/fedora/apex-backup  # rime-rename: keep (an ESP path earlier installs wrote)
+# --skip-finalize, and ONLY when staging on the target. bootc finishes a
+# to-filesystem install by remounting the target read-only, and the staging loop
+# device holds a WRITABLE fd on that same filesystem — so the remount fails with
+# EBUSY and a completely successful install reports as a failure. That is
+# measured, not deduced: it is what made the first three staged installs of the
+# v1.0.0 installer look broken. Skipping it costs nothing here (the engine
+# unmounts the target seconds later) and it also skips an fstrim that has no
+# business running mid-install. The paths that do not stage on the target keep
+# finalizing exactly as they do today.
+STAGE_BOOTC_ARGS=()
+stage_setup() {   # $1 = the already-mounted target root
+  local troot="$1" avail_kb stage_kb img
+  avail_kb=$(df -Pk "$troot" 2>/dev/null | awk 'NR==2{print $4}')
+  stage_kb=$(stage_budget_kb "${avail_kb:-0}") || {
+    echo "the target has only $(( ${avail_kb:-0} / 1024 / 1024 )) GB free; staging the download needs ${NEED_SCRATCH_GB} GB beside the ${STAGE_RESERVE_GB} GB the system itself needs" | tee -a "$LOG"
+    return 1; }
+  log "staging: ${stage_kb}KB sparse ceiling on the target (of ${avail_kb}KB free)"
+  img="$troot/.rime-stage.img"
+  truncate -s "${stage_kb}K" "$img" 2>>"$LOG" || return 1
+  STAGE_LOOP=$(losetup -f --show "$img" 2>>"$LOG") || return 1
+  # See detail 1: the directory entry goes, the inode stays.
+  rm -f "$img" 2>>"$LOG" || return 1
+  mkfs.xfs -q -f "$STAGE_LOOP" >>"$LOG" 2>&1 || return 1
+  mkdir -p "$STAGE_DIR" 2>>"$LOG" || return 1
+  # A staging filesystem left mounted here by a run that was killed outright
+  # would otherwise be silently stacked under this one, and then never released.
+  umount -R "$STAGE_DIR" 2>/dev/null || true
+  mount "$STAGE_LOOP" "$STAGE_DIR" >>"$LOG" 2>&1 || return 1
+  STAGE_MNT="$STAGE_DIR"
+  mkdir -p "$STAGE_MNT/tmp" 2>>"$LOG" || return 1
+  STAGE_TMPDIR="$STAGE_MNT/tmp"
+  STAGE_BOOTC_ARGS=(--skip-finalize)
+  # Logged because every out-of-space failure this design has had was about
+  # WHERE something was, and none of the logs said.
+  log "staging: loop=$STAGE_LOOP mnt=$STAGE_MNT tmpdir=$STAGE_TMPDIR"
+  log "staging: $(df -Pk "$STAGE_MNT" 2>/dev/null | awk 'NR==2{print $4" KB free on the staging fs"}'), $(df -Pk /var/tmp 2>/dev/null | awk 'NR==2{print $4" KB free on /var/tmp (unused: TMPDIR is redirected)"}')"
+  return 0
+}
+
+# Idempotent, and called from unmount_target as well as the success path: a loop
+# device still attached to a (deleted) file on the target filesystem keeps that
+# filesystem busy, so leaving one behind is what would stop the NEXT attempt
+# from being able to unmount the target at all.
+stage_teardown() {
+  [ -n "$STAGE_MNT$STAGE_LOOP" ] || return 0
+  # Lazy umount as a fallback: podman may still hold overlay mounts under the
+  # store at the moment a failure path runs.
+  [ -n "$STAGE_MNT" ] && { umount -R "$STAGE_MNT" 2>/dev/null || umount -l "$STAGE_MNT" 2>/dev/null || true; }
+  [ -n "$STAGE_LOOP" ] && { losetup -d "$STAGE_LOOP" 2>/dev/null || true; }
+  # netinstall_fetch_into exported TMPDIR into the staging filesystem, which has
+  # just gone away. Leaving it set makes the very next `mktemp -d` — the one the
+  # account step uses to mount the freshly installed root — fail with "No such
+  # file or directory", i.e. a perfect install with no account on it.
+  unset TMPDIR
+  STAGE_MNT=""; STAGE_LOOP=""; STAGE_TMPDIR=""; STAGE_BOOTC_ARGS=()
+  return 0
+}
+
+# ── The download itself, wherever it is going ────────────────────────────────
+# One function for both staging homes, so the external-scratch path and the
+# on-target fallback cannot drift apart. It sets OCI_SCRATCH, STORE_SCRATCH,
+# SRC_VOL, SRC_ARGS and PODMAN_STORE, and dies on failure.
+#
+# The only thing that differs between the two callers is what is TRUE about the
+# disk when it fails, and the messages say which — a "nothing has been erased"
+# on the path where the disk was erased first would be a lie in the frightening
+# direction.
+# The registry answered, and the answer was that this ISO's pinned build is not
+# there. Distinct from "unreachable": the network is fine, retrying will not
+# help, and the right advice is a newer ISO. Only meaningful for a pinned
+# digest; pin-netinstall-image.yml exists so this should never happen.
+pinned_image_gone() {
+  [ "$NET_SOURCE_IMAGE" != "$TARGET_IMAGE" ] || return 1
+  tail -n 60 "$LOG" 2>/dev/null | grep -qi 'manifest unknown'
+}
+pinned_image_gone_msg() {  # $1 = what is true about the disk
+  printf '%s\n' "This installer's build of Rime OS is no longer on the registry:
+$NET_SOURCE_IMAGE
+
+$1
+
+The registry answered, so the network is fine — but the exact build this ISO
+was tested with has been removed, and retrying will not bring it back.
+Download the newest installer from the Rime OS releases page; it pins a
+build that is still published."
+}
+
+netinstall_fetch_into() {   # $1 = a directory on a real filesystem with room
+  local scratch="$1" attempt _wait pull_ok _state _tmp
+  if [ "${STAGE_ON_TARGET:-0}" = 1 ]; then
+    _state="$TARGET has already been erased — on this machine the download and the
+install are the same step. Start the installer again to redo the whole install;
+a second run on the same disk is safe."
+  else
+    _state="Nothing has been erased — your disks are untouched."
+  fi
+  OCI_SCRATCH="$scratch/oci"
+  STORE_SCRATCH="$scratch/store"
+  _tmp="$scratch/tmp"
+  mkdir -p "$OCI_SCRATCH" "$STORE_SCRATCH" "$_tmp" \
+    || die "Could not create the staging directory at $scratch.
+
+$_state"
+  # TMPDIR, for the reason recorded at stage_setup detail 3: containers/image
+  # writes every blob to a scratch file under $TMPDIR before it reaches its
+  # destination, and the default /var/tmp is the RAM overlay on a live ISO. That
+  # is the same RAM write this whole section exists to remove, and it applies to
+  # BOTH staging homes — it is not specific to the on-target fallback.
+  export TMPDIR="$_tmp"
+  # …and TMPDIR alone is NOT enough for the containers-storage copy below.
+  # skopeo 1.22 takes that destination's big temporary files from
+  # containers.conf's image_copy_tmp_dir, which defaults to /var/tmp and wins
+  # over $TMPDIR. Measured in a VM booted from the netinstall ISO: the download
+  # stayed on the staging disk, then "Preparing the installer runtime" wrote
+  # /var/tmp/container_images_storage*/ into the 5.3 GB live overlay, filled it
+  # 40 s in, and died with no error in the log — the log lives on the same full
+  # filesystem. The host-side suites never saw it: this laptop's /var/tmp has
+  # hundreds of GB. So every skopeo copy here names its temp dir explicitly.
+  SKOPEO_TMP=(--tmpdir "$_tmp")
+  note "Staging to $scratch (needs ~${NEED_SCRATCH_GB} GB)."
+  log "scratch: $scratch ($(df -PBG "$scratch" 2>/dev/null | awk 'NR==2{print $4}') free, TMPDIR=$TMPDIR)"
+
+  note "Downloading Rime OS from $NET_SOURCE_IMAGE — this is the slow part."
+  if [ -f "$OCI_SCRATCH/index.json" ]; then
+    note "Already downloaded."
+    pull_ok=1
+  else
+    pull_ok=0
+    # skopeo, not `podman pull`: it writes the COMPRESSED blobs straight into an
+    # OCI directory and never decompresses them into containers-storage. That is
+    # the whole point — it is the difference between ~5.8 GB on disk and ~12 GB
+    # in RAM. It also fetches layers in parallel by default.
+    #
+    # Back off between attempts. The first version retried with NO delay at all,
+    # so all three attempts completed inside one second — which is one attempt
+    # wearing a disguise, and gives a flapping link or a slow DNS server no
+    # chance whatsoever to come good.
+    for attempt in 1 2 3; do
+      if [ "$attempt" != 1 ]; then
+        _wait=$(( attempt * 5 ))
+        note "Download failed — waiting ${_wait}s, then retrying (attempt $attempt of 3)…"
+        sleep "$_wait"
+      fi
+      if skopeo "${SKOPEO_TMP[@]}" copy --retry-times 3 \
+           "docker://$NET_SOURCE_IMAGE" "oci:$OCI_SCRATCH:rime" 2>&1 | tee -a "$LOG"; then
+        pull_ok=1; break
+      fi
+    done
+    if [ "$pull_ok" != 1 ] && pinned_image_gone; then
+      die "$(pinned_image_gone_msg "$_state")"
+    fi
+    [ "$pull_ok" = 1 ] || die "Could not download Rime OS from $NET_SOURCE_IMAGE after 3 attempts.
+
+$_state
+
+The network looked usable when this started, so the download itself failed:
+the connection may have dropped, or the registry may be unreachable from here.
+The exact error is above and in $LOG."
+  fi
+  note "Download complete."
+
+  # ── Install FROM the OCI directory, exactly as the offline ISO does ────────
+  # bootc reads compressed blobs straight out of this tree, so nothing is
+  # re-tarred into the container's /var/tmp — the second of the two RAM writes
+  # this path used to make.
+  SRC_VOL=(-v "$OCI_SCRATCH":/run/rime-oci:ro)
+  SRC_ARGS=(--source-imgref "oci:/run/rime-oci" --target-imgref "$TARGET_IMAGE")
+
+  # bootc still has to RUN from somewhere, and the netinstall live environment
+  # has no bootc of its own. Materialise the runner from the OCI directory we
+  # already have — a local decompress, no second download — into a store on the
+  # SAME scratch filesystem, so containers-storage never touches the RAM overlay.
+  note "Preparing the installer runtime…"
+  if ! podman --root "$STORE_SCRATCH/graph" --runroot "$STORE_SCRATCH/run" \
+         image exists "$TARGET_IMAGE" 2>/dev/null; then
+    skopeo "${SKOPEO_TMP[@]}" copy "oci:$OCI_SCRATCH:rime" \
+      "containers-storage:[overlay@$STORE_SCRATCH/graph+$STORE_SCRATCH/run]$TARGET_IMAGE" \
+      2>&1 | tee -a "$LOG" \
+      || die "Could not prepare the installer runtime from the downloaded image.
+
+$_state
+The exact error is above and in $LOG."
+  fi
+  # Every later `podman` call in this script must use that store, not the
+  # RAM-backed default one.
+  PODMAN_STORE=(--root "$STORE_SCRATCH/graph" --runroot "$STORE_SCRATCH/run")
+  return 0
+}
+
+# On the live ISO the image is ALSO present as an OCI directory (ISO /container,
+# mounted at /run/initramfs/live/container). Prefer it as the bootc install
+# source: the oci transport streams blobs straight off the read-only ISO,
+# whereas containers-storage re-tars every layer into the container's /var/tmp
+# — which lives in the RAM-backed live overlay and overflows on 4G machines.
+# Absent (e.g. plain-host testing) we fall back to the embedded storage image.
+OCI_DIR="${RIME_OCI_DIR:-/run/initramfs/live/container}"
+SRC_VOL=(); SRC_ARGS=()
+# Extra `podman` flags that redirect containers-storage onto the staging disk.
+# Empty everywhere except a network install — the offline ISO's store is on the
+# ISO itself and is already fine.
+PODMAN_STORE=()
+if [ -d "$OCI_DIR" ]; then
+  SRC_VOL=(-v "$OCI_DIR":/run/rime-oci:ro)
+  # --target-imgref is what the INSTALLED system records as its update origin.
+  # It must be the real registry, not the live env's local tag: with
+  # `localhost/rime-os:daily` baked in, `bootc upgrade` fails permanently on the
+  # installed machine (nothing to pull from).
+  SRC_ARGS=(--source-imgref "oci:/run/rime-oci" --target-imgref "$TARGET_IMAGE")
+fi
+
+# `|| true`: a full RAM disk (or an unwritable log) must never trip the ERR trap
+# and turn a fine install into a reported failure.
+log()  { printf '%s %s\n' "$(date +%T)" "$*" >>"$LOG" 2>/dev/null || true; }
+[ -z "$RIME_RELAY_PID" ] || log "front-end pipe: stdout relayed via pid $RIME_RELAY_PID; stderr merged: $RIME_STDERR_MERGED"
+have() { command -v "$1" >/dev/null 2>&1; }
+
+# ── The firmware is not part of the target disk ─────────────────────────────
+#
+# On real hardware `bootc install` MUST write UEFI NVRAM: bootupd runs
+# `efibootmgr --create` and the entry it makes is how the machine starts. That
+# is the whole point of an installer, and nothing here interferes with it.
+#
+# A LOOPBACK target is a different thing wearing the same interface. The "disk"
+# is a file, and the machine that would boot it is not the machine running the
+# installer. On 2026-09-20 a loopback `bootc install` on a developer laptop ran
+# with the host's /sys/firmware/efi/efivars mounted read-write; bootupd deleted
+# that laptop's real `Rime OS` boot entry and recreated it against the loop
+# device's ESP — PARTUUID ee26313c-…, which exists on no physical disk — and
+# the laptop would not boot the next morning. It was repaired from a live USB.
+# See BOOT-BREAKAGE-2026-09-20.md and AGENTS.md "Touching a machine's boot
+# path".
+#
+# So when, and ONLY when, the target is loop-backed, two things change.
+#
+# 1. `bootc install --generic-image`. This is THE prevention. bootc's own
+#    documentation for it: "All bootloader types will be installed - Changes to
+#    the system firmware will be skipped." The ESP still gets a complete
+#    bootloader, including the removable-media path, so the image boots on the
+#    machine it is built for; the firmware of the machine building it is not
+#    touched.
+#
+# 2. An empty tmpfs over /sys/firmware/efi/efivars in the container. This is
+#    defence in depth and NOTHING MORE, and saying so matters, because the
+#    first version of this code shipped the mask alone and believed it was the
+#    fix. MEASURED 2026-09-20, 22:12: with the mask applied and logged, a
+#    loopback `bootc install to-filesystem` still ran
+#
+#        efibootmgr -b 0000 -B
+#        efibootmgr --create --disk /dev/loop1 --part 1 ...
+#
+#    against the host, and tests/lab/nvram-guard caught it. The reason is
+#    `--pid=host`, which bootc requires: it re-enters the host's MOUNT
+#    namespace for the bootloader step, so the container's own mounts are not
+#    where bootupd is looking. Checked rather than deduced — an unmasked
+#    privileged container on this machine shows ZERO entries under
+#    /sys/firmware/efi/efivars, so the write cannot have gone through the
+#    container's namespace at all.
+#
+#    The mask stays because it costs nothing and covers any future step that
+#    does stay inside the container. It is not the guard.
+#
+# The test is the SYSFS BACKING FILE, never the device name. `/dev/loop1` can
+# be renamed or symlinked; `/sys/class/block/<name>/loop/backing_file` exists
+# if and only if the kernel itself considers the device a loop device, and that
+# is the condition that matters.
+#
+# RIME_SYSFS_BLOCK is a TEST SEAM and it only ever ADDS loop-ness. The real
+# /sys/class/block is consulted first and unconditionally; the override can
+# make a device look loop-backed that is not, and can never make a loop device
+# look real. That direction is deliberate: the failure mode of a wrong "yes" is
+# a disk image with no firmware entry, which the next boot of the machine that
+# owns the image fixes; the failure mode of a wrong "no" is the incident above.
+NVRAM_ARGS=()
+NVRAM_BOOTC_ARGS=()
+disk_is_loopback() {  # $1=block device path — 0 if the kernel calls it a loop
+  local d base
+  d=$(readlink -f "${1:-}" 2>/dev/null || true)
+  [ -n "$d" ] || return 1
+  case "$d" in /dev/*) : ;; *) return 1 ;; esac
+  base=${d#/dev/}
+  base=${base//\//!}
+  [ -e "/sys/class/block/$base/loop/backing_file" ] && return 0
+  [ -n "${RIME_SYSFS_BLOCK:-}" ] \
+    && [ -e "$RIME_SYSFS_BLOCK/$base/loop/backing_file" ] && return 0
+  return 1
+}
+# Sets NVRAM_ARGS for the install about to run. Call it immediately before the
+# podman invocation, with the TARGET DISK — not a partition of it.
+set_nvram_args_for() {  # $1=target block device
+  local base backing
+  NVRAM_ARGS=()
+  NVRAM_BOOTC_ARGS=()
+  if disk_is_loopback "$1"; then
+    NVRAM_ARGS=(--tmpfs /sys/firmware/efi/efivars)
+    NVRAM_BOOTC_ARGS=(--generic-image)
+    base=$(basename "$(readlink -f "$1")")
+    backing=$(cat "/sys/class/block/$base/loop/backing_file" 2>/dev/null \
+             || cat "${RIME_SYSFS_BLOCK:-/nonexistent}/$base/loop/backing_file" 2>/dev/null \
+             || echo unknown)
+    log "nvram: $1 is loop-backed ($backing) — bootc --generic-image, plus a tmpfs over /sys/firmware/efi/efivars"
+    note "Loopback target: the firmware step is skipped and this machine's UEFI boot entries will not be touched."
+  else
+    log "nvram: $1 is a real block device — bootc writes a boot entry, as a real install must"
+  fi
+}
+
+# note(): the engine's ONE user-facing output primitive — stdout plus the log.
+# stdout is read line by line by the graphical front end (which shows the last
+# line as its status text), or lands on the serial console in CI, so everything
+# worth telling the user goes through here. This replaced the whiptail
+# msg()/yn() dialogs when the text UI was deleted; newt/whiptail is no longer
+# in the installer image, so any surviving dialog call would be a
+# command-not-found (127) — under the ERR trap, a reported FAILURE on a machine
+# that may in fact be installed fine.
+# `|| true` on the printf: note() MUST NOT propagate a non-zero status. A
+# closed stdout (front end died mid-run) is not an install failure, and note()
+# is used as a non-final command in contexts the ERR trap does not exempt —
+# the same crash class msg() once shipped ("Unexpected error on line 223").
+# SECRETS: note() logs its argument verbatim — never pass it (or log) P1/MOKPW.
+note() { printf '%s\n' "$*" || true; log "$*"; }
+
+# Progress state — die() uses these to tell the TRUTH about what happened to the
+# disk. Before this, die() always claimed "nothing further was written", even
+# when called AFTER `bootc install --wipe` had already erased the target.
+WROTE_DISK=0      # 1 once bootc install has begun writing
+INSTALLED_OK=0    # 1 once bootc install returned success
+
+# ── Full-disk encryption state ───────────────────────────────────────────────
+# Declared up here, not where they are first assigned, because die() and
+# unmount_target() BOTH read them and both can run long before the encrypted
+# path does. An unset LUKS_MAPPER under `set -u` inside the cleanup path would
+# turn a recoverable failure into an unexplained crash in the cleanup itself.
+LUKS_PART=""      # the partition carrying the LUKS2 header
+LUKS_MAPPER=""    # the /dev/mapper name, once the volume is open
+LUKS_UUID=""      # the LUKS2 header UUID — what rd.luks.uuid= names
+BOOT_PART=""      # the SEPARATE, UNENCRYPTED /boot partition
+ESP_PART=""       # the ESP this engine created (encrypted whole-disk mode)
+RECOVERY_FILE=""  # 0600 file under /run holding the recovery key. SECRET.
+RECOVERY_KEY=""   # the key itself, once read back. SECRET — never log()ged.
+LUKS_TPM_TOKEN=0  # 1 once a systemd-tpm2 token is OBSERVED in the header
+# Where the enrolment helper lives INSIDE the Rime OS image being installed.
+# It is not in the live environment: enrolment policy belongs to the system
+# being installed, so the helper ships with it and is run out of it.
+LUKS_ENROLL_PATH="/usr/libexec/rime-luks-enroll"
+# The console (kbd) keymap the installed machine will load — NOT the XKB layout
+# name. See console_keymap_for() for why they are different things and why
+# confusing them is a stranding bug on an encrypted machine.
+CONSOLE_KEYMAP=""
+# The deployment directory create_user_in() currently has /proc and the
+# stateroot var mounted under. Read by unmount_target() so a failure anywhere
+# in that function still releases them: a mount left under the deployment keeps
+# the filesystem busy, which makes `umount` and `cryptsetup close` fail and the
+# NEXT install run refuse the disk as "in use" — the retry-is-impossible shape
+# this file already guards against elsewhere.
+DEPLOY_MNT=""
+
+# secret_line(): stdout ONLY, never the log.
+#
+# note() writes its argument to /var/log/rime-install.log, and save_log_to_esp()
+# copies that log onto the live USB stick in plain text on every failure. The
+# disk recovery key must reach the USER and must not be left lying in a log
+# file, so it travels through here and through the deliberate, 0600 copy
+# surface_recovery_key() writes — nowhere else.
+secret_line() { printf '%s\n' "$*" || true; }
+
+# Kernel cmdline, read EARLY: it carries the CI-only rime.unattended flag and
+# the rime.* keys that mode installs from.
+CMD=$(cat /proc/cmdline 2>/dev/null || true)
+kv()    { echo "$CMD" | tr ' ' '\n' | sed -n "s/^$1=//p" | head -1; }
+kvall() { echo "$CMD" | tr ' ' '\n' | sed -n "s/^$1=//p"; }
+UNATTENDED=0
+# Unattended install is a TEST/CI-only feature. It requires BOTH the kernel flag
+# AND a marker file baked ONLY into test builds. On the production USB the marker
+# is absent, so `rime.unattended` (even hand-added at the boot menu) is IGNORED
+# and the engine, run without --headless, refuses to start at all — no
+# accidental disk wipe.
+if echo "$CMD" | grep -qw rime.unattended && [ -f /usr/share/rime-installer/allow-unattended ]; then
+  UNATTENDED=1
+fi
+
+# ── Console quieting ────────────────────────────────────────────────────────
+# Historically this existed because the whiptail UI drew directly on the
+# console and kernel printk landed ON TOP of it — reproduced on an Acer Aspire,
+# where audit records and serial-getty churn scribbled over the welcome box.
+# The text UI is gone, but the quieting is kept on purpose: on the
+# catastrophic-failure path (front end dead, engine output landing on the
+# console) printk churn would bury the failure text the user needs to read.
+#
+# The kernel cmdline carries loglevel=3 audit=0, but relying on that alone means
+# one wrong karg silently makes the failure text unreadable again. Belt and
+# braces: drop the console log level while the engine runs, and put it back on
+# every exit path so a post-mortem or a dropped shell still shows kernel output.
+PRINTK_SAVED=""
+quiet_console() {
+  [ -w /proc/sys/kernel/printk ] || return 0
+  PRINTK_SAVED="$(cat /proc/sys/kernel/printk 2>/dev/null || true)"
+  # 1 = KERN_ALERT and above only; panics still reach the screen.
+  echo 1 > /proc/sys/kernel/printk 2>/dev/null || true
+  return 0
+}
+restore_console() {
+  [ -n "$PRINTK_SAVED" ] || return 0
+  [ -w /proc/sys/kernel/printk ] || return 0
+  printf '%s\n' "$PRINTK_SAVED" > /proc/sys/kernel/printk 2>/dev/null || true
+  return 0
+}
+
+# Release anything WE mounted. Without this, a failure or Ctrl+C left
+# /run/rime-target — and the shared ESP mounted under it — in place, so the next
+# run refused with "currently mounted", stranding the user on a half-installed
+# disk with no way forward. Deepest mount first. Safe to call at any time.
+TROOT=/run/rime-target
+unmount_target() {
+  # FIRST, always: the staging loop device is backed by a deleted file on the
+  # target filesystem, so nothing under $TROOT can be released while it is still
+  # attached. A leftover loop is exactly the kind of debris that makes the next
+  # run refuse with "currently mounted" — the stranding this function prevents.
+  stage_teardown
+  umount "$TROOT/boot/efi" 2>/dev/null || true
+  umount "$TROOT"          2>/dev/null || true
+  [ -n "${DEPLOY_MNT:-}" ] && { umount "$DEPLOY_MNT/proc" 2>/dev/null || true; umount "$DEPLOY_MNT/var" 2>/dev/null || true; }
+  [ -n "${MNT:-}" ] && { umount "$MNT/boot/efi" 2>/dev/null || true; umount "$MNT/boot" 2>/dev/null || true; umount "$MNT" 2>/dev/null || true; }
+  # A LUKS mapper left open holds the partition busy, so the NEXT run fails at
+  # `cryptsetup luksFormat` with "Device or resource busy" — i.e. the previous
+  # failure is what makes the retry impossible. That is precisely the stranding
+  # this function exists to prevent, and it is why closing belongs here and not
+  # only on the success path.
+  if [ -n "${LUKS_MAPPER:-}" ] && [ -e "/dev/mapper/$LUKS_MAPPER" ]; then
+    umount "$TROOT/boot/efi" 2>/dev/null || true
+    umount "$TROOT/boot"     2>/dev/null || true
+    umount "$TROOT"          2>/dev/null || true
+    cryptsetup close "$LUKS_MAPPER" 2>/dev/null || true
+  fi
+  return 0
+}
+
+# fail-loud: the exact reason, the TRUE state of the disk, the last log lines,
+# and how to get a shell. Never claims "nothing was written" once it has been.
+die() {
+  restore_console
+  log "FATAL: $1"
+  write_result failed "$1"
+  # Always release our own mounts first: leaving /run/rime-target (and the shared
+  # ESP under it) mounted makes the very next run refuse with "currently
+  # mounted", stranding the user on a half-installed disk.
+  unmount_target
+  local tail_txt state what others
+  tail_txt=$(tail -n 15 "$LOG" 2>/dev/null || true)
+  # Describe what WE actually targeted. Hard-coding $DISK told a partition-mode
+  # user "/dev/nvme0n1 WAS already erased" — i.e. that their whole disk (and the
+  # other OS on it) was gone — directly contradicting the specific message above
+  # it, and in the more frightening direction.
+  what="${TARGET_DESC:-${DISK:-the target disk}}"
+  if [ "${INSTALL_MODE:-disk}" = partition ]; then
+    others="The other partitions on ${DISK:-the disk} were not erased by the installer."
+  else
+    others="Your other disks were not touched."
+  fi
+  if [ "$INSTALLED_OK" = 1 ]; then
+    state="IMPORTANT: $what WAS written and Rime OS IS installed there, but the
+step above did not finish. Your account was probably NOT created — do not reboot
+expecting to log in. Start the installer again from the boot menu, or fix it
+from the rescue shell.
+$others"
+  elif [ "$WROTE_DISK" = 1 ]; then
+    state="IMPORTANT: $what may already have been erased and left INCOMPLETE
+(the exact message above says how far it got). If it was, it will not boot.
+Start the installer again from the boot menu to try again.
+$others"
+  else
+    state="Nothing was written. $others"
+  fi
+  # The full truth goes to stderr: that is where the console, the QEMU/CI
+  # serial capture and the front end's log collection see it, without
+  # disturbing the stdout status protocol.
+  {
+    echo "RIME-INSTALL-FAILED: $1"
+    echo
+    echo "$state"
+    echo
+    echo "Last log lines:"
+    echo "$tail_txt"
+    echo
+    echo "Full log: $LOG  (also copied to the USB's RIMEEFI partition if possible)"
+    echo "For a shell: Ctrl+Alt+F2, log in as  root  /  rime"
+  } >&2
+  save_log_to_esp
+  # The stdout copy goes LAST: it is the machine-readable failure sentinel the
+  # graphical front end and the QEMU/CI serial capture key on. Nothing may be
+  # printed to stdout after it.
+  echo "RIME-INSTALL-FAILED: $1"
+  exit 1
+}
+
+# The live log lives in a RAM-backed filesystem and dies with the reboot — the
+# user literally could not retrieve it to report a failure. Best-effort copy to
+# the ISO's writable RIMEEFI (ESP) partition so it survives.
+save_log_to_esp() {
+  local esp dst
+  esp=$(blkid -L RIMEEFI 2>/dev/null || true)
+  [ -n "$esp" ] || return 0
+  dst=$(mktemp -d 2>/dev/null) || return 0
+  if mount "$esp" "$dst" 2>/dev/null; then
+    cp -f "$LOG" "$dst/rime-install.log" 2>/dev/null || true
+    sync 2>/dev/null || true
+    umount "$dst" 2>/dev/null || true
+  fi
+  rmdir "$dst" 2>/dev/null || true
+  return 0
+}
+
+# Ctrl+C / SIGTERM during the install previously killed the installer with ZERO
+# output — leaving a half-wiped disk and no explanation.
+on_signal() {
+  trap - INT TERM HUP ERR
+  restore_console
+  echo
+  echo "Interrupted by signal."
+  die "Interrupted (Ctrl+C or shutdown signal)."
+}
+# Ignore SIGPIPE. If the graphical front end dies mid-install, our next write to
+# the pipe it was reading would otherwise kill this engine outright with signal
+# 13 — measured: bash dies on a closed pipe and a trailing `|| true` never runs,
+# so there would be no die(), no RIME-INSTALL-FAILED line, no save_log_to_esp
+# and no console message, on a machine whose disk is half-rewritten. With
+# SIGPIPE ignored the write returns EPIPE instead, which the `|| true` on every
+# log() and note() already absorbs, and the install carries on to a clean
+# finish. The comment above about a closed stdout not being an install failure
+# only becomes TRUE with this line present.
+trap '' PIPE
+
+trap on_signal INT TERM HUP
+trap 'die "Unexpected error on line $LINENO (see log). This is a bug in the installer, not a silent failure."' ERR
+
+# Quiet the console now that the traps that restore it are in place.
+quiet_console
+
+# ── preflight ────────────────────────────────────────────────────────────────
+[ "$(id -u)" = 0 ] || die "rime-install must run as root."
+# Clear any mounts left behind by a previous aborted run, so a retry is not
+# blocked by its own leftovers ("currently mounted — refusing").
+unmount_target
+have podman || die "podman is missing from the live environment."
+if [ "$NETINSTALL" = 1 ]; then
+  # Deliberately NOT a network check here. Preflight runs before the user has
+  # even seen the Wi-Fi page, so failing now for being offline would refuse an
+  # install that is about to become perfectly possible. The real check, and the
+  # pull, happen at the install step — before anything is written to the disk.
+  IMAGE="$TARGET_IMAGE"
+  # The marker file, not RIME_NETINSTALL: only a real netinstall ISO carries the
+  # pin, and a test forcing the netinstall guards on has no digest to read.
+  if [ -f /usr/lib/rime-installer/netinstall ]; then
+    RELEASE_DIGEST=$(tr -d '[:space:]' 2>/dev/null < /usr/lib/rime-installer/image-digest || true)
+    [[ "$RELEASE_DIGEST" =~ ^sha256:[0-9a-f]{64}$ ]] \
+      || die "This network installer has no valid pinned image digest, so it cannot know which Rime OS it was tested with.
+
+Nothing has been erased — your disks are untouched.
+The ISO is damaged or was built incorrectly; download it again."
+    NET_SOURCE_IMAGE="${TARGET_IMAGE%:*}@$RELEASE_DIGEST"
+  fi
+  # skopeo is what fetches the image now, so its absence must be a refusal here
+  # and not a "command not found" halfway through the download.
+  have skopeo || die "skopeo is missing from the live environment, so a network install cannot fetch Rime OS.
+
+Nothing has been erased — your disks are untouched.
+Use the full offline ISO, which needs no download."
+  note "Network install: Rime OS will be downloaded from $NET_SOURCE_IMAGE."
+elif [ "${1:-}" = --check-passphrase ]; then
+  # --check-passphrase is a one-shot, NO-DISK advisory check: it asks whether a
+  # passphrase can be typed on the initramfs keymap and prints one line. It
+  # reads no image, touches no disk and is documented to always exit 0, because
+  # the encrypt page calls it to fill in a form field and a non-zero exit there
+  # must never be read as "refuse the install".
+  #
+  # It was nonetheless dying here, before its own argument was ever parsed —
+  # the parse is ~800 lines below this refusal. On any machine without
+  # localhost/rime-os:daily every call answered
+  # `RIME-INSTALL-FAILED: The Rime OS image ... is not present`, exit 1. That is
+  # a GUI field reporting an install failure, and an advisory check that is a
+  # gate after all.
+  #
+  # It passed locally only because a developer's machine happens to have the
+  # image; it failed on every CI runner, which is why five of the seven reds in
+  # `Run installer disk-encryption suite` were this one refusal. Measured:
+  # 62 passed / 0 failed here, 24 passed / 7 failed there, same commit.
+  :
+elif ! podman image exists "$IMAGE" 2>/dev/null && [ ! -e /run/install/repo/container ]; then
+  die "The Rime OS image ($IMAGE) is not present in the live environment."
+fi
+
+# ── shared post-install: create the admin account inside the new system ──────
+# useradd/chpasswd via --root against the ostree deployment's /etc. The stateroot
+# var is bind-mounted over the deployment's /var first, so the home dir (through
+# the /home -> var/home symlink) is created where the booted system really has
+# its /var. Afterwards the SELinux labels shadow-utils lost are restored with
+# the TARGET's own setfiles+policy (the live env runs selinux=0, so every file
+# (re)written here has no label — and the installed system enforces policy:
+# greetd/polkitd get denied on an unlabeled /etc/passwd and login breaks).
+# ── shared post-install: carry the live session's network config into the target
+# Whatever wifi the user joined in the installer should just work on first boot —
+# otherwise the freshly installed machine comes up with no network, which is
+# exactly when it needs one (the first-login provisioner clones Rime Shell over
+# the network, and a failed clone leaves the desktop unprovisioned).
+#
+# NetworkManager is strict about these files and fails CLOSED and SILENTLY:
+# anything not 0600 root:root is ignored with no visible error, and on an
+# SELinux target a wrong label has the same effect. Both are set explicitly —
+# this exact mistake cost a whole debugging session on p5.
+copy_network_to() {  # $1=deploy dir
+  local deploy="$1" src=/etc/NetworkManager/system-connections dst n=0
+  [ -d "$src" ] || return 0
+  dst="$deploy/etc/NetworkManager/system-connections"
+  mkdir -p "$dst" 2>/dev/null || return 0
+  for f in "$src"/*.nmconnection; do
+    [ -e "$f" ] || continue
+    cp -a "$f" "$dst/" 2>/dev/null || continue
+    n=$((n+1))
+  done
+  [ "$n" -gt 0 ] || { log "network: no saved connections to carry over"; return 0; }
+  chown root:root "$dst"/*.nmconnection 2>/dev/null || true
+  chmod 0600      "$dst"/*.nmconnection 2>/dev/null || true
+  # Label with the TARGET's policy, not the live env's. Best effort: a missing
+  # policy must not fail the install, but a wrong label means no network.
+  if have setfiles && [ -f "$deploy/etc/selinux/targeted/contexts/files/file_contexts" ]; then
+    setfiles -r "$deploy" "$deploy/etc/selinux/targeted/contexts/files/file_contexts" \
+      "$dst" >>"$LOG" 2>&1 || true
+  fi
+  log "network: carried $n connection(s) into the installed system"
+  return 0
+}
+
+# ── XKB layout name  →  console (kbd) keymap name ───────────────────────────
+#
+# THESE ARE TWO DIFFERENT NAMESPACES AND THIS FILE USED TO CONFLATE THEM.
+# `set_locale_keymap_in` wrote the operator's XKB layout straight into
+# /etc/vconsole.conf, which systemd-vconsole-setup feeds to `loadkeys`. loadkeys
+# does not speak XKB. Measured against the keymap tree the image actually ships
+# (`i18n_install_all="yes"`, so every kbd map is present):
+#
+#     XKB layout   kbd keymap that exists      what the old code wrote
+#     gb           uk                          gb          -> no such keymap
+#     ch           sg                          ch          -> no such keymap
+#     latam        la-latin1                   latam       -> no such keymap
+#     jp           jp106                       jp          -> no such keymap
+#
+# loadkeys then fails and the console silently keeps the PREVIOUS map, which on
+# a fresh boot is the kernel built-in: `us`. On an unencrypted machine that is
+# an annoyance on tty1. On a machine encrypted by default it is the whole
+# stranding case — the passphrase prompt is a console prompt, so a British user
+# who typed a passphrase containing `"` on their own keyboard has to guess that
+# the box now wants `@`, at a prompt with no way back.
+#
+# The conversion table is systemd's own, /usr/share/systemd/kbd-model-map (the
+# same file `localectl set-x11-keymap` uses in the other direction), and a
+# direct keymap-file hit beats the table — that is the order systemd itself
+# uses, and it keeps `us`, `de`, `fr` and every other layout whose name IS a
+# kbd keymap on the obvious answer instead of whatever the table's first
+# matching row happens to be.
+#
+# Only the FIRST layout of a comma-separated list is converted: the console can
+# load exactly one keymap, and pretending otherwise is how "it looked like it
+# worked" bugs start.
+kbd_has() {  # $1=keymaps dir  $2=candidate name — prints $2 if such a keymap exists
+  local d="$1" n="$2" f
+  [ -d "$d" ] || return 0
+  f=$(find "$d" -type f \( -name "$n.map" -o -name "$n.map.gz" -o -name "$n.map.zst" \) \
+        -print -quit 2>/dev/null || true)
+  [ -n "$f" ] && printf '%s' "$n"
+  return 0
+}
+
+console_keymap_for() {  # $1=xkb layout(s)  $2=xkb variant  $3=deploy dir or ""
+  local layout="${1%%,*}" variant="${2:-}" deploy="${3:-}" kdir mapf hit=""
+  [ -n "$layout" ] || { printf 'us\n'; return 0; }
+  # Prefer the TARGET's data when we have it: the installed machine is the one
+  # that has to load this keymap, and the live ISO's kbd package is not
+  # necessarily the same build.
+  # ── where the two data files come from, and why that is overridable ────────
+  # By default the LIVE environment's own copies, which on the ISO are the
+  # Fedora ones this conversion was measured against. RIME_KBD_KEYMAPS and
+  # RIME_KBD_MODEL_MAP redirect them, and exist for exactly one reason:
+  # installer/test-installer-luks.sh has to be able to measure this conversion
+  # somewhere that is NOT a Fedora machine. Without them the suite's end-to-end
+  # keymap assertions read whatever kbd the machine running them happens to
+  # have — which on a GitHub ubuntu-24.04 runner is nothing in this shape, so
+  # every layout resolved to `us` and the suite had never once passed in CI.
+  # Same hook, same purpose, as RIME_IMAGE above ("override with RIME_IMAGE=...
+  # for testing"); nothing the GUI, the answers file or the kernel command line
+  # can reach.
+  #
+  # Read INSIDE this function on purpose, never as a file-level global:
+  # test-installer-luks.sh and test-installer-locale.sh both LIFT this function
+  # out of the engine with sed and run the copy on its own, so a variable
+  # assigned anywhere else in this file would be unset there — and under the
+  # suites' `set -u` that would kill the extracted copy outright.
+  kdir="${RIME_KBD_KEYMAPS:-/usr/lib/kbd/keymaps}"
+  if [ -n "$deploy" ] && [ -d "$deploy/usr/lib/kbd/keymaps" ]; then
+    kdir="$deploy/usr/lib/kbd/keymaps"
+  fi
+  mapf="${RIME_KBD_MODEL_MAP:-/usr/share/systemd/kbd-model-map}"
+  if [ -n "$deploy" ] && [ -f "$deploy/usr/share/systemd/kbd-model-map" ]; then
+    mapf="$deploy/usr/share/systemd/kbd-model-map"
+  fi
+  # 1. a keymap file named exactly for this layout(+variant).
+  if [ -n "$variant" ]; then
+    hit=$(kbd_has "$kdir" "$layout-$variant")
+  fi
+  if [ -z "$hit" ]; then hit=$(kbd_has "$kdir" "$layout"); fi
+  # 2. systemd's conversion table — exact layout+variant row first, …
+  #
+  #    The table's xlayout column is frequently a LIST: Bulgarian is written
+  #    `bg,us`, Greek `gr,us`, Georgian `ge,us`, because those layouts ship with
+  #    a latin group to toggle to. A plain `$2 == layout` test matches none of
+  #    them, which is how `bg` ended up falling all the way through to `us`
+  #    while /usr/lib/kbd/keymaps/legacy/…/bg_bds-utf8.map.gz sat there unused.
+  #    So a row also counts when the wanted layout is the FIRST of its list.
+  if [ -z "$hit" ] && [ -f "$mapf" ]; then
+    hit=$(awk -v l="$layout" -v v="$variant" \
+      'BEGIN{ if (v=="") v="-" }
+       /^#/ { next }
+       NF>=2 { xv=(NF>=4 ? $4 : "-")
+               if (($2==l || index($2, l ",")==1) && xv==v) { print $1; exit } }' \
+      "$mapf" 2>/dev/null || true)
+  fi
+  # 3. … then any row for this layout at all. A `ch` (Swiss) install must land
+  #    on `sg` even though every ch row in the table carries a variant.
+  if [ -z "$hit" ] && [ -f "$mapf" ]; then
+    hit=$(awk -v l="$layout" \
+      '/^#/ { next } NF>=2 { if ($2==l || index($2, l ",")==1) { print $1; exit } }' \
+      "$mapf" 2>/dev/null || true)
+  fi
+  # 4. The table names keymaps that a given kbd build may not actually ship —
+  #    measured: its `ge` row names a `ge` keymap that does not exist anywhere
+  #    in Fedora 43's kbd. Taking its word for it would put a name in
+  #    /etc/vconsole.conf and on the kernel command line that loadkeys cannot
+  #    load, which is the exact failure this function exists to remove, merely
+  #    moved one step later. So the table's answer is checked against the
+  #    keymap tree, the same way a direct hit was.
+  if [ -n "$hit" ]; then hit=$(kbd_has "$kdir" "$hit"); fi
+  # 5. `us` is the kernel built-in, so falling back to it changes nothing that
+  #    was not already going to happen — but it is a FALLBACK and the caller
+  #    logs it as one, rather than the silent fallback this comment is about.
+  [ -n "$hit" ] || hit=us
+  printf '%s\n' "$hit"
+  return 0
+}
+
+# ── Can the owner actually TYPE their passphrase at that prompt? ────────────
+#
+# The passphrase validation above restricts the passphrase to printable ASCII,
+# and the comment there used to say "every printable ASCII character is
+# reachable on every kbd keymap". MEASURED 2026-09-20, against the keymap tree
+# the image ships, and it is FALSE:
+#
+#   keymap        ASCII letters reachable anywhere in the table
+#   us de fr      yes
+#   bg_bds-utf8   yes  (Cyrillic is on a second group; Latin is the base plane)
+#   gr ua         yes  (same shape)
+#   jp106         yes  (inherited through `include "qwerty-layout"`)
+#   il            yes, but capitals are on Shift and lowercase on the CapsLock
+#                 plane — hard, not impossible
+#   ru ara fa     NO. Not one Latin letter anywhere in the table.
+#
+# So a Russian, Arabic or Persian owner chooses an ASCII passphrase the
+# installer accepts, the machine loads their layout at the unlock prompt, and
+# not one letter of that passphrase can be produced. That is L-002's stranding
+# case exactly, with the recovery key as the only way back in.
+#
+# The fix is not to refuse their passphrase — no ASCII passphrase would ever
+# pass — and not to refuse their layout. It is to load `us` AT THE UNLOCK
+# PROMPT ONLY, and say so. The installed system keeps their layout: the karg is
+# omitted entirely when the unlock keymap is `us` (see the LUKS_KARGS block),
+# so the initramfs falls back to the kernel's built-in US table and the booted
+# system reads its own /etc/vconsole.conf, which still names their choice.
+#
+# These three functions are extracted and exercised by
+# installer/test-installer-luks.sh against the real keymap tree.
+
+_keymap_cat() {  # $1=file — its text, gzipped or not
+  case "$1" in
+    *.gz) zcat "$1" 2>/dev/null ;;
+    *)    cat "$1" 2>/dev/null ;;
+  esac
+}
+
+# _keymap_text TREE FILE DEPTH — the keymap's own text plus, recursively, the
+# text of everything it `include`s. The includes are not optional detail:
+# jp106 has no Latin letters of its own and gets all of them from
+# `include "qwerty-layout"`, so a parser that stopped at the top file would
+# condemn every Japanese keyboard.
+_keymap_text() {
+  local tree="$1" f="$2" d="${3:-3}" txt inc p
+  [ -r "$f" ] || return 0
+  txt=$(_keymap_cat "$f")
+  [ -n "$txt" ] || return 0
+  printf '%s\n' "$txt"
+  [ "${d:-0}" -le 0 ] && return 0
+  printf '%s\n' "$txt" \
+    | sed -n 's/^[[:space:]]*include[[:space:]]*"\([^"]*\)".*/\1/p' \
+    | while read -r inc; do
+        inc=${inc##*/}
+        inc=${inc%.gz}
+        p=$(find "$tree" -type f \
+              \( -name "$inc" -o -name "$inc.gz" \
+              -o -name "$inc.inc" -o -name "$inc.inc.gz" \
+              -o -name "$inc.map" -o -name "$inc.map.gz" \) 2>/dev/null \
+            | sort | head -1)
+        [ -n "$p" ] && [ "$p" != "$f" ] && _keymap_text "$tree" "$p" $((d - 1))
+      done
+}
+
+# keymap_ascii_set TREE NAME — every printable-ASCII character the named
+# console keymap can produce, in any plane, as one string. Empty output means
+# the question could not be answered, which is NOT the same as "none".
+keymap_ascii_set() {
+  local tree="$1" name="$2" f raw
+  # An absolute path is taken as the keymap FILE itself. The engine never uses
+  # that form — it has a name — but the suite sweeps all 562 keymaps in the
+  # tree, and one `find` over the whole tree per keymap turned a check into a
+  # coffee break.
+  case "$name" in
+    /*) f="$name" ;;
+    *)  f=$(find "$tree/xkb" "$tree/legacy/i386" "$tree/i386" -type f \
+              \( -name "$name.map" -o -name "$name.map.gz" \) 2>/dev/null | head -1) ;;
+  esac
+  [ -n "$f" ] || return 1
+  raw=$(_keymap_text "$tree" "$f" 3)
+  [ -n "$raw" ] || return 1
+  # The characters are produced INSIDE awk, with a hand-built hex table and
+  # `printf "%c"`. The obvious route — emit hex, convert with
+  # `printf '%b' '\xNN'` — was written first and is WRONG: this bash drops the
+  # `\x` and leaves the digits, so `us` came back as a set of hex characters
+  # containing no letters and every keymap on the machine was declared
+  # untypeable. gawk's strtonum() is avoided for the opposite reason: it is not
+  # in POSIX awk and the live environment's awk is not guaranteed to be gawk.
+  printf '%s\n' "$raw" | awk '
+      BEGIN {
+          for (i = 0; i < 16; i++) {
+              H[substr("0123456789", i + 1, 1)] = i
+              H[substr("abcdef", i - 9, 1)] = i
+              H[substr("ABCDEF", i - 9, 1)] = i
+          }
+          # The two subtrees spell the same thing three ways. xkb-converted maps
+          # use +U+0031; the legacy maps use X keysym NAMES — one, exclam,
+          # slash. Without this table every legacy map looked as though it had
+          # no digits and no punctuation, and bg_bds-utf8, gr, ua and jp106
+          # were all wrongly condemned: their LETTERS are single characters and
+          # survived, their DIGITS are names and did not.
+          #
+          # The characters are built from their code points rather than written
+          # out, because this whole program is inside a single-quoted shell
+          # string and an apostrophe in it ends the program. That is not a
+          # hypothetical: the first version of this table had one.
+          nd = split("one two three four five six seven eight nine zero", D, " ")
+          for (i = 1; i <= nd; i++) N[D[i]] = (i % 10)
+          nm = split("space 32 exclam 33 quotedbl 34 numbersign 35 dollar 36 " \
+                     "percent 37 ampersand 38 apostrophe 39 parenleft 40 " \
+                     "parenright 41 asterisk 42 plus 43 comma 44 minus 45 " \
+                     "period 46 slash 47 colon 58 semicolon 59 less 60 " \
+                     "equal 61 greater 62 question 63 at 64 bracketleft 91 " \
+                     "backslash 92 bracketright 93 asciicircum 94 " \
+                     "underscore 95 grave 96 braceleft 123 bar 124 " \
+                     "braceright 125 asciitilde 126", NM, " ")
+          for (i = 1; i < nm; i += 2) N[NM[i]] = sprintf("%c", NM[i + 1] + 0)
+      }
+      # NOT anchored to the start of the line. Half the xkb-converted maps
+      # write every plane on its own line with the modifiers in front —
+      # `plain keycode 2 = U+0031`, `shift keycode 2 = U+0021` — and an
+      # anchored pattern skipped all of them. Measured: with the anchor, the
+      # Finnish map appeared to have no `1`, no `7` and no `e`, and `fi` was
+      # reported as a keyboard that cannot type a Latin passphrase.
+      /keycode[[:space:]]+[0-9]+[[:space:]]*=/ {
+          sub(/^[^=]*=/, "")
+          n = split($0, a, /[ \t]+/)
+          for (i = 1; i <= n; i++) {
+              s = a[i]; sub(/^\+/, "", s)
+              if (s ~ /^U\+00[0-9a-fA-F][0-9a-fA-F]$/) {
+                  d = H[substr(s, 5, 1)] * 16 + H[substr(s, 6, 1)]
+                  if (d >= 32 && d <= 126) printf "%c", d
+              } else if (length(s) == 1) {
+                  printf "%s", s
+              } else if (s in N) {
+                  printf "%s", N[s]
+              }
+          }
+      }'
+}
+
+# keymap_can_type PASSPHRASE TREE NAME — prints `yes`, `unknown`, or
+# `no:<the characters it cannot produce>`.
+#
+# `unknown` is a third answer and not a polite `no`: a keymap this parser did
+# not understand must leave the existing behaviour alone. Condemning a layout
+# on a parse failure would silently move a working machine to `us`.
+keymap_can_type() {
+  local pass="$1" tree="$2" name="$3" set c i
+  set=$(keymap_ascii_set "$tree" "$name" 2>/dev/null) || { printf 'unknown'; return 0; }
+  [ -n "$set" ] || { printf 'unknown'; return 0; }
+  # A table that yielded a handful of characters is a table that was not read,
+  # not a keyboard with six keys. Even the most Cyrillic map has digits and
+  # punctuation: `ru` yields 0 letters but 20-odd other printable characters.
+  [ "${#set}" -ge 10 ] || { printf 'unknown'; return 0; }
+  local missing=""
+  i=0
+  while [ "$i" -lt "${#pass}" ]; do
+    c=${pass:$i:1}
+    case "$set" in
+      *"$c"*) : ;;
+      *)      case "$missing" in *"$c"*) : ;; *) missing="$missing$c" ;; esac ;;
+    esac
+    i=$((i + 1))
+  done
+  # The characters are named, not just counted. "your keyboard cannot type this
+  # passphrase" is a sentence the owner cannot act on; "it cannot type x or q"
+  # is.
+  [ -n "$missing" ] && { printf 'no:%s' "$missing"; return 0; }
+  printf 'yes'
+}
+
+# ── shared post-install: locale + keyboard layout in the target ──────────────
+# THE CONTRACT THIS IMPLEMENTS
+# /usr/lib/systemd/system-environment-generators/50-rime-keymap (see
+# files/system/systemd/rime-keymap-env) exports XKB_DEFAULT_LAYOUT into the
+# systemd manager environment so greetd — and the sway/labwc greeter host it
+# spawns — use the machine's real layout instead of a hardcoded `us`. Its header
+# names its source of truth and whose job it is to write it:
+#
+#     SOURCE OF TRUTH: /etc/X11/xorg.conf.d/00-keyboard.conf [...] This file is
+#     machine-local (/etc), so it is the installer's job to put a keymap there.
+#
+# That job was never implemented. This script wrote no keymap, no locale and no
+# vconsole config, so on a script-installed machine:
+#   • the generator found no file and printed nothing → greeter fell back to `us`,
+#     i.e. the exact "cannot type my own password" failure it exists to prevent;
+#   • rime-shell-firstrun's FIRST keymap source (this same file) missed, it fell
+#     through to `localectl status`, and scraped the literal placeholder
+#     "(unset)" into the user's hyprland.conf as `kb_layout = (unset)`; and
+#   • /etc/locale.conf stayed absent → LANG=C.UTF-8.
+# Verified on the p6 install: no /etc/X11/xorg.conf.d/00-keyboard.conf existed and
+# `localectl status` reported "X11 Layout: (unset)".
+#
+# The image now also ships defaults for locale/vconsole (Containerfile.base), so
+# this function's real job is to record what the OPERATOR actually chose in the
+# live installer environment, overriding those defaults when it differs.
+# See rime-logs 54 / rimelogs/08-pending-root-fixes.md.
+set_locale_keymap_in() {  # $1=deploy dir
+  local deploy="$1" layout="" variant="" lang="" xkbdir tz=""
+  [ -d "$deploy/etc" ] || return 0
+
+  # ── The operator's own choice wins ─────────────────────────────────────────
+  # The installer now has a keyboard step before the account step, and what it
+  # collected arrives as KEYMAP / KEYVARIANT / TIMEZONE. That choice beats every
+  # inference below, because the inferences are about the LIVE ISO — whose
+  # kickstart hardcodes `us` and `Australia/Perth` — and not about the person
+  # standing in front of the machine.
+  #
+  # An absent value is not a choice: the answers file omits empty keys entirely
+  # (the front end writes `if a.get(k)`), so an operator who skipped the step
+  # falls through to exactly the behaviour this function has always had.
+  if [ -n "${KEYMAP:-}" ]; then
+    layout="$KEYMAP"
+    variant="${KEYVARIANT:-}"
+    log "locale/keymap: using the operator's choice layout=$layout${variant:+ variant=$variant}"
+  fi
+
+  # Prefer whatever the LIVE environment is using — the operator may have set a
+  # layout in the installer. localectl needs dbus and may not answer here, so
+  # every read is best-effort and the placeholder "(unset)" is rejected, not
+  # treated as a value (the bug above).
+  if [ -z "$layout" ] && have localectl; then
+    layout=$(localectl status 2>/dev/null \
+      | sed -n 's/^[[:space:]]*X11 Layout:[[:space:]]*//p' | head -1)
+    variant=$(localectl status 2>/dev/null \
+      | sed -n 's/^[[:space:]]*X11 Variant:[[:space:]]*//p' | head -1)
+  fi
+  # Only the inferred pair is sanitised for the "(unset)" placeholder; an
+  # operator's value has already been validated against xkb's own layout list
+  # before anything was erased.
+  case "$layout"  in "(unset)"|"n/a") layout="" ;;  esac
+  case "$variant" in "(unset)"|"n/a") variant="" ;; esac
+  # Fall back to the live env's vconsole keymap, then to `us`. Written as a plain
+  # `if` rather than an `&&`/`||` chain — this file's own notes flag that trap.
+  if [ -z "$layout" ]; then
+    layout=$(sed -n 's/^KEYMAP=//p' /etc/vconsole.conf 2>/dev/null | tr -d '"' | head -1)
+  fi
+  [ -n "$layout" ] || layout=us
+
+  lang=$(sed -n 's/^LANG=//p' /etc/locale.conf 2>/dev/null | tr -d '"' | head -1)
+  # C.UTF-8 is systemd's fallback, not a choice — do not propagate it as one.
+  case "$lang" in ""|"C.UTF-8"|"C.utf8"|"C") lang="en_US.UTF-8" ;; esac
+
+  # X11/wayland layout — what the keymap generator and rime-shell-firstrun read.
+  xkbdir="$deploy/etc/X11/xorg.conf.d"
+  mkdir -p "$xkbdir" 2>>"$LOG" || return 0
+  {
+    printf '# Written by rime-install. Change with: localectl set-x11-keymap <layout>\n'
+    printf 'Section "InputClass"\n'
+    printf '        Identifier "system-keyboard"\n'
+    printf '        MatchIsKeyboard "on"\n'
+    printf '        Option "XkbLayout" "%s"\n' "$layout"
+    # Explicit `if`, not `[ -n "$variant" ] && printf ...`: this script installs an
+    # ERR trap that calls die(), and a bare `&&` whose test fails returns non-zero
+    # for the whole list. See the same warning in create_user_in() below.
+    if [ -n "$variant" ]; then
+      printf '        Option "XkbVariant" "%s"\n' "$variant"
+    fi
+    printf 'EndSection\n'
+  } > "$xkbdir/00-keyboard.conf" 2>>"$LOG" || true
+
+  # Console keymap + system locale.
+  #
+  # `layout` is an XKB name and KEYMAP= is a kbd name; see console_keymap_for().
+  # CONSOLE_KEYMAP is normally already resolved (before the disk was touched, so
+  # the same value could be put on the kernel command line for the initramfs
+  # unlock prompt); recompute here against the TARGET's keymap tree when it is
+  # not, which is the path an operator who skipped the keyboard step takes.
+  local ckmap="${CONSOLE_KEYMAP:-}"
+  if [ -z "$ckmap" ]; then
+    ckmap=$(console_keymap_for "$layout" "$variant" "$deploy")
+  fi
+  if [ "$ckmap" != "$layout" ]; then
+    log "locale/keymap: XKB layout '$layout' -> console keymap '$ckmap'"
+  fi
+  printf '# Written by rime-install. Change with: localectl set-keymap <keymap>\n# NOTE: on an encrypted machine the vconsole.keymap= kernel argument set at\n# install time is what the initramfs unlock prompt uses, and systemd lets it\n# override this file. Change both, or the prompt and the console disagree.\nKEYMAP=%s\n' \
+    "$ckmap" > "$deploy/etc/vconsole.conf" 2>>"$LOG" || true
+  printf '# Written by rime-install. Change with: localectl set-locale LANG=...\nLANG=%s\n' \
+    "$lang" > "$deploy/etc/locale.conf" 2>>"$LOG" || true
+
+  # ── Timezone ───────────────────────────────────────────────────────────────
+  # /etc/localtime is a machine-local symlink into /usr/share/zoneinfo, and it
+  # was never written either — so on the p6 install the file did not exist AT ALL
+  # and systemd fell back to UTC. The clock read 13:45 while the wall clock said
+  # 21:45 (AWST is UTC+8): every timestamp, the bar clock, file mtimes, and
+  # `hypridle`/cron-style scheduling were eight hours out.
+  #
+  # Carry over whatever the LIVE environment resolved (the ISO's kickstart sets
+  # `timezone Australia/Perth --utc`, so a real operator install lands here with
+  # it already correct), and fall back to the same value the kickstart uses so the
+  # two install paths agree.
+  if [ -n "${TIMEZONE:-}" ]; then
+    tz="$TIMEZONE"
+  fi
+  if [ -z "$tz" ] && [ -L /etc/localtime ]; then
+    tz=$(readlink /etc/localtime | sed 's|.*/zoneinfo/||')
+  fi
+  if [ -z "$tz" ] && have timedatectl; then
+    tz=$(timedatectl show --property=Timezone --value 2>/dev/null)
+  fi
+  # An operator who explicitly chose UTC means it; only an INFERRED "UTC" is the
+  # systemd fallback this line exists to replace.
+  #
+  # The spellings matter and only matched two of them before. systemd writes the
+  # CANONICAL zone name into /etc/localtime, and on a machine with no timezone
+  # set that name is "Etc/UTC", not "UTC" — so the commonest form of the very
+  # case this line exists to catch went straight past it. Found by CI: a GitHub
+  # runner resolves Etc/UTC, the deploy root being built had no Etc/UTC in it,
+  # and the installed system got NO /etc/localtime at all.
+  if [ -z "${TIMEZONE:-}" ]; then
+    case "$tz" in
+      ""|"UTC"|"Etc/UTC"|"GMT"|"Etc/GMT"|"Etc/Universal"|"Universal"|"Zulu"|"Etc/Zulu")
+        tz="Australia/Perth" ;;
+    esac
+  fi
+  if [ -e "$deploy/usr/share/zoneinfo/$tz" ]; then
+    ln -sfn "../usr/share/zoneinfo/$tz" "$deploy/etc/localtime" 2>>"$LOG" || true
+  else
+    log "locale/keymap: WARN zoneinfo for '$tz' missing in target — leaving UTC"
+    tz="UTC"
+  fi
+
+  # Relabel with the TARGET's policy — the live env runs selinux=0, so anything
+  # written here is unlabeled, and an unlabeled /etc file can be denied on the
+  # installed system (the same trap copy_network_to documents above).
+  if have setfiles && [ -f "$deploy/etc/selinux/targeted/contexts/files/file_contexts" ]; then
+    setfiles -r "$deploy" "$deploy/etc/selinux/targeted/contexts/files/file_contexts" \
+      "$deploy/etc/X11" "$deploy/etc/vconsole.conf" "$deploy/etc/locale.conf" \
+      "$deploy/etc/localtime" >>"$LOG" 2>&1 || true
+  fi
+  log "locale/keymap: LANG=$lang layout=$layout${variant:+ variant=$variant} console=$ckmap tz=$tz"
+  return 0
+}
+
+# ── shared: name the Nth partition of a disk ────────────────────────────────
+# /dev/sda + 1 -> /dev/sda1, but /dev/nvme0n1 + 1 -> /dev/nvme0n1p1 and
+# /dev/mmcblk0 + 1 -> /dev/mmcblk0p1. Probing for the node that actually exists
+# is simpler and more honest than a name-shape rule, and it also proves udev has
+# finished: a name that is not a block device yet is not a name we may use.
+part_dev() {  # $1=disk  $2=partition number — prints the node, or nothing
+  local d="$1" n="$2" c
+  for c in "${d}p${n}" "${d}${n}"; do
+    if [ -b "$c" ]; then printf '%s' "$c"; return 0; fi
+  done
+  return 0
+}
+
+# ── shared: get the disk recovery key to the user ───────────────────────────
+#
+# THIS IS THE FUNCTION THIS WHOLE FEATURE STANDS OR FALLS ON. An encrypted
+# machine whose recovery key was never shown is the stranding case encryption
+# by default exists to prevent: a forgotten passphrase, a keyboard that types
+# something other than what is printed on it, a TPM that changed its mind after
+# a firmware update — every one of them ends at a prompt with no way back, and
+# the recovery key is the way back.
+#
+# systemd's recovery key is deliberately written in a modhex alphabet
+# (bcdefghijklnrtuv and digits) whose characters sit in the SAME PLACE on
+# QWERTY, QWERTZ and AZERTY. So it is also the answer to "the console keymap is
+# wrong": it can be typed on a machine whose layout is not the owner's.
+#
+# Two channels, because each one fails differently:
+#   1. On screen, via a stdout protocol line the graphical front end shows on a
+#      page of its own and makes the user acknowledge. Never through note() or
+#      log() — the log is copied onto the USB stick in the clear on every
+#      failure, and a key in there is a key nobody chose to write down.
+#   2. A 0600 file on the LIVE USB's own ESP — the stick the user is holding,
+#      which they still have when the machine will not boot and which is what
+#      they would boot to recover with anyway. The honest caveat is printed in
+#      the file itself: a stick kept in the same bag as the laptop protects
+#      nothing, so the file says to move it somewhere else or delete it.
+#
+# It is NEVER written to the target's ESP or /boot. Those live on the machine
+# that is encrypted, unencrypted, and an attacker with the laptop has them.
+surface_recovery_key() {  # $1=the recovery key — SECRET
+  local key="$1" esp dst path saved=0 why=""
+  RESULT_RECOVERY_KEY="$key"
+  # 1. the screen.
+  secret_line "RIME-INSTALL-RECOVERY-KEY: $key"
+  # 2. the stick. RIME_RECOVERY_DIR is a TEST hook (environment only, never the
+  #    answers file or the kernel command line), the same shape as RIME_IMAGE.
+  if [ -n "${RIME_RECOVERY_DIR:-}" ]; then
+    mkdir -p "$RIME_RECOVERY_DIR" 2>/dev/null || true
+    dst="$RIME_RECOVERY_DIR"
+  else
+    esp=$(blkid -L RIMEEFI 2>/dev/null || true)
+    if [ -n "$esp" ]; then
+      dst=$(mktemp -d 2>/dev/null || true)
+      if [ -n "$dst" ] && ! mount "$esp" "$dst" 2>>"$LOG"; then
+        rmdir "$dst" 2>/dev/null || true; dst=""; why="the USB stick could not be mounted"
+      fi
+    else
+      why="this installer is not running from a Rime USB stick"
+    fi
+  fi
+  if [ -n "$dst" ]; then
+    path="$dst/rime-recovery-key-${HOSTNAME:-rime}.txt"
+    if ( umask 077; {
+          printf 'Rime OS DISK RECOVERY KEY\n'
+          printf '=========================\n\n'
+          printf 'Machine : %s\n' "${HOSTNAME:-rime}"
+          printf 'Disk    : %s\n' "${DISK:-unknown}"
+          printf 'Written : %s\n\n' "$(date -Is 2>/dev/null || date)"
+          printf '    %s\n\n' "$key"
+          printf 'WHAT IT IS FOR\n'
+          printf 'If Rime OS ever asks for the disk passphrase and will not accept it --\n'
+          printf 'you forgot it, the keyboard is typing something other than what is on\n'
+          printf 'the keys, or the automatic unlock stopped working after a firmware\n'
+          printf 'update -- type THIS instead, at the same prompt. It always works.\n\n'
+          printf 'The letters and digits it uses are in the same place on nearly every\n'
+          printf 'keyboard layout, so it can be typed even when the layout is wrong.\n\n'
+          printf 'KEEP IT SOMEWHERE ELSE\n'
+          printf 'This key opens the disk. On this USB stick, in the same bag as the\n'
+          printf 'laptop, it protects nothing. Copy it to a password manager or write\n'
+          printf 'it on paper kept apart from the machine, then delete this file.\n'
+        } > "$path" ) 2>>"$LOG"; then
+      sync 2>/dev/null || true
+      saved=1
+    else
+      why="writing to the USB stick failed"
+    fi
+    [ -n "${RIME_RECOVERY_DIR:-}" ] || { umount "$dst" 2>/dev/null || true; rmdir "$dst" 2>/dev/null || true; }
+  fi
+  if [ "$saved" = 1 ]; then
+    RESULT_RECOVERY_SAVED="rime-recovery-key-${HOSTNAME:-rime}.txt"
+    note "RIME-INSTALL-RECOVERY-SAVED: rime-recovery-key-${HOSTNAME:-rime}.txt"
+  else
+    RESULT_RECOVERY_UNSAVED="${why:-unknown reason}"
+    note "RIME-INSTALL-RECOVERY-UNSAVED: ${why:-unknown reason}"
+  fi
+  return 0
+}
+
+# ── shared post-install: /etc/crypttab in the installed system ──────────────
+# The INITRAMFS unlocks from the kernel command line (rd.luks.uuid=), because a
+# generic, non-hostonly initramfs built in a container cannot contain this
+# machine's crypttab. This file is for the system AFTER switch-root: without it
+# systemd has no record that the root device is encrypted, and `x-initrd.attach`
+# is what tells it the volume was already attached in the initrd rather than
+# queueing a second attempt against a device that is already open.
+write_crypttab_in() {  # $1=deploy dir
+  local deploy="$1" opts="luks,discard,x-initrd.attach"
+  [ -n "${LUKS_UUID:-}" ] || return 0
+  [ -d "$deploy/etc" ] || return 0
+  if [ "${LUKS_TPM_TOKEN:-0}" = 1 ]; then opts="$opts,tpm2-device=auto"; fi
+  printf '# Written by rime-install.\n# <name>  <device>  <key file>  <options>\n%s  UUID=%s  none  %s\n' \
+    "$LUKS_MAPPER" "$LUKS_UUID" "$opts" > "$deploy/etc/crypttab" 2>>"$LOG" || true
+  chmod 0600 "$deploy/etc/crypttab" 2>/dev/null || true
+  if have setfiles && [ -f "$deploy/etc/selinux/targeted/contexts/files/file_contexts" ]; then
+    setfiles -r "$deploy" "$deploy/etc/selinux/targeted/contexts/files/file_contexts" \
+      "$deploy/etc/crypttab" >>"$LOG" 2>&1 || true
+  fi
+  log "crypttab: $LUKS_MAPPER UUID=$LUKS_UUID opts=$opts"
+  return 0
+}
+
+# Undo create_user_in()'s two mounts. Every exit path of that function goes
+# through here, including the failures: see DEPLOY_MNT above for why a mount
+# left behind is worse than the error that caused it.
+release_deploy_mounts() {  # $1=deploy dir
+  umount "$1/proc" 2>/dev/null || true
+  umount "$1/var"  2>/dev/null || true
+  DEPLOY_MNT=""
+  return 0
+}
+
+create_user_in() {  # $1=deploy dir  $2=user  $3=pass  $4=hostname  $5=err-prefix
+  local deploy=$1 user=$2 pass=$3 host=$4 pfx=$5 statevar setype spec f
+  statevar=$(dirname "$(dirname "$deploy")")/var
+  DEPLOY_MNT="$deploy"
+  mount --bind "$statevar" "$deploy/var" 2>>"$LOG" \
+    || die "$pfx: bind-mounting the stateroot var failed."
+  # ── /proc inside the deployment is not optional ────────────────────────────
+  # MEASURED, on two complete installs: without this mount `useradd --root`
+  # fails with
+  #     useradd: failure while writing changes to /etc/passwd
+  # and the cause has nothing to do with /etc/passwd, with permissions, or with
+  # the filesystem being read-only — all three were checked and all three were
+  # fine. useradd asks is_selinux_enabled() BEFORE it chroots, which on Fedora
+  # answers yes, and then inside the chroot calls setfscreatecon() to label the
+  # new /etc/passwd+. setfscreatecon() writes /proc/thread-self/attr/fscreate;
+  # with no /proc in the chroot that open returns ENOENT, shadow-utils converts
+  # it to EACCES, and the generic message above is all the user ever sees. An
+  # strace of the failing run shows the backup /etc/passwd- written in full and
+  # /etc/passwd+ never opened at all.
+  #
+  # chpasswd --root writes /etc/shadow the same way, so the mount has to cover
+  # the whole function rather than just the useradd line. /sys is NOT needed:
+  # the chrooted setfiles below was verified to relabel correctly without it.
+  mount -t proc proc "$deploy/proc" 2>>"$LOG" \
+    || { release_deploy_mounts "$deploy"; die "$pfx: mounting /proc inside the new system failed, and useradd cannot create an account without it."; }
+  # zsh is the Rime default shell (with starship, seeded at first login). Fall
+  # back to bash if the image somehow lacks zsh — a user with a nonexistent
+  # login shell cannot log in at all, which is a far worse failure than bash.
+  # Written as an `if` for legibility and to avoid the `||`/`&&` precedence trap
+  # (both operators are left-associative, so the bare form parses as
+  # `(A || B) && x=y` — correct here, but only by accident).
+  #
+  # NOTE: the bare form does NOT trip this script's ERR trap, contrary to what
+  # you might expect from the header notes. Measured: with both tests failing,
+  # bash exempts every command in a `&&`/`||` list except the one after the
+  # final operator, and that assignment never runs. Recorded so nobody "fixes"
+  # a non-problem here later.
+  ushell=/bin/bash
+  if [ -x "$deploy/bin/zsh" ] || [ -x "$deploy/usr/bin/zsh" ]; then
+    ushell=/bin/zsh
+  fi
+  log "creating $user with login shell $ushell"
+  useradd --root "$deploy" -m -G wheel -s "$ushell" "$user" 2>>"$LOG" \
+    || { release_deploy_mounts "$deploy"; die "$pfx: useradd failed for $user (see $LOG)."; }
+  echo "$user:$pass" | chpasswd --root "$deploy" 2>>"$LOG" \
+    || { release_deploy_mounts "$deploy"; die "$pfx: setting the password failed (see $LOG)."; }
+  echo "$host" > "$deploy/etc/hostname" 2>>"$LOG" || true
+  setype=$(sed -n 's/^SELINUXTYPE=//p' "$deploy/etc/selinux/config" 2>/dev/null | head -1)
+  spec="/etc/selinux/${setype:-targeted}/contexts/files/file_contexts"
+  # If the relabel tooling is missing we must NOT silently continue and then
+  # claim success: unlabeled /etc/passwd means greetd/polkitd get AVC-denied and
+  # the user cannot log in — an unusable system reported as a clean install.
+  if [ ! -x "$deploy/usr/sbin/setfiles" ] || [ ! -f "$deploy$spec" ]; then
+    release_deploy_mounts "$deploy"
+    die "$pfx: cannot SELinux-relabel the new account files (setfiles or the policy file_contexts is missing in the installed system). Without the relabel, login would be denied. The OS is installed on $DISK but the account is not usable."
+  fi
+  if true; then
+    local paths=(/etc/hostname /var/home)
+    for f in passwd passwd- shadow shadow- group group- gshadow gshadow- subuid subgid .pwd.lock; do
+      [ -e "$deploy/etc/$f" ] && paths+=("/etc/$f")
+    done
+    chroot "$deploy" /usr/sbin/setfiles -F "$spec" "${paths[@]}" 2>&1 | tee -a "$LOG" \
+      || { release_deploy_mounts "$deploy"; die "$pfx: SELinux relabel of the account files failed (see $LOG)."; }
+  fi
+  release_deploy_mounts "$deploy"
+}
+
+# ── unattended mode (automation / QEMU boot-test) ────────────────────────────
+# If the kernel cmdline has `rime.unattended` (and the test-build marker file —
+# see the gate above), install with no front end at all, using
+# rime.disk=/dev/X rime.user=NAME rime.pass=PW rime.host=NAME. Repeatable
+# rime.karg=... adds extra kernel args to the installed system (e.g. a serial
+# console for the QEMU boot-test); rime.poweroff powers off on success. Same
+# engine code path as a GUI-driven install, so a green run validates the flow.
+if [ "$UNATTENDED" = 1 ]; then
+  # Everything to the kernel console (ttyS0 in the QEMU test) so the run is
+  # observable on serial, not stuck on tty1.
+  [ -w /dev/console ] && exec >/dev/console 2>&1
+  DISK=$(kv rime.disk); USERNAME=$(kv rime.user); P1=$(kv rime.pass); HOSTNAME=$(kv rime.host)
+  : "${USERNAME:=andre}"; : "${HOSTNAME:=rime}"; : "${P1:=rime}"
+  # Encryption in the unattended (CI) path is OPT-IN and says which way it went.
+  # This path exists only on test builds (see the marker-file gate above) and
+  # runs with nobody in front of it, so there is no one to show a recovery key
+  # to; defaulting it to `yes` would encrypt CI disks with a key that goes
+  # straight in the bin. The line is printed rather than assumed so a reader of
+  # a CI log can see the decision instead of inferring it.
+  U_ENCRYPT=$(kv rime.encrypt); : "${U_ENCRYPT:=no}"
+  case "$U_ENCRYPT" in
+    no)  echo "unattended: encryption OFF (pass rime.encrypt=yes to turn it on)" ;;
+    yes) die "unattended: rime.encrypt=yes is not supported.
+
+The unattended path has nobody to show a disk recovery key to, and an encrypted
+disk whose recovery key was never shown to anyone is exactly what this feature
+exists to prevent. Drive the graphical installer, or use --headless with an
+answers file carrying encrypt=yes and lukspass=." ;;
+    *)   die "unattended: bad rime.encrypt='$U_ENCRYPT' (expected yes or no)." ;;
+  esac
+  [ -b "$DISK" ] || die "unattended: rime.disk=$DISK is not a block device."
+  log "UNATTENDED install: DISK=$DISK USER=$USERNAME HOST=$HOSTNAME"
+  echo "Rime OS unattended install to $DISK …"
+  WROTE_DISK=1
+  EXTRA_KARGS=()
+  for k in $(kvall rime.karg); do EXTRA_KARGS+=(--karg "$k"); done
+  # Disarm the ERR trap around the install (it fires even under `set +e`, and a
+  # failing `podman … | tee` pipeline would pre-empt the rc check below).
+  trap - ERR
+  set +e
+  # --net=host: no netavark needed in the live env; bootc install is offline.
+  set_nvram_args_for "$DISK"
+  podman ${PODMAN_STORE[@]+"${PODMAN_STORE[@]}"} run --rm --privileged --pid=host --net=host --security-opt label=disable \
+    -v /var/lib/containers:/var/lib/containers -v /dev:/dev \
+    ${NVRAM_ARGS[@]+"${NVRAM_ARGS[@]}"} \
+    ${SRC_VOL[@]+"${SRC_VOL[@]}"} "$IMAGE" \
+    bootc install to-disk --wipe --filesystem "$ROOTFS_TYPE" \
+      ${NVRAM_BOOTC_ARGS[@]+"${NVRAM_BOOTC_ARGS[@]}"} \
+      --karg quiet --karg splash ${EXTRA_KARGS[@]+"${EXTRA_KARGS[@]}"} \
+      ${SRC_ARGS[@]+"${SRC_ARGS[@]}"} \
+      "$DISK" 2>&1 | tee -a "$LOG"
+  rc=${PIPESTATUS[0]}
+  trap 'die "Unexpected error on line $LINENO (see log). This is a bug in the installer, not a silent failure."' ERR
+  [ "$rc" = 0 ] || die "unattended: bootc install exited $rc (see $LOG)."
+  INSTALLED_OK=1
+  MNT=$(mktemp -d)
+  udevadm settle --timeout=30 2>>"$LOG" || true
+  partprobe "$DISK" 2>>"$LOG" || true
+  udevadm settle --timeout=30 2>>"$LOG" || true
+  root_part=""
+  for p in $(lsblk -rno NAME,TYPE "$DISK" 2>/dev/null | awk '$2=="part"{print $1}'); do
+    if mount -o ro "/dev/$p" "$MNT" 2>/dev/null; then
+      if [ -d "$MNT/ostree/deploy" ]; then umount "$MNT" 2>/dev/null || true; root_part="/dev/$p"; break; fi
+      umount "$MNT" 2>/dev/null || true
+    fi
+  done
+  [ -n "$root_part" ] || die "unattended: installed root filesystem not found on $DISK."
+  mount "$root_part" "$MNT" || die "unattended: mount of new root failed."
+  deploy=$(ls -d "$MNT"/ostree/deploy/*/deploy/*.0 2>/dev/null | head -1 || true)
+  [ -n "$deploy" ] || { umount "$MNT" 2>/dev/null || true; die "unattended: deployment not found."; }
+  create_user_in "$deploy" "$USERNAME" "$P1" "$HOSTNAME" "unattended"
+  copy_network_to "$deploy"
+  set_locale_keymap_in "$deploy"
+  sync || true; umount "$MNT" 2>/dev/null || true; rmdir "$MNT" 2>/dev/null || true
+  echo "RIME-INSTALL-UNATTENDED-OK"; log "unattended install complete"
+  if echo "$CMD" | grep -qw rime.poweroff; then sync; poweroff; fi
+  exit 0
+fi
+
+# ── HEADLESS / GUI MODE — the only non-CI way to run this engine ─────────────
+# The graphical installer (rime-installer-gui) is a FRONT END only. It collects
+# answers and hands them here; every disk guard, ESP check, LVM/LUKS refusal,
+# bootc invocation, account creation, SELinux relabel and Secure Boot step
+# lives in this one engine. This file used to also carry a whiptail UI of its
+# own, reached as a fallback whenever the GUI failed to start — the exact place
+# real users kept getting stranded — so that UI was deleted entirely rather
+# than kept "just in case".
+#
+#   rime-install --headless ANSWERS        install from a key=value answers file
+#
+# Run with no arguments the engine REFUSES (exit 2) instead of guessing what to
+# do: an engine that quietly grows an interactive mode is how the stranding
+# fallback came to exist in the first place.
+#
+# The GUI enumerates disks itself (a front end presenting choices) and this
+# engine independently re-validates whatever comes back. That is deliberate
+# defence in depth: the live USB, for instance, is excluded by the GUI for UX
+# AND refused here by the "currently mounted" guard, so a front-end bug cannot
+# turn into a wiped boot stick.
+#
+# The answers file is written 0600 by the GUI and removed by it afterwards; it
+# carries the account password (and, optionally, the MOK enrolment password),
+# so it must never be world-readable or logged.
+case "${1:-}" in
+  --headless) ANSWERS="${2:-}" ;;
+  # A ONE-SHOT, NO-DISK check the GUI calls from the encrypt page itself,
+  # BEFORE the confirm step — not after it, on the progress page, which is
+  # where this same verdict used to surface (see the UNLOCK_KEYMAP block
+  # below: it is the identical logic, run here in isolation). Nothing is
+  # partitioned, nothing is mounted, no answers file is read. The passphrase
+  # comes off stdin, one line, never argv: this engine never puts a secret
+  # where `ps` or /proc/PID/cmdline can see it, and this mode does not start
+  # that now. Prints exactly one line and exits 0 whether or not the layout
+  # can type the passphrase — this is advisory information for a form field,
+  # not a guard, and a non-zero exit here must never be read as "refuse the
+  # install".
+  #   rime-install --check-passphrase LAYOUT [VARIANT]  <<< "PASSPHRASE"
+  --check-passphrase)
+    _cp_layout="${2:-}"
+    _cp_variant="${3:-}"
+    IFS= read -r _cp_pass || true
+    if [ -z "$_cp_layout" ]; then
+      echo "typeable: unknown reason=no-layout"
+      exit 0
+    fi
+    _cp_console=$(console_keymap_for "$_cp_layout" "$_cp_variant" "")
+    # Same gate as the real install path just below: `us` is never checked,
+    # because the unlock prompt only ever falls back TO `us` — a layout that
+    # already resolves there has nothing to fall back from.
+    if [ -z "$_cp_console" ] || [ "$_cp_console" = us ]; then
+      echo "typeable: yes console=${_cp_console:-us}"
+      exit 0
+    fi
+    # Same override as console_keymap_for's, for the same reason: the keymap
+    # TREE has to be redirectable or this check can only be measured on Fedora.
+    _cp_verdict=$(keymap_can_type "$_cp_pass" "${RIME_KBD_KEYMAPS:-/usr/lib/kbd/keymaps}" "$_cp_console")
+    case "$_cp_verdict" in
+      yes)  echo "typeable: yes console=$_cp_console" ;;
+      no:*) echo "typeable: no console=$_cp_console chars=${_cp_verdict#no:}" ;;
+      *)    echo "typeable: unknown console=$_cp_console" ;;
+    esac
+    exit 0
+    ;;
+  "")
+    # Not an install path — refuse loudly, start nothing, prompt for nothing.
+    restore_console
+    echo "rime-install is the install engine, not a user interface." >&2
+    echo "Run the graphical installer (rime-installer-launch), or pass --headless ANSWERS." >&2
+    exit 2
+    ;;
+  *)          die "unknown argument: $1 (expected --headless ANSWERS or --check-passphrase LAYOUT [VARIANT])" ;;
+esac
+
+[ -f "$ANSWERS" ] || die "answers file not found: $ANSWERS"
+# Only ever accept a fixed key set — never `source` an attacker-writable file.
+# Read WHOLE LINES and split them ourselves. Two separate measured bugs make
+# this the only safe shape:
+#
+#  1. `|| [ -n "$line" ]` — `read` returns non-zero at EOF without a trailing
+#     newline, and a plain `while read` DISCARDS that last line. Measured: a
+#     file ending `hostname=rime` with no final newline parsed every key except
+#     hostname. A silently dropped key is the worst shape of bug here — a lost
+#     `mokpw` skips Secure Boot enrolment without a word.
+#
+#  2. NOT `IFS='=' read -r k v`. That form eats a single TRAILING '=' from the
+#     value, because read strips one trailing IFS delimiter when filling the
+#     last variable. Measured, on the real loop:
+#         password=a=b=c  -> a=b=c   (fine)
+#         password=abc==  -> abc==   (fine)
+#         password=abc=   -> abc     (WRONG — one character silently gone)
+#     A trailing '=' is the canonical shape of a base64 password out of a
+#     password manager. chpasswd would then set a password DIFFERENT from the
+#     one the user typed, the install would print RIME-INSTALL-OK, and first
+#     login would fail with no error recorded anywhere — a locked-out system
+#     reported as a success. `${line#*=}` has no such behaviour.
+# Clear every answer variable before parsing, so "missing" means missing.
+#
+# This is not tidiness. **bash pre-populates $HOSTNAME** with the machine's own
+# hostname — measured, it is `rime` on this box and `rime-installer` in the live
+# ISO. So the "hostname missing" check could never fire, in this version OR in
+# the original `: "${HOSTNAME:?…}"` form. An answers file without a `hostname=`
+# line would sail through validation and install a system silently named after
+# the LIVE ENVIRONMENT instead of failing.
+#
+# Found the hard way: a test case that omitted hostname was expected to be
+# rejected, and instead ran all the way to `bootc install to-disk --wipe` on a
+# real USB stick. Nothing else stood between a missing key and a wiped disk.
+# ROOTFS_TYPE is deliberately NOT cleared — it has a real default (btrfs).
+INSTALL_MODE=""; DISK=""; TARGET=""; ESP_DEV=""
+USERNAME=""; P1=""; HOSTNAME=""; MOKPW=""
+# Cleared for the same reason as the rest: an operator's keyboard choice must
+# come from the answers file or not at all. A stale value here would silently
+# install a layout nobody picked, and a wrong layout is a password that cannot
+# be typed on first boot.
+KEYMAP=""; KEYVARIANT=""; TIMEZONE=""
+# Encryption is a DECISION, and a decision that goes missing must not be made
+# silently in either direction — see the `encrypt` validation below.
+ENCRYPT=""; LUKSPASS=""
+# The typed ERASE and the identity of every device it was typed against. See
+# the confirmation binding immediately before the dry-run stop.
+CONFIRMED=""; CONFIRM_TARGET=""; CONFIRM_DISK_ID=""; CONFIRM_TARGET_ID=""; CONFIRM_ESP_ID=""
+
+while IFS= read -r line || [ -n "$line" ]; do
+  case "$line" in
+    ''|'#'*) continue ;;
+    *'='*)   k=${line%%=*}; v=${line#*=} ;;
+    *)       die "malformed line in answers file (no '='): $line" ;;
+  esac
+  case "$k" in
+    mode)      INSTALL_MODE="$v" ;;
+    disk)      DISK="$v" ;;
+    target)    TARGET="$v" ;;
+    esp)       ESP_DEV="$v" ;;
+    username)  USERNAME="$v" ;;
+    password)  P1="$v" ;;
+    hostname)  HOSTNAME="$v" ;;
+    rootfs)    ROOTFS_TYPE="$v" ;;
+    mokpw)     MOKPW="$v" ;;
+    keymap)    KEYMAP="$v" ;;
+    keyvariant) KEYVARIANT="$v" ;;
+    timezone)  TIMEZONE="$v" ;;
+    encrypt)   ENCRYPT="$v" ;;
+    lukspass)  LUKSPASS="$v" ;;
+    confirmed) CONFIRMED="$v" ;;
+    confirm_target)    CONFIRM_TARGET="$v" ;;
+    confirm_disk_id)   CONFIRM_DISK_ID="$v" ;;
+    confirm_target_id) CONFIRM_TARGET_ID="$v" ;;
+    confirm_esp_id)    CONFIRM_ESP_ID="$v" ;;
+    *)         die "unknown key in answers file: $k" ;;
+  esac
+done < "$ANSWERS"
+
+# `|| die`, NOT `: "${VAR:?...}"`. Measured: the `:?` form writes to stderr and
+# exits 1 WITHOUT running the ERR trap, so nothing ever emits the
+# `RIME-INSTALL-FAILED:` line the GUI watches for. The front end then shows the
+# reasonless "The installer exited with status 1", and save_log_to_esp never
+# runs, so the one artefact that could explain it is lost with the RAM disk.
+# Every failure in this engine must speak the same protocol.
+[ -n "${INSTALL_MODE:-}" ] || die "answers: mode missing"
+[ -n "${DISK:-}" ]         || die "answers: disk missing"
+[ -n "${USERNAME:-}" ]     || die "answers: username missing"
+[ -n "${HOSTNAME:-}" ]     || die "answers: hostname missing"
+[ -n "${P1:-}" ] || die "answers: password missing"
+case "$INSTALL_MODE" in disk|partition) : ;; *) die "answers: bad mode '$INSTALL_MODE'" ;; esac
+
+# ── Encryption: explicit, or refuse ─────────────────────────────────────────
+# Rime OS encrypts the disk BY DEFAULT. "By default" is a property of the
+# question the front end asks (the box is ticked when the user arrives), NOT a
+# property of this engine — and the engine refuses to guess.
+#
+# Both silent defaults are wrong here, in opposite directions:
+#   * default to `no`  — a front-end bug that drops the key turns a user who
+#     ticked the box into an unencrypted machine, with nothing anywhere saying
+#     so. A silent security downgrade reported as success.
+#   * default to `yes` — a test harness, a scripted install, or the ISO's own
+#     unattended path would start encrypting disks nobody asked to encrypt.
+#
+# So the key is MANDATORY in headless mode. This is the same reasoning the
+# hostname parser above records: a key that can go missing without anybody
+# noticing is the shape of bug that costs a disk. rime-installer-gui always
+# writes it; the unattended (CI) path takes rime.encrypt= from the kernel
+# command line and SAYS which way it went.
+[ -n "${ENCRYPT:-}" ] || die "answers: encrypt missing.
+
+The installer must be told explicitly whether to encrypt this disk — it will
+not guess. Nothing has been erased."
+case "$ENCRYPT" in
+  yes|no) : ;;
+  *) die "answers: bad encrypt '$ENCRYPT' (expected yes or no). Nothing has been erased." ;;
+esac
+
+if [ "$ENCRYPT" = yes ]; then
+  # ── Encryption needs a whole disk, and this is not a shortcut ─────────────
+  # An encrypted root needs an UNENCRYPTED /boot for GRUB to read (see the
+  # layout comment at the encrypted install branch). Partition mode is handed
+  # ONE partition to install into plus somebody else's ESP; there is nowhere to
+  # put /boot without taking a second partition the user never offered. Rather
+  # than invent one, this refuses — with the disk intact and with the two ways
+  # forward named.
+  [ "$INSTALL_MODE" = disk ] \
+    || die "Encryption is only available when Rime OS gets a whole disk.
+
+Nothing has been erased — your disks are untouched.
+
+An encrypted system still needs a small UNENCRYPTED boot partition for the
+bootloader to read, and installing into a single existing partition leaves
+nowhere to put one.
+
+Either go back and choose 'Erase the whole disk', or go back and turn
+encryption off to install into this partition unencrypted."
+
+  # ── The passphrase ────────────────────────────────────────────────────────
+  # Checked HERE, before anything is erased, for the same reason the username
+  # is: the alternative is discovering it after `cryptsetup luksFormat` has
+  # already replaced the disk's contents.
+  [ -n "${LUKSPASS:-}" ] || die "answers: lukspass missing but encrypt=yes. Nothing has been erased."
+  # ASCII-printable only, and this is a deliberate restriction rather than
+  # laziness. The unlock prompt is a KERNEL CONSOLE prompt: it has one kbd
+  # keymap, no input method, no compose key and no dead keys. A passphrase
+  # containing a character the console keymap cannot produce is a passphrase
+  # the owner cannot type on their own machine, at the one prompt that has no
+  # way back. Nothing outside printable ASCII is reachable on a kbd keymap at
+  # all — no accents, no input method, no compose key.
+  #
+  # What is NOT true, and the old version of this comment claimed it was, is
+  # that every printable ASCII character is reachable on every kbd keymap.
+  # `ru`, `ara` and `fa` carry no Latin letter anywhere in their tables.
+  # keymap_can_type() handles that case; see its header. The restriction here
+  # stands on its own either way.
+  # `grep -v` on a HERE-STRING, deliberately, and not `printf … | grep -q`:
+  # under `pipefail` a matching `grep -q` can return 141 (it exits before the
+  # writer finishes, the writer takes SIGPIPE) and the `if` then reads a real
+  # match as a non-match, so the guard silently never fires. A here-string has
+  # no writer to signal. The anchored whole-line form is used because a
+  # here-string appends a newline, which is itself outside the printable set
+  # and would make the naive `grep -q '[^ -~]'` form match every passphrase.
+  if LC_ALL=C grep -qv '^[ -~]*$' <<<"$LUKSPASS"; then
+    die "The disk passphrase contains a character that cannot be typed at the boot prompt.
+
+Nothing has been erased — your disks are untouched.
+
+The screen that asks for this passphrase runs before the system starts: it has
+no accents, no emoji and no input method — only the plain characters printed on
+your keyboard. Please go back and choose a passphrase made of letters, digits
+and ordinary punctuation. (Your LOGIN password is not restricted this way.)"
+  fi
+  if [ "${#LUKSPASS}" -lt 8 ]; then
+    die "The disk passphrase is too short (${#LUKSPASS} characters; at least 8 are needed).
+
+Nothing has been erased — your disks are untouched."
+  fi
+
+  # ── The tools this path needs, checked before it needs them ───────────────
+  for _t in cryptsetup sgdisk wipefs blkid partprobe mkfs.ext4 mkfs.vfat mkfs.btrfs; do
+    have "$_t" || die "$_t is missing from this installer environment, so the disk cannot be encrypted.
+
+Nothing has been erased — your disks are untouched.
+Go back and turn encryption off to install unencrypted, or use a newer ISO."
+  done
+  # dm-crypt itself. `modprobe` first: on a live ISO the module is present but
+  # not loaded until something asks for it, and "not loaded" read as "not
+  # supported" would refuse an install that was about to work.
+  modprobe dm_crypt 2>>"$LOG" || true
+  if [ ! -d /sys/module/dm_crypt ] && ! grep -qw dm_crypt /proc/modules 2>/dev/null; then
+    die "This kernel cannot set up an encrypted disk (the dm-crypt module did not load).
+
+Nothing has been erased — your disks are untouched.
+Go back and turn encryption off to install Rime OS unencrypted."
+  fi
+  # btrfs is the only root filesystem this path has been exercised with, and an
+  # untested combination is not something to discover on somebody's only disk.
+  case "$ROOTFS_TYPE" in
+    btrfs) : ;;
+    *) die "Encryption is only supported with the btrfs root filesystem (this install asked for '$ROOTFS_TYPE'). Nothing has been erased." ;;
+  esac
+fi
+
+# ── Validate the account NOW, before anything is erased ──────────────────────
+# These three checks lived only in the deleted text UI, and deleting it took
+# them with it. They have to be here, not only in the GUI, and they have to run
+# BEFORE the disk is touched — that ordering is the whole point.
+#
+# The failure they prevent is the worst one this installer can produce: an
+# invalid username is not rejected by anything until `useradd` runs, and
+# `useradd` runs AFTER `bootc install --wipe` has already erased the target. The
+# result is a fully installed system with NO account on it — unbootable-into,
+# nothing to log in as, and the user's old OS gone. The original text UI
+# validated here for exactly this reason and its comment said so.
+#
+# A front end validating is not a substitute. The engine takes a file it did not
+# write, and it is the last thing between that file and an erased disk.
+# The keyboard choice is validated here, with the account, and for the same
+# reason: it is only ever checked when it is USED, and by then the disk is gone.
+# A layout that xkb does not know produces a system whose keymap silently falls
+# back to us — which is precisely the lockout this feature exists to end, except
+# now the user believes they chose otherwise. Optional: an absent key means the
+# operator did not choose and the live environment's own layout is carried over,
+# which is what this engine has always done.
+if [ -n "${KEYMAP:-}" ]; then
+  printf '%s' "$KEYMAP" | grep -Eq '^[a-z][a-z0-9_-]{0,31}(,[a-z][a-z0-9_-]{0,31})*$' \
+    || die "Invalid keyboard layout '$KEYMAP'. Nothing has been erased."
+  # Checked against xkb's own list, not a pattern — the pattern only proves it
+  # is shaped like a layout name. base.lst ships with xkeyboard-config, which
+  # installer/Containerfile.installer names explicitly so it cannot vanish; if
+  # it is somehow absent the shape check above stands alone rather than
+  # refusing an install over a missing reference file.
+  if [ -r /usr/share/X11/xkb/rules/base.lst ]; then
+    for _kl in $(printf '%s' "$KEYMAP" | tr ',' ' '); do
+      awk -v want="$_kl" \
+        '/^! layout/{f=1;next} /^!/{f=0} f && $1==want{found=1} END{exit !found}' \
+        /usr/share/X11/xkb/rules/base.lst 2>/dev/null \
+        || die "'$_kl' is not a keyboard layout this system knows. Nothing has been erased."
+    done
+  fi
+fi
+if [ -n "${TIMEZONE:-}" ]; then
+  printf '%s' "$TIMEZONE" | grep -Eq '^[A-Za-z][A-Za-z0-9+_-]*(/[A-Za-z0-9+_-]+)*$' \
+    || die "Invalid timezone '$TIMEZONE'. Nothing has been erased."
+fi
+
+# Resolve the CONSOLE keymap here, with the disk still intact, because an
+# encrypted install has to put it on the kernel command line — the initramfs
+# cannot read the installed system's /etc/vconsole.conf, so the unlock prompt's
+# layout is decided at install time or not at all. See console_keymap_for().
+if [ -n "${KEYMAP:-}" ]; then
+  CONSOLE_KEYMAP=$(console_keymap_for "$KEYMAP" "${KEYVARIANT:-}" "")
+  log "keyboard: XKB '$KEYMAP'${KEYVARIANT:+ variant '$KEYVARIANT'} -> console keymap '$CONSOLE_KEYMAP'"
+else
+  # No operator choice: the live environment's own console keymap is ALREADY a
+  # kbd name (it is what systemd-vconsole-setup loaded here), so it needs no
+  # conversion and must not be run through one.
+  CONSOLE_KEYMAP=$(sed -n 's/^KEYMAP=//p' /etc/vconsole.conf 2>/dev/null | tr -d '"' | head -1 || true)
+  log "keyboard: no operator choice; carrying the live console keymap '${CONSOLE_KEYMAP:-us}'"
+fi
+
+# ── the keymap the UNLOCK PROMPT will use, which is not always theirs ───────
+# Decided here, with every disk still intact, so the decision can be shown to
+# the operator before anything is erased. See keymap_can_type().
+UNLOCK_KEYMAP="$CONSOLE_KEYMAP"
+if [ "${ENCRYPT:-no}" = yes ] && [ -n "$CONSOLE_KEYMAP" ] && [ "$CONSOLE_KEYMAP" != us ]; then
+  _kmverdict=$(keymap_can_type "$LUKSPASS" "${RIME_KBD_KEYMAPS:-/usr/lib/kbd/keymaps}" "$CONSOLE_KEYMAP")
+  case "$_kmverdict" in
+    yes)
+      log "keyboard: console keymap '$CONSOLE_KEYMAP' can type this passphrase; the unlock prompt will use it" ;;
+    no:*)
+      UNLOCK_KEYMAP=us
+      _kmiss=${_kmverdict#no:}
+      log "keyboard: console keymap '$CONSOLE_KEYMAP' cannot produce [$_kmiss] anywhere in its table — the unlock prompt will use 'us' instead"
+      note "Your keyboard layout cannot type this passphrase at the disk-unlock screen."
+      note "  The characters it has no key for at all: $_kmiss"
+      note "  That ONE screen will use the US layout, so every character of the"
+      note "  passphrase you just chose has a key. The login screen, the desktop and"
+      note "  the console all keep your own layout." ;;
+    *)
+      log "keyboard: could not read keymap '$CONSOLE_KEYMAP' to check the passphrase is typeable; leaving the unlock prompt on it" ;;
+  esac
+fi
+
+printf '%s' "$USERNAME" | grep -Eq '^[a-z_][a-z0-9_-]{0,31}$' \
+  || die "Invalid username '$USERNAME'. Use lowercase letters, digits, - and _ ; it must start with a letter or _ and be at most 32 characters. Nothing has been erased."
+# The reserved list must cover names that ALREADY EXIST in the image being
+# installed, not just the famous ones. `lp`, `mail`, `games`, `ftp` and `sync`
+# ship in Fedora's `setup` package on every install, and `greetd` is created by
+# the greetd RPM this desktop depends on — the deleted text UI listed greetd for
+# exactly that reason and the rewrite dropped it. Any of these passes the regex
+# above, so without this list the disk is wiped and `useradd` then fails on a
+# name that was always going to collide.
+case "$USERNAME" in
+  root|bin|daemon|adm|sys|sync|shutdown|halt|mail|operator|games|ftp|lp|news|uucp|man|proxy|backup|list|irc|gnats|nobody|systemd*|dbus|polkitd|sshd|chrony|tss|sssd|greetd|gdm|sddm|lightdm|colord|geoclue|rtkit|pipewire|flatpak|avahi|rime|rimed|apex|apexd)  # rime-rename: keep (the pre-rebrand account names too)
+    die "'$USERNAME' is a reserved system account name — pick another. Nothing has been erased." ;;
+esac
+printf '%s' "$HOSTNAME" | grep -Eq '^[a-zA-Z0-9]([a-zA-Z0-9-]{0,61}[a-zA-Z0-9])?$' \
+  || die "Invalid hostname '$HOSTNAME'. Use letters, digits and hyphens only, starting and ending with a letter or digit (max 63 characters). Nothing has been erased."
+
+# Re-run the engine's full guard set on the answers. The GUI is not trusted to
+# have done it: a front end must never be the only thing standing between a
+# typo and a wiped disk.
+[ -b "$DISK" ] || die "$DISK is not a block device."
+# A block device is not necessarily a DISK. The deleted text UI built its menu
+# from `lsblk -dn … '$3=="disk"'`, so DISK was structurally a whole disk and
+# nothing downstream had to think about it. Headless takes whatever the answers
+# file says, and `bootc install to-disk --wipe /dev/sda3` happily writes a GPT
+# *inside a partition* — destroying that partition and yielding something no
+# firmware will boot, while the neighbouring OS's entries rot.
+#
+# `loop` is accepted alongside `disk`, and that is NOT a hole in this guard. A
+# loop device IS a whole block device with its own partition table — writing a
+# GPT to one is meaningful and is how a disk image gets built — whereas the
+# thing this guard exists to refuse is a PARTITION, which still fails. It is
+# here because the encrypted install path cannot be tested any other way: a real
+# `bootc install` onto a real LUKS2 volume has to happen on SOMETHING, and the
+# rule for this work is loopback files and VMs only, never a real disk. An
+# install path that has only ever been reasoned about is not a tested install
+# path. The graphical front end never offers a loop device (it enumerates with
+# `lsblk … TYPE=="disk"`), so this widens nothing a user can reach by accident.
+_dtype=$(lsblk -dno TYPE "$DISK" 2>/dev/null | tr -d ' ' || true)
+case "$_dtype" in
+  disk|loop) : ;;
+  *) die "$DISK is a '${_dtype:-unknown}', not a whole disk. Refusing — installing onto anything else produces a system that will not boot. Nothing has been erased." ;;
+esac
+if findmnt -rno SOURCE | grep -qE "^${DISK}([0-9p]|$)"; then
+  die "$DISK (or a partition of it) is currently mounted — refusing."
+fi
+
+# Refuse a target that cannot possibly hold the image, BEFORE erasing it. The
+# text UI warned below 16 GB; there was no check at all in headless mode, so a
+# too-small stick was wiped and the install then failed on space several minutes
+# later — destructive and pointless, when the size is knowable up front.
+_min_bytes=$((16 * 1000 * 1000 * 1000))
+_sz=$(lsblk -bdno SIZE "$DISK" 2>/dev/null | tr -d ' ' || true)
+case "$_sz" in
+  ''|*[!0-9]*) log "size check: could not read the size of $DISK — continuing" ;;
+  *) [ "$_sz" -ge "$_min_bytes" ] \
+       || die "$DISK is only $((_sz / 1000000000)) GB. Rime OS needs at least 16 GB. Nothing has been erased." ;;
+esac
+
+# Validate the filesystem choice for BOTH modes, here, before the mode split.
+# It used to be checked only in the partition branch, so in whole-disk mode a
+# typo reached `bootc install to-disk --filesystem` — which rejects it only
+# after WROTE_DISK=1 has been set, making die() report that the disk "may
+# already have been erased and left INCOMPLETE" about a disk it never touched.
+# This file's rule is that it must never lie in the frightening direction.
+case "$ROOTFS_TYPE" in
+  btrfs)     MKFS_FORCE="-f" ;;
+  ext4|ext3) MKFS_FORCE="-F" ;;
+  xfs)       MKFS_FORCE="-f" ;;
+  *)         die "Unsupported root filesystem '$ROOTFS_TYPE'. Nothing has been erased." ;;
+esac
+if [ "$INSTALL_MODE" = partition ]; then
+  [ -n "${TARGET:-}" ] || die "answers: target partition missing for partition mode"
+  [ -b "$TARGET" ] || die "$TARGET is not a block device."
+  [ -n "${ESP_DEV:-}" ] || die "answers: esp missing for partition mode"
+  [ -b "$ESP_DEV" ] || die "$ESP_DEV is not a block device."
+  # Formatting the ESP as the root filesystem destroys the boot partition of
+  # EVERY OS on the machine, including the one being installed, and produces a
+  # disk that boots nothing at all. The GUI presents them as two separate
+  # choices and will not offer the same device twice, but the engine must
+  # refuse it independently — this is the single most destructive thing a
+  # malformed answers file could ask for.
+  [ "$TARGET" != "$ESP_DEV" ] \
+    || die "The root partition and the EFI System Partition are the same device ($TARGET). Formatting the ESP would leave the machine unable to boot anything. Nothing has been erased."
+  # The target must be a PARTITION, and it must live on the disk we were told
+  # about. Both halves matter and the first one was missing.
+  #
+  # The earlier version of this guard read `[ -z "$_tdisk" ] || …`, which let an
+  # EMPTY parent through. Measured: `lsblk -no PKNAME /dev/sdb` is empty exactly
+  # when the device is a WHOLE DISK — precisely the case this guard exists to
+  # refuse. So `mode=partition, disk=/dev/sda, target=/dev/sdb` passed every
+  # check and would have run mkfs over the whole of /dev/sdb, a disk the user
+  # never named as the target, and then reported the outcome as if it had
+  # happened on /dev/sda. Empty must FAIL, not pass; the text UI had it that way
+  # and the rewrite inverted it.
+  #
+  # Checking TYPE as well as PKNAME closes the related case of a device-mapper
+  # node sitting directly on the disk, which reports the disk as its parent and
+  # would otherwise satisfy the comparison.
+  _ttype=$(lsblk -dno TYPE "$TARGET" 2>/dev/null | tr -d ' ' || true)
+  [ "$_ttype" = part ] \
+    || die "$TARGET is a '${_ttype:-unknown}', not a partition. In partition mode the target must be a partition. Nothing has been erased."
+  _tdisk=$(lsblk -dno PKNAME "$TARGET" 2>/dev/null | head -1 | tr -d ' ' || true)
+  [ -n "$_tdisk" ] \
+    || die "Could not determine which disk $TARGET belongs to. Refusing to format it. Nothing has been erased."
+  [ "$_tdisk" = "$(basename "$DISK")" ] \
+    || die "$TARGET is not a partition of $DISK (it belongs to /dev/$_tdisk). Refusing to act on two disks at once. Nothing has been erased."
+  # The ESP has to be on that same disk too, and it has to actually BE an ESP.
+  # Without the type check, an `esp=` pointing at a Windows data partition or a
+  # FAT photo partition passes `-b` and "mountable with 40MB free", and bootupd
+  # then writes an \EFI\ tree into it: the firmware never finds Rime, and a
+  # partition the user cares about gets boot files scribbled into it. The text
+  # UI located the ESP by GPT type GUID and explicitly refused to treat plain
+  # vfat as evidence.
+  _esp_disk=$(lsblk -dno PKNAME "$ESP_DEV" 2>/dev/null | head -1 | tr -d ' ' || true)
+  [ "$_esp_disk" = "$(basename "$DISK")" ] \
+    || die "The EFI System Partition $ESP_DEV is not on $DISK (it is on /dev/${_esp_disk:-unknown}). Nothing has been erased."
+  _esp_type=$(lsblk -dno PARTTYPE "$ESP_DEV" 2>/dev/null | tr -d ' ' | tr 'A-Z' 'a-z' || true)
+  case "$_esp_type" in
+    c12a7328-f81f-11d2-ba4b-00a0c93ec93b|0xef) : ;;
+    *) die "$ESP_DEV is not an EFI System Partition (partition type '${_esp_type:-none}'). Writing boot files there would not make the machine boot, and would damage whatever is on it. Nothing has been erased." ;;
+  esac
+  # Container-member refusal: mkfs on an LVM PV / LUKS header silently destroys
+  # everything inside it, and the live env may not even have the tooling to
+  # notice it is mounted.
+  tfs=$(lsblk -dno FSTYPE "$TARGET" 2>/dev/null | tr -d ' ' || true)
+  case "$tfs" in
+    LVM2_member|crypto_LUKS|linux_raid_member|ddf_raid_member|isw_raid_member|zfs_member|bcache)
+      die "$TARGET is a $tfs container member — refusing to format it." ;;
+  esac
+  # MKFS_FORCE is set above, for both modes. Only the TOOLING check is
+  # partition-specific: whole-disk mode hands the filesystem name to bootc,
+  # which brings its own mkfs, whereas partition mode runs ours.
+  have "mkfs.$ROOTFS_TYPE" || die "mkfs.$ROOTFS_TYPE is not available in this installer.
+Only filesystems with tooling present can be used (btrfs is the default)."
+
+  # Fedora-family neighbour check. Rime installs its bootloader under
+  # \EFI\fedora\ — the SAME directory an existing Fedora/RHEL-family install
+  # uses. bootupd rewrites \EFI\fedora\bootuuid.cfg to point at OUR new root,
+  # and the neighbour's unchanged grub.cfg resolves its prefix from that file.
+  # Net effect: the neighbour's data survives untouched, but its existing
+  # firmware entry starts booting Rime. Detect it here so the install step
+  # backs the originals up to \EFI\fedora\apex-backup\, and say so plainly  (rime-rename: keep)
+  # instead of claiming "your existing OS entries stay".
+  ESP_SHARED_FEDORA=0
+  _probe=$(mktemp -d 2>/dev/null || echo /tmp/rime-esp-probe); mkdir -p "$_probe"
+  if mount -o ro "$ESP_DEV" "$_probe" 2>/dev/null; then
+    if [ -e "$_probe/EFI/fedora/bootuuid.cfg" ] || [ -e "$_probe/EFI/fedora/grub.cfg" ]; then
+      ESP_SHARED_FEDORA=1
+      note "A Fedora-family install already uses \\EFI\\fedora on this ESP.
+Rime uses that same directory. Its boot files will be UPDATED to point at
+Rime, so the existing \"Fedora\" entry in your firmware menu will boot
+Rime OS after this. The other install's DATA is not touched, but you will
+need to re-add a boot entry for it (its files stay in place, and the
+originals are backed up to \\${ESP_BACKUP_DIR//\//\\}\\)."
+    fi
+    umount "$_probe" 2>/dev/null || true
+  fi
+  rmdir "$_probe" 2>/dev/null || true
+
+  TARGET_DESC="$TARGET (partition of $DISK)"
+else
+  TARGET="$DISK"
+  TARGET_DESC="$DISK (entire disk)"
+fi
+log "headless: MODE=$INSTALL_MODE TARGET=$TARGET ESP=${ESP_DEV:-n/a} USER=$USERNAME HOST=$HOSTNAME"
+
+# ── 4. install (via the embedded image; stream to log) ───────────────────────
+note "Installing Rime OS to $TARGET_DESC … (full log: $LOG)"
+# ── Network install: fetch the OS BEFORE touching the disk ──────────────────
+# Ordering matters. If the download fails — no network, registry down, a typo in
+# the ref — the disk must still be untouched and the user must get a reason they
+# can act on. Doing this after the wipe would leave a machine with no OS and no
+# way back.
+if [ "$NETINSTALL" = 1 ]; then
+  # ── Say WHY before saying "download failed" ───────────────────────────────
+  # The first real install attempt failed here with three identical
+  # "Temporary failure in name resolution" errors inside ONE SECOND, and the
+  # message it produced ("the registry may be temporarily unavailable") sent the
+  # reader looking at GitHub when the actual problem was that the machine had no
+  # network at all. Diagnose the layers separately and name the one that broke.
+  net_diagnose() {
+    if ! ip route show default 2>/dev/null | grep -q .; then
+      echo "no-route"; return
+    fi
+    if ! getent hosts ghcr.io >/dev/null 2>&1; then
+      echo "no-dns"; return
+    fi
+    echo "ok"
+  }
+
+  # Give a just-connected link a moment to finish. DHCP, DNS from the lease and
+  # a wifi association all land a few seconds apart, so checking once and giving
+  # up is how a connection that was about to work gets reported as broken.
+  for _w in 1 2 3 4 5 6 7 8 9 10; do
+    [ "$(net_diagnose)" = ok ] && break
+    sleep 2
+  done
+
+  case "$(net_diagnose)" in
+    no-route)
+      die "This machine is not connected to any network, and this is the network
+installer — it has to download Rime OS (about 5 GB) to install it.
+
+Nothing has been erased — your disks are untouched.
+
+Go Back to the Network step and connect to Wi-Fi, or plug in an Ethernet cable,
+then come back and confirm again.
+
+If you cannot get online here, use the full offline ISO instead: it contains the
+whole system and needs no network at all." ;;
+    no-dns)
+      die "This machine has a network connection, but cannot look up addresses on it
+(DNS is not answering), so Rime OS cannot be downloaded.
+
+Nothing has been erased — your disks are untouched.
+
+Usually this means the network needs you to sign in first — a hotel, airport or
+school portal — which this installer cannot do. Try a different network, a phone
+hotspot, or use the full offline ISO, which needs no network at all." ;;
+  esac
+
+  # ── Stage to disk, not to RAM ─────────────────────────────────────────────
+  # See NEED_SCRATCH_GB above for why, and the STAGE_TARGET comment for what
+  # happens on a machine that has no scratch volume at all.
+  #
+  # Two orderings, and the difference is exactly the guarantee this step can
+  # make:
+  #
+  #   * a real scratch volume exists → download FIRST, disks untouched. A
+  #     failure here costs nothing.
+  #   * nothing qualifies → stage inside the target root, which means the
+  #     target is partitioned and formatted BEFORE the download. The disk is
+  #     committed at that point. This is the case the published v1.0.0
+  #     installer shipped and installed with on real hardware, and it is the
+  #     only thing that turns the single-disk USB-boot laptop from a refusal
+  #     into an install.
+  #
+  # Neither ordering stages into RAM, which is the rule 63857891 added and this
+  # does not relax: the fallback's store lives on a loop device backed by the
+  # TARGET DISK, with TMPDIR pointed at it too.
+  STAGE_ON_TARGET=0
+  SCRATCH="$(pick_scratch)" || die "The staging directory you asked for (RIME_OCI_SCRATCH=${RIME_OCI_SCRATCH:-})
+cannot be used: it is not a writable directory on a real filesystem with
+${NEED_SCRATCH_GB} GB free, or it is on the disk about to be erased.
+
+Nothing has been erased — your disks are untouched.
+
+Unset RIME_OCI_SCRATCH to let the installer choose for itself."
+  if [ "$SCRATCH" = "$STAGE_TARGET" ]; then
+    STAGE_ON_TARGET=1
+    SCRATCH=""
+    # ── Is the target big enough to hold the download AND the system? ───────
+    # Asked HERE, against the raw device, because here the disk is still
+    # intact. The shipped installer asked the same question inside its
+    # stage_setup — i.e. after mkfs — so a too-small disk was erased before
+    # being told no. The same rule is applied again after mkfs against real
+    # free space; this one is what makes the refusal survivable.
+    # A RAW device size is not free space, and the gap is not small: this path
+    # spends ~513 MiB of the disk on the BIOS-boot and EFI partitions before
+    # mkfs runs, and the filesystem then keeps its own metadata. Without a
+    # margin, a disk a couple of GB above the line passes HERE, gets
+    # partitioned, and fails the same rule again in stage_setup — which is the
+    # "erased for nothing" outcome this check exists to prevent.
+    _tsize=$(lsblk -bdno SIZE "$TARGET" 2>/dev/null | tr -dc '0-9')
+    _tsize_kb=$(( ${_tsize:-0} / 1024 - 2 * 1024 * 1024 ))
+    [ "$_tsize_kb" -ge 0 ] || _tsize_kb=0
+    if ! stage_budget_kb "$_tsize_kb" >/dev/null; then
+      die "$TARGET is too small to install Rime OS over the network.
+
+Nothing has been erased — your disks are untouched.
+
+There is no separate drive or spare partition to download onto, so Rime OS has
+to be staged on $TARGET itself: about ${NEED_SCRATCH_GB} GB while it installs,
+on top of the ${STAGE_RESERVE_GB} GB the installed system needs. $TARGET has
+about $(( _tsize_kb / 1024 / 1024 )) GB to give.
+
+Either install to a larger disk, or plug in a USB stick or drive with
+${NEED_SCRATCH_GB} GB free — it is used as scratch space only and is not
+erased — and try again."
+    fi
+    # ── Reachability, checked while everything is still intact ──────────────
+    # On this path the download happens AFTER the disk is erased, so this is
+    # the last moment anything can be verified for free. `skopeo inspect --raw`
+    # fetches the manifest only: in about a second it proves DNS resolves, the
+    # registry answers, the repository is readable without credentials, and the
+    # tag for THIS edition exists. Every one of those used to be discovered
+    # several minutes in, after the wipe.
+    #
+    # What it cannot prove is that a link working now still works in ten
+    # minutes. Nothing can, and the message below does not pretend otherwise.
+    note "Checking Rime OS can be downloaded from $NET_SOURCE_IMAGE …"
+    insp_ok=0
+    for attempt in 1 2 3; do
+      if [ "$attempt" != 1 ]; then
+        _wait=$(( attempt * 5 ))
+        note "Could not reach the registry — waiting ${_wait}s, then retrying (attempt $attempt of 3)…"
+        sleep "$_wait"
+      fi
+      if skopeo inspect --raw "docker://$NET_SOURCE_IMAGE" >>"$LOG" 2>&1; then insp_ok=1; break; fi
+    done
+    if [ "$insp_ok" != 1 ] && pinned_image_gone; then
+      die "$(pinned_image_gone_msg "Nothing has been erased — your disks are untouched.")"
+    fi
+    [ "$insp_ok" = 1 ] || die "Could not reach Rime OS at $NET_SOURCE_IMAGE after 3 attempts.
+
+Nothing has been erased — your disks are untouched.
+
+The network itself looked usable, so the problem is between here and the image
+registry: the connection may have dropped, the registry may be unreachable from
+this network, or this edition may not have been published. The exact error is at
+the end of $LOG."
+    # ── The fallback runs tools the normal whole-disk path never needs ─────
+    # Whole-disk mode hands the filesystem name to bootc, which brings its own
+    # mkfs; only partition mode checks for one. This path does its own
+    # partitioning, its own mkfs and its own loop device, so every tool it uses
+    # is checked HERE — before the disk is touched — rather than being
+    # discovered missing with the partition table already gone.
+    for _t in losetup truncate mkfs.xfs findmnt; do
+      have "$_t" || die "$_t is missing from this installer, so Rime OS cannot be staged on $TARGET.
+
+Nothing has been erased — your disks are untouched.
+
+Plug in a USB stick or drive with ${NEED_SCRATCH_GB} GB free — it is used as
+scratch space only and is not erased — and try again."
+    done
+    if [ "$INSTALL_MODE" = disk ] && [ "$ENCRYPT" != yes ]; then
+      for _t in sgdisk wipefs partprobe udevadm lsblk mkfs.vfat "mkfs.$ROOTFS_TYPE"; do
+        have "$_t" || die "$_t is missing from this installer, so $DISK cannot be prepared for a staged install.
+
+Nothing has been erased — your disks are untouched.
+
+Plug in a USB stick or drive with ${NEED_SCRATCH_GB} GB free — it is used as
+scratch space only and is not erased — and try again."
+      done
+    fi
+    log "staging: no scratch volume qualified — staging inside the target root on $TARGET"
+    note "No spare drive or partition was found, so Rime OS will be downloaded onto $TARGET itself as it installs."
+  else
+    netinstall_fetch_into "$SCRATCH"
+  fi
+fi
+
+# ── The encryption helper has to EXIST before the disk is destroyed ─────────
+# It lives in the image, which on a network install only arrived a moment ago,
+# so this is the first point at which the question can be answered — and it is
+# still before anything has been written. An encrypted disk whose recovery key
+# was never created is the stranding case this whole item exists to prevent, so
+# a missing helper is a refusal, never a "carry on without the recovery key".
+#
+# Split out so the answer is produced by ONE piece of code wherever it is asked.
+# It is asked here on every path that already has the image, and again from the
+# encrypted branch on the one path that does not — see luks_helper_checked.
+luks_helper_ok() {
+  [ "$ENCRYPT" = yes ] || return 0
+  if [ -n "${RIME_LUKS_ENROLL_LOCAL:-}" ]; then
+    [ -x "$RIME_LUKS_ENROLL_LOCAL" ] || return 1
+    log "luks: using the test-only local enrolment helper $RIME_LUKS_ENROLL_LOCAL"
+    return 0
+  fi
+  podman ${PODMAN_STORE[@]+"${PODMAN_STORE[@]}"} run --rm "$IMAGE" \
+    test -x "$LUKS_ENROLL_PATH" >>"$LOG" 2>&1
+}
+luks_helper_checked=0
+if [ "$ENCRYPT" = yes ]; then
+  if [ -n "${RIME_LUKS_ENROLL_LOCAL:-}" ]; then
+    [ -x "$RIME_LUKS_ENROLL_LOCAL" ] \
+      || die "RIME_LUKS_ENROLL_LOCAL=$RIME_LUKS_ENROLL_LOCAL is not executable. Nothing has been erased."
+    log "luks: using the test-only local enrolment helper $RIME_LUKS_ENROLL_LOCAL"
+    luks_helper_checked=1
+  elif [ "${NETINSTALL:-0}" = 1 ] && [ "${STAGE_ON_TARGET:-0}" = 1 ]; then
+    # The image has NOT been downloaded yet on this path: the only place with
+    # room for it is the target disk, so it arrives after the disk is prepared.
+    # Asking now would run `podman run` against a store that holds nothing and
+    # refuse a perfectly good image. Deferred to the encrypted branch, which
+    # asks the moment the image exists — still before one byte of the system is
+    # written, and before any user data could be locked away.
+    log "luks: enrolment-helper check deferred — the image downloads onto the target"
+  elif ! luks_helper_ok; then
+    die "This Rime OS image cannot set up an encrypted disk: it does not contain
+the enrolment helper ($LUKS_ENROLL_PATH) that creates the recovery key.
+
+Nothing has been erased — your disks are untouched.
+
+An encrypted disk with no recovery key is a disk you can be permanently locked
+out of, so the installer will not make one. Go back and turn encryption off to
+install Rime OS unencrypted, or use a newer ISO."
+  else
+    luks_helper_checked=1
+  fi
+fi
+
+# ── The typed ERASE is bound to the devices it was typed against ─────────────
+# The confirm page names devices by /dev path, and a /dev path is not an
+# identity. Between the user typing ERASE and this line there can be a
+# multi-minute download, and in that time a USB disk can drop off the bus and
+# come back under another name, or a second one can be plugged in and take the
+# first one's name — /dev/sdb is whichever disk the kernel enumerated second,
+# not the disk the user looked at. So the front end records each device's
+# kernel identity, size, WWN, serial and partition-table/partition UUIDs when
+# the confirm page is drawn, and this is the check that they still match,
+# made here because this is the last line before anything is destroyed.
+#
+# It is a hard refusal in the ENGINE, not a check in the GUI, because the
+# engine is the only thing between an answers file and a wipe: a front end with
+# a bug, or an answers file written by hand, gets exactly the same treatment.
+device_fingerprint() {
+  lsblk -bdnP -o MAJ:MIN,SIZE,WWN,SERIAL,PTUUID,PARTUUID,PARTTYPE "$1" 2>/dev/null | head -1
+}
+[ "$CONFIRMED" = ERASE ] \
+  || die "The final confirmation (typing ERASE) is missing from the answers file. Nothing has been erased."
+[ -n "$CONFIRM_TARGET" ] && [ "$CONFIRM_TARGET" = "$TARGET" ] \
+  || die "The confirmation was typed for ${CONFIRM_TARGET:-no device}, not $TARGET. Nothing has been erased."
+[ -n "$CONFIRM_DISK_ID" ] && [ "$(device_fingerprint "$DISK")" = "$CONFIRM_DISK_ID" ] \
+  || die "$DISK is not the disk that was confirmed: it changed, or a different disk now has that name. Nothing has been erased.
+
+Go back to the disk page and choose the disk again."
+if [ "$INSTALL_MODE" = partition ]; then
+  [ -n "$CONFIRM_TARGET_ID" ] && [ "$(device_fingerprint "$TARGET")" = "$CONFIRM_TARGET_ID" ] \
+    || die "$TARGET is not the partition that was confirmed. Nothing has been erased.
+
+Go back to the disk page and choose the partition again."
+  [ -n "$CONFIRM_ESP_ID" ] && [ "$(device_fingerprint "$ESP_DEV")" = "$CONFIRM_ESP_ID" ] \
+    || die "$ESP_DEV is not the EFI System Partition that was confirmed. Nothing has been erased.
+
+Go back to the disk page and choose the partition again."
+  [ "$(lsblk -dno PKNAME "$TARGET" 2>/dev/null | tr -d ' ')" = "$(basename "$DISK")" ] \
+    || die "$TARGET is no longer on the confirmed disk $DISK. Nothing has been erased."
+  [ "$(lsblk -dno PKNAME "$ESP_DEV" 2>/dev/null | tr -d ' ')" = "$(basename "$DISK")" ] \
+    || die "$ESP_DEV is no longer on the confirmed disk $DISK. Nothing has been erased."
+fi
+
+if [ "${STAGE_ON_TARGET:-0}" = 1 ]; then
+  # Say plainly what is about to happen and in what order, because on this path
+  # the download and the destruction are the SAME step. Someone who reads "do
+  # not power off" and then watches a progress bar for twenty minutes deserves
+  # to know that pulling the plug now is not recoverable.
+  note "Do not power off — $TARGET is being erased now, and Rime OS downloads onto it as it goes. This is the slow part."
+else
+  note "Do not power off — $TARGET is being erased and rewritten from here on."
+fi
+
+# ── Dry-run stop: the last line before anything is destroyed ─────────────────
+# RIME_DRY_RUN=1 runs the ENTIRE validation path for real — every guard, on the
+# real devices named — and then stops here, immediately before the first
+# destructive command. It exists because the test suite must be able to feed
+# this engine real device names without any possibility of erasing them.
+#
+# It is not paranoia. While testing the guards, one case that should have been
+# rejected was not (bash pre-sets $HOSTNAME, see the parser), and the engine ran
+# `bootc install to-disk --wipe` against a USB stick that was plugged in. The
+# guards are the primary defence; this is the one that does not depend on the
+# guards being right.
+#
+# Deliberately NOT reachable from the kernel cmdline or the answers file — only
+# from the environment, which the GUI never sets.
+if [ "${RIME_DRY_RUN:-0}" = 1 ]; then
+  note "RIME-DRY-RUN: validation complete, stopping before the first destructive write."
+  note "  would install: MODE=$INSTALL_MODE TARGET=$TARGET DISK=$DISK ESP=${ESP_DEV:-n/a} FS=$ROOTFS_TYPE USER=$USERNAME HOST=$HOSTNAME ENCRYPT=$ENCRYPT KEYMAP=${CONSOLE_KEYMAP:-unset}"
+  restore_console
+  echo "RIME-INSTALL-DRYRUN-OK"
+  exit 0
+fi
+# NOTE: WROTE_DISK is deliberately NOT set here. In partition mode the ESP
+# free-space check runs first and can fail with everything still intact; claiming
+# destruction at that point is a lie in the frightening direction. Each branch
+# sets it at the exact moment data actually starts being destroyed.
+log "install start: MODE=$INSTALL_MODE TARGET=$TARGET DISK=$DISK ESP=${ESP_DEV:-n/a} USER=$USERNAME HOST=$HOSTNAME FS=$ROOTFS_TYPE"
+
+# Disarm the ERR trap around the install: the trap fires even under `set +e`, and
+# with pipefail a failing `podman … | tee` pipeline would hit it BEFORE we can
+# read rc — reporting a useless "unexpected error on line N" instead of the real
+# bootc error. We check rc explicitly and re-arm immediately after.
+trap - ERR
+set +e
+if [ "$INSTALL_MODE" = partition ]; then
+  # ── partition mode: prepare the filesystem ourselves, then to-filesystem ──
+  # Proven on a loopback multi-OS disk: the other partitions and the existing
+  # /EFI/Microsoft entry survive; Rime is added under /EFI/fedora alongside them.
+  mkdir -p "$TROOT"
+  # Check the ESP has room BEFORE destroying the target. bootupd writes ~20-30 MB
+  # (shim, grub, fallback); running out mid-write left a TRUNCATED BOOTX64.EFI
+  # with the working original already gone — i.e. an unbootable machine, after we
+  # had also erased the target. Verify first, fail while everything is intact.
+  if mount -o ro "$ESP_DEV" "$TROOT" >>"$LOG" 2>&1; then
+    esp_free=$(df -Pk "$TROOT" 2>/dev/null | awk 'NR==2{print $4}' || true)
+    umount "$TROOT" 2>/dev/null || true
+    case "$esp_free" in ''|*[!0-9]*) esp_free=0 ;; esac
+    if [ "$esp_free" -lt 40960 ]; then
+      rc=93
+      echo "ESP $ESP_DEV has only ${esp_free}KB free; need ~40MB" | tee -a "$LOG"
+    fi
+  else
+    rc=92; echo "could not read the ESP $ESP_DEV" | tee -a "$LOG"
+  fi
+  if [ "${rc:-0}" = 0 ]; then
+    WROTE_DISK=1   # mkfs starts here — the target's contents are now going away
+    mkfs."$ROOTFS_TYPE" $MKFS_FORCE -L rime-root "$TARGET" >>"$LOG" 2>&1 \
+      || { rc=90; echo "mkfs.$ROOTFS_TYPE failed on $TARGET" | tee -a "$LOG"; }
+  fi
+  if [ "${rc:-0}" = 0 ]; then
+    mount "$TARGET" "$TROOT" >>"$LOG" 2>&1 || { rc=91; echo "mounting $TARGET failed" | tee -a "$LOG"; }
+  fi
+  if [ "${rc:-0}" = 0 ]; then
+    mkdir -p "$TROOT/boot/efi"
+    mount "$ESP_DEV" "$TROOT/boot/efi" >>"$LOG" 2>&1 \
+      || { rc=92; echo "mounting the ESP $ESP_DEV failed" | tee -a "$LOG"; }
+  fi
+  if [ "${rc:-0}" = 0 ]; then
+    # Record what the ESP looked like BEFORE, so a bootloader problem afterwards
+    # is diagnosable rather than mysterious.
+    { echo "--- ESP $ESP_DEV before install ---"; find "$TROOT/boot/efi" -maxdepth 3; } >>"$LOG" 2>&1 || true
+    # Back up the neighbour's \EFI\fedora boot files: bootupd is about to rewrite
+    # bootuuid.cfg (and may touch grub.cfg), which redirects the existing
+    # "Fedora" firmware entry at Rime. Keeping the originals makes that
+    # recoverable instead of permanent.
+    if [ "${ESP_SHARED_FEDORA:-0}" = 1 ] && [ -d "$TROOT/boot/efi/EFI/fedora" ]; then
+      mkdir -p "$TROOT/boot/efi/$ESP_BACKUP_DIR" 2>/dev/null || true
+      for f in bootuuid.cfg grub.cfg BOOTX64.CSV; do
+        [ -e "$TROOT/boot/efi/EFI/fedora/$f" ] \
+          && cp -n "$TROOT/boot/efi/EFI/fedora/$f" "$TROOT/boot/efi/$ESP_BACKUP_DIR/$f" 2>/dev/null
+      done
+      cp -n "$TROOT/boot/efi/EFI/BOOT/BOOTX64.EFI" "$TROOT/boot/efi/$ESP_BACKUP_DIR/BOOTX64.EFI.orig" 2>/dev/null || true
+      { echo "--- backed up neighbour EFI files to $ESP_BACKUP_DIR ---"
+        ls -l "$TROOT/boot/efi/$ESP_BACKUP_DIR" 2>/dev/null; } >>"$LOG" 2>&1 || true
+    fi
+  fi
+  # ── Nowhere else to stage: the download goes onto the target we just made ──
+  # The target root is mounted at this point and is the only filesystem on this
+  # machine with room, which is what makes the fallback possible here and not
+  # earlier. See stage_setup.
+  if [ "${rc:-0}" = 0 ] && [ "${STAGE_ON_TARGET:-0}" = 1 ]; then
+    if stage_setup "$TROOT"; then
+      netinstall_fetch_into "$STAGE_MNT"
+    else
+      rc=79
+    fi
+  fi
+  if [ "${rc:-0}" = 0 ]; then
+    set_nvram_args_for "$DISK"
+    podman ${PODMAN_STORE[@]+"${PODMAN_STORE[@]}"} run --rm --privileged --pid=host --net=host --security-opt label=disable \
+      -v /var/lib/containers:/var/lib/containers -v /dev:/dev \
+      ${NVRAM_ARGS[@]+"${NVRAM_ARGS[@]}"} \
+      -v "$TROOT":"$TROOT":rshared \
+      ${SRC_VOL[@]+"${SRC_VOL[@]}"} "$IMAGE" \
+      bootc install to-filesystem \
+        --skip-fetch-check --acknowledge-destructive \
+        ${STAGE_BOOTC_ARGS[@]+"${STAGE_BOOTC_ARGS[@]}"} \
+        ${NVRAM_BOOTC_ARGS[@]+"${NVRAM_BOOTC_ARGS[@]}"} \
+        --karg quiet --karg splash ${SRC_ARGS[@]+"${SRC_ARGS[@]}"} \
+        "$TROOT" 2>&1 | tee -a "$LOG"
+    rc=${PIPESTATUS[0]}
+    { echo "--- ESP $ESP_DEV after install ---"; find "$TROOT/boot/efi" -maxdepth 3; } >>"$LOG" 2>&1 || true
+  fi
+  # Before the umounts: the staging loop device holds a writable fd on a deleted
+  # file on $TROOT's filesystem, so $TROOT cannot be released while it exists.
+  stage_teardown
+  umount -R "$TROOT/boot/efi" 2>/dev/null || umount -l "$TROOT/boot/efi" 2>/dev/null || true
+  umount -R "$TROOT" 2>/dev/null || umount -l "$TROOT" 2>/dev/null || true
+elif [ "$ENCRYPT" = yes ]; then
+  # ── encrypted whole disk: partition, LUKS2, then to-filesystem ────────────
+  #
+  # WHY THIS PATH EXISTS AT ALL, AND WHY IT IS NOT `--block-setup tpm2-luks`.
+  # `bootc install to-disk` offers `--block-setup tpm2-luks`, and using it would
+  # have been three words instead of this branch. Read what it does: it binds
+  # the unlock to "presence of the default tpm2 device" — no passphrase slot, no
+  # recovery slot, and on systemd 258 `--tpm2-device=auto` binds to NO PCRs at
+  # all (measured on real hardware, L-002 round 31). That is an encrypted disk
+  # with exactly one key, held by a chip that a firmware update, a TPM clear or
+  # a motherboard swap takes away — the stranding case verbatim, and it is also
+  # why bootc's own help points at to-filesystem "for anything more complex such
+  # as ... LUKS". So the layout is built here, where the passphrase and the
+  # recovery key are created and PROVEN before the disk is committed to.
+  #
+  # THE LAYOUT, and why /boot is outside the encryption:
+  #
+  #   p1  1 GiB   ef00  EFI System Partition   FAT32     -> /boot/efi
+  #   p2  1 GiB   8300  rime-boot              ext4      -> /boot     (PLAIN)
+  #   p3  rest    8309  rime-luks              LUKS2     -> /         (btrfs)
+  #
+  # Rime boots GRUB through bootupd. Fedora's GRUB can be talked into reading a
+  # LUKS2 volume, but only for some header formats, and the failure mode of
+  # getting that wrong is a machine that does not boot at all rather than one
+  # that asks for a passphrase. A separate plain /boot is what Fedora itself
+  # ships for encrypted installs and what this repository's own runbook
+  # specified (docs/m4-install-runbook.md §5b, docs/m0-results.md §9). The
+  # kernel and initramfs living in the clear is not a secret leak: they are the
+  # same public bytes as the published image, and their integrity is Secure
+  # Boot's job, not the disk encryption's.
+  #
+  # Partition TYPES matter and 8309 is chosen deliberately: the initramfs
+  # carries systemd-gpt-auto-generator, which acts on the DISCOVERABLE root
+  # type GUID. Labelling the LUKS partition "Linux LUKS" rather than "root"
+  # keeps exactly one thing responsible for opening it — the rd.luks.* kernel
+  # arguments written below.
+  WROTE_DISK=1
+  rc=0
+  note "Partitioning $DISK (EFI, a plain boot partition, and an encrypted volume for everything else) …"
+  wipefs -a "$DISK" >>"$LOG" 2>&1 || true
+  sgdisk --zap-all "$DISK" >>"$LOG" 2>&1 || true
+  #
+  # PARTITION 4 IS A 1 MiB BIOS BOOT PARTITION AND IT IS NOT DECORATION.
+  # bootupd installs the BIOS GRUB component as well as the EFI one whenever
+  # bootc is told this is a generic image — which is exactly what a loopback
+  # install is told, because that is the flag that stops it rewriting the
+  # building machine's NVRAM. Without somewhere to embed core.img,
+  # `grub2-install --target i386-pc` refuses ("will not proceed with
+  # blocklists") and the whole install fails after the volume is already
+  # encrypted. MEASURED 2026-09-20 22:26, live run 6.
+  #
+  # It is created between 2 and 3 so the NUMBERING stays 1=ESP, 2=boot,
+  # 3=LUKS — sgdisk allocates in the order the options are given, not in
+  # number order — because those three numbers are written into the installer's
+  # own discovery, its tests, and the recovery instructions in
+  # docs/disk-encryption.md. It costs 1 MiB, it is unused on a UEFI machine,
+  # and it makes the encrypted layout match what `bootc install to-disk`
+  # builds for itself.
+  if ! sgdisk \
+        -n 1:0:+1GiB -t 1:ef00 -c 1:"EFI System Partition" \
+        -n 2:0:+1GiB -t 2:8300 -c 2:"rime-boot" \
+        -n 4:0:+1MiB -t 4:ef02 -c 4:"BIOS boot partition" \
+        -n 3:0:0     -t 3:8309 -c 3:"rime-luks" \
+        "$DISK" >>"$LOG" 2>&1; then
+    rc=70; echo "sgdisk could not write the partition table on $DISK" | tee -a "$LOG"
+  fi
+  if [ "${rc:-0}" = 0 ]; then
+    partprobe "$DISK" >>"$LOG" 2>&1 || true
+    udevadm settle --timeout=30 >>"$LOG" 2>&1 || true
+    ESP_PART=$(part_dev "$DISK" 1)
+    BOOT_PART=$(part_dev "$DISK" 2)
+    LUKS_PART=$(part_dev "$DISK" 3)
+    if [ -z "$ESP_PART" ] || [ -z "$BOOT_PART" ] || [ -z "$LUKS_PART" ]; then
+      rc=70
+      echo "the new partitions on $DISK did not appear (esp='$ESP_PART' boot='$BOOT_PART' luks='$LUKS_PART')" | tee -a "$LOG"
+    else
+      log "luks layout: esp=$ESP_PART boot=$BOOT_PART luks=$LUKS_PART"
+    fi
+  fi
+  if [ "${rc:-0}" = 0 ]; then
+    mkfs.vfat -F 32 -n RIMEESP "$ESP_PART" >>"$LOG" 2>&1 \
+      || { rc=71; echo "mkfs.vfat failed on the EFI partition $ESP_PART" | tee -a "$LOG"; }
+  fi
+  if [ "${rc:-0}" = 0 ]; then
+    mkfs.ext4 -F -L rime-boot "$BOOT_PART" >>"$LOG" 2>&1 \
+      || { rc=71; echo "mkfs.ext4 failed on the boot partition $BOOT_PART" | tee -a "$LOG"; }
+  fi
+  # ── the LUKS2 header ───────────────────────────────────────────────────────
+  # The passphrase goes in on STDIN (`--key-file -`), never as an argument:
+  # everything on a command line is world-readable in /proc for as long as the
+  # process lives. argon2id is cryptsetup's own default for LUKS2 and is kept
+  # deliberately — nothing here has to read this header except the initramfs,
+  # which has a full cryptsetup.
+  if [ "${rc:-0}" = 0 ]; then
+    note "Creating the encrypted volume on $LUKS_PART …"
+    LUKS_FMT=(--type luks2 --pbkdf argon2id --label RIMEROOT --batch-mode --key-file -)
+    # TEST-ONLY, environment-only: a weaker key-derivation cost so a loopback
+    # test does not spend a gigabyte and several seconds per open. It is LOGGED,
+    # so a run that used it says so in the artefact rather than looking normal.
+    if [ -n "${RIME_LUKS_PBKDF_MEMORY:-}" ]; then
+      LUKS_FMT+=(--pbkdf-memory "$RIME_LUKS_PBKDF_MEMORY" --pbkdf-parallel 1 --pbkdf-force-iterations 4)
+      log "luks: WEAKENED key derivation in use (RIME_LUKS_PBKDF_MEMORY=$RIME_LUKS_PBKDF_MEMORY) — test builds only"
+    fi
+    if ! printf '%s' "$LUKSPASS" | cryptsetup luksFormat "${LUKS_FMT[@]}" "$LUKS_PART" >>"$LOG" 2>&1; then
+      rc=72; echo "cryptsetup luksFormat failed on $LUKS_PART" | tee -a "$LOG"
+    fi
+  fi
+  if [ "${rc:-0}" = 0 ]; then
+    LUKS_UUID=$(cryptsetup luksUUID "$LUKS_PART" 2>>"$LOG" || true)
+    if [ -z "$LUKS_UUID" ]; then
+      rc=72; echo "the new LUKS2 header on $LUKS_PART has no UUID" | tee -a "$LOG"
+    else
+      # The mapper name is fixed here and put on the kernel command line, so the
+      # name the initramfs creates and the name /etc/crypttab expects are the
+      # same string by construction rather than by coincidence.
+      LUKS_MAPPER="luks-$LUKS_UUID"
+    fi
+  fi
+  if [ "${rc:-0}" = 0 ]; then
+    if ! printf '%s' "$LUKSPASS" | cryptsetup open --key-file - "$LUKS_PART" "$LUKS_MAPPER" >>"$LOG" 2>&1; then
+      rc=73; echo "the new encrypted volume would not open with the passphrase just set" | tee -a "$LOG"
+    fi
+  fi
+  if [ "${rc:-0}" = 0 ]; then
+    mkfs.btrfs -f -L rime-root "/dev/mapper/$LUKS_MAPPER" >>"$LOG" 2>&1 \
+      || { rc=76; echo "mkfs.btrfs failed inside the encrypted volume" | tee -a "$LOG"; }
+  fi
+  if [ "${rc:-0}" = 0 ]; then
+    mkdir -p "$TROOT"
+    mount "/dev/mapper/$LUKS_MAPPER" "$TROOT" >>"$LOG" 2>&1 \
+      || { rc=77; echo "mounting the encrypted root failed" | tee -a "$LOG"; }
+  fi
+  if [ "${rc:-0}" = 0 ]; then
+    mkdir -p "$TROOT/boot"
+    mount "$BOOT_PART" "$TROOT/boot" >>"$LOG" 2>&1 \
+      || { rc=77; echo "mounting the boot partition failed" | tee -a "$LOG"; }
+  fi
+  if [ "${rc:-0}" = 0 ]; then
+    mkdir -p "$TROOT/boot/efi"
+    mount "$ESP_PART" "$TROOT/boot/efi" >>"$LOG" 2>&1 \
+      || { rc=77; echo "mounting the EFI partition failed" | tee -a "$LOG"; }
+  fi
+  # ── Nowhere else to stage: the download goes inside the encrypted root ────
+  # Every staged byte is encrypted on the way in, which is slower and correct.
+  # This is the first point on this path at which a filesystem with room exists.
+  # It is also, deliberately, the step BEFORE enrolment: the helper that makes
+  # the recovery key lives in the image, and on this path the image is not on
+  # this machine yet. See the enrolment block immediately below.
+  if [ "${rc:-0}" = 0 ] && [ "${STAGE_ON_TARGET:-0}" = 1 ]; then
+    if stage_setup "$TROOT"; then
+      netinstall_fetch_into "$STAGE_MNT"
+      # The check that could not run before the wipe, run at the first instant
+      # the image exists — and still before bootc writes anything, so the
+      # encrypted volume holds no data and nothing is locked away. rc=74's
+      # message already describes exactly this state.
+      if [ "$luks_helper_checked" = 0 ] && ! luks_helper_ok; then
+        rc=74
+        echo "the downloaded Rime OS image does not contain $LUKS_ENROLL_PATH" | tee -a "$LOG"
+      else
+        luks_helper_checked=1
+      fi
+    else
+      rc=79
+    fi
+  fi
+  # ── enrolment: the recovery key (always) and a TPM slot (only where safe) ──
+  # Policy is NOT decided here. /usr/libexec/rime-luks-enroll, in the image being
+  # installed, owns it; this engine's job is to call it, to check that a
+  # recovery key really came out, and to refuse to continue if one did not.
+  # The existing passphrase is offered both as $PASSWORD (systemd-cryptenroll's
+  # own documented environment variable) and on stdin, because adding a keyslot
+  # requires unlocking the volume key with a key that already exists.
+  #
+  # ── WHY THIS RUNS HERE, AFTER THE STAGING FETCH, NOT BEFORE mkfs.btrfs ────
+  # The helper is INSIDE the image. On the encrypted whole-disk staging
+  # fallback — nothing qualified as scratch, so the download goes onto the
+  # target itself — $IMAGE is the REGISTRY ref and PODMAN_STORE is still empty
+  # until netinstall_fetch_into sets it. Run before that download, this
+  # `podman run` made podman pull ~15 GB into the DEFAULT containers-storage:
+  # on a live ISO that is the RAM overlay the entire staging design exists to
+  # avoid, on exactly the single-internal-disk USB-boot laptop the fallback was
+  # added for. The deferred luks_helper_ok check above had already been moved
+  # past the download for that reason; the enrolment call it defers FOR had not.
+  #
+  # ONE order for every encrypted path, not a second one behind a
+  # STAGE_ON_TARGET guard. A second call site for a privileged container on a
+  # disk-erasing path is the worse trade, and on the path that does have
+  # scratch everything this moved past is mkfs.btrfs and three mounts — seconds,
+  # no download.
+  #
+  # THE TRADE, STATED RATHER THAN BURIED: on the staging fallback the recovery
+  # key is now created and shown AFTER the download instead of before it. That
+  # is accepted because for the whole of that window the volume holds nothing
+  # but blobs that can be downloaded again, the passphrase the owner just typed
+  # has already been PROVEN to open the volume (the `cryptsetup open` above
+  # succeeded with it, which is what a keyslot test is), and the key still
+  # reaches them before bootc writes the first byte of the system. Nothing of
+  # theirs is locked away at any point in it. Before this change that path
+  # could not complete at all.
+  if [ "${rc:-0}" = 0 ]; then
+    note "Creating the recovery key …"
+    mkdir -p /run/rime-luks 2>>"$LOG" || true
+    chmod 700 /run/rime-luks 2>/dev/null || true
+    RECOVERY_FILE=/run/rime-luks/recovery.key
+    rm -f "$RECOVERY_FILE" 2>/dev/null || true
+    if [ -n "${RIME_LUKS_ENROLL_LOCAL:-}" ]; then
+      printf '%s' "$LUKSPASS" | PASSWORD="$LUKSPASS" "$RIME_LUKS_ENROLL_LOCAL" \
+        --device "$LUKS_PART" --recovery-out "$RECOVERY_FILE" >>"$LOG" 2>&1 \
+        || { rc=74; echo "the enrolment helper failed" | tee -a "$LOG"; }
+    else
+      printf '%s' "$LUKSPASS" | PASSWORD="$LUKSPASS" \
+        podman ${PODMAN_STORE[@]+"${PODMAN_STORE[@]}"} run --rm --privileged --pid=host --net=host \
+          --security-opt label=disable -i -e PASSWORD \
+          -v /dev:/dev -v /run/rime-luks:/run/rime-luks \
+          "$IMAGE" "$LUKS_ENROLL_PATH" \
+            --device "$LUKS_PART" --recovery-out "$RECOVERY_FILE" >>"$LOG" 2>&1 \
+        || { rc=74; echo "the enrolment helper failed" | tee -a "$LOG"; }
+    fi
+  fi
+  if [ "${rc:-0}" = 0 ] && [ ! -s "$RECOVERY_FILE" ]; then
+    rc=74; echo "the enrolment helper produced no recovery key" | tee -a "$LOG"
+  fi
+  # ── prove both keys open it, BEFORE the install writes anything ──────────
+  # This is the acceptance criterion in two commands. A recovery key that was
+  # printed but does not open the volume is worse than none, and finding that
+  # out after the install would mean finding it out on the user's machine.
+  # "Before the install" is bootc, not the download: on the staging fallback
+  # the download is already behind this point, and every byte of it is ours.
+  # `grep`-free and `luksDump`-free: --test-passphrase asks the header itself.
+  if [ "${rc:-0}" = 0 ]; then
+    RECOVERY_KEY=$(tr -d '\r\n' < "$RECOVERY_FILE" 2>>"$LOG" || true)
+    note "Checking that the passphrase and the recovery key both open the disk …"
+    if ! printf '%s' "$LUKSPASS" | cryptsetup open --test-passphrase --key-file - "$LUKS_PART" >>"$LOG" 2>&1; then
+      rc=75; echo "the passphrase does not open the encrypted volume" | tee -a "$LOG"
+    fi
+  fi
+  if [ "${rc:-0}" = 0 ]; then
+    if ! printf '%s' "$RECOVERY_KEY" | cryptsetup open --test-passphrase --key-file - "$LUKS_PART" >>"$LOG" 2>&1; then
+      rc=75; echo "the recovery key does not open the encrypted volume" | tee -a "$LOG"
+    fi
+  fi
+  # Whether a TPM keyslot was actually added is OBSERVED in the header, not
+  # taken from the helper's word for it: the kernel argument and the crypttab
+  # line below only make sense if a systemd-tpm2 token is really there, and a
+  # tpm2-device= option against a header with no such token is a boot-time
+  # message nobody needs. Substring match on a captured string, NOT
+  # `luksDump | grep -q` — under `pipefail` a matching `grep -q` can return 141
+  # because the writer takes SIGPIPE, which reads here as "no token".
+  if [ "${rc:-0}" = 0 ]; then
+    _dump=$(cryptsetup luksDump "$LUKS_PART" 2>>"$LOG" || true)
+    case "$_dump" in *systemd-tpm2*) LUKS_TPM_TOKEN=1 ;; esac
+    log "luks: header has $(printf '%s' "$_dump" | grep -c '^ *[0-9]*: luks2' || true) keyslot(s); tpm2 token=$LUKS_TPM_TOKEN"
+    _dump=""
+  fi
+  # The key exists and is proven. Get it to the user NOW, not after the install:
+  # a failure in the next ten minutes must not be what loses it. On the staging
+  # fallback the download has already happened by the time we get here — see the
+  # enrolment block — and this is still ahead of every byte bootc writes.
+  if [ "${rc:-0}" = 0 ]; then
+    surface_recovery_key "$RECOVERY_KEY"
+    shred -u "$RECOVERY_FILE" 2>/dev/null || rm -f "$RECOVERY_FILE" 2>/dev/null || true
+  fi
+  if [ "${rc:-0}" = 0 ]; then
+    # ── the kernel arguments that make the machine unlockable ──────────────
+    # The initramfs is GENERIC (`hostonly=no`, built in the image), so it cannot
+    # contain this machine's /etc/crypttab. rd.luks.uuid= is what
+    # systemd-cryptsetup-generator reads inside the initrd, and rd.luks.name=
+    # pins the mapper name so /etc/crypttab and the initrd agree.
+    #
+    # vconsole.keymap= is the OTHER half of not stranding people. The unlock
+    # prompt is drawn before any filesystem is mounted, so the only place the
+    # keyboard layout can come from is this command line. Without it every
+    # encrypted machine asks for its passphrase on a US layout, whatever the
+    # owner chose in this installer. The guard below is on the RESOLVED
+    # CONSOLE KEYMAP, not on the XKB layout: a US machine on Dvorak resolves to
+    # `us-dvorak`, which is not `us`, and does get the argument — correctly, as
+    # its owner types a different passphrase than a plain-US one would. Only a
+    # machine that lands on exactly `us`, the kernel built-in, is left with no
+    # argument that could later override `localectl set-keymap`.
+    LUKS_KARGS=(--karg "rd.luks.uuid=$LUKS_UUID" --karg "rd.luks.name=$LUKS_UUID=$LUKS_MAPPER")
+    if [ "$LUKS_TPM_TOKEN" = 1 ]; then
+      LUKS_KARGS+=(--karg "rd.luks.options=$LUKS_UUID=tpm2-device=auto")
+    fi
+    if [ -n "${UNLOCK_KEYMAP:-}" ] && [ "${UNLOCK_KEYMAP:-}" != us ]; then
+      LUKS_KARGS+=(--karg "rd.vconsole.keymap=$UNLOCK_KEYMAP" --karg "vconsole.keymap=$UNLOCK_KEYMAP")
+    fi
+    BOOT_UUID=$(blkid -s UUID -o value "$BOOT_PART" 2>>"$LOG" || true)
+    if [ -n "$BOOT_UUID" ]; then
+      LUKS_KARGS+=(--boot-mount-spec "UUID=$BOOT_UUID")
+    fi
+    # TEST-ONLY, environment-only, same shape as RIME_LUKS_ENROLL_LOCAL and
+    # RIME_RECOVERY_DIR above: never read from the answers file or the kernel
+    # command line. A space-separated list of raw kernel arguments appended
+    # to this install only. Exists so a boot-lab script can make the
+    # INSTALLED kernel and systemd visible on a serial console (e.g.
+    # `console=ttyS0,115200 loglevel=7 systemd.log_target=kmsg`) without this
+    # engine knowing anything about qemu — the property under test is that a
+    # disk this installer writes actually boots, and that needs eyes on it.
+    if [ -n "${RIME_LUKS_EXTRA_KARGS:-}" ]; then
+      # shellcheck disable=SC2086  # intentional word-splitting, same pattern
+      # as `for k in $(kvall rime.karg)` above: each word is its own --karg.
+      for _xk in ${RIME_LUKS_EXTRA_KARGS}; do LUKS_KARGS+=(--karg "$_xk"); done
+      log "luks: extra test-only kargs in use (RIME_LUKS_EXTRA_KARGS='$RIME_LUKS_EXTRA_KARGS')"
+    fi
+    log "luks kargs: ${LUKS_KARGS[*]}"
+    set_nvram_args_for "$DISK"
+    podman ${PODMAN_STORE[@]+"${PODMAN_STORE[@]}"} run --rm --privileged --pid=host --net=host --security-opt label=disable \
+      -v /var/lib/containers:/var/lib/containers -v /dev:/dev \
+      ${NVRAM_ARGS[@]+"${NVRAM_ARGS[@]}"} \
+      -v "$TROOT":"$TROOT":rshared \
+      ${SRC_VOL[@]+"${SRC_VOL[@]}"} "$IMAGE" \
+      bootc install to-filesystem \
+        --skip-fetch-check --acknowledge-destructive \
+        ${STAGE_BOOTC_ARGS[@]+"${STAGE_BOOTC_ARGS[@]}"} \
+        ${NVRAM_BOOTC_ARGS[@]+"${NVRAM_BOOTC_ARGS[@]}"} \
+        --karg quiet --karg splash "${LUKS_KARGS[@]}" \
+        ${SRC_ARGS[@]+"${SRC_ARGS[@]}"} \
+        "$TROOT" 2>&1 | tee -a "$LOG"
+    rc=${PIPESTATUS[0]}
+    { echo "--- boot + ESP after install ---"; find "$TROOT/boot" -maxdepth 3; } >>"$LOG" 2>&1 || true
+  fi
+  # ── the same keymap, by the channel that survives a signed UKI ───────────
+  #
+  # The karg above is the channel that works today, on GRUB. It stops working
+  # the day this machine boots a Unified Kernel Image: the command line is
+  # inside the signed PE, an installer cannot add to it without invalidating
+  # the signature, and it cannot re-sign.
+  #
+  # What survives is a systemd credential. systemd-boot reads
+  # `\loader\credentials\*.cred` off the ESP and sd-stub passes them to the
+  # initrd as system credentials, and `systemd-vconsole-setup.service` already
+  # carries `ImportCredential=vconsole.*`. So the file is written now, on every
+  # encrypted install, rather than on the day of the pivot: GRUB ignores it
+  # completely, and a machine installed today then carries its own layout into
+  # a UKI world with nothing to migrate.
+  #
+  # MEASURED, and the reason the dracut module exists: a .cred on its own is
+  # INERT. systemd-vconsole-setup(8) says the matching options in
+  # vconsole.conf and on the kernel command line take precedence over these
+  # credentials, and dracut bakes /etc/vconsole.conf (KEYMAP=us) into the
+  # initramfs. installer/test-installer-keymap-boot.sh boots a guest with the
+  # credential and no shim and watches the unlock fail, then the same guest
+  # with files/dracut/rime-unlock-hint's rime-vconsole-credential and watches
+  # it succeed. Both halves are needed; neither is assumed.
+  #
+  # Same `us` rule as the karg: a machine that lands on exactly `us` gets no
+  # channel at all, so `localectl set-keymap` later is not fighting a file.
+  if [ "${rc:-0}" = 0 ] && [ -n "${UNLOCK_KEYMAP:-}" ] && [ "${UNLOCK_KEYMAP:-}" != us ]; then
+    if mkdir -p "$TROOT/boot/efi/loader/credentials" 2>>"$LOG" \
+       && printf '%s' "$UNLOCK_KEYMAP" > "$TROOT/boot/efi/loader/credentials/vconsole.keymap.cred" 2>>"$LOG"; then
+      log "luks: wrote ESP credential loader/credentials/vconsole.keymap.cred = $UNLOCK_KEYMAP"
+    else
+      # NOT fatal, and the log says which half is missing. The karg above is
+      # what this machine boots with today; the credential is for a bootloader
+      # it does not yet run. Failing a completed encrypted install over it
+      # would be the wrong trade by a wide margin.
+      log "luks: WARNING could not write the ESP vconsole.keymap credential — the kernel argument still carries the keymap on this machine"
+    fi
+  fi
+  # ── EVERY mount under $TROOT has to go, and it has to be CHECKED ─────────
+  # Two things put mounts here that a plain `umount $TROOT` does not remove.
+  # The podman run above shares this tree `rshared`, so mounts bootc makes
+  # inside the container appear on the HOST as well; and `bootc install
+  # to-filesystem` FINALIZES by remounting the target read-only (its own log
+  # says "Finalizing filesystem root").
+  #
+  # Leaving one behind is not cosmetic. btrfs shares one superblock per
+  # filesystem, so mounting the same volume a second time — which is exactly
+  # what the account step below does — inherits the read-only flag of the mount
+  # that is still there. The result is the account step failing with
+  # `useradd: failure while writing changes to /etc/passwd` on a machine whose
+  # install went perfectly. Measured on the loopback install, 2026-09-20.
+  # The staging loop device is backed by a deleted file INSIDE the encrypted
+  # root, so it has to go before anything under $TROOT can be released — and
+  # before `cryptsetup close` could ever succeed.
+  stage_teardown
+  umount -R "$TROOT/boot/efi" 2>/dev/null || true
+  umount -R "$TROOT/boot"     2>/dev/null || true
+  umount -R "$TROOT"          2>/dev/null || true
+  # A PREFIX match, not an exact one. bootc mounts things INSIDE the tree —
+  # /sysroot, the stateroot var, the boot binds — and with rshared those appear
+  # on the host too. Checking only that `$TROOT` itself is gone would declare
+  # success while `$TROOT/ostree/deploy/.../var` was still mounted, which is
+  # the mount that the account step then writes through.
+  _resid=$(findmnt -rno TARGET 2>/dev/null | grep -c "^$TROOT" || true)
+  if [ "${_resid:-0}" != 0 ]; then
+    log "luks: $_resid mount(s) still under $TROOT after the install — releasing lazily"
+    findmnt -rno TARGET 2>/dev/null | grep "^$TROOT" | sort -r | while read -r _m; do
+      umount -Rl "$_m" 2>>"$LOG" || true
+    done
+  fi
+  if [ "${rc:-0}" = 0 ]; then
+    _resid=$(findmnt -rno TARGET 2>/dev/null | grep -c "^$TROOT" || true)
+    if [ "${_resid:-0}" != 0 ]; then
+      { echo "--- mounts still under $TROOT ---"; findmnt -R "$TROOT"; } >>"$LOG" 2>&1 || true
+      rc=78; echo "could not release $TROOT after the install ($_resid mount(s) left)" | tee -a "$LOG"
+    fi
+  fi
+elif [ "${STAGE_ON_TARGET:-0}" = 1 ]; then
+  # ── whole disk, no scratch volume: partition it ourselves, then stage ─────
+  #
+  # `bootc install to-disk` partitions the disk itself and is the right thing to
+  # use whenever we can. This is the one case where we cannot: the image has to
+  # be on a filesystem BEFORE bootc runs, the only disk with room is the one
+  # being installed to, and to-disk would erase that staging area as its first
+  # act. So the layout is built here and the install is to-filesystem — the same
+  # shape partition mode and the encrypted path already use. This is what the
+  # published v1.0.0 installer did, and it is the installer that booted on real
+  # hardware.
+  #
+  # The layout is MIRRORED from a real `bootc install to-disk --filesystem
+  # btrfs` run, read back with sfdisk rather than guessed:
+  #   1  1 MiB    21686148-6449-6E6F-744E-656564454649  BIOS-BOOT
+  #   2  512 MiB  C12A7328-F81F-11D2-BA4B-00A0C93EC93B  EFI-SYSTEM
+  #   3  rest     4F68BCE3-E8CD-4DB1-96E7-FBCAF984B709  root
+  # The BIOS-boot partition is there because bootc makes one; leaving it out
+  # would make this layout quietly different from to-disk's on exactly the
+  # legacy-BIOS machines that took a whole log entry to support.
+  WROTE_DISK=1   # the partition table goes now — everything on the disk with it
+  note "Preparing $DISK …"
+  mkdir -p "$TROOT"
+  wipefs -a "$DISK" >>"$LOG" 2>&1 || true
+  if ! sgdisk --zap-all "$DISK" >>"$LOG" 2>&1 \
+    || ! sgdisk -n1:0:+1M   -t1:21686148-6449-6E6F-744E-656564454649 -c1:BIOS-BOOT \
+                -n2:0:+512M -t2:C12A7328-F81F-11D2-BA4B-00A0C93EC93B -c2:EFI-SYSTEM \
+                -n3:0:0     -t3:4F68BCE3-E8CD-4DB1-96E7-FBCAF984B709 -c3:rime-root \
+                "$DISK" >>"$LOG" 2>&1; then
+    rc=70; echo "sgdisk could not write the partition table on $DISK" | tee -a "$LOG"
+  fi
+  if [ "${rc:-0}" = 0 ]; then
+    partprobe "$DISK" >>"$LOG" 2>&1 || true
+    udevadm settle --timeout=30 >>"$LOG" 2>&1 || true
+    # Resolve the device nodes by ASKING, never by pasting a number onto the
+    # disk name: that is /dev/sda1 on one machine and /dev/nvme0n1p1 on the next.
+    _parts=()
+    while read -r _n; do _parts+=("/dev/$_n"); done < <(
+      lsblk -rno NAME,TYPE "$DISK" 2>/dev/null | awk '$2=="part"{print $1}')
+    if [ "${#_parts[@]}" != 3 ]; then
+      rc=70
+      echo "expected 3 partitions on $DISK after partitioning, found ${#_parts[@]}" | tee -a "$LOG"
+    else
+      # Assert what we just built rather than assuming it: a wrong ESP here
+      # would send the boot files to the root partition and produce a machine
+      # that installs perfectly and does not boot.
+      _pt=$(lsblk -dno PARTTYPE "${_parts[1]}" 2>/dev/null | tr 'A-Z' 'a-z' | tr -d ' ')
+      if [ "$_pt" != c12a7328-f81f-11d2-ba4b-00a0c93ec93b ]; then
+        rc=70; echo "${_parts[1]} is not an ESP (parttype '$_pt')" | tee -a "$LOG"
+      else
+        ESP_DEV="${_parts[1]}"
+        TARGET="${_parts[2]}"
+        log "partitioned $DISK: BIOS-BOOT=${_parts[0]} ESP=$ESP_DEV root=$TARGET"
+      fi
+    fi
+  fi
+  if [ "${rc:-0}" = 0 ]; then
+    mkfs.vfat -F32 -n EFI-SYSTEM "$ESP_DEV" >>"$LOG" 2>&1 \
+      || { rc=71; echo "mkfs.vfat failed on the EFI partition $ESP_DEV" | tee -a "$LOG"; }
+  fi
+  if [ "${rc:-0}" = 0 ]; then
+    mkfs."$ROOTFS_TYPE" $MKFS_FORCE -L rime-root "$TARGET" >>"$LOG" 2>&1 \
+      || { rc=80; echo "mkfs.$ROOTFS_TYPE failed on $TARGET" | tee -a "$LOG"; }
+  fi
+  if [ "${rc:-0}" = 0 ]; then
+    mount "$TARGET" "$TROOT" >>"$LOG" 2>&1 || { rc=80; echo "mounting $TARGET failed" | tee -a "$LOG"; }
+  fi
+  if [ "${rc:-0}" = 0 ]; then
+    mkdir -p "$TROOT/boot/efi"
+    mount "$ESP_DEV" "$TROOT/boot/efi" >>"$LOG" 2>&1 \
+      || { rc=80; echo "mounting the ESP $ESP_DEV failed" | tee -a "$LOG"; }
+  fi
+  if [ "${rc:-0}" = 0 ]; then
+    if stage_setup "$TROOT"; then
+      netinstall_fetch_into "$STAGE_MNT"
+    else
+      rc=79
+    fi
+  fi
+  if [ "${rc:-0}" = 0 ]; then
+    set_nvram_args_for "$DISK"
+    podman ${PODMAN_STORE[@]+"${PODMAN_STORE[@]}"} run --rm --privileged --pid=host --net=host --security-opt label=disable \
+      -v /var/lib/containers:/var/lib/containers -v /dev:/dev \
+      ${NVRAM_ARGS[@]+"${NVRAM_ARGS[@]}"} \
+      -v "$TROOT":"$TROOT":rshared \
+      ${SRC_VOL[@]+"${SRC_VOL[@]}"} "$IMAGE" \
+      bootc install to-filesystem \
+        --skip-fetch-check --acknowledge-destructive \
+        ${STAGE_BOOTC_ARGS[@]+"${STAGE_BOOTC_ARGS[@]}"} \
+        ${NVRAM_BOOTC_ARGS[@]+"${NVRAM_BOOTC_ARGS[@]}"} \
+        --karg quiet --karg splash ${SRC_ARGS[@]+"${SRC_ARGS[@]}"} \
+        "$TROOT" 2>&1 | tee -a "$LOG"
+    rc=${PIPESTATUS[0]}
+    { echo "--- ESP $ESP_DEV after install ---"; find "$TROOT/boot/efi" -maxdepth 3; } >>"$LOG" 2>&1 || true
+  fi
+  # Staging first, then a PREFIX-matched sweep: podman shares $TROOT rshared, so
+  # mounts bootc makes inside the container appear on the host too, and one left
+  # behind under $TROOT is what makes the account step below write through a
+  # read-only mount of the same btrfs superblock.
+  stage_teardown
+  umount -R "$TROOT/boot/efi" 2>/dev/null || true
+  umount -R "$TROOT"          2>/dev/null || true
+  _resid=$(findmnt -rno TARGET 2>/dev/null | grep -c "^$TROOT" || true)
+  if [ "${_resid:-0}" != 0 ]; then
+    log "staged install: $_resid mount(s) still under $TROOT — releasing lazily"
+    findmnt -rno TARGET 2>/dev/null | grep "^$TROOT" | sort -r | while read -r _m; do
+      umount -Rl "$_m" 2>>"$LOG" || true
+    done
+  fi
+else
+  # --net=host: no netavark needed in the live env; bootc install is offline.
+  # Set BEFORE the call: `--wipe` destroys the disk immediately, so a Ctrl+C one
+  # second later must NOT be reported as "nothing was written".
+  WROTE_DISK=1
+  set_nvram_args_for "$DISK"
+  podman ${PODMAN_STORE[@]+"${PODMAN_STORE[@]}"} run --rm --privileged --pid=host --net=host --security-opt label=disable \
+    -v /var/lib/containers:/var/lib/containers -v /dev:/dev \
+    ${NVRAM_ARGS[@]+"${NVRAM_ARGS[@]}"} \
+    ${SRC_VOL[@]+"${SRC_VOL[@]}"} "$IMAGE" \
+    bootc install to-disk --wipe --filesystem "$ROOTFS_TYPE" \
+      ${NVRAM_BOOTC_ARGS[@]+"${NVRAM_BOOTC_ARGS[@]}"} \
+      --karg quiet --karg splash ${SRC_ARGS[@]+"${SRC_ARGS[@]}"} \
+      "$DISK" 2>&1 | tee -a "$LOG"
+  rc=${PIPESTATUS[0]}
+fi
+trap 'die "Unexpected error on line $LINENO (see log). This is a bug in the installer, not a silent failure."' ERR
+# Distinguish OUR pre-install preparation failures from a real bootc failure —
+# reporting "bootc install exited 90" when mkfs was the thing that failed sends
+# you looking in the wrong place.
+case "$rc" in
+  0)  : ;;
+  70) die "Could not create the partitions on $DISK (see $LOG).
+
+$DISK has been erased and has no usable partitions on it. Nothing on your OTHER
+disks was touched. Start the installer again to try again — a second attempt on
+the same disk is safe." ;;
+  71) die "Could not create the boot filesystems on $DISK (see $LOG).
+
+$DISK has been erased. Nothing on your other disks was touched. Start the
+installer again to try again." ;;
+  72) die "Could not create the encrypted volume on $DISK (see $LOG).
+
+$DISK has been erased and nothing usable was written to it; in particular NO
+encrypted data exists there, so nothing is locked away. Your other disks were
+not touched. Start the installer again, or go back and turn encryption off." ;;
+  73) die "The encrypted volume was created but would not open with the passphrase that was just set (see $LOG).
+
+$DISK has been erased. There is no data inside that volume — the installer
+stopped before writing any — so nothing has been locked away. Start the
+installer again and choose a different passphrase." ;;
+  74) die "The recovery key for the encrypted disk could not be created (see $LOG).
+
+$DISK has been erased, but NOTHING has been installed on it and nothing is
+locked away.
+
+The installer refuses to finish an encrypted install without a recovery key: a
+disk whose only key is one passphrase is a disk one forgotten password turns
+into a brick. Start the installer again, or go back and turn encryption off." ;;
+  75) die "The disk was encrypted, but the installer could not prove that BOTH the passphrase and the recovery key open it (see $LOG).
+
+$DISK has been erased and nothing has been installed on it, so nothing is
+locked away. This check runs before the install for exactly this reason.
+Start the installer again, or go back and turn encryption off." ;;
+  76) die "Could not create the root filesystem inside the encrypted volume (see $LOG).
+
+$DISK has been erased. Your other disks were not touched. Start the installer
+again to try again." ;;
+  77) die "Could not mount the new filesystems to install into (see $LOG).
+
+$DISK has been erased. Your other disks were not touched. Start the installer
+again to try again." ;;
+  78) die "Rime OS was installed on $DISK, but the installer could not release the filesystems afterwards, so it could not create your account (see $LOG).
+
+Do not reboot expecting to log in. Start the installer again — a second run on
+the same disk is safe, and it will redo the whole install." ;;
+  79) die "Rime OS could not be staged on ${TARGET_DESC:-$TARGET}, so the download had nowhere to go (see $LOG).
+
+${TARGET_DESC:-$TARGET} has been erased and NOTHING has been installed on it, so
+it will not boot. Your other disks were not touched.
+
+This machine has no spare drive or partition, so the installer stages the
+download on the disk it is installing to. Plug in a USB stick or drive with
+${NEED_SCRATCH_GB} GB free — it is used as scratch space only and is not erased
+— and start the installer again." ;;
+  80) die "Could not create or mount the filesystems on $DISK (see $LOG).
+
+$DISK has been erased. Your other disks were not touched. Start the installer
+again to try again — a second attempt on the same disk is safe." ;;
+  90) die "Could not format $TARGET as $ROOTFS_TYPE (mkfs failed — see $LOG). The partition was NOT changed; your other partitions are untouched." ;;
+  91) die "Could not mount the freshly formatted $TARGET (see $LOG). $TARGET was reformatted and is now empty; your other partitions are untouched." ;;
+  92) die "Could not read/mount the EFI System Partition $ESP_DEV (see $LOG). Nothing was formatted; $TARGET and your other partitions are untouched." ;;
+  93) die "The EFI System Partition $ESP_DEV does not have enough free space (~40MB needed) for the Rime boot files.
+
+Nothing was formatted — $TARGET and your other partitions are untouched.
+Free up space on the ESP (old distro directories under \\EFI\\ are the usual culprit) and try again." ;;
+  *)  die "bootc install exited $rc. The exact error is above and in $LOG (search for 'error:'). No boot config was left half-written by grub2-mkconfig — bootc uses bootupd." ;;
+esac
+INSTALLED_OK=1   # the OS is on the disk; only account setup remains
+
+# ── 5. create the account in the freshly installed system ─────────────────────
+note "Creating your account …"; log "post-install: create user $USERNAME"
+MNT=$(mktemp -d)
+# Find the root partition by WHAT IT IS, not by position. `lsblk … | tail -1` was
+# wrong: it can return the whole disk (no partitions yet visible) or a non-root
+# partition, producing a false FAILURE after a perfectly good install. Settle
+# udev first — the partition table was just rewritten.
+udevadm settle --timeout=30 2>>"$LOG" || true
+if [ "$INSTALL_MODE" = partition ]; then
+  # We formatted and installed into this exact partition — no searching, and
+  # crucially NO partprobe (the partition table was not modified in this mode;
+  # re-reading it needlessly on a disk holding another live OS is pointless risk).
+  root_part="$TARGET"
+elif [ -n "$LUKS_MAPPER" ]; then
+  # The installed root is INSIDE the still-open LUKS volume. The scan below
+  # would never find it: mounting the LUKS partition itself yields nothing but
+  # a header, so the loop would run to the end and report "installed root
+  # filesystem not found" about a perfectly good install.
+  root_part="/dev/mapper/$LUKS_MAPPER"
+else
+  partprobe "$DISK" 2>>"$LOG" || true
+  udevadm settle --timeout=30 2>>"$LOG" || true
+  root_part=""
+  for p in $(lsblk -rno NAME,TYPE "$DISK" 2>/dev/null | awk '$2=="part"{print $1}'); do
+    if mount -o ro "/dev/$p" "$MNT" 2>/dev/null; then
+      if [ -d "$MNT/ostree/deploy" ]; then umount "$MNT" 2>/dev/null || true; root_part="/dev/$p"; break; fi
+      umount "$MNT" 2>/dev/null || true
+    fi
+  done
+fi
+[ -n "$root_part" ] || die "Installed root filesystem not found on $DISK after bootc reported success. The OS is installed but the account could not be created."
+mount -o rw "$root_part" "$MNT" 2>>"$LOG" || die "Could not mount the new root ($root_part) to create your account."
+# PROVE it is writable rather than discovering it inside useradd.
+#
+# `bootc install to-filesystem` finalizes by remounting the target read-only,
+# and btrfs shares one superblock per filesystem — so if any earlier mount of
+# this volume is still around, this one is read-only no matter what `-o rw`
+# says. useradd reports that as "failure while writing changes to /etc/passwd",
+# which sends the reader looking at shadow-utils and SELinux instead of at a
+# mount flag. Ask the question directly, and name the answer.
+if ! touch "$MNT/.rime-write-probe" 2>>"$LOG"; then
+  { echo "--- mounts at the time of the failed write probe ---"; findmnt -R "$MNT"; } >>"$LOG" 2>&1 || true
+  umount "$MNT" 2>/dev/null || true
+  die "The freshly installed root ($root_part) mounted READ-ONLY, so your account could not be created.
+
+Rime OS is installed on $DISK but has no account on it — do not reboot
+expecting to log in. Start the installer again; a second run on the same disk
+is safe."
+fi
+rm -f "$MNT/.rime-write-probe" 2>/dev/null || true
+# ostree layout: the deployed root is the newest dir under ostree/deploy/*/deploy/*.0
+# `|| true`: no glob match makes the pipeline non-zero → ERR trap. The explicit
+# emptiness check on the next line is what should report the problem.
+deploy=$(ls -d "$MNT"/ostree/deploy/*/deploy/*.0 2>/dev/null | head -1 || true)
+[ -n "$deploy" ] || { umount "$MNT" 2>/dev/null || true; die "Installed ostree deployment not found under $root_part."; }
+# ── probe the directory useradd actually writes to ──────────────────────────
+# A write probe at the root of the filesystem is the wrong question. useradd
+# renames /etc/passwd+ over /etc/passwd INSIDE THE DEPLOYMENT, and a deployment
+# can be unwritable while the filesystem holding it is not — a stale mount left
+# over the tree, an ostree checkout that was never made writable, an immutable
+# attribute. Measured on a loopback install: the root probe passed and useradd
+# still failed with "failure while writing changes to /etc/passwd", which sends
+# the reader to shadow-utils and SELinux instead of to the deployment.
+#
+# So ask the exact question, and if the answer is no, say what was tried and
+# dump the mount tree into the log rather than leaving the next person to guess.
+if ! touch "$deploy/etc/.rime-write-probe" 2>>"$LOG"; then
+  { echo "--- the deployment refused a write ---"
+    echo "deploy=$deploy"
+    ls -ld "$deploy" "$deploy/etc" 2>&1
+    lsattr -d "$deploy" "$deploy/etc" 2>&1
+    findmnt -R "$MNT" 2>&1
+  } >>"$LOG" 2>&1 || true
+  umount "$MNT" 2>/dev/null || true
+  die "The installed system ($deploy) will not accept changes, so your account could not be created (see $LOG).
+
+Rime OS is on $DISK but has no account on it — do not reboot expecting to log
+in. Start the installer again; a second run on the same disk is safe."
+fi
+rm -f "$deploy/etc/.rime-write-probe" 2>/dev/null || true
+create_user_in "$deploy" "$USERNAME" "$P1" "$HOSTNAME" "post-install"
+copy_network_to "$deploy"
+set_locale_keymap_in "$deploy"
+write_crypttab_in "$deploy"
+# Never let cleanup failures trip the ERR trap AFTER a successful install — that
+# would report failure on a system that is actually installed fine.
+sync || true; umount "$MNT" 2>/dev/null || true; rmdir "$MNT" 2>/dev/null || true
+# Close the encrypted volume now that nothing is using it. Leaving it open
+# holds the partition, and the very next thing that happens here is a reboot
+# into a machine that has to open it again from scratch.
+if [ -n "$LUKS_MAPPER" ] && [ -e "/dev/mapper/$LUKS_MAPPER" ]; then
+  cryptsetup close "$LUKS_MAPPER" >>"$LOG" 2>&1 || log "luks: could not close $LUKS_MAPPER (harmless; it goes away on reboot)"
+fi
+log "post-install: user $USERNAME created, hostname=$HOSTNAME"
+
+# ── 5b. Secure Boot: enrol the Rime key so the installed kernel will boot ────
+# The CachyOS kernel is signed with the Rime MOK (see Containerfile.base). With
+# Secure Boot ON, shim will only accept it once that key is enrolled — a one-time
+# step that REQUIRES physical presence at the MokManager screen (by design; it
+# cannot be automated away).
+#
+# NON-INTERACTIVE by construction: the graphical front end asks the user up
+# front and passes their chosen MokManager password as `mokpw` in the answers
+# file; an empty or absent mokpw means the user declined. Nothing here may
+# prompt — a prompt at the engine's end has nobody to answer it, and would hang
+# a machine that is already fully installed.
+#
+# SECRET: MOKPW must never reach stdout or the log — note() logs its argument,
+# so no note()/log() line may interpolate it. It goes ONLY to mokutil's stdin.
+SB_STATE="unknown"
+if have mokutil; then SB_STATE=$(mokutil --sb-state 2>/dev/null | tr -d '\n' || true); fi
+sb_on=0
+case "$SB_STATE" in *[Ee]nabled*) sb_on=1 ;; esac
+cert="$deploy/usr/share/rime-os/secureboot/rime-mok.der"
+kstate=$(cat "$deploy/usr/share/rime-os/secureboot/kernel-signed" 2>/dev/null || echo unknown)
+# Enrol whenever a password was supplied and the kernel is signed — NOT only
+# when Secure Boot is already on. `mokutil --import` writes MokNew/MokAuth to
+# UEFI NVRAM, which is firmware state belonging to the MACHINE, not to the OS on
+# the disk. So a key queued here from the live environment is picked up by shim
+# on the next boot regardless, and the request persists in NVRAM until it is
+# processed — queueing it with Secure Boot off is safe and it is still waiting
+# if the user switches Secure Boot on afterwards.
+#
+# Gating this on sb_on was wrong and made the feature nearly unreachable: most
+# machines ship with Secure Boot off, so the front end never offered enrolment,
+# so the only route to a Secure Boot system was install, boot, run mokutil by
+# hand, reboot, then toggle the firmware. The whole point of doing it here is
+# that the user is already sitting in front of the machine.
+if [ -n "${MOKPW:-}" ] || [ "$sb_on" = 1 ]; then
+  if [ "$kstate" = signed ] && [ -f "$cert" ] && have mokutil; then
+    if [ -n "${MOKPW:-}" ]; then
+      if printf '%s\n%s\n' "$MOKPW" "$MOKPW" | mokutil --import "$cert" >>"$LOG" 2>&1; then
+        log "secureboot: MOK enrolment queued"
+        if [ "$sb_on" = 1 ]; then
+          note "Secure Boot: enrolment queued. On the next boot, a blue 'MOK management' screen appears:
+
+  Enroll MOK  →  Continue  →  Yes  →  enter that password  →  Reboot
+
+After that Rime OS boots normally with Secure Boot ON."
+        else
+          note "Secure Boot: the Rime key is queued for enrolment. On the next boot, a blue 'MOK management' screen appears:
+
+  Enroll MOK  →  Continue  →  Yes  →  enter that password  →  Reboot
+
+Secure Boot is currently OFF, so nothing about this install depends on it — but
+once the key is enrolled you can turn Secure Boot on in your firmware whenever
+you like and Rime OS will boot. No second install, no mokutil by hand.
+
+If the blue screen does not appear because Secure Boot is off, the request stays
+queued in firmware and will be offered the first time you enable it."
+        fi
+      else
+        note "Secure Boot: mokutil could not queue the key (see $LOG).
+
+Rime OS is installed. To boot it, either turn Secure Boot off in firmware, or
+run this from a live session later:
+  mokutil --import /usr/share/rime-os/secureboot/rime-mok.der"
+      fi
+    else
+      note "No MOK enrolment password was supplied — the Rime key was NOT enrolled. (Secure Boot is currently ${SB_STATE:-unknown}.)
+
+Rime OS uses a custom (CachyOS) kernel, which Microsoft does not sign. It is
+signed with Rime's own key instead — that key has to be enrolled once, or the
+machine will refuse to boot Rime.
+
+Declining is fine — you can either enrol later with
+  mokutil --import /usr/share/rime-os/secureboot/rime-mok.der
+or turn Secure Boot off in firmware."
+    fi
+  else
+    # Reached when the deployed kernel is not signed. With a network install the
+    # front end cannot know this in advance — it offers enrolment and we land
+    # here if the downloaded image turned out unsigned — so this must read
+    # sensibly whether or not Secure Boot is currently on, and must not imply the
+    # install failed. It did not; only enrolment was skipped.
+    if [ "$sb_on" = 1 ]; then
+      note "Secure Boot is ON — action needed.
+
+Secure Boot is enabled, but this build's kernel is not signed with a Rime key
+(state: $kstate).
+
+Rime OS is installed, but it will NOT boot until you turn Secure Boot OFF in
+your firmware settings. Everything else about the install is complete."
+    else
+      note "Secure Boot: nothing to enrol — the installed kernel is not signed with a Rime key (state: $kstate).
+
+The install is complete and the system boots normally. Secure Boot is currently
+off; leave it off, because turning it on would stop this kernel from booting.
+
+If you want Secure Boot later, install a build whose kernel is signed and enrol
+its key with:
+  sudo mokutil --import /usr/share/rime-os/secureboot/rime-mok.der"
+    fi
+  fi
+fi
+
+# ── 6. done ──────────────────────────────────────────────────────────────────
+if [ "$ENCRYPT" = yes ]; then
+  crypt_extra="
+
+This disk is ENCRYPTED. Every time it starts, Rime OS asks for the disk
+passphrase you chose before it can boot — that is normal and it is not your
+login password.
+
+If it ever will not take that passphrase, type the RECOVERY KEY shown on the
+previous screen at the same prompt instead. It always works, including when the
+keyboard layout is wrong. Keep it somewhere that is not this laptop."
+else
+  crypt_extra=""
+fi
+if [ "$INSTALL_MODE" = partition ]; then
+  done_extra="Installed into $TARGET; the other partitions on $DISK were not touched.
+
+Your firmware boot menu should now list Rime OS alongside your other OS.
+If it does not appear, pick it from the one-time boot menu (F12 on ThinkPads).
+Your previous OS entry is still there."
+else
+  done_extra="Installed on $DISK (whole disk)."
+fi
+note "Rime OS is installed.
+
+$done_extra$crypt_extra
+
+Log in as: $USERNAME
+Hostname:  $HOSTNAME
+
+Remove the USB stick and reboot. On first login the shell finishes setting
+itself up (needs network the first time).
+
+Full log: $LOG"
+log "install complete"
+write_result ok ""
+# The machine-readable success sentinel. It MUST be the very last line on
+# stdout: the graphical front end declares victory on exactly this string, the
+# same way it declares defeat on the RIME-INSTALL-FAILED: line die() emits.
+# Print NOTHING to stdout after it.
+echo "RIME-INSTALL-OK"

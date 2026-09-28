@@ -1,6 +1,6 @@
 # Persistent state across an update and a rollback
 
-Roadmap §25: the state `bootc rollback` does not undo, and how APEX handles it.
+Roadmap §25: the state `bootc rollback` does not undo, and how Rime handles it.
 
 ## The sequence that breaks a machine
 
@@ -19,8 +19,8 @@ The image rolled back and the state did not. This document is about step 4.
 
 ## What each store declares
 
-Every store APEX manages declares five things in one place,
-`apexd/apexd-core/src/migrate.rs`:
+Every store Rime manages declares five things in one place,
+`rimed/rimed-core/src/migrate.rs`:
 
 | declared | what it is |
 |---|---|
@@ -42,7 +42,7 @@ No file written before the version key existed has one. The tempting rule is
 second version exists. From then on, every file written before the key claims to
 be current, and the new rules read it.
 
-APEX documented two of its own schemas that way, and both are fixed:
+Rime documented two of its own schemas that way, and both are fixed:
 `blueprint.toml`'s `version` and `tasks.toml`'s now say "absent means 1", the
 version that existed when the key arrived. A task state record with no `schema`
 key is version 0, and 0 is a real version.
@@ -96,7 +96,7 @@ A refusal has to name four things, or somebody reinstalls the machine:
 - the remedy: boot the newer deployment again, or move the file aside.
 
 The blueprint's refusal named none of them. `Blueprint` is
-`deny_unknown_fields`, so a file from a newer APEX failed on whichever new key
+`deny_unknown_fields`, so a file from a newer Rime failed on whichever new key
 TOML reached first, and the user read `unknown field 'foo' at line 12` about a
 file that is not wrong. The loader now reads the version **before** the strict
 parse. That read does not depend on the document's shape, so it can answer
@@ -105,7 +105,7 @@ sense of.
 
 `blueprint-state.toml` was worse: it has a required `schema` field, nothing read
 it, and its only caller discards parse errors. A machine that had rolled back
-reported that no `apex apply` had ever run on it.
+reported that no `rime apply` had ever run on it.
 
 ## A file somebody typed is never rewritten
 
@@ -123,9 +123,9 @@ read a file nobody rewrote.
 ## Seeing it
 
 ```bash
-apex schema status          # every store, its version, what a rollback does to it
-apex schema migrate         # a dry run: what would change, and to what
-apex schema migrate --commit
+rime schema status          # every store, its version, what a rollback does to it
+rime schema migrate         # a dry run: what would change, and to what
+rime schema migrate --commit
 ```
 
 `status` opens each file read-only and closes it. It needs no daemon, no root
@@ -133,26 +133,26 @@ and no subprocess, so you can run it while you decide whether to roll back,
 which is when its answer matters.
 
 `migrate` changes nothing without `--commit`. It reports a file written by a
-newer APEX and leaves it exactly as it is: overwriting it would destroy the only
+newer Rime and leaves it exactly as it is: overwriting it would destroy the only
 copy of what that build recorded.
 
 ## The stores this does not cover
 
-`apex schema status` ends with a list of them. The list lives in the product as
+`rime schema status` ends with a list of them. The list lives in the product as
 well as in this document, because a report that left out the secret broker's
 grant table would read as "everything is covered".
 
 | store | why not |
 |---|---|
-| `~/.local/state/apex/agent/sessions/<id>.json` | `apex-agent-core` does not depend on `apexd-core` |
-| `~/.local/state/apex/agent/grants.json` | same |
-| `~/.local/state/apex/agent/privilege-audit.jsonl` | append-only JSONL; a line carries its own shape, so a document version does not fit |
-| `/var/lib/apex-secretd/users/<uid>/` | root-owned, and `apex-secret-core` does not depend on `apexd-core` |
-| `/var/lib/apex/pkg/state.json` | written by `apex-pkg` in shell, which carries its own `pkg_compat_level` |
+| `~/.local/state/rime/agent/sessions/<id>.json` | `rime-agent-core` does not depend on `rimed-core` |
+| `~/.local/state/rime/agent/grants.json` | same |
+| `~/.local/state/rime/agent/privilege-audit.jsonl` | append-only JSONL; a line carries its own shape, so a document version does not fit |
+| `/var/lib/rime-secretd/users/<uid>/` | root-owned, and `rime-secret-core` does not depend on `rimed-core` |
+| `/var/lib/rime/pkg/state.json` | written by `rime-pkg` in shell, which carries its own `pkg_compat_level` |
 
-The framework lives in `apexd-core`, the type library the CLI and the daemon
+The framework lives in `rimed-core`, the type library the CLI and the daemon
 share. The agent runtime and the secret broker sit beside it on purpose instead
-of depending on it; `apexd/apex-aid/Cargo.toml` says why for its own case.
+of depending on it; `rimed/rime-aid/Cargo.toml` says why for its own case.
 Wiring those stores in means either a new dependency edge or moving the
 framework into a crate below all three, and somebody has to make that decision
 on purpose.

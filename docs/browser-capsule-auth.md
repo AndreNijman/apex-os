@@ -26,9 +26,9 @@ measurement decided that, not a preference: a value inside a capsule reaches
 the caller through the nomination boundary, a path the capsule's own design
 puts there on purpose.
 
-**Route B is built.** `apex browser run --capability NAME --present`,
-`apex agent run --present NAME`, `RunRequest::present` at protocol 11,
-`apex-agentd/src/intercept.rs` and `apex-secretd/src/present.rs`. "What it
+**Route B is built.** `rime browser run --capability NAME --present`,
+`rime agent run --present NAME`, `RunRequest::present` at protocol 11,
+`rime-agentd/src/intercept.rs` and `rime-secretd/src/present.rs`. "What it
 took", below, records what it took, rewritten from the estimate. "The
 question, for Andre" records the decision that unblocked it, which is now
 answered.
@@ -43,7 +43,7 @@ Two facts decide the shape of every route, and
 `tests/browserlab/run-browserlab`'s `authentication` flow measured both.
 
 **An engine cannot put anything in a capsule except a file it writes.** The
-first attempt at a control exported a variable beside `apex browser` and
+first attempt at a control exported a variable beside `rime browser` and
 reached nothing at all: the daemon builds a session's environment, and the
 sandbox does not inherit the caller's. So the control went through the capsule
 *profile* instead, which is a file the engine does write. That is also the only
@@ -94,7 +94,7 @@ typed.
 ### Why it is rejected
 
 The framework's rule is that an agent uses a credential without holding it:
-`apex secret list` never prints a value and `apex browser` never asks for one.
+`rime secret list` never prints a value and `rime browser` never asks for one.
 Route A breaks that in two places at once:
 
 * **The caller gets the value.** The capsule holds it, `--download` carries
@@ -116,31 +116,31 @@ different product from the one the framework describes, and it should not
 arrive as a flag.
 
 If anyone ever wants it anyway, the honest form keeps the value out of user
-processes: **`apex-secretd`, which is root, writes the cookie file into the
+processes: **`rime-secretd`, which is root, writes the cookie file into the
 capsule directory itself**, and the engine never sees it. An engine that read
 the value to write `cookies.sqlite` would have moved it through an unprivileged
 process, which is the thing the store exists to stop.
 
 ## Route B: the daemon presents the credential
 
-`apex-agentd` already stands between a capsule and every host it reaches. For a
+`rime-agentd` already stands between a capsule and every host it reaches. For a
 destination bound by `--capability`, and only for that one, the daemon
 terminates TLS with a certificate it mints for the run and hands the plaintext
-to `apex-secretd`, which adds the credential's header and originates its own
+to `rime-secretd`, which adds the credential's header and originates its own
 TLS connection to the site. The capsule trusts a CA that exists for the length
 of one capsule and that nothing else on the machine trusts.
 
 **Which daemon adds the header matters, and this page had it wrong.** Under
 "What it would take" (the estimate that became "What it took"), it said the
 change was "not a new trust relationship — the daemon already holds the
-credential". `apex-agentd` does not and must not: it runs as the user, so any
+credential". `rime-agentd` does not and must not: it runs as the user, so any
 value it held, an unconfined session of that user could read, and
-`apex-agentd/src/broker.rs` states the invariant this rests on: no verb in
-`apex_secret_core::protocol` returns a credential, and nothing in that daemon
+`rime-agentd/src/broker.rs` states the invariant this rests on: no verb in
+`rime_secret_core::protocol` returns a credential, and nothing in that daemon
 holds a `SecretValue`. The build kept that sentence true by splitting the work.
 The runtime terminates TLS and pumps plaintext, and the one process that ever
 sees the value is the one that already held it, already decided where it could
-be spent, and already sees the plaintext of every `apex secret use`.
+be spent, and already sees the plaintext of every `rime secret use`.
 
 The capsule never holds the value, so all six negative observations above keep
 holding, and nothing a caller nominates can contain a credential that was never
@@ -166,7 +166,7 @@ handshake and rendered the page. The machine's own file stayed untouched
 throughout and compared clean afterwards.
 
 That made gap 5 on this unit's card ("a CA a capsule could be told to trust")
-a per-session `--ro-bind` in `apex_agent_core::sandbox`: one field on the
+a per-session `--ro-bind` in `rime_agent_core::sandbox`: one field on the
 session request, and no package that is not in the image. **It is built**
 (`--trust-ca`, protocol 10); the bottom of this page records what it cost and
 what the build found that this paragraph did not foresee. Route B installs its
@@ -221,7 +221,7 @@ left. The probe recorded two things the design has to carry:
 * ~~**Re-origination TLS was not the question and was not measured.**~~
   **Measured, in the build.** The origin in this probe is plain HTTP on
   loopback, so the probe said nothing about it. The shipped path does:
-  `apex-secretd` opens a validated `rustls` connection to the site against the
+  `rime-secretd` opens a validated `rustls` connection to the site against the
   machine's own trust store, and `egress.rs`'
   `a_capsules_request_reaches_the_site_with_a_credential_it_is_never_given`
   exercises it against a loopback TLS origin whose authority the test minted,
@@ -239,7 +239,7 @@ for a feature that did not yet exist.
 **Every capsule reads `/etc/firefox/policies/policies.json`.** The measurement
 above proves it, and it deserves its own line: the sandbox binds `/` read-only,
 so the machine's enterprise policy is part of every capsule's trust surface.
-Today APEX's own file carries four preferences at `Status: "default"` and
+Today Rime's own file carries four preferences at `Status: "default"` and
 nothing else, so it overrides nothing. A future `Certificates.Install` there, or
 a `Proxy` at `Status: "locked"`, would change what every capsule believes or
 where it connects, silently and without an error anywhere.
@@ -248,7 +248,7 @@ where it connects, silently and without an error anywhere.
 `Preferences` and nothing else, every preference at `Status: "default"`), so
 all three of those additions fail the image build instead of shipping. It is a
 build assertion and not a suite, because the build drops the file and nothing
-`apex browser` owns does; `tests/check-containerfile-assertions.sh` runs it
+`rime browser` owns does; `tests/check-containerfile-assertions.sh` runs it
 against this repository first, which before this round it could not do for any
 `python3 -c` assertion at all.
 
@@ -257,10 +257,10 @@ against this repository first, which before this round it could not do for any
 Written as an estimate before the build and rewritten after it, with the two
 places the estimate was wrong marked and not quietly corrected.
 
-* **A TLS server in `apex-agentd`**: `apex-agentd/src/intercept.rs`. `rustls`
+* **A TLS server in `rime-agentd`**: `rime-agentd/src/intercept.rs`. `rustls`
   0.23 was already a workspace dependency but only as a client; it is a
-  dependency of this crate now, pinned to the same version `apex-remoted` and
-  `apex-secretd` use so one image cannot hold two rustls builds. Certificate
+  dependency of this crate now, pinned to the same version `rime-remoted` and
+  `rime-secretd` use so one image cannot hold two rustls builds. Certificate
   minting still has no crate in the tree and still does not need one: a CA and
   one leaf per session, from the `openssl` the image ships, elliptic-curve
   instead of RSA because a 2048-bit keygen is a visible pause on every capsule.
@@ -295,13 +295,13 @@ places the estimate was wrong marked and not quietly corrected.
 * **A sentence in `docs/browser-capsule.md` stopped being true, and the
   replacement is narrower than the estimate expected.** "A tunnel is opaque.
   This is a destination policy" is still true of every destination but one. For
-  the pinned one the runtime reads the request and `apex-secretd` reads the
+  the pinned one the runtime reads the request and `rime-secretd` reads the
   request and the answer.
 
   The estimate justified that with "the daemon already holds the credential",
   **and that was wrong**; see the correction at the top of this route.
-  `apex-agentd` held no credential before this change and holds none after it.
-  The property `apex-secretd`'s protocol note states (no verb returns a
+  `rime-agentd` held no credential before this change and holds none after it.
+  The property `rime-secretd`'s protocol note states (no verb returns a
   credential) is still true, and the split between the two daemons is what kept
   it true, not a comment claiming it.
 
@@ -311,14 +311,14 @@ places the estimate was wrong marked and not quietly corrected.
   nothing would intercept), `--trust-ca` alongside, and an allowlist that is
   not exactly the pin. In the proxy: exact equality on host and port, not a
   question for the allowlist, whose rules can be wildcards. In
-  `apex-secretd`: the grant, the operation (`browser.present` and nothing
+  `rime-secretd`: the grant, the operation (`browser.present` and nothing
   else), and the pin again, because the runtime runs as the user and is not
   the boundary.
 
 * **A grant vocabulary entry**, which the estimate did not foresee at all.
-  `apex-secretd` refuses to write a grant for an operation no provider offers,
+  `rime-secretd` refuses to write a grant for an operation no provider offers,
   so there is a `browser` provider whose one operation, `browser.present`, both
-  trait methods refuse. It exists so that `apex secret grant NAME
+  trait methods refuse. It exists so that `rime secret grant NAME
   browser.present --everywhere` can be typed; an interception with no grant
   behind it would be a way for anything running as the user to spend a
   credential on arbitrary requests to the pinned host. `--everywhere`, because
@@ -358,12 +358,12 @@ Four more limits. They are limits, and none of them is a hole:
   error page quoting the request) and cannot catch base64 or a hash. A
   credential spent at a site is a credential that site has.
 * **`SessionInfo` does not carry `present`**, and it does not carry
-  `trust_ca` either. `apex agent status` cannot show that a session's one destination
+  `trust_ca` either. `rime agent status` cannot show that a session's one destination
   is being authenticated. For a field that decides whether a capsule is logged
   in, a record that is silent about it is a gap; an additive optional field on
   a stability surface is a follow-up, outside this work.
 * **The pinned site sees a TCP connection for a request that is refused.**
-  `apex-secretd` opens its connection to the site before it has read the
+  `rime-secretd` opens its connection to the site before it has read the
   capsule's head, which is `CONNECT` semantics: the tunnel is established and
   then spoken on. A request the head rewrite refuses leaves a socket that was
   accepted and never used. An empty entry in a site's log is not a leak.
@@ -399,7 +399,7 @@ stores.
 Everything above was engineering that had been measured. This was the one thing
 that was not, and route B could not be built past it:
 
-> **May `apex-agentd` read the plaintext of a capsule's connection to the one
+> **May `rime-agentd` read the plaintext of a capsule's connection to the one
 > destination that capsule was pinned to, in order to add a credential the
 > capsule is never given?**
 
@@ -407,7 +407,7 @@ that was not, and route B could not be built past it:
 **2026-09-19**. This page does not record the date he said it, because it does
 not know it, and inventing one would be worse than the gap.
 
-What a *yes* bought, as promised: `apex browser run --capability NAME
+What a *yes* bought, as promised: `rime browser run --capability NAME
 --present` authenticates to any site whose authentication is a header, with no
 per-site provider, and the six negative observations on this page keep holding.
 The capsule still cannot be made to hand a credential to its caller, because it
@@ -415,7 +415,7 @@ never has one.
 
 What it cost, against the estimate that was put to him:
 
-* A TLS **server** in `apex-agentd`, per-run certificate minting, and a CA that
+* A TLS **server** in `rime-agentd`, per-run certificate minting, and a CA that
   exists for the length of one capsule. **As estimated.**
 * `PROTOCOL_VERSION` **11** and gated fields with the CLI refusing to send them
   to an older daemon. **One field, not two**; see "What it took".
@@ -425,22 +425,22 @@ What it cost, against the estimate that was put to him:
 * A guard in the daemon that the interception is only ever the pinned
   destination. **Built, and it is most of the work.** The estimate called it
   "a guard"; it is four refusals at session start, an exact-equality test in
-  the proxy, and three more checks in `apex-secretd`, because the runtime runs
+  the proxy, and three more checks in `rime-secretd`, because the runtime runs
   as the user and is not the boundary.
 
 ### What the answer did NOT cover, and what was done about it
 
 The question was about the runtime reading **plaintext**. It was not a decision
 to give the runtime a **credential**, and those are different questions:
-`apex-agentd` runs as the user, so any value it held, an unconfined session of
-that user could read. That is the reason the store moved to `apex-secretd`
+`rime-agentd` runs as the user, so any value it held, an unconfined session of
+that user could read. That is the reason the store moved to `rime-secretd`
 under P0-002.
 
 So the build was arranged so that nobody had to ask the second question.
 The runtime terminates TLS toward the capsule and pumps plaintext;
-`apex-secretd`, which already held the credential, adds it. **No verb in
-`apex_secret_core::protocol` returns a credential** (the sentence
-`apex-agentd/src/broker.rs` states as a property) is as true after this round
+`rime-secretd`, which already held the credential, adds it. **No verb in
+`rime_secret_core::protocol` returns a credential** (the sentence
+`rime-agentd/src/broker.rs` states as a property) is as true after this round
 as before it.
 
 This page records that, and a commit message would bury it, because this page is
@@ -451,9 +451,9 @@ the record says so.
 ## What is not decided, and belongs to whoever picks this up
 
 * ~~**Whether the per-run CA bind lands on its own.**~~ **Done, and it did.**
-  `apex browser run --trust-ca FILE` and `apex agent run --trust-ca FILE`,
+  `rime browser run --trust-ca FILE` and `rime agent run --trust-ca FILE`,
   `RunRequest::trust_ca` at protocol **10**, and
-  `apex-agentd/src/browser_ca.rs`. It closed gap 5 (automating an intranet
+  `rime-agentd/src/browser_ca.rs`. It closed gap 5 (automating an intranet
   site behind a private CA) with none of route B, which is what made it
   dispatchable while the question above had no answer.
 
@@ -471,16 +471,16 @@ the record says so.
   The probe above is the evidence that a real Firefox accepts such a root: its
   authenticated arm is exactly a capsule told to trust one CA. The probe could
   not say that the DAEMON builds the bind correctly, and
-  `apexd/apex-agentd/tests/browser_ca_bind.rs` does: the session copies out
+  `rimed/rime-agentd/tests/browser_ca_bind.rs` does: the session copies out
   what it sees at that path inside its own namespace, reads the path the
   document names, and copies that out too, with a control that sees the
   machine's own file byte for byte.
 * **What is left, after route B.** Three things, none of them blocking.
-  `SessionInfo` carries neither `trust_ca` nor `present`, so `apex agent
+  `SessionInfo` carries neither `trust_ca` nor `present`, so `rime agent
   status` cannot show that a capsule trusts an extra root or that one of its
   destinations is authenticated; that is an additive optional field on a
   stability surface, and a follow-up. Route C still needs `geckodriver` in the
-  image, which is a product decision about what APEX carries and is what a form
+  image, which is a product decision about what Rime carries and is what a form
   login waits on. And round 4's recorded inconsistency is still there: the
   engine's pre-check falls back to the bare host, so `--allow e.example:8443`
   passes it when only `e.example` is allowed, and the DAEMON refuses it. That
@@ -510,11 +510,11 @@ the record says so.
 | a minted leaf is accepted at the far end of a `CONNECT` tunnel, and the credential reaches the site | the three-arm probe above, on Firefox 155.0 |
 | Firefox validates the chain through the tunnel | the no-CA control: `TLSV1_ALERT_UNKNOWN_CA`, no screenshot, no request at the origin |
 | and validates the name, not merely the signature | the wrong-name control: `SSLV3_ALERT_BAD_CERTIFICATE`, same |
-| the daemon's own bind puts the merged policy at that path inside a capsule, and the file it names is openable from in there | `apex-agentd/tests/browser_ca_bind.rs`, where the SESSION copies out what it sees; the control with no `--trust-ca` sees the machine's file byte for byte |
+| the daemon's own bind puts the merged policy at that path inside a capsule, and the file it names is openable from in there | `rime-agentd/tests/browser_ca_bind.rs`, where the SESSION copies out what it sees; the control with no `--trust-ca` sees the machine's file byte for byte |
 | the runtime terminates the PINNED destination and tunnels every other one | `egress.rs`'s `the_pinned_destination_is_terminated_and_every_other_stays_an_opaque_tunnel`: two loopback TLS origins with an authority each, and a client trusting one root set at a time. The pin verifies against the per-run CA and not against the origin's own; another allowed destination verifies against the origin's own and not against the per-run CA. The pairs are what give either half meaning |
 | a session that named no credential has nothing terminated | the same test's control arm: the pin reaches its own certificate |
-| the credential reaches the site and not the capsule, in one run | `egress.rs`'s `a_capsules_request_reaches_the_site_with_a_credential_it_is_never_given`, against a private `apex-secretd` and a site that echoes the header back on purpose; the echo comes back redacted in place, same length |
+| the credential reaches the site and not the capsule, in one run | `egress.rs`'s `a_capsules_request_reaches_the_site_with_a_credential_it_is_never_given`, against a private `rime-secretd` and a site that echoes the header back on purpose; the echo comes back redacted in place, same length |
 | the runtime originates a validated TLS connection to the site | the same test: the site's certificate is signed by an authority the test minted and named through `SSL_CERT_FILE` |
-| a capsule's own `Authorization` header never reaches the site | `apex-secretd/tests/present.rs`, through the real relay |
+| a capsule's own `Authorization` header never reaches the site | `rime-secretd/tests/present.rs`, through the real relay |
 | no grant means no connection | the same file: the refusal AND an empty log at the site, because "refused" and "reached the site and the site said no" are otherwise the same observation |
 | the capsule's operation is the only one this path can spend | the same file: a record naming `git.push`, granted, refused |

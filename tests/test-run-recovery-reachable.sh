@@ -43,7 +43,7 @@ CHECKER=../files/scripts/check-run-recovery-reachable
 CHECKER=$(cd "$(dirname "$CHECKER")" && pwd)/$(basename "$CHECKER")
 REPO=$(cd .. && pwd)
 
-WORK=$(mktemp -d /var/lab-scratch/apex-run-recovery.XXXXXX 2>/dev/null \
+WORK=$(mktemp -d /var/lab-scratch/rime-run-recovery.XXXXXX 2>/dev/null \
        || mktemp -d)
 trap 'rm -rf "${WORK:?}"' EXIT
 
@@ -80,7 +80,7 @@ echo "── RED: the defect the checker exists to catch ──"
 run_case shipped-shape <<'CF'
 FROM fedora:43
 RUN set -eux; \
-    KVER="$(cat /usr/lib/apex-kver)"; \
+    KVER="$(cat /usr/lib/rime-kver)"; \
     for k in nvidia xone; do \
         akmods --force --kernels "${KVER}" --kmod "${k}"; \
         RPM="$(ls -1 /var/cache/akmods/${k}/kmod-${k}-*.rpm 2>/dev/null | head -1)"; \
@@ -205,7 +205,7 @@ echo "── and the shipped Containerfiles, which must be clean ──"
 
 CFS=()
 for f in Containerfile.base Containerfile.core Containerfile.kernel \
-         Containerfile.apex Containerfile.release; do
+         Containerfile.rime Containerfile.release; do
     [ -f "$REPO/$f" ] && CFS+=("$f")
 done
 OUT=$(cd "$REPO" && python3 "$CHECKER" "${CFS[@]}" 2>&1); RC=$?

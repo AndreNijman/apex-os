@@ -4,12 +4,12 @@
 > building on this**, and do not resume without Andre asking. Several findings
 > in it are facts about Windows and bootc that outlive this tool.
 
-# How a Windows program installs APEX, and why it is not the obvious way
+# How a Windows program installs Rime, and why it is not the obvious way
 
 `bootc install` is Linux software. It opens block devices, runs `mkfs`, writes
 an ostree or composefs store through a Linux kernel's filesystem drivers, and
 relabels files with the target's SELinux policy. None of that has a Windows
-implementation and none of it is going to get one. So "install APEX from a
+implementation and none of it is going to get one. So "install Rime from a
 Windows app" cannot mean "run the normal installer", and the first job of this
 directory is to say what it means instead.
 
@@ -27,16 +27,16 @@ The Windows program does four things and then stops:
 
 1. it verifies and takes exclusive ownership of one empty partition the user
    chose,
-2. it writes an **APEX bootstrap environment** into that partition: a kernel,
+2. it writes an **Rime bootstrap environment** into that partition: a kernel,
    an initramfs and an answers file, not an operating system,
 3. it adds a small, self-contained boot directory to the shared Windows ESP,
    and
 4. it appends one firmware boot entry to the **end** of `BootOrder`, leaving
    Windows the default.
 
-The first time you select that entry, APEX's own live environment comes up and
-runs `installer/apex-install` in `mode=partition`, against the same partition,
-on Linux, as a normal APEX installation. The real installer formats the target,
+The first time you select that entry, Rime's own live environment comes up and
+runs `installer/rime-install` in `mode=partition`, against the same partition,
+on Linux, as a normal Rime installation. The real installer formats the target,
 runs `bootc install to-filesystem`, creates the account, relabels it with the
 target policy and queues the MOK enrolment. The Windows program never imitates
 any of that.
@@ -56,7 +56,7 @@ measured facts stop it.
 
 ### 1. A prepared root image does not carry the half that has to boot
 
-APEX is pivoting to systemd-boot with bootc's composefs backend
+Rime is pivoting to systemd-boot with bootc's composefs backend
 (`docs/boot-v2.md`, "The pivot to systemd-boot", Andre's decision of
 2026-09-20). On that backend `/boot` **is** the FAT ESP: the kernel, the
 initramfs and the loader entry all live there, not on the root filesystem:
@@ -65,17 +65,17 @@ initramfs and the loader entry all live there, not on the root filesystem:
 > a `.conf` in `/loader/entries/`, and the kernel command line on that file's
 > `options` line (`docs/boot-v2.md`, "Two phases, and which one ships first")
 
-So on the path APEX is moving to, "write the root image" installs nothing that
+So on the path Rime is moving to, "write the root image" installs nothing that
 can start. The bootable half is a separate transaction into a partition shared
 with Windows, and the ESP-size section below explains why that transaction does
 not fit.
 
 ### 2. The per-machine configuration is not optional, and it is Linux-only
 
-`installer/apex-install` does not finish when `bootc install` returns. It then
+`installer/rime-install` does not finish when `bootc install` returns. It then
 runs, inside the new deployment:
 
-- `useradd --root "$deploy" -m -G wheel -s "$ushell"` (`installer/apex-install:1608`),
+- `useradd --root "$deploy" -m -G wheel -s "$ushell"` (`installer/rime-install:1608`),
 - `chroot "$deploy" /usr/sbin/setfiles -F "$spec" …` with the **target's** policy
   (`:1627`), because the live environment runs `selinux=0` and every file it
   creates is otherwise unlabelled (`:947`),
@@ -86,7 +86,7 @@ why:
 
 > cannot SELinux-relabel the new account files … Without the relabel, login
 > would be denied. The OS is installed on $DISK but the account is not usable.
-> (`installer/apex-install:1620`)
+> (`installer/rime-install:1620`)
 
 A Windows program cannot run `setfiles`, cannot run `useradd --root`, and
 cannot write a MOK request into the deployment. So **a first boot on Linux is
@@ -107,12 +107,12 @@ guessed.
 
 The rule for this tool is that the ESP is shared with Windows, is never
 reformatted, and is only ever added to. That makes the ESP's **free space** a
-hard budget, and the two APEX boot paths want very different amounts of it.
+hard budget, and the two Rime boot paths want very different amounts of it.
 
 | path | what lands on the ESP | size |
 | --- | --- | --- |
-| ostree + GRUB (what `apex-install` installs today) | `EFI/BOOT/` + `EFI/fedora/` (shim, grub, mm, CSV, `grub.cfg`, `bootuuid.cfg`); kernels and BLS entries stay on the root filesystem | **≈ 7.47 MiB**, measured in `docs/m0-results.md`, "ESP contents + space delta" |
-| systemd-boot + composefs (where APEX is going) | the whole of `/boot`: `vmlinuz` + `initrd` per deployment, sd-boot, loader entries | **374 MiB per deployment**, ≈ **1.1 GiB** for booted + rollback + a staging third (`docs/boot-v2.md`, "How reversible this is for an existing machine") |
+| ostree + GRUB (what `rime-install` installs today) | `EFI/BOOT/` + `EFI/fedora/` (shim, grub, mm, CSV, `grub.cfg`, `bootuuid.cfg`); kernels and BLS entries stay on the root filesystem | **≈ 7.47 MiB**, measured in `docs/m0-results.md`, "ESP contents + space delta" |
+| systemd-boot + composefs (where Rime is going) | the whole of `/boot`: `vmlinuz` + `initrd` per deployment, sd-boot, loader entries | **374 MiB per deployment**, ≈ **1.1 GiB** for booted + rollback + a staging third (`docs/boot-v2.md`, "How reversible this is for an existing machine") |
 
 A stock Windows ESP is **100 MB**. Windows Setup creates exactly that, and
 `lab/autounattend.xml` asks for it on purpose, so the lab measures the real
@@ -144,23 +144,23 @@ So, against the two paths:
 One deployment alone on the composefs path is 374 MiB, still five times the
 whole free space. No version of this fits.
 
-`docs/boot-v2.md` also recorded that even an **APEX** machine's ESP was too
+`docs/boot-v2.md` also recorded that even an **Rime** machine's ESP was too
 small for the composefs path: 600 MiB on the L16 against the ~1.1 GiB needed
 ("What boots through systemd-boot today, measured"). A 100 MB Windows ESP is
 not close. Since this page was written, the slim initramfs cut a deployment to
 100.9 MiB and the three-deployment requirement to 350 MiB (`docs/boot-v2.md`,
 "When it refuses", the `esp-too-small` row). That retires the refusal on an
-APEX machine with a larger ESP; one deployment still does not fit in 68.3 MiB.
+Rime machine with a larger ESP; one deployment still does not fit in 68.3 MiB.
 
 ### The consequence
 
-**A Windows-side APEX install cannot use the systemd-boot + composefs path into
+**A Windows-side Rime install cannot use the systemd-boot + composefs path into
 a shared Windows ESP.** The boot files do not fit, by an order of magnitude,
 and nobody can grow an ESP in place without moving the partition after it
 (`docs/boot-v2.md`, "How reversible this is for an existing machine").
 
 So this tool targets the **ostree + GRUB** backend, whose ESP cost is 7.47 MiB
-and which fits inside what Windows leaves over. `installer/apex-install` passes
+and which fits inside what Windows leaves over. `installer/rime-install` passes
 neither `--bootloader` nor `--composefs-backend` today, so that is also what it
 already produces: the Windows path and the Linux path install the same thing.
 
@@ -192,24 +192,24 @@ Rejected without much argument, for the record:
 
 ### Into the chosen partition
 
-A FAT32 filesystem containing the APEX bootstrap:
+A FAT32 filesystem containing the Rime bootstrap:
 
 ```
-/apex/vmlinuz              the APEX kernel
-/apex/initramfs.img        the APEX live initramfs
-/apex/answers              the install answers the GUI collected
-/apex/stage.json           the transaction journal's guest-visible half
+/rime/vmlinuz              the Rime kernel
+/rime/initramfs.img        the Rime live initramfs
+/rime/answers              the install answers the GUI collected
+/rime/stage.json           the transaction journal's guest-visible half
 ```
 
 FAT32 rather than ext4 because the loader has to read it before Linux exists,
 and because the Windows side can write it without shipping an ext4
 implementation. It is a *staging* filesystem, not the future root: the first
-boot's `apex-install` formats this partition as btrfs and installs into it, so
+boot's `rime-install` formats this partition as btrfs and installs into it, so
 the loader reads everything above into memory and it is gone afterwards by
 design.
 
 The payload is a live environment, not an operating system image.
-`apex-install`'s existing netinstall path fetches the OS itself, and that path
+`rime-install`'s existing netinstall path fetches the OS itself, and that path
 already carries its own guards: default route, DNS, and a ≥ 32 GB non-tmpfs
 scratch check (`NEED_SCRATCH_GB`; it was 22 GB when this page was written). A 400 MB bootstrap that pulls a verified image beats a 5 GB
 payload that has to survive being copied into RAM before its own partition is
@@ -217,13 +217,13 @@ reformatted.
 
 ### SUPERSEDED 2026-09-21: there is no shared Windows ESP
 
-Andre decided that APEX builds its **own** ESP, and that APEX reads Windows'
+Andre decided that Rime builds its **own** ESP, and that Rime reads Windows'
 ESP for facts and never writes it. The section below describes writing into a
 shared one and stays only as the record of what was planned; do not build
 toward it. An agent reading this file fresh would otherwise implement the thing
 the decision forbids.
 
-See `docs/apex-owns-its-esp.md`: both product decisions now live there,
+See `docs/rime-owns-its-esp.md`: both product decisions now live there,
 together with the five things that must be measured before either is claimed to
 work, and the invariants any GPT write has to satisfy.
 
@@ -244,7 +244,7 @@ starts and re-checks it afterwards.
 ### Into the firmware
 
 One new `Boot####` variable and one appended entry at the **end** of
-`BootOrder`. No `BootNext`, no reordering, no replacing an earlier APEX entry.
+`BootOrder`. No `BootNext`, no reordering, no replacing an earlier Rime entry.
 Windows stays the default boot option, and the assertion for that is a
 before/after dump of the firmware variables compared outside the guest, not an
 intention written in a comment.

@@ -1,0 +1,107 @@
+#!/usr/bin/env bash
+# ─────────────────────────────────────────────────────────────────────────────
+#  install-rename-compat ROOT — the APEX-OS names, as aliases of the Rime OS
+#  ones, for the transition Andre chose: "keep `apex` working for a release or
+#  two".  (rime-rename: keep)
+#
+#  Run once by Containerfile.rime, as the last thing that adds files, with
+#  ROOT=/; tests/test-rime-rename-compat.sh runs it against a fixture root.
+#
+#  What an existing machine still names by the old spelling, and why each
+#  alias exists:
+#
+#    systemd units   /usr/lib/systemd/{system,user}/apex-X -> rime-X
+#                    A link someone made with `systemctl enable` (Andre's
+#                    per-user apex-agentd and apex-remoted, katana's units)
+#                    points at /usr/lib/systemd/.../apex-X.service. With the
+#                    alias it loads rime-X; without it the unit is "not found"
+#                    and silently never starts. rime-migrate-from-apex moves
+#                    system-wide links to the new names at boot; these keep
+#                    every other one working meanwhile.
+#    /usr/libexec    apex-X -> rime-X for every helper the old image shipped.
+#                    Users' seeded configs call them by absolute path and are
+#                    never reseeded once edited: ~/.config/labwc/{rc.xml,
+#                    autostart,menu.xml}, ~/.config/hypr/apex/*.lua,
+#                    niri's config.kdl; so do an edited /etc/greetd/config.toml
+#                    (the greeter itself: apex-greet-session) and edited
+#                    sudoers rules the ostree merge keeps. All of them, not a
+#                    picked few: a helper nobody listed is a dead keybind.
+#    /usr/share      apex-shell, apex-greet, apex, backgrounds/apex -> the new
+#                    trees. hypridle's after_sleep_cmd, zsh's agent.sh and
+#                    greeting.sh, the greeter's sway config and the stock
+#                    wallpaper are all named by these paths in user files.
+#
+#  NOT covered, and it matters: `qs -c /usr/share/apex-shell ipc call …`
+#  (hypridle's lock_cmd) does not reach a shell started from
+#  /usr/share/rime-shell through this link — quickshell keys an instance by
+#  the config path as given, not its canonical path (measured, quickshell
+#  0.3.1: "No running instances"). The per-user migration has to rewrite it.
+#
+#  Every alias is a relative symlink in the same directory, created only when
+#  its target exists; a target that is missing fails the build, so the lists
+#  below cannot drift from what the image actually ships.
+# ─────────────────────────────────────────────────────────────────────────────
+set -euo pipefail
+
+ROOT="${1:?usage: install-rename-compat ROOT}"
+ROOT="${ROOT%/}"
+
+readonly OLD=apex   # rime-rename: keep (the old name, spelled once)
+readonly NEW=rime
+
+# Suffixes after the name, so each entry is the same on both sides:
+# "d.service" is apexd.service -> rimed.service.
+SYSTEM_UNITS=(
+    d.service -boot-count.service -boot-health.service
+    -boot-migrate-confirm.service -boot-notice.service -firewall.service
+    -flathub-setup.service -flatpak-preinstall.service -greet-publish.service
+    -guest-session@.service -guest-wipe@.service -lid.service -secretd.service
+    -switch-greeter@.service -sysext-rebuild.service
+)
+USER_UNITS=(
+    -agentd.service -aid.service -remoted.service -shell-firstrun.service
+    -storage-notice.service -storage-notice.timer
+)
+# Every /usr/libexec name the old image installed (795a1face's Containerfiles).
+# The bare "" is /usr/libexec/apex, the tool-broker shim directory on PATH.
+LIBEXEC=(
+    "" -agent-focus -agent-review -boot-count -boot-health -boot-migrate
+    -boot-windows -browser -compositor-reload -debrand-runtime -desktop-menu
+    -devices -display-apply -disposable -env -firewall -gaming-session
+    -greet-publish-all -greet-session -greet-wallpaper -guest-wipe
+    -hypr-migrate -input-apply -labwc-keybinds -luks-enroll -mux
+    -open-browser -pkg -plugin -plugin-verdict.js -plymouth-accent
+    -project-windows -safe-graphics -safe-graphics-terminal -screen-reader
+    -session-logout -session-select -session-watchdog -shell-autostart
+    -shell-firstrun -storage-notice -switch-greeter -switch-user -switcher
+    -tool-broker -user -vconsole-guard -vm
+)
+SHARE=( -shell -greet "" )
+
+made=0
+alias_one() {  # $1 = directory (under ROOT), $2 = old name, $3 = new name, $4 = kind
+    local dir="$ROOT$1" old="$2" new="$3" kind="$4"
+    case "$kind" in
+        unit) [ -f "$dir/$new" ] && [ ! -L "$dir/$new" ] \
+                  || { echo "FATAL: $1/$new is not a unit file; cannot alias $old to it" >&2; exit 1; } ;;
+        *)    [ -e "$dir/$new" ] \
+                  || { echo "FATAL: $1/$new does not exist; cannot alias $old to it" >&2; exit 1; } ;;
+    esac
+    if [ -L "$dir/$old" ] && [ "$(readlink "$dir/$old")" = "$new" ]; then
+        return 0
+    fi
+    [ -e "$dir/$old" ] || [ -L "$dir/$old" ] \
+        && { echo "FATAL: $1/$old already exists and is not the alias" >&2; exit 1; }
+    ln -s "$new" "$dir/$old"
+    made=$((made + 1))
+}
+
+for s in "${SYSTEM_UNITS[@]}"; do alias_one /usr/lib/systemd/system "$OLD$s" "$NEW$s" unit; done
+for s in "${USER_UNITS[@]}";   do alias_one /usr/lib/systemd/user   "$OLD$s" "$NEW$s" unit; done
+for s in "${LIBEXEC[@]}";      do alias_one /usr/libexec            "$OLD$s" "$NEW$s" path; done
+for s in "${SHARE[@]}";        do alias_one /usr/share              "$OLD$s" "$NEW$s" path; done
+alias_one /usr/share/backgrounds "$OLD" "$NEW" path
+
+echo "install-rename-compat: ${made} alias(es) for the ${OLD} names" \
+     "(${#SYSTEM_UNITS[@]} system units, ${#USER_UNITS[@]} user units," \
+     "${#LIBEXEC[@]} libexec, $(( ${#SHARE[@]} + 1 )) share)"

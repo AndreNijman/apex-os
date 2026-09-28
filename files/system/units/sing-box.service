@@ -1,9 +1,9 @@
-# sing-box VPN, shipped DISABLED — APEX Shell's VPN tab starts/stops it on
-# demand via systemctl (authorized by the polkit rule 49-apex-singbox.rules,
+# sing-box VPN, shipped DISABLED — Rime Shell's VPN tab starts/stops it on
+# demand via systemctl (authorized by the polkit rule 49-rime-singbox.rules,
 # no password). The user supplies /etc/sing-box/config.json (rendered by the
 # shell from its template). Never autostarts.
 [Unit]
-Description=sing-box VPN (APEX-OS; toggled by APEX Shell)
+Description=sing-box VPN (Rime OS; toggled by Rime Shell)
 Documentation=https://sing-box.sagernet.org
 After=network-online.target
 Wants=network-online.target

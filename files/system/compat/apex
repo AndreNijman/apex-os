@@ -1,0 +1,11 @@
+#!/bin/sh
+# /usr/bin/apex — the command's old name, kept working for a release or two  (rime-rename: keep)
+# (Andre: "keep `apex` working for a release or two"). It runs `rime` with the
+# same arguments, the same stdin and the same exit status.
+#
+# The note goes to STDERR and nowhere else. `apex mcp run …` and `apex mcp
+# bridge …` are what users' ~/.claude.json entries launch as stdio MCP
+# servers, and their stdout is the protocol: one byte of text there and the
+# client drops the server. Scripts that parse `apex … --json` read stdout too.
+printf '%s\n' 'apex: this command is now `rime`' >&2   # rime-rename: keep
+exec /usr/bin/rime "$@"

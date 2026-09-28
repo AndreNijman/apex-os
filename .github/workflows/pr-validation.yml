@@ -17,6 +17,12 @@ on:
     branches: [roadmap/v2.2]
   workflow_dispatch:
 
+# The shell repository under the name that resolves on both sides of the GitHub
+# rename: GitHub redirects a renamed repository's old name, and the new name
+# resolves only once the rename has happened.
+env:
+  SHELL_REPO: https://github.com/AndreNijman/apex-shell  # rime-rename: keep (works before and after the GitHub rename)
+
 permissions:
   contents: read
 
@@ -49,8 +55,8 @@ jobs:
   #     basename, so a suite dropped in the move fails that gate.
   #  2. Relative order inside a shard is the order it had in the monolith.
   #     That matters because several steps depend on running BEFORE an
-  #     install: test-apex-hypr-lua.sh, test-apex-hypr-focus.sh and
-  #     test-apex-input-live.sh are asserted to skip on a runner with no
+  #     install: test-rime-hypr-lua.sh, test-rime-hypr-focus.sh and
+  #     test-rime-input-live.sh are asserted to skip on a runner with no
   #     compositor, and would start measuring — and failing their own floors —
   #     if labwc were installed above them.
   #  3. A shard that lost an inherited prerequisite re-establishes it. The
@@ -58,7 +64,7 @@ jobs:
   #     being one job: squashfs-tools and the userns knob from step 3, the bus
   #     tools from 23, bubblewrap from 36, labwc from 33 and 64, shellcheck
   #     from 57, fish, nushell, tmux, zellij, sshd, nftables — and the
-  #     apex-shell TREE the vendor step clones, which is state rather than a
+  #     rime-shell TREE the vendor step clones, which is state rather than a
   #     tool and which the first audit here missed. Every consumer was tracked
   #     down (grep for the binary or the path, never for the package name) and
   #     is in a shard that provides it, or in one that adds the `Allow
@@ -167,25 +173,25 @@ jobs:
           engine=false
           android=false
           # `tests/` is in the Rust selector as well as the engine one because
-          # test-apex-blueprint.sh and test-apex-modes.sh both drive the built
-          # `apex` binary and therefore live in the `rust` job, the only one
+          # test-rime-blueprint.sh and test-rime-modes.sh both drive the built
+          # `rime` binary and therefore live in the `rust` job, the only one
           # with a toolchain. A PR touching only such a file used to set
           # engine=true and rust=false, so the suite never ran — and `result`
           # passed anyway, because a skipped job counts as success. A check
           # required on every PR must always report.
-          # `config/` and not `config/sysprofiles/`: test-apex-ai.sh reads
+          # `config/` and not `config/sysprofiles/`: test-rime-ai.sh reads
           # config/ai/catalogue.toml, so a PR that changed ONLY the catalogue
           # — adding a model, or correcting a digest — set every selector false
           # and skipped this job, and a skipped job counts as success. That is
           # the third instance of this bug in this file, and a catalogue edit is
-          # exactly the change most likely to introduce an id `apex ai pull`
+          # exactly the change most likely to introduce an id `rime ai pull`
           # would refuse. `config/` is small and every file in it is read by the
           # binary this job builds.
           # `files/` — the WHOLE tree — is in the RUST selector as well as the
           # engine one. It began as files/desktop/{fish,nushell,shell}/ and the
           # multiplexer adapter, added because test-shell-agent.sh and
           # test-mux-layouts.sh assert them and run in the rust job, the only
-          # one with a toolchain to build `apex`. A PR touching only one of
+          # one with a toolchain to build `rime`. A PR touching only one of
           # those set engine=true, rust=false, skipped the job, and passed: a
           # skipped job counts as success. Fourth instance of this bug.
           #
@@ -194,14 +200,14 @@ jobs:
           # numbered instances. Counted 2026-09-13: SIX suites in the rust job
           # read something under files/ —
           #   check-containerfile-assertions.sh  files/system/NetworkManager/
-          #   test-apex-blueprint.sh             files/system/libexec/apex-pkg
-          #   test-apex-lid.sh                   files/system/units/, and a grep
+          #   test-rime-blueprint.sh             files/system/libexec/rime-pkg
+          #   test-rime-lid.sh                   files/system/units/, and a grep
           #                                      over ALL of files/ for a static
           #                                      HandleLidSwitch=
-          #   test-apex-recover.sh               files/system/libexec/
-          #   test-apex-storage.sh               files/system/{libexec,units}/
+          #   test-rime-recover.sh               files/system/libexec/
+          #   test-rime-storage.sh               files/system/{libexec,units}/
           #   test-boot-v2.sh                    files/scripts/boot-v2, units/
-          # — and the selector reached none of them. Deleting apex-lid.service,
+          # — and the selector reached none of them. Deleting rime-lid.service,
           # or adding `HandleLidSwitch=ignore` to any drop-in under files/, is a
           # files/-only change: engine=true, rust=false, job skipped, PR green,
           # on exactly the change those suites exist to catch. Seventh instance,
@@ -213,8 +219,8 @@ jobs:
           # case fails towards running too much, never too little."
           # docs/ and README.md are in the RUST selector, and only because the
           # job that checks them is the one with a toolchain: check-doc-verbs.sh
-          # asks the built `apex` binary what it can do, in both directions. A
-          # docs-only PR — deleting the line that documents `apex remote pair`,
+          # asks the built `rime` binary what it can do, in both directions. A
+          # docs-only PR — deleting the line that documents `rime remote pair`,
           # say — set every selector false, skipped the job, and passed, which
           # is exactly the change that checker exists to catch. Fifth instance
           # of this bug in this file; the four above it are the same shape.
@@ -228,20 +234,20 @@ jobs:
           # `android/core/src/test/resources/` is in the RUST selector as well
           # as the android one, and the reason is the same shape as every other
           # note in this block. `noise-vectors.json` is generated by
-          # apex-remote-core's `vectors.rs` and checked by its
+          # rime-remote-core's `vectors.rs` and checked by its
           # `the_committed_android_vectors_are_what_snow_produces` test — which
           # lives in the `rust` job. A PR that edited only that file would
           # otherwise never run the check that the file is still what `snow`
           # produces, and hand-editing it is precisely how the Kotlin suite
           # stops being evidence about the protocol the desktop speaks.
-          grep -Eq '^(apexd/|config/|Containerfile|docs/|README\.md|tests/|files/|android/core/src/test/resources/)' <<<"$files" && rust=true
+          grep -Eq '^(rimed/|config/|Containerfile|docs/|README\.md|tests/|files/|android/core/src/test/resources/)' <<<"$files" && rust=true
           grep -Eq '^installer/' <<<"$files" && installer=true
           # files/** is the whole runtime payload of the image — the package
           # engine, session launchers, guards. A PR touching only that used to
           # run nothing but a syntax check that did not even reach it.
           # Containerfile* is in the ENGINE selector as well as the rust one,
           # and it is another instance of the bug above rather than a new idea.
-          # tests/test-apex-a11y-stack.sh asserts what Containerfile.core
+          # tests/test-rime-a11y-stack.sh asserts what Containerfile.core
           # installs — the screen reader P2-003 names — so a PR that deleted
           # `orca` from that file and touched nothing else set every selector
           # false, skipped every job, and passed, because a skipped job counts
@@ -264,7 +270,7 @@ jobs:
           # repository ROOT, which no selector named, so a PR editing only it
           # set every selector false, skipped every job, and passed — including
           # tests/test-build-local-shell-ref.sh, the suite that exists to hold
-          # its apex-shell pinning rule. The file an assertion is ABOUT has to
+          # its rime-shell pinning rule. The file an assertion is ABOUT has to
           # select the job that runs it.
           grep -Eq '^(files/|tests/|Containerfile|build-local\.sh|\.github/workflows/)' <<<"$files" && engine=true
           # The Android client. Its own job, because none of the three above can
@@ -316,19 +322,19 @@ jobs:
             head -n1 -- "$file" | grep -qE '^#!.*(bash|/bin/sh)' || continue
             bash -n "$file"
             checked=$((checked + 1))
-          done < <(find . -type f -not -path './.git/*' -not -path './apexd/target/*' -print0)
+          done < <(find . -type f -not -path './.git/*' -not -path './rimed/target/*' -print0)
           echo "bash -n: $checked shell scripts"
           # The engine is the one that must never be missed again, so its
           # presence in that set is asserted rather than assumed.
-          test -f files/system/libexec/apex-pkg
-          bash -n files/system/libexec/apex-pkg
-          python3 -m py_compile installer/apex-installer-gui
+          test -f files/system/libexec/rime-pkg
+          bash -n files/system/libexec/rime-pkg
+          python3 -m py_compile installer/rime-installer-gui
           # The plugin CLI's node shim. Nothing else in the tree is JavaScript,
           # so it would otherwise be the one shipped program with no syntax
-          # check at all — and it is the file that asks apex-shell's validator
-          # for every verdict `apex plugin` gives.
-          test -f files/system/libexec/apex-plugin-verdict.js
-          node --check files/system/libexec/apex-plugin-verdict.js
+          # check at all — and it is the file that asks rime-shell's validator
+          # for every verdict `rime plugin` gives.
+          test -f files/system/libexec/rime-plugin-verdict.js
+          node --check files/system/libexec/rime-plugin-verdict.js
 
       - name: Validate TOML
         if: ${{ !cancelled() }}
@@ -361,14 +367,14 @@ jobs:
           #
           # A static check, so both are caught in seconds on the PR instead.
           python3 files/scripts/check-containerfile-order \
-            Containerfile.base Containerfile.core Containerfile.apex
+            Containerfile.base Containerfile.core Containerfile.rime
 
       # ── the checker above, checked ────────────────────────────────────────
       #
       # It was red on 34727364060 for a defect of its own: a path inside a
       # quoted `grep` PATTERN counted as a read, so Containerfile.base:1644 —
-      # which greps a unit file for the string `ExecStart=/usr/bin/apex lid
-      # watch` and reads nothing — was reported as reading /usr/bin/apex ahead
+      # which greps a unit file for the string `ExecStart=/usr/bin/rime lid
+      # watch` and reads nothing — was reported as reading /usr/bin/rime ahead
       # of the COPY at line 2952. The Containerfile says in a comment directly
       # above that line that the binary is deliberately not read there.
       #
@@ -446,37 +452,37 @@ jobs:
           # Neither shows up in a test of either side alone, because each is
           # internally consistent.
           #
-          # apex-shell is a separate repository, so it is checked out here. The
+          # rime-shell is a separate repository, so it is checked out here. The
           # checker exits 77 (skip) when it is absent, which keeps this from
           # failing for a reason that is nothing to do with the change.
           # Clone the MATCHING branch where one exists, and say which one was
-          # used. This job's first ever run compared apex-os `roadmap/v2.2`
-          # against apex-shell `main` and failed on two touchpad defaults —
+          # used. This job's first ever run compared rime-os `roadmap/v2.2`
+          # against rime-shell `main` and failed on two touchpad defaults —
           # while the two INTEGRATION branches agreed perfectly (22 settings,
           # identical keys and defaults). A parity check that silently compares
           # a branch against someone else's default branch reports drift that
           # is not there and hides drift that is.
           #
           # The real drift it exposed is between the two MAINS, and it is kept
-          # rather than papered over: apex-shell main has drag_lock=true and
-          # click_method=clickfinger where apex-os main's generator has false
+          # rather than papered over: rime-shell main has drag_lock=true and
+          # click_method=clickfinger where rime-os main's generator has false
           # and buttonAreas. Whoever performs the final integration must land
           # both sides together, or opening the Input page silently changes a
           # user's touchpad behaviour.
           # ...and then the fallback did exactly the thing the paragraph above
-          # forbids, on every branch. apex-shell has no `task/*` twin for most
+          # forbids, on every branch. rime-shell has no `task/*` twin for most
           # of this program's branches, so "no matching branch" sent the
-          # comparison to apex-shell's DEFAULT branch — `main`, the one the
+          # comparison to rime-shell's DEFAULT branch — `main`, the one the
           # paragraph above says is knowingly drifted. The result: this step
-          # was red on every apex-os feature branch, for a reason that had
+          # was red on every rime-os feature branch, for a reason that had
           # nothing to do with the change, which is the precise failure the
           # comment was written to describe. Measured on task/followups-5:
-          #   vs apex-shell main          -> rc=1, click_method and drag_lock
-          #   vs apex-shell roadmap/v2.2  -> rc=0, "22 settings, identical"
+          #   vs rime-shell main          -> rc=1, click_method and drag_lock
+          #   vs rime-shell roadmap/v2.2  -> rc=0, "22 settings, identical"
           #
           # So try the integration branch BEFORE the default one. Exact match
           # stays first, which is what keeps the main-vs-main drift reported:
-          # on apex-os `main` the exact match is apex-shell `main`, and that
+          # on rime-os `main` the exact match is rime-shell `main`, and that
           # comparison still fails, deliberately.
           #
           # `roadmap/v2.2` is hardcoded because it is this program's
@@ -495,50 +501,50 @@ jobs:
             # conflates "the branch does not exist" with "the network is
             # down", and sends the second one to a silently wrong comparison.
             if git ls-remote --exit-code --heads \
-                 https://github.com/AndreNijman/apex-shell "$cand" >/dev/null 2>&1; then
+                 "$SHELL_REPO" "$cand" >/dev/null 2>&1; then
               shell_ref="$cand"; break
             fi
           done
           if [ -n "$shell_ref" ]; then
             git clone --depth 1 -q --branch "$shell_ref" \
-              https://github.com/AndreNijman/apex-shell /tmp/apex-shell-parity
-            echo "input parity: comparing against apex-shell branch '$shell_ref'"
+              "$SHELL_REPO" /tmp/rime-shell-parity
+            echo "input parity: comparing against rime-shell branch '$shell_ref'"
           else
-            git clone --depth 1 -q https://github.com/AndreNijman/apex-shell \
-              /tmp/apex-shell-parity || true
-            echo "::warning::input parity: apex-shell has no '$want' and no roadmap/v2.2; comparing against its default branch"
+            git clone --depth 1 -q "$SHELL_REPO" \
+              /tmp/rime-shell-parity || true
+            echo "::warning::input parity: rime-shell has no '$want' and no roadmap/v2.2; comparing against its default branch"
           fi
           set +e
           python3 files/scripts/check-input-parity \
-            --service /tmp/apex-shell-parity/src/services/config_tab/InputService.qml
+            --service /tmp/rime-shell-parity/src/services/config_tab/InputService.qml
           rc=$?
           set -e
           case "$rc" in
             0)  echo "input parity holds" ;;
-            77) echo "::notice::apex-shell unavailable; input parity not checked" ;;
+            77) echo "::notice::rime-shell unavailable; input parity not checked" ;;
             *)  exit "$rc" ;;
           esac
 
-          # Same clone, same shape, a different contract: apexd's power tiers
+          # Same clone, same shape, a different contract: rimed's power tiers
           # against the shell's picker. tier.rs states in prose that the IDs
-          # "must match the strings the D-Bus API and the apex-shell
+          # "must match the strings the D-Bus API and the rime-shell
           # PowerProfileService use verbatim" — and nothing enforced it, so the
           # picker went on offering `ultra` and `ultra-max` for a release after
-          # apexd stopped parsing them. Two buttons that could only fail, found
+          # rimed stopped parsing them. Two buttons that could only fail, found
           # by Andre looking at the page rather than by any test on either side,
           # because each side was internally consistent.
           set +e
           python3 files/scripts/check-tier-parity \
-            --service /tmp/apex-shell-parity/src/services/system/PowerProfileService.qml
+            --service /tmp/rime-shell-parity/src/services/system/PowerProfileService.qml
           rc=$?
           set -e
           case "$rc" in
             0)  echo "tier parity holds" ;;
-            77) echo "::notice::apex-shell unavailable; tier parity not checked" ;;
+            77) echo "::notice::rime-shell unavailable; tier parity not checked" ;;
             *)  exit "$rc" ;;
           esac
 
-      - name: §24 every session APEX ships has a decided portal backend set
+      - name: §24 every session Rime ships has a decided portal backend set
         if: ${{ !cancelled() }}
         run: |
           set -euo pipefail
@@ -556,11 +562,11 @@ jobs:
           # nothing could see it.
           #
           # This is enumerated BY DESKTOP NAME, and every name is either pinned
-          # by APEX or listed here as deliberately packaged-default with the
+          # by Rime or listed here as deliberately packaged-default with the
           # reason. A count would pass with one of them missing.
           fail() { echo "::error::$*"; exit 1; }
 
-          # Why a name may have no APEX-owned config. Empty means APEX must pin it.
+          # Why a name may have no Rime-owned config. Empty means Rime must pin it.
           packaged_reason() {
             case "$1" in
               hyprland) echo "hyprland-portals.conf ships default=hyprland;gtk, and hyprland.portal implements only Screenshot/ScreenCast/GlobalShortcuts/InputCapture, so every desktop interface already reaches gtk" ;;
@@ -604,32 +610,32 @@ jobs:
           grep -q '^XDG_CURRENT_DESKTOP=labwc' files/desktop/labwc/environment \
             || fail "the labwc session no longer announces labwc; labwc-portals.conf would be inert"
 
-          # apex-gaming is gamescope + Steam Big Picture: no desktop session, no
+          # rime-gaming is gamescope + Steam Big Picture: no desktop session, no
           # Flatpak file dialogs, no portal story. Named as excluded rather than
           # silently absent — silently absent is exactly what niri was.
-          grep -q '^DesktopNames=gamescope$' files/desktop/wayland-sessions/apex-gaming.desktop \
-            || fail "apex-gaming.desktop changed its desktop name; re-decide whether it now needs a portal config"
+          grep -q '^DesktopNames=gamescope$' files/desktop/wayland-sessions/rime-gaming.desktop \
+            || fail "rime-gaming.desktop changed its desktop name; re-decide whether it now needs a portal config"
 
       - name: The blueprint and the capsule engine agree on the languages
         if: ${{ !cancelled() }}
         run: |
           set -euo pipefail
-          # `[development] languages` is validated by apexd-core's LANGUAGES
-          # const and converged by apex-env's own LANGUAGES table. The split is
+          # `[development] languages` is validated by rimed-core's LANGUAGES
+          # const and converged by rime-env's own LANGUAGES table. The split is
           # deliberate — the planner needs the vocabulary and must NOT have the
           # language -> package table, because a table on the host is what §8
           # exists to avoid — but two lists in two files drift silently, and
           # each side is internally consistent so neither suite catches it.
           #
           # THIS RUNS IN THE `static` JOB ON PURPOSE. The path selectors would
-          # otherwise hide it: `rust` fires on ^(apexd/|…) and `engine` on
-          # ^(files/|tests/), so a PR touching only apex-env's table never runs
+          # otherwise hide it: `rust` fires on ^(rimed/|…) and `engine` on
+          # ^(files/|tests/), so a PR touching only rime-env's table never runs
           # the Rust job and a PR touching only the const never runs the engine
           # job — and a skipped job counts as success. That is the exact bug
-          # this repository already recorded once with test-apex-modes.sh.
+          # this repository already recorded once with test-rime-modes.sh.
           #
           # Needs no toolchain and no container: it parses one Rust const and
-          # runs `apex-env languages`, which is a pure print.
+          # runs `rime-env languages`, which is a pure print.
           python3 files/scripts/check-language-parity
 
       - name: Only the daemon may run host commands
@@ -650,35 +656,35 @@ jobs:
           # Two allowed files: the daemon that opts in, and syswriter.rs where
           # the constructor is defined and unit-tested. Comment lines are
           # stripped so prose about it does not trip the check. Anywhere else —
-          # a tests/ directory, the `apex` CLI, a future binary — is a failure.
-          found="$(grep -rn 'RealWriter::for_daemon' apexd --include='*.rs' \
+          # a tests/ directory, the `rime` CLI, a future binary — is a failure.
+          found="$(grep -rn 'RealWriter::for_daemon' rimed --include='*.rs' \
                    | grep -vE ':[0-9]+:[[:space:]]*//' || true)"
           echo "$found"
           outside="$(printf '%s\n' "$found" \
-                     | grep -vE '^apexd/(apexd/src/main\.rs|apexd-core/src/syswriter\.rs):' || true)"
+                     | grep -vE '^rimed/(rimed/src/main\.rs|rimed-core/src/syswriter\.rs):' || true)"
           if [ -n "$outside" ]; then
             echo "FATAL: only the daemon may opt into host commands; found:" >&2
             printf '%s\n' "$outside" >&2
             exit 1
           fi
           # No integration test may construct one, whatever the path.
-          if grep -rn 'RealWriter::for_daemon' apexd --include='*.rs' \
+          if grep -rn 'RealWriter::for_daemon' rimed --include='*.rs' \
              | grep -E '/tests/'; then
             echo "FATAL: a test must never opt into host commands (see above)" >&2
             exit 1
           fi
           # And the daemon must still use it, or game mode has silently stopped
           # switching the scheduler — the failure mode of fixing this lazily.
-          printf '%s\n' "$found" | grep -q '^apexd/apexd/src/main\.rs:' \
+          printf '%s\n' "$found" | grep -q '^rimed/rimed/src/main\.rs:' \
             || { echo "FATAL: the daemon no longer opts in; game mode would never switch the scheduler" >&2; exit 1; }
           echo "host commands: only the daemon opts in"
 
-      - name: Only `apex apply` may converge the machine
+      - name: Only `rime apply` may converge the machine
         if: ${{ !cancelled() }}
         run: |
           set -euo pipefail
           # The blueprint's counterpart to the check above, for the same class
-          # of accident one command along. `apex apply` writes session state,
+          # of accident one command along. `rime apply` writes session state,
           # runs the package engine and rewrites the user's configuration, so
           # `RealConverger::for_apply` is the one constructor permitted to have
           # effects — everything else gets the inert one, which logs and skips.
@@ -686,34 +692,34 @@ jobs:
           # Three parts, matching the host-command check, because a red check
           # fixed by neutering the feature is the failure mode this shape
           # exists to prevent.
-          FILE=apexd/apex/src/blueprint.rs
+          FILE=rimed/rime/src/blueprint.rs
           test -f "$FILE"
 
           # 1. Nothing outside that file may construct one. Comment lines are
           #    stripped so prose about it does not trip the check.
-          found="$(grep -rn 'RealConverger::for_apply' apexd --include='*.rs' \
+          found="$(grep -rn 'RealConverger::for_apply' rimed --include='*.rs' \
                    | grep -vE ':[0-9]+:[[:space:]]*//' || true)"
           echo "$found"
           outside="$(printf '%s\n' "$found" | grep -v "^${FILE}:" | grep . || true)"
           if [ -n "$outside" ]; then
-            echo "FATAL: only \`apex apply\` may build a converger with effects; found:" >&2
+            echo "FATAL: only \`rime apply\` may build a converger with effects; found:" >&2
             printf '%s\n' "$outside" >&2
             exit 1
           fi
 
           # 2. No test may construct one, whatever the path.
-          if grep -rn 'RealConverger::for_apply' apexd --include='*.rs' \
+          if grep -rn 'RealConverger::for_apply' rimed --include='*.rs' \
              | grep -E '/tests/'; then
             echo "FATAL: a test must never build a converger with effects (see above)" >&2
             exit 1
           fi
 
           # 3. And the CLI must still use it, in code that is not #[cfg(test)] —
-          #    or `apex apply` has silently become a command that converges
+          #    or `rime apply` has silently become a command that converges
           #    nothing while every test still passes.
           prod="$(sed '/^#\[cfg(test)\]/,$d' "$FILE")"
           grep -q 'RealConverger::for_apply()' <<<"$prod" \
-            || { echo "FATAL: nothing outside the tests constructs a live converger; \`apex apply\` would change nothing" >&2; exit 1; }
+            || { echo "FATAL: nothing outside the tests constructs a live converger; \`rime apply\` would change nothing" >&2; exit 1; }
 
           # `apply` must never escalate. This is the whole reason it cannot
           # raise a polkit prompt: it converges the privilege domain it is
@@ -721,10 +727,10 @@ jobs:
           # and the symptom would be a password prompt in the middle of a test
           # run — which has happened twice in this repository already.
           if grep -nE 'Command::new\("(sudo|pkexec|su|doas)"|"(sudo|pkexec|doas)"' <<<"$prod"; then
-            echo "FATAL: apex apply must never escalate privilege (see above)" >&2
+            echo "FATAL: rime apply must never escalate privilege (see above)" >&2
             exit 1
           fi
-          echo "converging: only \`apex apply\` opts in, and it never escalates"
+          echo "converging: only \`rime apply\` opts in, and it never escalates"
 
       - name: §12 shares one apply guard, and its planner stays pure
         if: ${{ !cancelled() }}
@@ -734,19 +740,19 @@ jobs:
           # profiles. Same three-part shape, and for the same reason: a red
           # check fixed by neutering the feature is the failure mode this
           # arrangement exists to prevent.
-          CORE_PLAN=apexd/apexd-core/src/gameprofile.rs
-          CORE_PROBE=apexd/apexd-core/src/gaming.rs
-          CLI=apexd/apex/src/gaming.rs
+          CORE_PLAN=rimed/rimed-core/src/gameprofile.rs
+          CORE_PROBE=rimed/rimed-core/src/gaming.rs
+          CLI=rimed/rime/src/gaming.rs
           for f in "$CORE_PLAN" "$CORE_PROBE" "$CLI"; do test -f "$f"; done
 
-          # 1. `apex game profile apply` moves the same levers as
-          #    `apex mode set` — tier, auto-switch, game mode, fan — so it must
+          # 1. `rime game profile apply` moves the same levers as
+          #    `rime mode set` — tier, auto-switch, game mode, fan — so it must
           #    obey the SAME guard. A second environment variable would split
           #    one invariant across two names, and the older one's
           #    guard-before-bus proof would stop covering the newer verb.
           prod="$(sed '/^#\[cfg(test)\]/,$d' "$CLI")"
           grep -q 'crate::mode::guard_set()' <<<"$prod" \
-            || { echo "FATAL: \`apex game profile apply\` no longer checks the shared guard; it could move the tier of a machine running the tests" >&2; exit 1; }
+            || { echo "FATAL: \`rime game profile apply\` no longer checks the shared guard; it could move the tier of a machine running the tests" >&2; exit 1; }
           if grep -nE 'NO_APPLY_ENV *: *&str *=' "$CLI"; then
             echo "FATAL: §12 must not define a second apply guard (see above)" >&2
             exit 1
@@ -770,27 +776,27 @@ jobs:
             exit 1
           fi
 
-          # 3. And the CLI must still route the verb, or `apex game profile
+          # 3. And the CLI must still route the verb, or `rime game profile
           #    apply` has silently become a command that changes nothing while
           #    every test still passes.
-          grep -q 'gaming::profile_main' apexd/apex/src/main.rs \
-            || { echo "FATAL: nothing dispatches \`apex game profile\`" >&2; exit 1; }
+          grep -q 'gaming::profile_main' rimed/rime/src/main.rs \
+            || { echo "FATAL: nothing dispatches \`rime game profile\`" >&2; exit 1; }
           # It must be routed at the dispatch site, NOT only inside cmd_game:
           # cmd_game connects to the system bus before it looks at the verb, so
           # routing through it would put a connection ahead of the guard.
           sed -n '/Cmd::Game { cmd } => match cmd {/,/^        },$/p' \
-              apexd/apex/src/main.rs | grep -q 'GameCmd::Profile { cmd } => gaming::profile_main' \
+              rimed/rime/src/main.rs | grep -q 'GameCmd::Profile { cmd } => gaming::profile_main' \
             || { echo "FATAL: \`game profile\` must be routed before cmd_game, which connects to the bus first" >&2; exit 1; }
           echo "§12: one shared guard, a pure planner, a read-only probe"
 
       # §22 boot v2. THIS RUNS IN THE `static` JOB ON PURPOSE, and the reason is
       # the one docs/p1-progress.md already records twice: `rust` fires on
-      # ^(apexd/|config/sysprofiles/|tests/) and `engine` on ^(files/|tests/),
+      # ^(rimed/|config/sysprofiles/|tests/) and `engine` on ^(files/|tests/),
       # so a check in either specialised job is skipped by a PR that changes
       # only the other side — and a skipped job counts as success.
       #
       # A boot-v2 PR is exactly that kind of PR. The units and the health
-      # helper are under files/, `apex boot status` is under apexd/, and the
+      # helper are under files/, `rime boot status` is under rimed/, and the
       # single most important assertion here spans both: that every unit this
       # image enables is conditioned on systemd-boot's LoaderBootCountPath, so
       # the systemd-boot path stays opt-in and GRUB stays the default for
@@ -798,7 +804,7 @@ jobs:
       # PR that quietly removed that condition from a unit file would have
       # skipped the `rust` job entirely.
       #
-      # No argument, so no `apex` binary is needed. The binary-driven half runs
+      # No argument, so no `rime` binary is needed. The binary-driven half runs
       # in `rust` below, where the toolchain is, and dies rather than skipping
       # if the binary is missing.
       - name: §22 boot v2 — the opt-in is structural, and nothing shipped touches a boot path
@@ -822,7 +828,7 @@ jobs:
       # the scan it ends with walks EVERY tracked file, so a PR adding a
       # `bootc install --via-loopback` with no `--generic-image` anywhere — a
       # workflow, an installer script, a lab helper — must not be able to skip
-      # it by touching neither apexd/ nor files/.
+      # it by touching neither rimed/ nor files/.
       #
       # 2026-09-20, twice. A loopback install reached bootc's firmware step,
       # bootupd rewrote the HOST's boot entry to point inside the disk image it
@@ -843,22 +849,22 @@ jobs:
       # §27's trust readout, structural half. In `static` because the check
       # that matters most here compares two files in DIFFERENT selectors: the
       # cosign identity in .github/workflows/build-image.yml against the one
-      # `apex trust` expects in apexd/apex/src/trust.rs. A PR touching only the
+      # `rime trust` expects in rimed/rime/src/trust.rs. A PR touching only the
       # workflow sets rust=false, and the drift would ship — with every machine
       # reporting a good image as signed by the wrong party.
-      - name: §27 trust — the readout is wired into apex status, and expects the identity CI signs under
+      - name: §27 trust — the readout is wired into rime status, and expects the identity CI signs under
         if: ${{ !cancelled() }}
-        run: ./tests/test-apex-trust.sh
+        run: ./tests/test-rime-trust.sh
 
       # §13.4's tool half, the part an agent actually types. In `static`
       # because the thing being asserted is a command line: which subcommands
       # reach the broker and which reach the real tool unchanged. It needs no
       # toolchain, no wrangler, no terraform and no daemon — the suite refuses
-      # to run if `apex` resolves to anything but its own stub, so it cannot
+      # to run if `rime` resolves to anything but its own stub, so it cannot
       # quietly start measuring the runner's machine.
-      - name: §13.4 tool broker — a brokered subcommand reaches apex, and everything else reaches the tool
+      - name: §13.4 tool broker — a brokered subcommand reaches rime, and everything else reaches the tool
         if: ${{ !cancelled() }}
-        run: ./tests/test-apex-tool-broker.sh
+        run: ./tests/test-rime-tool-broker.sh
 
       # §25's persistent-state migration, structural half. In `static` because
       # the thing most likely to rot here is a doc comment — a version key that
@@ -867,7 +873,7 @@ jobs:
       # else's machine.
       - name: §25 schema — every store declares its rollback answer, and no version key defaults to current
         if: ${{ !cancelled() }}
-        run: ./tests/test-apex-schema.sh
+        run: ./tests/test-rime-schema.sh
 
       # §48's Storage Manager, structural half. Three one-line changes away
       # from being actively harmful: a comparison against smartctl's exit
@@ -876,7 +882,7 @@ jobs:
       # encrypted disk as unencrypted.
       - name: §48 storage — a failing disk is red not grey, and the composefs root is not a full disk
         if: ${{ !cancelled() }}
-        run: ./tests/test-apex-storage.sh
+        run: ./tests/test-rime-storage.sh
 
       # §P2-015's firmware readout, structural half. fwupdmgr's exit status
       # means "nothing to do" when non-zero and accompanies an explicit error
@@ -886,7 +892,7 @@ jobs:
       # Firmware, so printing it as a capability is a lie about the hardware.
       - name: §P2-015 firmware — the document is the only truth, and updatable is not a property
         if: ${{ !cancelled() }}
-        run: ./tests/test-apex-firmware.sh
+        run: ./tests/test-rime-firmware.sh
 
       # The initramfs gates, run against captured listings rather than inside a
       # 40-minute image build. They were inline Containerfile greps until
@@ -899,7 +905,7 @@ jobs:
       # cannot go red fails here.
       - name: initramfs budget — every gate proven red on a fat image and green on a slim one
         if: ${{ !cancelled() }}
-        run: ./tests/test-apex-initramfs-budget.sh
+        run: ./tests/test-rime-initramfs-budget.sh
 
       # §33's qualification database, structural half. The two properties it
       # guards are both one-line changes away: a consent gate that reads
@@ -908,7 +914,7 @@ jobs:
       # has tried into a fault report about working hardware.
       - name: §33 qualify — nothing is recorded without consent, and a check nobody tried is not a check that failed
         if: ${{ !cancelled() }}
-        run: ./tests/test-apex-qualify.sh
+        run: ./tests/test-rime-qualify.sh
 
       # P1-025/026/027/028, structural half, and it belongs in `static` for the
       # usual reason: its subject is the shape of the source, and a PR that
@@ -921,10 +927,10 @@ jobs:
       # green.
       - name: §P1-025 skills & provenance — a refused read is never an absence, and dead code was called rather than silenced
         if: ${{ !cancelled() }}
-        run: ./tests/test-apex-skill.sh
+        run: ./tests/test-rime-skill.sh
 
       # §P1-061 application permissions. In `static` because the subject is a
-      # runtime behaviour of xdg-desktop-portal, not of anything in apexd/ —
+      # runtime behaviour of xdg-desktop-portal, not of anything in rimed/ —
       # a PR that changed only docs/app-permissions.md would skip a `rust` job
       # and ship a page that claims a revocation nothing enforces.
       #
@@ -935,7 +941,7 @@ jobs:
       # the desktop stack, which is every machine this feature ships to.
       - name: §P1-061 app permissions — a revoked grant is refused, and the native one cannot be
         if: ${{ !cancelled() }}
-        run: ./tests/test-apex-permissions.sh
+        run: ./tests/test-rime-permissions.sh
 
       # §P1-061 criterion 4, the other half: does a permission-store change
       # reach a PipeWire client that is ALREADY RUNNING? The answer decides
@@ -958,30 +964,30 @@ jobs:
         run: ./tests/measure-permission-store-reach.sh
 
       # §26's channels, structural half, and this one has to be in `static`:
-      # every assertion compares .github/workflows against apexd/, which are
+      # every assertion compares .github/workflows against rimed/, which are
       # different path selectors. A PR touching only build-image.yml sets
       # rust=false, and the drift that ships is `stable` quietly advancing on
       # every build — a user who chose it would be taking edge's risk while
       # believing they had opted out.
       - name: §26 channels — edge moves with every build, the slower ones do not, and a promotion cannot skip a channel
         if: ${{ !cancelled() }}
-        run: ./tests/test-apex-channel.sh
+        run: ./tests/test-rime-channel.sh
 
       # §19's disposable engine, and the structural rules its teardown depends
       # on. In `static` for the reason boot-v2's structural half is: the
       # `engine` selector is ^(files/|tests/) and the `rust` selector is
-      # ^(apexd/|config/|tests/), so a PR touching ONLY
-      # files/system/libexec/apex-disposable sets engine=true and rust=false.
+      # ^(rimed/|config/|tests/), so a PR touching ONLY
+      # files/system/libexec/rime-disposable sets engine=true and rust=false.
       # A check that lived only in `rust` would be skipped by exactly the PR
       # that changes the recursive delete — and a skipped job counts as
       # success. `static` has no path filter and can never be skipped.
       #
-      # No argument, so no `apex` binary is needed. The binary-driven half runs
+      # No argument, so no `rime` binary is needed. The binary-driven half runs
       # in `rust` below, where the toolchain is, and dies rather than skipping
       # if the binary is missing.
       - name: §19 disposable execution — the teardown's four fences, and the copy boundary
         if: ${{ !cancelled() }}
-        run: ./tests/test-apex-recover.sh
+        run: ./tests/test-rime-recover.sh
 
       - name: §14 the daemon, the CLI and the unit agree
         if: ${{ !cancelled() }}
@@ -1035,7 +1041,7 @@ jobs:
       # tests compiles for the HOST and the Windows-only paths are skipped by
       # cfg(). Its first round shipped 655 lines and recorded honestly that no
       # .exe had ever been built here — the toolchain looked unavailable
-      # because APEX is bootc and read-only, so `dnf install` on the host is
+      # because Rime is bootc and read-only, so `dnf install` on the host is
       # refused. It installs fine in a container.
       #
       # This builds the real PE32+ binary and RUNS it under wine. The exit code
@@ -1059,7 +1065,7 @@ jobs:
       # languages, so nothing but a parity check can hold them together.
       #
       # In `static` and not `rust` on purpose. It was put here because a PR
-      # touching only files/system/units/apex-aid.service did not set rust=true,
+      # touching only files/system/units/rime-aid.service did not set rust=true,
       # and that unit is one of the files this check reads. The rust selector
       # gained `files/` on 2026-09-13, so that particular hole is closed — but
       # `static` is the job with no selector at all, and a parity check across
@@ -1072,11 +1078,11 @@ jobs:
       # This repository has shipped four checks satisfied by their own comments;
       # this one proves it is not a fifth.
       # P1-062's chaos harness, tested. `tests/chaos/` is what decides whether
-      # APEX survives a fault, so "what decides whether the decider is right?"
+      # Rime survives a fault, so "what decides whether the decider is right?"
       # needs an answer that is not "somebody read it".
       #
       # In `static` because it needs no binary and because the `rust` selector
-      # (^(apexd/|config/|tests/)) would in fact catch it — but the boot-path
+      # (^(rimed/|config/|tests/)) would in fact catch it — but the boot-path
       # half is a rule about FILE CONTENT under tests/chaos/, and a rule that
       # can be skipped is a rule that gets broken on the PR that skips it.
       # `static` has no path filter and can never be skipped.
@@ -1089,7 +1095,7 @@ jobs:
       # repository has shipped four times.
       - name: P1-062 the chaos harness — the boot-path rule, and every verdict arm
         if: ${{ !cancelled() }}
-        run: ./tests/test-apex-chaos.sh
+        run: ./tests/test-rime-chaos.sh
 
   rust:
     name: Rust validation
@@ -1098,7 +1104,7 @@ jobs:
     runs-on: ubuntu-24.04
     defaults:
       run:
-        working-directory: apexd
+        working-directory: rimed
     steps:
       - name: Checkout
         uses: actions/checkout@v4
@@ -1108,11 +1114,11 @@ jobs:
         run: rustup component add clippy
 
       # bubblewrap is not on the GitHub runner, and six assertions in
-      # apex/tests/mcp_sidecar_live.rs depend on it: they confine a real MCP
+      # rime/tests/mcp_sidecar_live.rs depend on it: they confine a real MCP
       # server and then check that the confinement actually holds — no network
       # where none was asked for, no reach into the agent's HOME, no inherited
       # variables, the broker socket opened only on request. Without bwrap each
-      # one fails on `apex mcp run: this MCP server cannot be confined`.
+      # one fails on `rime mcp run: this MCP server cannot be confined`.
       #
       # Installed rather than skipped, deliberately. The alternative pattern in
       # this repository is to skip when a tool is missing, and that is right for
@@ -1147,28 +1153,28 @@ jobs:
           path: |
             ~/.cargo/registry
             ~/.cargo/git
-            apexd/target
-          key: cargo-${{ runner.os }}-${{ hashFiles('apexd/Cargo.lock') }}
+            rimed/target
+          key: cargo-${{ runner.os }}-${{ hashFiles('rimed/Cargo.lock') }}
           restore-keys: cargo-${{ runner.os }}-
 
       - name: Clippy
         if: ${{ !cancelled() }}
         run: cargo clippy --all-targets --locked -- -D warnings
 
-      # `cargo test` does not build the `apex` binary, and apex-agentd's
-      # hook_bridge suite needs it: it runs `apex agent hook` inside a real
+      # `cargo test` does not build the `rime` binary, and rime-agentd's
+      # hook_bridge suite needs it: it runs `rime agent hook` inside a real
       # session to prove the publish path. Without the binary that test SKIPS
       # and reports as a pass, which is how it went unnoticed that the live
       # assertion had never run in CI at all — four green tests in 0.13 s.
-      - name: Build the apex CLI, which the live agent tests drive
+      - name: Build the rime CLI, which the live agent tests drive
         if: ${{ !cancelled() }}
-        run: cargo build --locked -p apex
+        run: cargo build --locked -p rime
 
-      # APEX_REQUIRE_APEX_CLI turns that skip into a failure. Same shape as
-      # APEX_REQUIRE_NIRI in tests/test-apex-input.sh: a developer running one
+      # RIME_REQUIRE_RIME_CLI turns that skip into a failure. Same shape as
+      # RIME_REQUIRE_NIRI in tests/test-rime-input.sh: a developer running one
       # crate's tests still gets a skip, CI does not.
       # Through tests/in-login-session.sh, which is what makes §7's LOCAL
-      # column reachable. `apex-agentd` decides whether a human is at this
+      # column reachable. `rime-agentd` decides whether a human is at this
       # machine from the connecting peer's cgroup, and a GitHub runner's
       # processes are in neither a login session nor a user service — so
       # `origin::observe` cannot classify them at all, and every assertion
@@ -1181,8 +1187,8 @@ jobs:
         if: ${{ !cancelled() }}
         run: ../tests/in-login-session.sh cargo test --locked
         env:
-          APEX_REQUIRE_APEX_CLI: "1"
-          # The same shape, for the other thing this step buys. `apex-remoted`'s
+          RIME_REQUIRE_RIME_CLI: "1"
+          # The same shape, for the other thing this step buys. `rime-remoted`'s
           # relay and end-to-end suites cannot pair a device unless §7 observes
           # a human at this machine, so outside a login session they SKIP with
           # the placement named — the honest answer, and a silent pass if it
@@ -1193,7 +1199,7 @@ jobs:
           # `logind session 3, 0::/user.slice/user-1001.slice/session-3.scope`,
           # so this knob asserts a fact that already held rather than asking
           # for a new one.
-          APEX_REQUIRE_LOCAL_ORIGIN: "1"
+          RIME_REQUIRE_LOCAL_ORIGIN: "1"
 
       # §7's table has two columns and they live in two different
       # environments, so no single `cargo test` run can cover both: inside a
@@ -1214,8 +1220,8 @@ jobs:
         if: ${{ !cancelled() }}
         run: |
           set -euo pipefail
-          cargo test --locked -p apex-agentd --test request_origin
-          out="$(cargo test --locked -p apex-agentd --test system_grants \
+          cargo test --locked -p rime-agentd --test request_origin
+          out="$(cargo test --locked -p rime-agentd --test system_grants \
                  a_non_local_caller_is_refused_a_grant_before_polkit_is_asked \
                  -- --exact --nocapture 2>&1)"
           printf '%s\n' "$out"
@@ -1226,11 +1232,11 @@ jobs:
 
       # §10's blueprint suite drives the COMPILED binary, so it belongs here
       # rather than in the `engine` job: this is where the toolchain and the
-      # cargo cache are, and building `apex` a second time elsewhere would
+      # cargo cache are, and building `rime` a second time elsewhere would
       # double the slowest step in the PR for no extra coverage.
       #
-      # APEX_BLUEPRINT_NO_APPLY is set for the whole step as a blanket net for
-      # anything that might invoke `apex apply` directly. It is NOT what keeps
+      # RIME_BLUEPRINT_NO_APPLY is set for the whole step as a blanket net for
+      # anything that might invoke `rime apply` directly. It is NOT what keeps
       # the suite safe, and pretending otherwise would be worse than not
       # setting it: the suite builds each invocation's environment with
       # `env -i`, so this variable does not reach the binary at all. What
@@ -1244,18 +1250,18 @@ jobs:
         if: ${{ !cancelled() }}
         working-directory: .
         env:
-          APEX_BLUEPRINT_NO_APPLY: "1"
-        # No APEX_BIN: the suite builds the binary itself, which is a cache hit
+          RIME_BLUEPRINT_NO_APPLY: "1"
+        # No RIME_BIN: the suite builds the binary itself, which is a cache hit
         # after the two steps above. Pointing it at a path instead would make
         # the job depend on exactly which targets `cargo test` happens to
         # build, and the failure would read as a broken suite rather than a
         # missing artefact. When it cannot build, it exits non-zero — a suite
         # that cannot run must never report a green tick, which this repository
         # has now been bitten by three times.
-        run: ./tests/test-apex-blueprint.sh
+        run: ./tests/test-rime-blueprint.sh
 
       # §11/§12/§13's shell-level suite. It lives HERE rather than in the
-      # `engine` job because it runs the real built `apex` binary, and this is
+      # `engine` job because it runs the real built `rime` binary, and this is
       # the only job with a Rust toolchain and a warm cargo cache.
       #
       # It is also the suite that must never reach the host. The area has form:
@@ -1267,7 +1273,7 @@ jobs:
       - name: Run mode, workload and Performance Lab assertions
         if: ${{ !cancelled() }}
         working-directory: ${{ github.workspace }}
-        run: ./tests/test-apex-modes.sh
+        run: ./tests/test-rime-modes.sh
 
       # §12's other two halves: per-game profiles and boot-to-game readiness.
       # A separate file from the suite above because it is a separate claim —
@@ -1282,17 +1288,17 @@ jobs:
       # them by PATH lookup and must never spawn one.
       #
       # Every invocation in it redirects DBUS_SYSTEM_BUS_ADDRESS at a path that
-      # does not exist, so nothing in it can reach a live apexd — which is also
+      # does not exist, so nothing in it can reach a live rimed — which is also
       # what makes it behave identically here and on a developer's desktop.
       - name: Run per-game profile and boot-to-game assertions
         if: ${{ !cancelled() }}
         working-directory: ${{ github.workspace }}
-        run: ./tests/test-apex-gaming.sh
+        run: ./tests/test-rime-gaming.sh
 
       # What the Gaming Mode session actually hands gamescope, measured by
       # RUNNING the session script with a fake gamescope that records its argv.
-      # Before this, the only thing behind apex-gaming-session was `bash -n` in
-      # Containerfile.apex — a parser, which accepted every version of the
+      # Before this, the only thing behind rime-gaming-session was `bash -n` in
+      # Containerfile.rime — a parser, which accepted every version of the
       # script that produced the 2026-09-19 katana failures: gamescope on the
       # Intel iGPU with the external monitor dark, and `--rt` passed to a
       # gamescope that logged "No CAP_SYS_NICE" and ran at normal priority.
@@ -1300,15 +1306,15 @@ jobs:
       # Both of those are now decisions the script makes from sysfs and
       # /proc/self/status, so both are reachable on a runner with no GPU: the
       # suite feeds it katana's exact DRM topology as a fixture tree. It uses
-      # the REAL apex binary for the selection rule, through APEX_ROOT, so what
+      # the REAL rime binary for the selection rule, through RIME_ROOT, so what
       # is under test is the code that ships rather than a fake that agrees
       # with the test.
       - name: Run Gaming Mode session assertions
         if: ${{ !cancelled() }}
         working-directory: ${{ github.workspace }}
-        run: ./tests/test-apex-gaming-session.sh
+        run: ./tests/test-rime-gaming-session.sh
 
-      # §22's `apex boot status`, driven against fixture roots that stand in
+      # §22's `rime boot status`, driven against fixture roots that stand in
       # for a GRUB machine and for a systemd-boot machine mid-rollback. The
       # sd-boot fixture's entry list is the document `bootctl list --json`
       # produced from an ESP a VM had actually booted four times, so the field
@@ -1316,52 +1322,52 @@ jobs:
       # entry — are measured rather than invented.
       #
       # `--with-binary` re-runs the toolchain-free half too. That is
-      # deliberate: it costs a second and it means a PR touching apexd/ gets
+      # deliberate: it costs a second and it means a PR touching rimed/ gets
       # the unit-file assertions as well, rather than relying on the `static`
       # job being the only place they exist.
       #
-      # APEX_BOOT_ROOT relocates every path the command READS. No program name
+      # RIME_BOOT_ROOT relocates every path the command READS. No program name
       # comes from the environment: bootctl is a fixed absolute path and under
       # a fixture root it is not executed at all.
-      - name: §22 boot v2 — apex boot status against GRUB and systemd-boot fixtures
+      - name: §22 boot v2 — rime boot status against GRUB and systemd-boot fixtures
         if: ${{ !cancelled() }}
         working-directory: ${{ github.workspace }}
         env:
-          APEX_BIN: ${{ github.workspace }}/apexd/target/debug/apex
+          RIME_BIN: ${{ github.workspace }}/rimed/target/debug/rime
         run: |
           set -euo pipefail
-          cargo build -p apex --locked --manifest-path apexd/Cargo.toml
+          cargo build -p rime --locked --manifest-path rimed/Cargo.toml
           # A missing binary must be a hard failure, not a skip.
-          test -x "$APEX_BIN"
+          test -x "$RIME_BIN"
           ./tests/test-boot-v2.sh --with-binary
 
-      # §27's binary half: `apex trust` and `apex status` against fixture
-      # machines — an unverified pull on a permissive policy (what every APEX
+      # §27's binary half: `rime trust` and `rime status` against fixture
+      # machines — an unverified pull on a permissive policy (what every Rime
       # machine has today), a signed pull on a strict one, and the two reads
       # that must report as unavailable rather than as an answer. `--verify`
       # refuses to run under a fixture root, so this step never leaves the
       # runner and cannot go red because ghcr.io is having a bad day.
-      - name: §27 trust — apex trust against unverified, signed and unreadable fixtures
+      - name: §27 trust — rime trust against unverified, signed and unreadable fixtures
         if: ${{ !cancelled() }}
         working-directory: ${{ github.workspace }}
         env:
-          APEX: ${{ github.workspace }}/apexd/target/debug/apex
+          Rime: ${{ github.workspace }}/rimed/target/debug/rime
         run: |
           set -euo pipefail
-          cargo build -p apex --locked --manifest-path apexd/Cargo.toml
-          test -x "$APEX"
-          ./tests/test-apex-trust.sh --with-binary
+          cargo build -p rime --locked --manifest-path rimed/Cargo.toml
+          test -x "$Rime"
+          ./tests/test-rime-trust.sh --with-binary
 
       # §27's other half, and the half that refuses things. The step above
-      # guards the READOUT — that `apex trust` describes the machine's trust
+      # guards the READOUT — that `rime trust` describes the machine's trust
       # state without lying about it. This one guards the GATE: that
-      # `apex update` refuses an image whose signature does not verify, permits
+      # `rime update` refuses an image whose signature does not verify, permits
       # one it merely could not check, and says which of the two happened.
       # It was DEBT in tests/suites-not-in-ci.txt; no CI run had executed it.
       #
       # Every assertion needs a minted CA and a real signature, so it is slower
       # than the readout suite and it needs openssl. It never touches a real
-      # deployment: the fixtures are a mktemp tree passed as APEX_TRUST_ROOT.
+      # deployment: the fixtures are a mktemp tree passed as RIME_TRUST_ROOT.
       #
       # The floor is the assertion that matters on a RUNNER specifically. This
       # repository has a standing note that the CI runner is a second
@@ -1373,12 +1379,12 @@ jobs:
         if: ${{ !cancelled() }}
         working-directory: ${{ github.workspace }}
         env:
-          APEX: ${{ github.workspace }}/apexd/target/debug/apex
+          Rime: ${{ github.workspace }}/rimed/target/debug/rime
         run: |
           set -euo pipefail
-          cargo build -p apex --locked --manifest-path apexd/Cargo.toml
-          test -x "$APEX"
-          rc=0; out="$(./tests/test-apex-trust-enforcement.sh 2>&1)" || rc=$?
+          cargo build -p rime --locked --manifest-path rimed/Cargo.toml
+          test -x "$Rime"
+          rc=0; out="$(./tests/test-rime-trust-enforcement.sh 2>&1)" || rc=$?
           printf '%s\n' "$out"
           [ "$rc" = 0 ] || { echo "::error::the trust-enforcement suite exited $rc; it exits 1 before asserting anything if openssl is missing"; exit 1; }
           summary="$(printf '%s\n' "$out" | grep -E '^[[:space:]]*[0-9]+ passed, [0-9]+ failed$' || true)"
@@ -1408,12 +1414,12 @@ jobs:
         if: ${{ !cancelled() }}
         working-directory: ${{ github.workspace }}
         env:
-          APEX: ${{ github.workspace }}/apexd/target/debug/apex
+          Rime: ${{ github.workspace }}/rimed/target/debug/rime
         run: |
           set -euo pipefail
-          cargo build -p apex --locked --manifest-path apexd/Cargo.toml
-          test -x "$APEX"
-          rc=0; out="$(./tests/test-apex-rollout.sh 2>&1)" || rc=$?
+          cargo build -p rime --locked --manifest-path rimed/Cargo.toml
+          test -x "$Rime"
+          rc=0; out="$(./tests/test-rime-rollout.sh 2>&1)" || rc=$?
           printf '%s\n' "$out"
           [ "$rc" = 0 ] || { echo "::error::the rollout suite exited $rc; it exits 1 before asserting anything if openssl or python3 is missing"; exit 1; }
           summary="$(printf '%s\n' "$out" | grep -E '^[0-9]+ passed, [0-9]+ failed$' || true)"
@@ -1429,7 +1435,7 @@ jobs:
           [ "$passed" -ge 42 ] || { echo "::error::only $passed rollout assertions ran; 42 ran on 2026-09-22, so some no longer execute"; exit 1; }
 
       # P0-002's first criterion has two halves, and only one of them was ever
-      # measured anywhere. The PATH half — the store is /var/lib/apex-secretd
+      # measured anywhere. The PATH half — the store is /var/lib/rime-secretd
       # and not $HOME — is a unit test and has been true since the crate landed.
       # The AT-REST half is not a property of the path at all: it is whether a
       # process running as the owner's own uid can open the file. That needs
@@ -1437,12 +1443,12 @@ jobs:
       # tests/suites-not-in-ci.txt as DEBT — the property P0-002 earned, checked
       # by nobody.
       #
-      # In the rust job because it builds apex-secretd itself with cargo, and
+      # In the rust job because it builds rime-secretd itself with cargo, and
       # this is the only job with a toolchain.
       #
       # It uses `sudo -n`, which by definition cannot prompt, and touches
       # nothing outside a fresh mktemp tree: --store and --socket point the
-      # daemon there, and the real /var/lib/apex-secretd and the shipped unit
+      # daemon there, and the real /var/lib/rime-secretd and the shipped unit
       # are never started, stopped or read. A GitHub runner's passwordless sudo
       # is what makes it meaningful here — without it the suite abstains, and
       # the step below refuses the abstention rather than banking its exit 0.
@@ -1472,23 +1478,23 @@ jobs:
           fi
 
       # ── P1-063 lid, and the reason this step exists at all ─────────────────
-      # tests/test-apex-lid.sh is sixty assertions for the behaviour Andre
+      # tests/test-rime-lid.sh is sixty assertions for the behaviour Andre
       # asked for by name — close the lid at school and the agents keep
       # running — and until this line, no CI run had ever executed one of
       # them. It sat in tests/suites-not-in-ci.txt as debt: a file that looks
       # like coverage and gates nothing.
       #
-      # It lives in the RUST job because it drives the shipped `apex lid`
+      # It lives in the RUST job because it drives the shipped `rime lid`
       # binary, and this is the only job with a toolchain. tests/ is in the
       # rust selector, so an edit to the suite reaches it.
       #
       # The suite opens no window, starts no compositor, suspends nothing and
       # never touches the machine running it: every fixture is a tree under
       # mktemp, HOME is pushed inside it so the invoking account's own
-      # ~/.config/apex/lid.toml cannot be read, and every power-down action is
+      # ~/.config/rime/lid.toml cannot be read, and every power-down action is
       # a logged argv rather than a syscall. The real SW_LID half needs uinput,
       # root and a machine you are willing to watch sleep — that is
-      # test-apex-lid-live.sh, which stays exempt for that reason.
+      # test-rime-lid-live.sh, which stays exempt for that reason.
       #
       # The step reads the suite's own summary line back rather than banking
       # exit 0, because the point of wiring a suite in is evidence that it RAN.
@@ -1499,12 +1505,12 @@ jobs:
         if: ${{ !cancelled() }}
         working-directory: ${{ github.workspace }}
         env:
-          APEX_BIN: ${{ github.workspace }}/apexd/target/debug/apex
+          RIME_BIN: ${{ github.workspace }}/rimed/target/debug/rime
         run: |
           set -euo pipefail
-          cargo build -p apex --locked --manifest-path apexd/Cargo.toml
-          test -x "$APEX_BIN"
-          rc=0; out="$(./tests/test-apex-lid.sh 2>&1)" || rc=$?
+          cargo build -p rime --locked --manifest-path rimed/Cargo.toml
+          test -x "$RIME_BIN"
+          rc=0; out="$(./tests/test-rime-lid.sh 2>&1)" || rc=$?
           printf '%s\n' "$out"
           [ "$rc" = 0 ] || { echo "::error::the lid suite exited $rc; it says FATAL and exits 2 when it cannot find the binary or python3"; exit 1; }
           summary="$(printf '%s\n' "$out" | grep -E '^[[:space:]]*[0-9]+ passed, [0-9]+ failed$' || true)"
@@ -1520,74 +1526,74 @@ jobs:
               exit 1
           fi
 
-      # §25's binary half: `apex schema` against real state trees — a record
+      # §25's binary half: `rime schema` against real state trees — a record
       # from before the version key existed migrated with a copy kept, a record
-      # from a newer APEX left byte-identical, and a blueprint from a newer
-      # APEX refused by name rather than by serde. The suite exports
+      # from a newer Rime left byte-identical, and a blueprint from a newer
+      # Rime refused by name rather than by serde. The suite exports
       # XDG_STATE_HOME and XDG_CONFIG_HOME at its own mktemp tree and hard-exits
       # if any store path resolves outside it: this is the suite that drives the
       # code which REWRITES persistent state.
-      - name: §25 schema — apex schema against records older and newer than this build
+      - name: §25 schema — rime schema against records older and newer than this build
         if: ${{ !cancelled() }}
         working-directory: ${{ github.workspace }}
         env:
-          APEX: ${{ github.workspace }}/apexd/target/debug/apex
+          Rime: ${{ github.workspace }}/rimed/target/debug/rime
         run: |
           set -euo pipefail
-          cargo build -p apex --locked --manifest-path apexd/Cargo.toml
-          test -x "$APEX"
-          ./tests/test-apex-schema.sh --with-binary
+          cargo build -p rime --locked --manifest-path rimed/Cargo.toml
+          test -x "$Rime"
+          ./tests/test-rime-schema.sh --with-binary
 
-      # §48's binary half: `apex storage` and the notifier against a whole
+      # §48's binary half: `rime storage` and the notifier against a whole
       # fixture machine — sysfs, mountinfo, udev records and captured smartctl
       # output for a healthy disk, a failing one and a refused read. Nothing
-      # touches a real block device: under $APEX_STORAGE_ROOT no subprocess is
+      # touches a real block device: under $RIME_STORAGE_ROOT no subprocess is
       # spawned at all, and the notifier's notify-send is a shim that writes to
       # a file.
-      - name: §48 storage — apex storage against a healthy disk, a failing one and a refused read
+      - name: §48 storage — rime storage against a healthy disk, a failing one and a refused read
         if: ${{ !cancelled() }}
         working-directory: ${{ github.workspace }}
         env:
-          APEX: ${{ github.workspace }}/apexd/target/debug/apex
+          Rime: ${{ github.workspace }}/rimed/target/debug/rime
         run: |
           set -euo pipefail
-          cargo build -p apex --locked --manifest-path apexd/Cargo.toml
-          test -x "$APEX"
-          ./tests/test-apex-storage.sh --with-binary
+          cargo build -p rime --locked --manifest-path rimed/Cargo.toml
+          test -x "$Rime"
+          ./tests/test-rime-storage.sh --with-binary
 
-      # §P2-015's binary half: `apex firmware` against captured fwupd
+      # §P2-015's binary half: `rime firmware` against captured fwupd
       # documents — the on-battery one, an Error object that arrived with exit
       # zero, a document with no Devices list at all, and prose where JSON was
       # asked for. No fwupdmgr is spawned; every answer is a file the script
       # writes, so this runs on a machine with no fwupd and no system bus.
-      - name: §P2-015 firmware — apex firmware against fwupd's own oddest answers
+      - name: §P2-015 firmware — rime firmware against fwupd's own oddest answers
         if: ${{ !cancelled() }}
         working-directory: ${{ github.workspace }}
         env:
-          APEX: ${{ github.workspace }}/apexd/target/debug/apex
+          Rime: ${{ github.workspace }}/rimed/target/debug/rime
         run: |
           set -euo pipefail
-          cargo build -p apex --locked --manifest-path apexd/Cargo.toml
-          test -x "$APEX"
-          ./tests/test-apex-firmware.sh --with-binary
+          cargo build -p rime --locked --manifest-path rimed/Cargo.toml
+          test -x "$Rime"
+          ./tests/test-rime-firmware.sh --with-binary
 
-      # §33's binary half: `apex qualify` against a whole fixture machine —
+      # §33's binary half: `rime qualify` against a whole fixture machine —
       # DMI, PCI, cpuinfo, cmdline and an EFI variable — including a serial
       # number sitting in DMI next to the model, which must not reach the
       # database, and a sealed SecureBoot variable, which must read as not
       # checked rather than as a firmware that fails.
-      - name: §33 qualify — apex qualify against a fixture machine, consent gate and all
+      - name: §33 qualify — rime qualify against a fixture machine, consent gate and all
         if: ${{ !cancelled() }}
         working-directory: ${{ github.workspace }}
         env:
-          APEX: ${{ github.workspace }}/apexd/target/debug/apex
+          Rime: ${{ github.workspace }}/rimed/target/debug/rime
         run: |
           set -euo pipefail
-          cargo build -p apex --locked --manifest-path apexd/Cargo.toml
-          test -x "$APEX"
-          ./tests/test-apex-qualify.sh --with-binary
+          cargo build -p rime --locked --manifest-path rimed/Cargo.toml
+          test -x "$Rime"
+          ./tests/test-rime-qualify.sh --with-binary
 
-      # P1-061's binary half. The three refusals `apex permissions revoke` owes
+      # P1-061's binary half. The three refusals `rime permissions revoke` owes
       # — a native subject, a Flatpak carrying `devices=all`, and a capability
       # this session has no portal for — must each exit NON-ZERO with its own
       # sentence, against a shimmed `flatpak` and `busctl` so no real store is
@@ -1598,12 +1604,12 @@ jobs:
         if: ${{ !cancelled() }}
         working-directory: ${{ github.workspace }}
         env:
-          APEX: ${{ github.workspace }}/apexd/target/debug/apex
+          Rime: ${{ github.workspace }}/rimed/target/debug/rime
         run: |
           set -euo pipefail
-          cargo build -p apex --locked --manifest-path apexd/Cargo.toml
-          test -x "$APEX"
-          ./tests/test-apex-permissions.sh --with-binary
+          cargo build -p rime --locked --manifest-path rimed/Cargo.toml
+          test -x "$Rime"
+          ./tests/test-rime-permissions.sh --with-binary
 
       # P1-025/026/027/028's binary half: the four verbs against fixture HOMEs,
       # including a skills directory that exists and is refused (which must
@@ -1614,36 +1620,36 @@ jobs:
       # vacuously true field.
       #
       # Each fixture gets its own XDG_STATE_HOME as well as its own HOME:
-      # `apex provenance record` writes a baseline store and `store_path`
+      # `rime provenance record` writes a baseline store and `store_path`
       # prefers XDG_STATE_HOME, so a suite setting only HOME would write over
       # the runner's real one.
-      - name: §P1-025 skills & provenance — apex skill / provenance / mcp planes against fixture homes
+      - name: §P1-025 skills & provenance — rime skill / provenance / mcp planes against fixture homes
         if: ${{ !cancelled() }}
         working-directory: ${{ github.workspace }}
         env:
-          APEX: ${{ github.workspace }}/apexd/target/debug/apex
+          Rime: ${{ github.workspace }}/rimed/target/debug/rime
         run: |
           set -euo pipefail
-          cargo build -p apex --locked --manifest-path apexd/Cargo.toml
-          test -x "$APEX"
-          ./tests/test-apex-skill.sh --with-binary
+          cargo build -p rime --locked --manifest-path rimed/Cargo.toml
+          test -x "$Rime"
+          ./tests/test-rime-skill.sh --with-binary
 
-      # §26's binary half: `apex channel` against fixture machines on each of
+      # §26's binary half: `rime channel` against fixture machines on each of
       # the four channel tags and on the legacy alias every installed machine
       # actually follows.
-      - name: §26 channels — apex channel against a machine on each tag
+      - name: §26 channels — rime channel against a machine on each tag
         if: ${{ !cancelled() }}
         working-directory: ${{ github.workspace }}
         env:
-          APEX: ${{ github.workspace }}/apexd/target/debug/apex
+          Rime: ${{ github.workspace }}/rimed/target/debug/rime
         run: |
           set -euo pipefail
-          cargo build -p apex --locked --manifest-path apexd/Cargo.toml
-          test -x "$APEX"
-          ./tests/test-apex-channel.sh --with-binary
+          cargo build -p rime --locked --manifest-path rimed/Cargo.toml
+          test -x "$Rime"
+          ./tests/test-rime-channel.sh --with-binary
 
       # §19's binary half: the recovery surface against whole fixture machines,
-      # `apex doctor --json`, and the factory reset.
+      # `rime doctor --json`, and the factory reset.
       #
       # This step drives the most destructive verb in the product, so it is
       # worth stating what stops it reaching the runner: every path is
@@ -1652,7 +1658,7 @@ jobs:
       # ostree, bootc, podman, pkexec, busctl or sudo is ever spawned, canaries
       # planted outside every fixture are compared byte-for-byte at the end
       # (Rust's remove_dir_all spawns no `rm`, so the PATH tripwire is blind to
-      # it), and the invoking account's own ~/.config/apex is diffed before and
+      # it), and the invoking account's own ~/.config/rime is diffed before and
       # after. The safety properties are mutation-tested, not assumed: removing
       # the teardown's symlink guard fails one assertion, removing both guards
       # fails six including "THE CANARY IS GONE".
@@ -1663,13 +1669,13 @@ jobs:
         if: ${{ !cancelled() }}
         working-directory: ${{ github.workspace }}
         env:
-          APEX_BIN: ${{ github.workspace }}/apexd/target/debug/apex
+          RIME_BIN: ${{ github.workspace }}/rimed/target/debug/rime
         run: |
           set -euo pipefail
-          cargo build -p apex --locked --manifest-path apexd/Cargo.toml
+          cargo build -p rime --locked --manifest-path rimed/Cargo.toml
           # A missing binary must be a hard failure, not a skip.
-          test -x "$APEX_BIN"
-          ./tests/test-apex-recover.sh --with-binary
+          test -x "$RIME_BIN"
+          ./tests/test-rime-recover.sh --with-binary
 
       # §20's trusted devices. A fake `ssh` first on PATH records every argv,
       # which is the only way to assert the things that matter here: that
@@ -1682,29 +1688,29 @@ jobs:
       #
       # It also means the suite reaches no network and no other machine, so it
       # behaves the same here as on a laptop that has left the LAN. The last
-      # case compares the developer's real ~/.config/apex/hosts.toml before and
-      # after: if `apex host` ever resolved paths from $HOME instead of
+      # case compares the developer's real ~/.config/rime/hosts.toml before and
+      # after: if `rime host` ever resolved paths from $HOME instead of
       # XDG_CONFIG_HOME, the cost of not catching it is someone's device list.
       # A verb can vanish from the binary without breaking the build. Two
       # agents editing main.rs in parallel silently dropped `mod task;`, which
       # also stopped task.rs being compiled — so there was no orphaned
-      # reference, no dead-code warning and no test failure. `apex task` was
+      # reference, no dead-code warning and no test failure. `rime task` was
       # simply gone. Only asking the built artifact what it can do catches it.
       - name: Every verb is in the binary
         if: ${{ !cancelled() }}
         working-directory: ${{ github.workspace }}
-        run: ./tests/test-apex-verbs.sh
+        run: ./tests/test-rime-verbs.sh
 
-      # tests/check-doc-verbs.sh existed since the `apex request install clang`
+      # tests/check-doc-verbs.sh existed since the `rime request install clang`
       # defect and ran NOWHERE — not in this workflow, not from any suite — so
       # it was a checker somebody had to remember to type. Both directions run
-      # here now. Forward: every `apex …` a doc shows parses. Reverse: every
+      # here now. Forward: every `rime …` a doc shows parses. Reverse: every
       # command the binary offers is named by some doc, or is declared in
       # tests/doc-verbs-undocumented, which is a debt list that can only
-      # shrink. The reverse direction is the one that found `apex remote
+      # shrink. The reverse direction is the one that found `rime remote
       # pair|devices|revoke|status|enable` documented nowhere; the forward one
       # structurally cannot, because a verb no doc mentions produces no line.
-      # It asks the binary this job already built, not the installed apex,
+      # It asks the binary this job already built, not the installed rime,
       # which on a runner does not exist.
       - name: Docs and the CLI agree, in both directions
         if: ${{ !cancelled() }}
@@ -1721,7 +1727,7 @@ jobs:
         working-directory: ${{ github.workspace }}
         run: ./tests/check-containerfile-assertions.sh
 
-      # APEX builds its own kernel, and kernel/kernel.pin is what decides which
+      # Rime builds its own kernel, and kernel/kernel.pin is what decides which
       # one. It exists because the COPR build it replaces takes
       # `BuildRequires: dwarves` unversioned and fetches two of its three
       # sources from `master` URLs -- which is how a kernel that could not load
@@ -1737,7 +1743,7 @@ jobs:
         run: ./tests/check-kernel-pin.sh
 
       # The pin above says which kernel to BUILD. This says which built kernel
-      # `core` INSTALLS -- one `FROM ${APEX_KERNEL_IMAGE}` line, which has now
+      # `core` INSTALLS -- one `FROM ${RIME_KERNEL_IMAGE}` line, which has now
       # stopped every image build in the project twice: once defaulting to a
       # localhost image only a machine that hand-built a kernel can have, once
       # declared where the ARG was invisible to its own FROM. Both cost ~45
@@ -1753,9 +1759,9 @@ jobs:
       - name: Run trusted-device assertions
         if: ${{ !cancelled() }}
         working-directory: ${{ github.workspace }}
-        run: ./tests/test-apex-host.sh
+        run: ./tests/test-rime-host.sh
 
-      # The editors APEX ships have to be launchable, not merely present. Zed
+      # The editors Rime ships have to be launchable, not merely present. Zed
       # shipped on every image with no desktop entry at all — the install read a
       # filename the tarball has never used and `|| true` swallowed the failure —
       # so the binary worked from a shell and the editor was invisible in every
@@ -1764,26 +1770,26 @@ jobs:
       - name: The shipped editors are launchable
         if: ${{ !cancelled() }}
         working-directory: ${{ github.workspace }}
-        run: ./tests/test-apex-editors.sh
+        run: ./tests/test-rime-editors.sh
 
       # The desktop AI apps are part of the product, not add-ons: ChatGPT and
-      # Claude Desktop ship in the image, arrive with `apex update`, and must
+      # Claude Desktop ship in the image, arrive with `rime update`, and must
       # bring no updater of their own. Both vendors package for mutable
       # distributions and therefore subscribe the machine to their own
       # repository on install — OpenAI's rpm ships an enabled
       # /etc/yum.repos.d/chatgpt.repo, Anthropic's deb writes an apt source
-      # from its maintainer script. On APEX that is a live hazard rather than
-      # dead weight, because apex-pkg builds user extensions with dnf against
+      # from its maintainer script. On Rime that is a live hazard rather than
+      # dead weight, because rime-pkg builds user extensions with dnf against
       # the host's repos. This runs the structural half here; the live half
       # needs the installed apps and skips in CI.
       - name: The desktop AI apps ship with the system and bring no updater
         if: ${{ !cancelled() }}
         working-directory: ${{ github.workspace }}
-        run: ./tests/test-apex-ai-apps.sh
+        run: ./tests/test-rime-ai-apps.sh
 
       # QT_QPA_PLATFORMTHEME is not a palette preference. Qt decides
       # layoutDirection by translating the string QT_LAYOUT_DIRECTION, so it
-      # needs a Qt translation catalogue loaded — and the only thing in APEX
+      # needs a Qt translation catalogue loaded — and the only thing in Rime
       # that installs a QTranslator is the qt6ct platform theme plugin, on its
       # way to applying a dark palette. Right-to-left mirroring therefore rests
       # on a theming choice, a labwc environment file, and a package that until
@@ -1792,16 +1798,16 @@ jobs:
       # The step above greps that same variable, but only to LOCATE the
       # /etc/environment line before asserting Electron settings on it. Deleting
       # the variable goes red there for the wrong reason; changing its VALUE was
-      # caught by nothing at all. apex-shell's run-rtl-test.sh checks the live
-      # value and SKIPs off a booted APEX host, so this repository — the one
+      # caught by nothing at all. rime-shell's run-rtl-test.sh checks the live
+      # value and SKIPs off a booted Rime host, so this repository — the one
       # that can actually break it — had no guard naming the consequence.
       - name: The Qt platform theme that makes the shell mirror is set, to qt6ct
         if: ${{ !cancelled() }}
         working-directory: ${{ github.workspace }}
-        run: ./tests/test-apex-platform-theme.sh
+        run: ./tests/test-rime-platform-theme.sh
 
       # §20's remote compute and handoff. The largest group of cases in it is
-      # about one refusal: `apex build --on` has to decide which directory on
+      # about one refusal: `rime build --on` has to decide which directory on
       # the far side is this project, and the failure mode of a wrong answer is
       # not a crash but a build that SUCCEEDS against the wrong source. So the
       # suite asserts the same-repository check happens, refuses on a mismatch,
@@ -1817,30 +1823,30 @@ jobs:
       - name: Run remote-compute and handoff assertions
         if: ${{ !cancelled() }}
         working-directory: ${{ github.workspace }}
-        run: ./tests/test-apex-dispatch.sh
+        run: ./tests/test-rime-dispatch.sh
 
       # §14's local inference service, driven as a process.
       #
       # Every invocation in it redirects stdin from /dev/null, and that is
-      # load-bearing rather than tidiness: `apex ai run` accepts a piped
+      # load-bearing rather than tidiness: `rime ai run` accepts a piped
       # prompt, so with no arguments and an open stdin it waits for EOF the way
       # `cat` does. Measured while writing the suite — an invocation without the
       # redirection hung for two minutes. A suite that forgets it does not fail,
       # it hangs, and a hung job is worse than a red one because nobody can
       # tell it from a slow one.
       #
-      # It points APEX_AI_CATALOGUE at config/ai/catalogue.toml, because the
-      # catalogue is image content installed to /usr/share/apexos/ai by the
+      # It points RIME_AI_CATALOGUE at config/ai/catalogue.toml, because the
+      # catalogue is image content installed to /usr/share/rimeos/ai by the
       # build and does not exist on a checkout — the same coupling
       # test-labwc-keybinds.sh documents for the shell tree. The suite hard
       # exits if the repository copy is missing rather than falling back.
       - name: Run local inference assertions
         if: ${{ !cancelled() }}
         working-directory: ${{ github.workspace }}
-        run: ./tests/test-apex-ai.sh
+        run: ./tests/test-rime-ai.sh
 
       # §21's Task. It belongs in this job rather than `engine` because it
-      # drives the built `apex` binary, and this is the only job with a Rust
+      # drives the built `rime` binary, and this is the only job with a Rust
       # toolchain and a warm cargo cache.
       #
       # The binary is built explicitly first and then asserted executable. The
@@ -1853,7 +1859,7 @@ jobs:
       # worktree and a checkpoint, and every one of them can go away
       # underneath it. Each of those cases greps the specific refusal and the
       # specific recovery command rather than a non-zero exit. It also proves
-      # the two properties that are absences: `apex task` reopens no window
+      # the two properties that are absences: `rime task` reopens no window
       # (the fixture window logs every launch, and the count must stay at one),
       # and it invokes none of sudo, pkexec, secret-tool, podman, distrobox,
       # hyprctl or niri — recording stubs for all seven are first on PATH, with
@@ -1863,13 +1869,13 @@ jobs:
         if: ${{ !cancelled() }}
         working-directory: ${{ github.workspace }}
         env:
-          APEX_BIN: ${{ github.workspace }}/apexd/target/debug/apex
+          RIME_BIN: ${{ github.workspace }}/rimed/target/debug/rime
         run: |
           set -euo pipefail
-          cargo build -p apex --locked --bin apex --manifest-path apexd/Cargo.toml
+          cargo build -p rime --locked --bin rime --manifest-path rimed/Cargo.toml
           # A missing binary must be a hard failure, not a skip.
-          test -x "$APEX_BIN"
-          ./tests/test-apex-task.sh
+          test -x "$RIME_BIN"
+          ./tests/test-rime-task.sh
 
       # ── LAST IN THIS JOB, DELIBERATELY ──────────────────────────────────
       # A failed step skips every step BELOW it in the same job, and this
@@ -1882,7 +1888,7 @@ jobs:
       # P1-062's chaos cases, for real, against the built binary.
       #
       # THIS JOB AND NOT ANOTHER: two of the four cases need an unprivileged
-      # user namespace — `network-loss` puts `apex doctor` in a network
+      # user namespace — `network-loss` puts `rime doctor` in a network
       # namespace, `full-disk` mounts a size-limited tmpfs in a mount
       # namespace — and Ubuntu 24.04 ships
       # kernel.apparmor_restrict_unprivileged_userns=1. The bubblewrap step
@@ -1906,14 +1912,14 @@ jobs:
         if: ${{ !cancelled() }}
         working-directory: ${{ github.workspace }}
         env:
-          APEX_BIN: ${{ github.workspace }}/apexd/target/debug/apex
+          RIME_BIN: ${{ github.workspace }}/rimed/target/debug/rime
         run: |
           set -euo pipefail
-          cargo build -p apex --locked --bin apex --manifest-path apexd/Cargo.toml
+          cargo build -p rime --locked --bin rime --manifest-path rimed/Cargo.toml
           # A missing binary must be a hard failure, not a skip. Without this
           # every case reports could-not-inject for the least interesting
           # possible reason.
-          test -x "$APEX_BIN"
+          test -x "$RIME_BIN"
           ./tests/chaos/run-chaos --out "$RUNNER_TEMP/chaos" --seed "$GITHUB_RUN_ID"
 
       # The comment above says "a diagnostic that only exists inside a finished
@@ -2001,7 +2007,7 @@ jobs:
       # names which half broke rather than being buried in the big suite.
       #
       # Both degrade honestly on this runner rather than lying: the engine cases
-      # SKIP when no APEX-OS image can be put where preflight looks, and the
+      # SKIP when no Rime OS image can be put where preflight looks, and the
       # end-to-end keymap measurement SKIPs without Xvfb, cage and python3-gi.
       # Installing them here is what makes the criterion actually measured in CI
       # instead of skipped on every run.
@@ -2074,7 +2080,7 @@ jobs:
       # names which half broke rather than being buried in the big suite.
       #
       # Both degrade honestly on this runner rather than lying: the engine cases
-      # SKIP when no APEX-OS image can be put where preflight looks, and the
+      # SKIP when no Rime OS image can be put where preflight looks, and the
       # end-to-end keymap measurement SKIPs without Xvfb, cage and python3-gi.
       # Installing them here is what makes the criterion actually measured in CI
       # instead of skipped on every run.
@@ -2128,7 +2134,7 @@ jobs:
       - name: Checkout
         uses: actions/checkout@v4
 
-      # Runs the shipped /usr/libexec/apex-pkg itself: argument classification,
+      # Runs the shipped /usr/libexec/rime-pkg itself: argument classification,
       # the local-.rpm validation refusals, the package-name guard that keeps an
       # untrusted RPM header out of a root-owned path, the cache identifiers a
       # rebuild depends on, and the unsigned-package policy. No root, no network,
@@ -2137,7 +2143,39 @@ jobs:
       # run for real in the image smoke test in build-image.yml.
       - name: Run package-engine assertions
         if: ${{ !cancelled() }}
-        run: ./tests/test-apex-pkg.sh
+        run: ./tests/test-rime-pkg.sh
+
+      # The same engine on a machine whose user extension predates the rebrand
+      # (/var/lib/extensions/apex-user.raw): it must be adopted as current, not  (rime-rename: keep)
+      # rebuilt at first boot, and the next real rebuild must replace it rather
+      # than merge a second extension beside it.
+      - name: Run package-engine assertions against a pre-rename extension
+        if: ${{ !cancelled() }}
+        run: ./tests/test-rime-pkg-legacy-ext.sh
+
+      # The rest of the first boot of a Rime OS image on an APEX machine: the (rime-rename: keep)
+      # system-state migration, the session-side one, the boot splash's accent
+      # from the ESP credential APEX wrote, and the apex command, units and (rime-rename: keep)
+      # trees kept as aliases. Each runs against a fixture root, never the host.
+      - name: Run the migration from an APEX machine  # rime-rename: keep
+        if: ${{ !cancelled() }}
+        run: ./tests/test-rime-migrate-from-apex.sh  # rime-rename: keep (the suite's name)
+
+      - name: Run the session-side migration
+        if: ${{ !cancelled() }}
+        run: ./tests/test-rime-session-migrate.sh
+
+      - name: Run firstrun's check that the idle lock reaches a shell
+        if: ${{ !cancelled() }}
+        run: ./tests/test-rime-lock-cmd-check.sh
+
+      - name: Run the boot splash accent read from a pre-rename credential
+        if: ${{ !cancelled() }}
+        run: ./tests/test-rime-plymouth-accent-legacy.sh
+
+      - name: Run the pre-rename command and unit aliases
+        if: ${{ !cancelled() }}
+        run: ./tests/test-rime-rename-compat.sh
 
       # The .deb route. Anthropic publishes Claude Desktop for Linux as a .deb
       # and nothing else, so this is how it stops being hand-unpacked into
@@ -2150,11 +2188,11 @@ jobs:
       # have been created by its postinst, and a path the image already owns.
       # Its last leg runs the engine's extract_debs for real inside a
       # throwaway Fedora container, because PKG_ROOT is a readonly constant
-      # pointing at /var/lib/apex; that leg skips out loud where podman or the
+      # pointing at /var/lib/rime; that leg skips out loud where podman or the
       # network is absent.
       - name: Run .deb package assertions
         if: ${{ !cancelled() }}
-        run: ./tests/test-apex-deb.sh
+        run: ./tests/test-rime-deb.sh
       # squashfs-tools is what unpacks an AppImage's payload, and mksquashfs is
       # what the suite below BUILDS its fixtures with. Installed explicitly
       # rather than relied on: without it every extraction, integration and
@@ -2183,21 +2221,21 @@ jobs:
           sudo sysctl -w kernel.apparmor_restrict_unprivileged_userns=0 || true
           unshare -rm true && echo "unprivileged user namespaces: available"
 
-      # `apex install ./Thing.AppImage`. Leg A is unprivileged and covers the
+      # `rime install ./Thing.AppImage`. Leg A is unprivileged and covers the
       # routing (an AppImage argument must beat BOTH the local-.rpm rule and
       # the Flatpak one), the ELF arithmetic that finds the squashfs payload
       # without ever executing the file, the privilege strip, the symlink
       # containment on everything read out of the payload, the desktop rewrite
       # and the shadow guard that stops an AppImage hiding a program the image
       # provides. Leg B re-enters the suite inside `unshare -rm` with tmpfs
-      # over /var/lib/apex and /usr/local and runs the shipped engine as a
+      # over /var/lib/rime and /usr/local and runs the shipped engine as a
       # PROCESS, end to end — install, list, verify, upgrade, remove — with the
       # fixture at mode 0644, which is what proves the AppImage is never
-      # executed and that libfuse.so.2 (absent from the APEX image) is never
+      # executed and that libfuse.so.2 (absent from the Rime image) is never
       # needed. Nothing escapes that namespace.
       - name: Run AppImage-install assertions
         if: ${{ !cancelled() }}
-        run: ./tests/test-apex-appimage.sh
+        run: ./tests/test-rime-appimage.sh
 
       # The per-login provisioner edits files that belong to the user. These
       # extract its self-healing blocks from the shipped script and run them
@@ -2205,13 +2243,13 @@ jobs:
       # the user wrote is touched.
       - name: Run user-provisioner assertions
         if: ${{ !cancelled() }}
-        run: ./tests/test-apex-firstrun.sh
+        run: ./tests/test-rime-firstrun.sh
 
       - name: Run input-settings assertions
         if: ${{ !cancelled() }}
-        run: ./tests/test-apex-input.sh
+        run: ./tests/test-rime-input.sh
 
-      # §8's capsule engine. `apex env create` pulls hundreds of megabytes and
+      # §8's capsule engine. `rime env create` pulls hundreds of megabytes and
       # makes a container, so it can never run for real here — and it must
       # never run for real on a developer's machine during a test either. The
       # suite reduces $PATH to recording stubs for podman and distrobox and
@@ -2227,11 +2265,11 @@ jobs:
       # is downloaded.
       - name: Run capsule assertions
         if: ${{ !cancelled() }}
-        run: ./tests/test-apex-env.sh
+        run: ./tests/test-rime-env.sh
 
       # P2-008's virtualization engine. Same trade as the capsule suite above
-      # and for a sharper reason: `apex vm create` defines a libvirt domain and
-      # `apex vm rm` deletes disk images, so it can never run for real here and
+      # and for a sharper reason: `rime vm create` defines a libvirt domain and
+      # `rime vm rm` deletes disk images, so it can never run for real here and
       # must never run for real on a developer's machine during a test. $PATH
       # is reduced to recording stubs for virsh, qemu-img, mcopy and friends,
       # and the suite HARD-EXITS if `command -v virsh` does not resolve to the
@@ -2250,7 +2288,7 @@ jobs:
       # that is the point.
       - name: Run virtualization assertions
         if: ${{ !cancelled() }}
-        run: ./tests/test-apex-vm.sh
+        run: ./tests/test-rime-vm.sh
 
       # ── the could-not-run arm, EXERCISED rather than asserted by comment ───
       #
@@ -2269,7 +2307,7 @@ jobs:
       # why, and no flow may come back `failed`. A runner that CAN boot guests
       # verifies them instead, which is also a pass.
       #
-      # tests/test-apex-vm.sh drives both could-not-run branches directly (the
+      # tests/test-rime-vm.sh drives both could-not-run branches directly (the
       # --no-kvm flag and an unusable KVM node), so the arm is proven there on
       # every runner. This step is the end-to-end shape: the lab, invoked the
       # way a person invokes it, writing a bundle.
@@ -2304,7 +2342,7 @@ jobs:
 
       # ── P2-012's browser capsule ──────────────────────────────────────────
       #
-      # The everywhere half. A recording stub for `apex` on $APEX_BROWSER_APEX,
+      # The everywhere half. A recording stub for `rime` on $RIME_BROWSER_RIME,
       # and assertions on the two argvs and the one file that decide anything:
       # the SESSION argv, where the confinement is asked for (a dropped word
       # there is a capsule whose home is not masked or whose network is not
@@ -2314,12 +2352,12 @@ jobs:
       # egress bridge because Firefox does not read $HTTP_PROXY.
       - name: Run browser capsule assertions
         if: ${{ !cancelled() }}
-        run: ./tests/test-apex-browser.sh
+        run: ./tests/test-rime-browser.sh
 
       # ── and its live lab, wherever this runs ──────────────────────────────
       #
       # tests/browserlab/run-browserlab boots real capsules through the shipped
-      # engine against a real apex-agentd, a real bwrap namespace and a real
+      # engine against a real rime-agentd, a real bwrap namespace and a real
       # browser. On a runner it will almost always report could-not-run, and
       # that is the point rather than a shortfall: it needs a runtime built
       # from THIS branch, and session.rs::bridge_program refuses a bridge under
@@ -2366,32 +2404,32 @@ jobs:
       # qualification.
       #
       # This suite asks the shipped engine what a profile adds (it sources
-      # apex-env and calls gpu_flags, so a change to a profile changes the
+      # rime-env and calls gpu_flags, so a change to a profile changes the
       # test) and hands exactly those flags to real rootless podman on an
       # image that is ALREADY local, then reads back what is reachable inside.
-      # It never calls `apex env create`, never pulls, and every container is
+      # It never calls `rime env create`, never pulls, and every container is
       # --rm.
       #
       # On this runner there is no AMD device and probably no podman, so the
-      # hardware half skips with status 0 — the same trade test-apex-hypr-lua
-      # and test-apex-input-live already make. The profile-SHAPE assertions run
+      # hardware half skips with status 0 — the same trade test-rime-hypr-lua
+      # and test-rime-input-live already make. The profile-SHAPE assertions run
       # everywhere and fail rather than skip if gpu_flags stops emitting
       # `--additional-flags` plus one argument, which is the way this file
       # could otherwise have gone quietly vacuous.
       - name: Run capsule device-profile assertions (live where the hardware is)
         if: ${{ !cancelled() }}
-        run: ./tests/test-apex-env-devices-live.sh
+        run: ./tests/test-rime-env-devices-live.sh
 
       # P2-016's guest and kiosk halves. Two claims, tested two ways.
       #
       # Criterion 3 -- "kiosk/shared-device policy is possible WITHOUT
       # weakening ordinary desktop use" -- is an assertion about an ABSENCE:
-      # the shipped greetd config must carry no auto-login stanza, or APEX
+      # the shipped greetd config must carry no auto-login stanza, or Rime
       # would have stopped asking who you are and would still boot. The suite
       # also feeds the same check a config that HAS one, because an absence
       # assertion that never sees a presence cannot fail.
       #
-      # Criterion 2 runs the real /usr/libexec/apex-guest-wipe against a
+      # Criterion 2 runs the real /usr/libexec/rime-guest-wipe against a
       # fixture passwd, a fixture secretd store and a fixture greeter state
       # dir, as an ordinary user. It creates no account and touches nothing
       # outside its temp directory -- and asserts that redirection worked
@@ -2399,23 +2437,23 @@ jobs:
       # opens no window.
       - name: Run shared-machine (guest, kiosk) assertions
         if: ${{ !cancelled() }}
-        run: ./tests/test-apex-shared-machine.sh
+        run: ./tests/test-rime-shared-machine.sh
 
-      # P2-016 criterion 1. One assertion carries it: `apex user add` without
+      # P2-016 criterion 1. One assertion carries it: `rime user add` without
       # --admin must not put the account in wheel, because wheel is what
-      # polkit's auth_admin and sudo both resolve to on APEX. A dropped
+      # polkit's auth_admin and sudo both resolve to on Rime. A dropped
       # condition there is not a compile error and not a visible failure -- it
-      # is every account APEX creates able to approve a root operation, which
-      # is the state installer/apex-install is in today.
+      # is every account Rime creates able to approve a root operation, which
+      # is the state installer/rime-install is in today.
       #
-      # It runs the real /usr/libexec/apex-user against a fixture passwd and
+      # It runs the real /usr/libexec/rime-user against a fixture passwd and
       # group file, with every privileged tool (useradd, userdel, gpasswd,
       # systemctl) replaced by a stub that records its argv. So the decisions
       # go through the production path while no account is created, removed or
       # changed, and nothing is written outside its temp directory.
       - name: Run account (standard vs administrator) assertions
         if: ${{ !cancelled() }}
-        run: ./tests/test-apex-user.sh
+        run: ./tests/test-rime-user.sh
 
       # P2-016 criterion 1's other half: fast user switching, which had no
       # surface at all until this suite's engines existed. A switch takes the
@@ -2433,7 +2471,7 @@ jobs:
       # It starts no compositor, opens no window and changes no seat.
       - name: Run fast-user-switching assertions
         if: ${{ !cancelled() }}
-        run: ./tests/test-apex-switch-user.sh
+        run: ./tests/test-rime-switch-user.sh
 
   engine-pkg:
     name: Package engine — packages
@@ -2469,13 +2507,13 @@ jobs:
           sudo sysctl -w kernel.apparmor_restrict_unprivileged_userns=0 \
             || echo "note: no apparmor userns restriction on this kernel"
 
-      # tests/test-apex-multilib.sh — the engine's multilib DECISIONS, judged
-      # against packages Fedora actually ships. test-apex-pkg.sh asserts the
+      # tests/test-rime-multilib.sh — the engine's multilib DECISIONS, judged
+      # against packages Fedora actually ships. test-rime-pkg.sh asserts the
       # argv the engine builds, which is the right level for most of it and was
-      # not enough here: `apex install steam` was broken by six defects and the
+      # not enough here: `rime install steam` was broken by six defects and the
       # one that reached a user's screen produced correct argv and a wrong
       # result. It was DEBT in tests/suites-not-in-ci.txt, with the note "drives
-      # apex-pkg; needs care about what it installs".
+      # rime-pkg; needs care about what it installs".
       #
       # That care is already in the suite's shape, and it was checked rather
       # than assumed: every rpm is downloaded and every decision is taken INSIDE
@@ -2483,7 +2521,7 @@ jobs:
       # read-only. The engine is sourced there and only `guard_rpms` is called —
       # a function that decides and deletes from a scratch destdir. Nothing is
       # installed on the runner, no sysext is built, and /var/lib/extensions is
-      # never opened. (`source apex-pkg` does reach `main` with no arguments,
+      # never opened. (`source rime-pkg` does reach `main` with no arguments,
       # which prints usage.)
       #
       # This step also fails if podman is missing: the suite prints SKIP and
@@ -2494,13 +2532,13 @@ jobs:
         run: |
           set -euo pipefail
           command -v podman >/dev/null || { echo "::error::podman is not on this runner; the multilib suite would SKIP and exit 0, and a could-not-run is not a pass"; exit 1; }
-          rc=0; out="$(./tests/test-apex-multilib.sh 2>&1)" || rc=$?
+          rc=0; out="$(./tests/test-rime-multilib.sh 2>&1)" || rc=$?
           printf '%s\n' "$out"
           [ "$rc" = 0 ] || { echo "::error::the multilib suite exited $rc"; exit 1; }
-          summary="$(printf '%s\n' "$out" | grep -E '^apex-multilib: [0-9]+ passed, [0-9]+ failed$' || true)"
+          summary="$(printf '%s\n' "$out" | grep -E '^rime-multilib: [0-9]+ passed, [0-9]+ failed$' || true)"
           [ -n "$summary" ] || { echo "::error::the multilib suite printed no summary line, which is what it does when podman is absent or no repository was reachable — it then exits 0, so this line is the only thing between that and a green tick"; exit 1; }
           [ "$(printf '%s\n' "$summary" | wc -l)" = 1 ] || { echo "::error::more than one line looked like the summary; the parse below would read the wrong one"; exit 1; }
-          counts="$(printf '%s' "$summary" | sed 's/^apex-multilib: //')"
+          counts="$(printf '%s' "$summary" | sed 's/^rime-multilib: //')"
           passed="$(printf '%s' "$counts" | awk '{print $1}')"
           failed="$(printf '%s' "$counts" | awk '{print $3}')"
           echo "measured: passed=$passed failed=$failed"
@@ -2511,7 +2549,7 @@ jobs:
               exit 1
           fi
 
-      # tests/test-apex-multilib-extract.sh — the same engine, one function
+      # tests/test-rime-multilib-extract.sh — the same engine, one function
       # later. The suite above stops at guard_rpms on purpose and says why: a
       # full extraction through the install path needs the container's versions
       # to match the repository, and when they do not the guard correctly
@@ -2555,7 +2593,7 @@ jobs:
       #     be proving the wrong leg of the rule: in fedora:43 the x86_64
       #     siblings of gstreamer1 and at-spi2-core are downloaded, so the
       #     "already placed by the native pass" clause hides most of the defect,
-      #     while on a real APEX machine every 64-bit sibling is in the IMAGE
+      #     while on a real Rime machine every 64-bit sibling is in the IMAGE
       #     and the rpmdb clause is the only thing doing the work.
       #
       # If Fedora ever stops shipping 32-bit helpers or arch-tagged manifests in
@@ -2563,22 +2601,22 @@ jobs:
       # blind — the opposite of what a coverage drop usually does here.
       #
       # The eleventh assertion is not about extraction at all: it calls
-      # probe_rpm against the REAL dnf5 this container has. `apex resolve` lost
+      # probe_rpm against the REAL dnf5 this container has. `rime resolve` lost
       # its entire rpm leg to `dnf5 repoquery -- <name>`, an invocation dnf5
-      # refuses, and tests/test-apex-resolve.sh could not see it because it
+      # refuses, and tests/test-rime-resolve.sh could not see it because it
       # fakes dnf5. This is the only suite in the tree with a real one.
       - name: P1 multilib — where the 32-bit pass actually puts files
         if: ${{ !cancelled() }}
         run: |
           set -euo pipefail
           command -v podman >/dev/null || { echo "::error::podman is not on this runner; the extract suite would SKIP and exit 0, and a could-not-run is not a pass"; exit 1; }
-          rc=0; out="$(./tests/test-apex-multilib-extract.sh 2>&1)" || rc=$?
+          rc=0; out="$(./tests/test-rime-multilib-extract.sh 2>&1)" || rc=$?
           printf '%s\n' "$out"
           [ "$rc" = 0 ] || { echo "::error::the multilib extract suite exited $rc"; exit 1; }
-          summary="$(printf '%s\n' "$out" | grep -E '^apex-multilib-extract: [0-9]+ passed, [0-9]+ failed$' || true)"
+          summary="$(printf '%s\n' "$out" | grep -E '^rime-multilib-extract: [0-9]+ passed, [0-9]+ failed$' || true)"
           [ -n "$summary" ] || { echo "::error::the extract suite printed no summary line, which is what it does when podman is absent or no repository was reachable — it then exits 0, so this line is the only thing between that and a green tick"; exit 1; }
           [ "$(printf '%s\n' "$summary" | wc -l)" = 1 ] || { echo "::error::more than one line looked like the summary; the parse below would read the wrong one"; exit 1; }
-          counts="$(printf '%s' "$summary" | sed 's/^apex-multilib-extract: //')"
+          counts="$(printf '%s' "$summary" | sed 's/^rime-multilib-extract: //')"
           passed="$(printf '%s' "$counts" | awk '{print $1}')"
           failed="$(printf '%s' "$counts" | awk '{print $3}')"
           echo "measured: passed=$passed failed=$failed"
@@ -2589,10 +2627,10 @@ jobs:
               exit 1
           fi
 
-      # tests/test-apex-pkg-etc-label.sh — what LABEL the engine puts on the
+      # tests/test-rime-pkg-etc-label.sh — what LABEL the engine puts on the
       # files it writes into /etc. install_etc copies with `cp -a`, which
       # preserves the SOURCE label, and the source is an rpm extraction tree
-      # under /var/lib — so every file `apex install` put in /etc arrived as
+      # under /var/lib — so every file `rime install` put in /etc arrived as
       # rpm_var_lib_t. On katana on 2026-09-20 that made /etc/.pwd.lock
       # rpm_var_lib_t where policy wants passwd_file_t, systemd could not take
       # the passwd lock, and all six DynamicUser=yes units on the machine —
@@ -2619,27 +2657,27 @@ jobs:
       # files with SELinux switched off — wants a non-default type for a real
       # share of them, so the lookup cannot be a constant. 9 assertions ran
       # that way, measured on 2026-09-20 by forcing coverage mode on an SELinux
-      # workstation (APEX_ETC_LABEL_FORCE_COVERAGE=1); the same suite runs 21
+      # workstation (RIME_ETC_LABEL_FORCE_COVERAGE=1); the same suite runs 21
       # there without forcing, and the extra 12 are the ones that read labels
       # back, including the pre-fix control that reproduces the katana finding
-      # exactly. Run it on an APEX machine to get those.
+      # exactly. Run it on a Rime machine to get those.
       #
       # Both halves are mutation-tested rather than assumed: deleting the
       # engine's relabel call turns 6 assertions red here and 2 in coverage
       # mode, and deleting the single line that records what the plain-write
       # branch wrote turns coverage red for the 44 paths that branch handles.
-      - name: P0 pkg — the label on everything apex install writes into /etc
+      - name: P0 pkg — the label on everything rime install writes into /etc
         if: ${{ !cancelled() }}
         run: |
           set -euo pipefail
           command -v podman >/dev/null || { echo "::error::podman is not on this runner; the etc-label suite would SKIP and exit 0, and a could-not-run is not a pass"; exit 1; }
-          rc=0; out="$(./tests/test-apex-pkg-etc-label.sh 2>&1)" || rc=$?
+          rc=0; out="$(./tests/test-rime-pkg-etc-label.sh 2>&1)" || rc=$?
           printf '%s\n' "$out"
           [ "$rc" = 0 ] || { echo "::error::the etc-label suite exited $rc"; exit 1; }
-          summary="$(printf '%s\n' "$out" | grep -E '^apex-pkg-etc-label: [0-9]+ passed, [0-9]+ failed$' || true)"
+          summary="$(printf '%s\n' "$out" | grep -E '^rime-pkg-etc-label: [0-9]+ passed, [0-9]+ failed$' || true)"
           [ -n "$summary" ] || { echo "::error::the etc-label suite printed no summary line, which is what it does when podman is absent or no repository was reachable — it then exits 0, so this line is the only thing between that and a green tick"; exit 1; }
           [ "$(printf '%s\n' "$summary" | wc -l)" = 1 ] || { echo "::error::more than one line looked like the summary; the parse below would read the wrong one"; exit 1; }
-          counts="$(printf '%s' "$summary" | sed 's/^apex-pkg-etc-label: //')"
+          counts="$(printf '%s' "$summary" | sed 's/^rime-pkg-etc-label: //')"
           passed="$(printf '%s' "$counts" | awk '{print $1}')"
           failed="$(printf '%s' "$counts" | awk '{print $3}')"
           echo "measured: passed=$passed failed=$failed"
@@ -2650,11 +2688,11 @@ jobs:
               exit 1
           fi
 
-      # tests/test-apex-pkg-alternatives.sh — does a package that publishes its
+      # tests/test-rime-pkg-alternatives.sh — does a package that publishes its
       # binaries through `alternatives` actually get them? Until 2026-09-22 it
       # did not. The extension is built by extracting rpms with --noscripts, and
       # such a package creates its binaries IN ITS SCRIPTLETS, so they were
-      # never created at all. On katana `apex install wine` left /usr/bin/wine
+      # never created at all. On katana `rime install wine` left /usr/bin/wine
       # and /usr/bin/wineserver absent and twelve /usr/bin entries — msidb,
       # msiexec, notepad, regedit, regsvr32, wineboot, winecfg, wineconsole,
       # winedbg, winefile, winemine, winepath — as dangling symlinks. The
@@ -2693,13 +2731,13 @@ jobs:
         run: |
           set -euo pipefail
           command -v podman >/dev/null || { echo "::error::podman is not on this runner; the alternatives suite would SKIP and exit 0, and a could-not-run is not a pass"; exit 1; }
-          rc=0; out="$(./tests/test-apex-pkg-alternatives.sh 2>&1)" || rc=$?
+          rc=0; out="$(./tests/test-rime-pkg-alternatives.sh 2>&1)" || rc=$?
           printf '%s\n' "$out"
           [ "$rc" = 0 ] || { echo "::error::the alternatives suite exited $rc"; exit 1; }
-          summary="$(printf '%s\n' "$out" | grep -E '^apex-pkg-alternatives: [0-9]+ passed, [0-9]+ failed$' || true)"
+          summary="$(printf '%s\n' "$out" | grep -E '^rime-pkg-alternatives: [0-9]+ passed, [0-9]+ failed$' || true)"
           [ -n "$summary" ] || { echo "::error::the alternatives suite printed no summary line, which is what it does when podman is absent or no repository was reachable — it then exits 0, so this line is the only thing between that and a green tick"; exit 1; }
           [ "$(printf '%s\n' "$summary" | wc -l)" = 1 ] || { echo "::error::more than one line looked like the summary; the parse below would read the wrong one"; exit 1; }
-          counts="$(printf '%s' "$summary" | sed 's/^apex-pkg-alternatives: //')"
+          counts="$(printf '%s' "$summary" | sed 's/^rime-pkg-alternatives: //')"
           passed="$(printf '%s' "$counts" | awk '{print $1}')"
           failed="$(printf '%s' "$counts" | awk '{print $3}')"
           echo "measured: passed=$passed failed=$failed"
@@ -2710,10 +2748,10 @@ jobs:
               exit 1
           fi
 
-      # tests/test-apex-pkg-update.sh — does a fix baked into an image ever
+      # tests/test-rime-pkg-update.sh — does a fix baked into an image ever
       # reach a machine that is already running one? On 2026-09-19 it did not.
       # katana was rebased onto the image carrying pkg-share, rebooted, and
-      # apex-sysext-rebuild.service — the unit whose entire job is to notice
+      # rime-sysext-rebuild.service — the unit whose entire job is to notice
       # that the OS moved — started and finished in the SAME SECOND, reported
       # success, and re-merged a byte-identical old extension: 177 image paths
       # still shadowed, zero i686 Vulkan ICDs on a machine that had just taken
@@ -2721,7 +2759,7 @@ jobs:
       #
       # Two guards decide. `cmd_rebuild --if-needed` read os_version_id and
       # pkg_compat_level; `rebuild_extension`'s own short-circuit read
-      # os_version_id and the resolved rpm set. Neither can see an APEX image
+      # os_version_id and the resolved rpm set. Neither can see a Rime image
       # build: VERSION_ID is 43 before and after, and the resolved set comes
       # from Fedora's repositories. The level is the only signal, and the guard
       # every install, remove, upgrade and rebuild funnels through ignored it.
@@ -2755,13 +2793,13 @@ jobs:
         run: |
           set -euo pipefail
           command -v podman >/dev/null || { echo "::error::podman is not on this runner; leg B would SKIP and a could-not-run is not a pass"; exit 1; }
-          rc=0; out="$(./tests/test-apex-pkg-update.sh 2>&1)" || rc=$?
+          rc=0; out="$(./tests/test-rime-pkg-update.sh 2>&1)" || rc=$?
           printf '%s\n' "$out"
           [ "$rc" = 0 ] || { echo "::error::the pkg-update suite exited $rc"; exit 1; }
-          summary="$(printf '%s\n' "$out" | grep -E '^apex-pkg-update: [0-9]+ passed, [0-9]+ failed, [0-9]+ skipped$' || true)"
+          summary="$(printf '%s\n' "$out" | grep -E '^rime-pkg-update: [0-9]+ passed, [0-9]+ failed, [0-9]+ skipped$' || true)"
           [ -n "$summary" ] || { echo "::error::the pkg-update suite printed no summary line"; exit 1; }
           [ "$(printf '%s\n' "$summary" | wc -l)" = 1 ] || { echo "::error::more than one line looked like the summary; the parse below would read the wrong one"; exit 1; }
-          counts="$(printf '%s' "$summary" | sed 's/^apex-pkg-update: //')"
+          counts="$(printf '%s' "$summary" | sed 's/^rime-pkg-update: //')"
           passed="$(printf '%s' "$counts" | awk '{print $1}')"
           failed="$(printf '%s' "$counts" | awk '{print $3}')"
           skipped="$(printf '%s' "$counts" | awk '{print $5}')"
@@ -2812,11 +2850,11 @@ jobs:
       # third criterion — compositor names stay implementation details for
       # normal users — failed on the one surface every user sees at every
       # login: the greeter rendered `Name=` verbatim, so the carousel read
-      # "labwc (APEX) / niri / Hyprland".
+      # "labwc (Rime) / niri / Hyprland".
       #
       # This runs here rather than only in an image build because two of the
       # three things it checks are build rules: Containerfile.base's rename of
-      # the Hyprland package's own entry, and Containerfile.apex's sweep over
+      # the Hyprland package's own entry, and Containerfile.rime's sweep over
       # the finished directory. Both are LIFTED OUT of the Containerfiles and
       # run against a staging tree, so the gate that normally costs a
       # multi-hour image build is exercised on every PR in under a second, and
@@ -2825,20 +2863,20 @@ jobs:
       # that loop. It starts no compositor and opens no window.
       - name: Run session-picker wording assertions
         if: ${{ !cancelled() }}
-        run: ./tests/test-apex-greet-sessions.sh
+        run: ./tests/test-rime-greet-sessions.sh
 
       # P2-018's first criterion, and the half that did not exist until now:
-      # APEX Safe Graphics shipped as a session a PERSON enters, and NOTHING
+      # Rime Safe Graphics shipped as a session a PERSON enters, and NOTHING
       # noticed a failure. greetd is a stock Fedora unit with no Restart=, no
-      # StartLimitBurst and no OnFailure=, and apex-boot-health's units are
+      # StartLimitBurst and no OnFailure=, and rime-boot-health's units are
       # inert on every published image because they condition on
-      # LoaderBootCountPath while every APEX image boots GRUB.
+      # LoaderBootCountPath while every Rime image boots GRUB.
       #
       # It runs beside the session-picker suite because it needs exactly what
       # that one needs — python3 and the shipped GreetContext.qml — and because
       # it lifts BOTH greeter hooks out of that same file and runs them. It
       # starts no compositor, no greeter and no session, opens no window, and
-      # touches no real /var/lib/apex-greet.
+      # touches no real /var/lib/rime-greet.
       #
       # THE FLOOR IS NOT DECORATION HERE. This suite's most important
       # assertions are the three fail-open mutations — the helper replaced by
@@ -2864,7 +2902,7 @@ jobs:
         if: ${{ !cancelled() }}
         run: |
           set -euo pipefail
-          out="$(./tests/test-apex-session-watchdog.sh 2>&1)"
+          out="$(./tests/test-rime-session-watchdog.sh 2>&1)"
           printf '%s\n' "$out"
           summary="$(printf '%s' "$out" | grep -E '^session-watchdog: ' || true)"
           [ -n "$summary" ] || { echo "::error::the session-watchdog suite printed no summary line"; exit 1; }
@@ -2882,7 +2920,7 @@ jobs:
 
       - name: Run greeter keyboard-layout assertions
         if: ${{ !cancelled() }}
-        run: ./tests/test-apex-greet-layout.sh
+        run: ./tests/test-rime-greet-layout.sh
 
       # The other half of the same finding, and the more important one: the
       # greeter's markup is right and a screen reader still receives nothing,
@@ -2922,7 +2960,7 @@ jobs:
 
       - name: Run greeter session-bus assertions
         if: ${{ !cancelled() }}
-        run: ./tests/test-apex-greet-session-bus.sh
+        run: ./tests/test-rime-greet-session-bus.sh
 
       # The image ships a screen reader, and nothing starts it. Reads
       # Containerfile.core by parsing its dnf5 invocations rather than grepping
@@ -2931,13 +2969,13 @@ jobs:
       # deployment to ask; the two sections that gate the change do run.
       - name: Run accessibility-stack assertions
         if: ${{ !cancelled() }}
-        run: ./tests/test-apex-a11y-stack.sh
+        run: ./tests/test-rime-a11y-stack.sh
       # ── the same vendor step, because a shard inherits nothing ───────────
       #
       # tests/test-labwc-keybind-reload.sh generates the labwc binding file
-      # from apex-shell's KeybindService.qml and then PRESSES the rebound key
-      # under a nested labwc. It looks for the model at `../apex-shell`, and
-      # when it cannot find one it prints `SKIP: no apex-shell checkout found`
+      # from rime-shell's KeybindService.qml and then PRESSES the rebound key
+      # under a nested labwc. It looks for the model at `../rime-shell`, and
+      # when it cannot find one it prints `SKIP: no rime-shell checkout found`
       # and exits 0 — a green tick over nothing, which is the defect this
       # whole file is about. In the monolithic job the tree happened to be
       # there because a step thirty lines up had cloned it. A shard inherits
@@ -2945,20 +2983,20 @@ jobs:
       #
       # Kept byte-identical to the copy in `engine-desktop`. If one is ever
       # changed, the other is wrong.
-      - name: Vendor apex-shell for the keybind model
+      - name: Vendor rime-shell for the keybind model
         if: ${{ !cancelled() }}
         run: |
           set -euo pipefail
           # The integration branch sits between the exact match and the default
           # branch, for the reason spelled out on the input-parity step above:
-          # apex-shell has no `task/*` twin for most of this program's
+          # rime-shell has no `task/*` twin for most of this program's
           # branches, so "no matching branch" meant "compare against main",
           # and main is 137 commits behind the work — the exact staleness the
           # paragraph above says this step was changed to stop having. It is
           # latent here rather than red only because the keybind assertions
           # happen to still pass against the older model; that is luck, not a
-          # property. Exact match stays first, so apex-os `main` still
-          # vendors apex-shell `main`.
+          # property. Exact match stays first, so rime-os `main` still
+          # vendors rime-shell `main`.
           #
           # Kept deliberately identical to the input-parity step above. If one
           # is ever changed, the other is wrong.
@@ -2967,22 +3005,22 @@ jobs:
           for cand in "$want" roadmap/v2.2; do
             [ -n "$cand" ] || continue
             if git ls-remote --exit-code --heads \
-                 https://github.com/AndreNijman/apex-shell "$cand" >/dev/null 2>&1; then
+                 "$SHELL_REPO" "$cand" >/dev/null 2>&1; then
               shell_ref="$cand"; break
             fi
           done
           if [ -n "$shell_ref" ]; then
-            echo "keybind model: vendoring apex-shell branch '$shell_ref'"
+            echo "keybind model: vendoring rime-shell branch '$shell_ref'"
             git clone --depth 1 --branch "$shell_ref" \
-              https://github.com/AndreNijman/apex-shell.git \
-              "${GITHUB_WORKSPACE}/../apex-shell"
+              "$SHELL_REPO" \
+              "${GITHUB_WORKSPACE}/../rime-shell"
           else
-            echo "::warning::keybind model: apex-shell has no '$want' and no roadmap/v2.2; using its default branch"
-            git clone --depth 1 https://github.com/AndreNijman/apex-shell.git \
-              "${GITHUB_WORKSPACE}/../apex-shell"
+            echo "::warning::keybind model: rime-shell has no '$want' and no roadmap/v2.2; using its default branch"
+            git clone --depth 1 "$SHELL_REPO" \
+              "${GITHUB_WORKSPACE}/../rime-shell"
           fi
-          git -C "${GITHUB_WORKSPACE}/../apex-shell" log -1 --format='vendored apex-shell %h %s'
-          test -f "${GITHUB_WORKSPACE}/../apex-shell/src/services/config_tab/KeybindService.qml"
+          git -C "${GITHUB_WORKSPACE}/../rime-shell" log -1 --format='vendored rime-shell %h %s'
+          test -f "${GITHUB_WORKSPACE}/../rime-shell/src/services/config_tab/KeybindService.qml"
 
       # The half of the reported bug the suite above cannot reach. It passes
       # --no-reload to every `apply` on purpose, so it never starts labwc and
@@ -3001,7 +3039,7 @@ jobs:
       # the inherited LABWC_PID — `labwc --reconfigure` SIGHUPs whatever that
       # names, and inheriting it would reload a developer's own session.
       #
-      # It reuses the apex-shell tree vendored above, and skips with status 0
+      # It reuses the rime-shell tree vendored above, and skips with status 0
       # where labwc or wtype will not run, so a runner that cannot host a
       # compositor reports a skip rather than a false green or a false red.
       - name: Install a compositor and a synthetic keyboard
@@ -3036,7 +3074,7 @@ jobs:
       # and what its absence would silently cost.
       - name: Run the safe-graphics recovery assertions
         if: ${{ !cancelled() }}
-        run: ./tests/test-apex-safe-graphics.sh
+        run: ./tests/test-rime-safe-graphics.sh
 
   engine-greeter-a11y:
     name: Package engine — greeter accessibility
@@ -3096,7 +3134,7 @@ jobs:
       # every PR for ever. A skip nobody notices is how a suite goes quietly
       # vacuous, which is the failure this whole unit exists to measure.
       #
-      # So it runs in a Fedora container, which is what APEX is built from
+      # So it runs in a Fedora container, which is what Rime is built from
       # anyway — the Qt the greeter actually ships against rather than the one
       # the runner happens to carry. Verified by running it: 22 assertions, same
       # result as on a Fedora workstation.
@@ -3126,7 +3164,7 @@ jobs:
           if ! docker run --rm -v "$PWD":/w -w /w fedora:43 bash -c '
                 dnf -y install --setopt=install_weak_deps=False \
                     qt6-qtdeclarative-devel >/dev/null 2>&1 || exit 97
-                ./tests/test-apex-greet-a11y.sh'; then
+                ./tests/test-rime-greet-a11y.sh'; then
               rc=$?
               if [ "$rc" -eq 97 ]; then
                   echo "could not install Qt in the container; the greeter a11y suite did not run"
@@ -3184,7 +3222,7 @@ jobs:
                     xorg-x11-server-Xwayland mesa-dri-drivers \
                     at-spi2-core python3-gobject dbus-daemon glib2 \
                     >/dev/null 2>&1 || exit 97
-                ./tests/test-apex-greet-atspi.sh'; then
+                ./tests/test-rime-greet-atspi.sh'; then
               rc=$?
               if [ "$rc" -eq 97 ]; then
                   echo "could not install the accessibility stack in the container; the AT-SPI walk did not run"
@@ -3239,13 +3277,13 @@ jobs:
       # all: both "this exists" and "this does not" are reachable.
       #
       # The load-bearing assertion is that an exact-name repository package
-      # still wins, because `apex install <name>` already ships and a silent
+      # still wins, because `rime install <name>` already ships and a silent
       # re-route would be a behaviour change on a shipped command. The one
       # exception is the curated table, and the suite checks that it explains
       # itself and stays overridable with --source.
       - name: Run resolver assertions
         if: ${{ !cancelled() }}
-        run: ./tests/test-apex-resolve.sh
+        run: ./tests/test-rime-resolve.sh
 
       # The display engine is the one generator that can reach hardware, so its
       # suite asserts that it does not: fake hyprctl/wlr-randr first on PATH
@@ -3257,10 +3295,10 @@ jobs:
       # empty line, and a per-line handler reset the accent on the empty one.
       - name: Run greeter accent assertions
         if: ${{ !cancelled() }}
-        run: ./tests/test-apex-greet-accent.sh
+        run: ./tests/test-rime-greet-accent.sh
 
-      # The login screen's password shapes (APEX Shell's PasswordShapes, loaded
-      # from /usr/share/apex-shell) and the motion settings they move on. The
+      # The login screen's password shapes (Rime Shell's PasswordShapes, loaded
+      # from /usr/share/rime-shell) and the motion settings they move on. The
       # publisher's parser is sourced and run against hostile fixtures — it may
       # emit only its closed vocabulary; the greeter validates each line again;
       # the shapes are handed the field's LENGTH and nothing else, the field
@@ -3268,27 +3306,27 @@ jobs:
       # refusal's error survives the field being cleared.
       - name: Run greeter password-shape and motion assertions
         if: ${{ !cancelled() }}
-        run: ./tests/test-apex-greet-motion.sh
+        run: ./tests/test-rime-greet-motion.sh
 
       # The boot and shutdown splash follow the owner's accent from the first
       # frame: the real writer and initramfs reader, round-tripped through a
       # stand-in ESP, and the 24 accent themes.
       - name: Run boot-splash accent assertions
         if: ${{ !cancelled() }}
-        run: ./tests/test-apex-plymouth-accent.sh
+        run: ./tests/test-rime-plymouth-accent.sh
 
       - name: Run display-settings assertions
         if: ${{ !cancelled() }}
         env:
-          APEX_DISPLAY_NO_LIVE: "1"
-        run: ./tests/test-apex-display.sh
+          RIME_DISPLAY_NO_LIVE: "1"
+        run: ./tests/test-rime-display.sh
 
       # The prompt follows the wallpaper through a symlink firstrun maintains;
-      # the suite cuts that block out of apex-shell-firstrun itself and checks
-      # it migrates APEX's own seeds and never touches the user's file or link.
+      # the suite cuts that block out of rime-shell-firstrun itself and checks
+      # it migrates Rime's own seeds and never touches the user's file or link.
       - name: Run starship prompt-link assertions
         if: ${{ !cancelled() }}
-        run: ./tests/test-apex-starship-link.sh
+        run: ./tests/test-rime-starship-link.sh
 
       # The seeded Hyprland Lua tree in a REAL Hyprland, not just through
       # --verify-config. Three things only a running instance can answer:
@@ -3315,26 +3353,26 @@ jobs:
           # machine that CAN run it is an error rather than a smaller number
           # nobody compares.
           set -uo pipefail
-          rc=0; out="$(./tests/test-apex-hypr-lua.sh 2>&1)" || rc=$?
+          rc=0; out="$(./tests/test-rime-hypr-lua.sh 2>&1)" || rc=$?
           printf '%s\n' "$out"
-          [ "$rc" = 0 ] || { echo "::error::test-apex-hypr-lua.sh exited $rc"; exit 1; }
-          summary="$(printf '%s\n' "$out" | grep -E '^apex hypr-lua: [0-9]+ passed, [0-9]+ failed, [0-9]+ skipped$' || true)"
-          [ -n "$summary" ] || { echo "::error::test-apex-hypr-lua.sh printed no summary line; nothing below can be believed"; exit 1; }
-          [ "$(printf '%s\n' "$summary" | wc -l)" = 1 ] || { echo "::error::more than one line looked like test-apex-hypr-lua.sh's summary"; exit 1; }
+          [ "$rc" = 0 ] || { echo "::error::test-rime-hypr-lua.sh exited $rc"; exit 1; }
+          summary="$(printf '%s\n' "$out" | grep -E '^rime hypr-lua: [0-9]+ passed, [0-9]+ failed, [0-9]+ skipped$' || true)"
+          [ -n "$summary" ] || { echo "::error::test-rime-hypr-lua.sh printed no summary line; nothing below can be believed"; exit 1; }
+          [ "$(printf '%s\n' "$summary" | wc -l)" = 1 ] || { echo "::error::more than one line looked like test-rime-hypr-lua.sh's summary"; exit 1; }
           passed="$(printf '%s' "$summary" | awk '{print $3}')"
           failed="$(printf '%s' "$summary" | awk '{print $5}')"
           skipped="$(printf '%s' "$summary" | awk '{print $7}')"
           echo "measured: passed=$passed failed=$failed skipped=$skipped"
-          [ "$failed" = 0 ] || { echo "::error::$failed apex hypr-lua assertions failed"; exit 1; }
+          [ "$failed" = 0 ] || { echo "::error::$failed rime hypr-lua assertions failed"; exit 1; }
           if [ "$passed" -eq 0 ]; then
-              [ "$skipped" -gt 0 ] || { echo "::error::test-apex-hypr-lua.sh asserted nothing and did not say why"; exit 1; }
-              echo "::warning::test-apex-hypr-lua.sh asserted NOTHING on this runner ($skipped skipped) — it needs a nested labwc and ubuntu-24.04 has none, so this step is a could-not-run, not a pass. Its 22 assertions only ever run on a machine with the compositors installed."
+              [ "$skipped" -gt 0 ] || { echo "::error::test-rime-hypr-lua.sh asserted nothing and did not say why"; exit 1; }
+              echo "::warning::test-rime-hypr-lua.sh asserted NOTHING on this runner ($skipped skipped) — it needs a nested labwc and ubuntu-24.04 has none, so this step is a could-not-run, not a pass. Its 22 assertions only ever run on a machine with the compositors installed."
           else
-              [ "$passed" -ge 22 ] || { echo "::error::only $passed apex hypr-lua assertions ran; 22 ran on 2026-09-18, so some no longer execute"; exit 1; }
+              [ "$passed" -ge 22 ] || { echo "::error::only $passed rime hypr-lua assertions ran; 22 ran on 2026-09-18, so some no longer execute"; exit 1; }
           fi
 
       # The compositor's motion classes (UI/UX roadmap v3 Phase 20) and the
-      # layer rule that leaves APEX Shell's surfaces to the shell. Unlike the
+      # layer rule that leaves Rime Shell's surfaces to the shell. Unlike the
       # two nested suites around it, most of this one runs HERE: its static
       # half is python over appearance.lua, so only the `Hyprland
       # --verify-config` half skips on the runner. The floor is the static
@@ -3343,17 +3381,17 @@ jobs:
         if: ${{ !cancelled() }}
         run: |
           set -uo pipefail
-          rc=0; out="$(./tests/test-apex-hypr-motion.sh 2>&1)" || rc=$?
+          rc=0; out="$(./tests/test-rime-hypr-motion.sh 2>&1)" || rc=$?
           printf '%s\n' "$out"
-          [ "$rc" = 0 ] || { echo "::error::test-apex-hypr-motion.sh exited $rc"; exit 1; }
-          summary="$(printf '%s\n' "$out" | grep -E '^apex hypr-motion: [0-9]+ passed, [0-9]+ failed, [0-9]+ skipped$' || true)"
-          [ -n "$summary" ] || { echo "::error::test-apex-hypr-motion.sh printed no summary line; nothing below can be believed"; exit 1; }
-          [ "$(printf '%s\n' "$summary" | wc -l)" = 1 ] || { echo "::error::more than one line looked like test-apex-hypr-motion.sh's summary"; exit 1; }
+          [ "$rc" = 0 ] || { echo "::error::test-rime-hypr-motion.sh exited $rc"; exit 1; }
+          summary="$(printf '%s\n' "$out" | grep -E '^rime hypr-motion: [0-9]+ passed, [0-9]+ failed, [0-9]+ skipped$' || true)"
+          [ -n "$summary" ] || { echo "::error::test-rime-hypr-motion.sh printed no summary line; nothing below can be believed"; exit 1; }
+          [ "$(printf '%s\n' "$summary" | wc -l)" = 1 ] || { echo "::error::more than one line looked like test-rime-hypr-motion.sh's summary"; exit 1; }
           passed="$(printf '%s' "$summary" | awk '{print $3}')"
           failed="$(printf '%s' "$summary" | awk '{print $5}')"
           echo "measured: passed=$passed failed=$failed"
-          [ "$failed" = 0 ] || { echo "::error::$failed apex hypr-motion assertions failed"; exit 1; }
-          [ "$passed" -ge 11 ] || { echo "::error::only $passed apex hypr-motion assertions ran; the static half alone is 11"; exit 1; }
+          [ "$failed" = 0 ] || { echo "::error::$failed rime hypr-motion assertions failed"; exit 1; }
+          [ "$passed" -ge 11 ] || { echo "::error::only $passed rime hypr-motion assertions ran; the static half alone is 11"; exit 1; }
 
       # What SUPER+arrow actually DOES, which no config grep can answer. The
       # seeded session focus-follows-mouse, so a keyboard focus change that
@@ -3369,25 +3407,25 @@ jobs:
         if: ${{ !cancelled() }}
         run: |
           set -uo pipefail
-          rc=0; out="$(./tests/test-apex-hypr-focus.sh 2>&1)" || rc=$?
+          rc=0; out="$(./tests/test-rime-hypr-focus.sh 2>&1)" || rc=$?
           printf '%s\n' "$out"
-          [ "$rc" = 0 ] || { echo "::error::test-apex-hypr-focus.sh exited $rc"; exit 1; }
-          summary="$(printf '%s\n' "$out" | grep -E '^apex hypr-focus: [0-9]+ passed, [0-9]+ failed, [0-9]+ skipped$' || true)"
-          [ -n "$summary" ] || { echo "::error::test-apex-hypr-focus.sh printed no summary line; nothing below can be believed"; exit 1; }
-          [ "$(printf '%s\n' "$summary" | wc -l)" = 1 ] || { echo "::error::more than one line looked like test-apex-hypr-focus.sh's summary"; exit 1; }
+          [ "$rc" = 0 ] || { echo "::error::test-rime-hypr-focus.sh exited $rc"; exit 1; }
+          summary="$(printf '%s\n' "$out" | grep -E '^rime hypr-focus: [0-9]+ passed, [0-9]+ failed, [0-9]+ skipped$' || true)"
+          [ -n "$summary" ] || { echo "::error::test-rime-hypr-focus.sh printed no summary line; nothing below can be believed"; exit 1; }
+          [ "$(printf '%s\n' "$summary" | wc -l)" = 1 ] || { echo "::error::more than one line looked like test-rime-hypr-focus.sh's summary"; exit 1; }
           passed="$(printf '%s' "$summary" | awk '{print $3}')"
           failed="$(printf '%s' "$summary" | awk '{print $5}')"
           skipped="$(printf '%s' "$summary" | awk '{print $7}')"
           echo "measured: passed=$passed failed=$failed skipped=$skipped"
-          [ "$failed" = 0 ] || { echo "::error::$failed apex hypr-focus assertions failed"; exit 1; }
+          [ "$failed" = 0 ] || { echo "::error::$failed rime hypr-focus assertions failed"; exit 1; }
           if [ "$passed" -eq 0 ]; then
-              [ "$skipped" -gt 0 ] || { echo "::error::test-apex-hypr-focus.sh asserted nothing and did not say why"; exit 1; }
-              echo "::warning::test-apex-hypr-focus.sh asserted NOTHING on this runner ($skipped skipped) — it needs a nested labwc + Hyprland + quickshell and ubuntu-24.04 has none, so this step is a could-not-run, not a pass. Its 17 assertions only ever run on a machine with the compositors installed."
+              [ "$skipped" -gt 0 ] || { echo "::error::test-rime-hypr-focus.sh asserted nothing and did not say why"; exit 1; }
+              echo "::warning::test-rime-hypr-focus.sh asserted NOTHING on this runner ($skipped skipped) — it needs a nested labwc + Hyprland + quickshell and ubuntu-24.04 has none, so this step is a could-not-run, not a pass. Its 17 assertions only ever run on a machine with the compositors installed."
           else
-              [ "$passed" -ge 19 ] || { echo "::error::only $passed apex hypr-focus assertions ran; 19 ran on 2026-09-20, so some no longer execute"; exit 1; }
+              [ "$passed" -ge 19 ] || { echo "::error::only $passed rime hypr-focus assertions ran; 19 ran on 2026-09-20, so some no longer execute"; exit 1; }
           fi
 
-      # The input half of the same argument. test-apex-input.sh proves each
+      # The input half of the same argument. test-rime-input.sh proves each
       # compositor's validator ACCEPTS what is generated; only a running
       # instance proves the value arrives, that `hyprctl reload` re-reads a
       # module rewritten under it, and that every option name the read-back
@@ -3410,22 +3448,22 @@ jobs:
           # machine that CAN run it is an error rather than a smaller number
           # nobody compares.
           set -uo pipefail
-          rc=0; out="$(./tests/test-apex-input-live.sh 2>&1)" || rc=$?
+          rc=0; out="$(./tests/test-rime-input-live.sh 2>&1)" || rc=$?
           printf '%s\n' "$out"
-          [ "$rc" = 0 ] || { echo "::error::test-apex-input-live.sh exited $rc"; exit 1; }
-          summary="$(printf '%s\n' "$out" | grep -E '^apex input-live: [0-9]+ passed, [0-9]+ failed, [0-9]+ skipped$' || true)"
-          [ -n "$summary" ] || { echo "::error::test-apex-input-live.sh printed no summary line; nothing below can be believed"; exit 1; }
-          [ "$(printf '%s\n' "$summary" | wc -l)" = 1 ] || { echo "::error::more than one line looked like test-apex-input-live.sh's summary"; exit 1; }
+          [ "$rc" = 0 ] || { echo "::error::test-rime-input-live.sh exited $rc"; exit 1; }
+          summary="$(printf '%s\n' "$out" | grep -E '^rime input-live: [0-9]+ passed, [0-9]+ failed, [0-9]+ skipped$' || true)"
+          [ -n "$summary" ] || { echo "::error::test-rime-input-live.sh printed no summary line; nothing below can be believed"; exit 1; }
+          [ "$(printf '%s\n' "$summary" | wc -l)" = 1 ] || { echo "::error::more than one line looked like test-rime-input-live.sh's summary"; exit 1; }
           passed="$(printf '%s' "$summary" | awk '{print $3}')"
           failed="$(printf '%s' "$summary" | awk '{print $5}')"
           skipped="$(printf '%s' "$summary" | awk '{print $7}')"
           echo "measured: passed=$passed failed=$failed skipped=$skipped"
-          [ "$failed" = 0 ] || { echo "::error::$failed apex input-live assertions failed"; exit 1; }
+          [ "$failed" = 0 ] || { echo "::error::$failed rime input-live assertions failed"; exit 1; }
           if [ "$passed" -eq 0 ]; then
-              [ "$skipped" -gt 0 ] || { echo "::error::test-apex-input-live.sh asserted nothing and did not say why"; exit 1; }
-              echo "::warning::test-apex-input-live.sh asserted NOTHING on this runner ($skipped skipped) — it needs a nested labwc and ubuntu-24.04 has none, so this step is a could-not-run, not a pass. Its 22 assertions only ever run on a machine with the compositors installed."
+              [ "$skipped" -gt 0 ] || { echo "::error::test-rime-input-live.sh asserted nothing and did not say why"; exit 1; }
+              echo "::warning::test-rime-input-live.sh asserted NOTHING on this runner ($skipped skipped) — it needs a nested labwc and ubuntu-24.04 has none, so this step is a could-not-run, not a pass. Its 22 assertions only ever run on a machine with the compositors installed."
           else
-              [ "$passed" -ge 22 ] || { echo "::error::only $passed apex input-live assertions ran; 22 ran on 2026-09-18, so some no longer execute"; exit 1; }
+              [ "$passed" -ge 22 ] || { echo "::error::only $passed rime input-live assertions ran; 22 ran on 2026-09-18, so some no longer execute"; exit 1; }
           fi
 
       # §17's fourth generator. The shell has written Hyprland .conf/.lua and
@@ -3437,37 +3475,37 @@ jobs:
       # The suite splices into fixture files only — it must never touch a real
       # ~/.config/labwc/rc.xml, which is what the helper's own default would do
       # if `apply` were ever called without --rc.
-      # The model lives in apex-shell, so the suite needs that tree. It vendors
+      # The model lives in rime-shell, so the suite needs that tree. It vendors
       # the MATCHING branch, falling back to the default one, and says which.
       #
       # This used to clone the default branch unconditionally, and the comment
       # justified it: "exactly what Containerfile.base does — so a shell change
       # that moves the keybind defaults fails here until it lands, which is the
       # documented merge order doing its job." That premise was true and is not
-      # any more. build-image.yml pinned apex-shell to `main` while this program
+      # any more. build-image.yml pinned rime-shell to `main` while this program
       # develops both repos on roadmap/v2.2 and is forbidden from pushing main
       # until the final integration, so the "merge order" this relied on cannot
-      # happen while the program runs — apex-shell/main last moved 2026-09-04
+      # happen while the program runs — rime-shell/main last moved 2026-09-04
       # and roadmap/v2.2 was 137 commits ahead of it. The image was being built
       # from two repos at different ages, and this check was comparing against
       # the older one, so it could not have noticed.
       #
       # Both are pinned to the matching branch now. Keep the two in step: if one
       # is ever changed, the other is wrong.
-      - name: Vendor apex-shell for the keybind model
+      - name: Vendor rime-shell for the keybind model
         if: ${{ !cancelled() }}
         run: |
           set -euo pipefail
           # The integration branch sits between the exact match and the default
           # branch, for the reason spelled out on the input-parity step above:
-          # apex-shell has no `task/*` twin for most of this program's
+          # rime-shell has no `task/*` twin for most of this program's
           # branches, so "no matching branch" meant "compare against main",
           # and main is 137 commits behind the work — the exact staleness the
           # paragraph above says this step was changed to stop having. It is
           # latent here rather than red only because the keybind assertions
           # happen to still pass against the older model; that is luck, not a
-          # property. Exact match stays first, so apex-os `main` still
-          # vendors apex-shell `main`.
+          # property. Exact match stays first, so rime-os `main` still
+          # vendors rime-shell `main`.
           #
           # Kept deliberately identical to the input-parity step above. If one
           # is ever changed, the other is wrong.
@@ -3476,22 +3514,22 @@ jobs:
           for cand in "$want" roadmap/v2.2; do
             [ -n "$cand" ] || continue
             if git ls-remote --exit-code --heads \
-                 https://github.com/AndreNijman/apex-shell "$cand" >/dev/null 2>&1; then
+                 "$SHELL_REPO" "$cand" >/dev/null 2>&1; then
               shell_ref="$cand"; break
             fi
           done
           if [ -n "$shell_ref" ]; then
-            echo "keybind model: vendoring apex-shell branch '$shell_ref'"
+            echo "keybind model: vendoring rime-shell branch '$shell_ref'"
             git clone --depth 1 --branch "$shell_ref" \
-              https://github.com/AndreNijman/apex-shell.git \
-              "${GITHUB_WORKSPACE}/../apex-shell"
+              "$SHELL_REPO" \
+              "${GITHUB_WORKSPACE}/../rime-shell"
           else
-            echo "::warning::keybind model: apex-shell has no '$want' and no roadmap/v2.2; using its default branch"
-            git clone --depth 1 https://github.com/AndreNijman/apex-shell.git \
-              "${GITHUB_WORKSPACE}/../apex-shell"
+            echo "::warning::keybind model: rime-shell has no '$want' and no roadmap/v2.2; using its default branch"
+            git clone --depth 1 "$SHELL_REPO" \
+              "${GITHUB_WORKSPACE}/../rime-shell"
           fi
-          git -C "${GITHUB_WORKSPACE}/../apex-shell" log -1 --format='vendored apex-shell %h %s'
-          test -f "${GITHUB_WORKSPACE}/../apex-shell/src/services/config_tab/KeybindService.qml"
+          git -C "${GITHUB_WORKSPACE}/../rime-shell" log -1 --format='vendored rime-shell %h %s'
+          test -f "${GITHUB_WORKSPACE}/../rime-shell/src/services/config_tab/KeybindService.qml"
 
       - name: Run labwc keybind generator assertions
         if: ${{ !cancelled() }}
@@ -3499,10 +3537,10 @@ jobs:
           # Turns "no shell tree, skip everything" into a failure. Without it the
           # suite reported passed=0 failed=0 and a green tick on its first CI
           # run, having asserted precisely nothing.
-          APEX_REQUIRE_SHELL_TREE: "1"
+          RIME_REQUIRE_SHELL_TREE: "1"
         run: ./tests/test-labwc-keybinds.sh
 
-      # tests/test-labwc-session.sh — the APEX Floating session, probed by real
+      # tests/test-labwc-session.sh — the Rime Floating session, probed by real
       # clients against a real labwc running the SHIPPED config. It was the last
       # DEBT line in tests/suites-not-in-ci.txt, and its note asked the right
       # question: "check whether the harness now allows it".
@@ -3511,7 +3549,7 @@ jobs:
       # could only nest inside a parent display, which on the only machine that
       # ever ran it meant real windows on a developer's active workspace — a
       # blanket `tests/*.sh` sweep once launched compositors over somebody's
-      # work, which is why the APEX_LABWC_SESSION_TESTS opt-in exists. wlroots'
+      # work, which is why the RIME_LABWC_SESSION_TESTS opt-in exists. wlroots'
       # headless backend needs no screen at all, and nobody had wired it up.
       #
       # The suite does not merely set WLR_BACKENDS=headless; it STRIPS
@@ -3546,7 +3584,7 @@ jobs:
       - name: P3 labwc — the shipped session, probed headless by real clients
         if: ${{ !cancelled() }}
         env:
-          APEX_LABWC_SESSION_TESTS: "1"
+          RIME_LABWC_SESSION_TESTS: "1"
           WLR_BACKENDS: headless
           WLR_LIBINPUT_NO_DEVICES: "1"
         run: |
@@ -3564,7 +3602,7 @@ jobs:
           echo "measured: passed=$passed failed=$failed skipped=$skipped"
           [ "$failed" = 0 ] || { echo "::error::$failed labwc session assertions failed"; exit 1; }
           [ "$skipped" = 0 ] || {
-              echo "::error::$skipped labwc session assertions could not run ($summary). Both of this suite's skip paths — the APEX_LABWC_SESSION_TESTS opt-in and 'nowhere to render' — exit 0, so without this line a step that started no compositor at all would show a green tick"
+              echo "::error::$skipped labwc session assertions could not run ($summary). Both of this suite's skip paths — the RIME_LABWC_SESSION_TESTS opt-in and 'nowhere to render' — exit 0, so without this line a step that started no compositor at all would show a green tick"
               exit 1
           }
           [ "$passed" -ge 18 ] || { echo "::error::only $passed labwc session assertions ran; 18 ran on 2026-09-13, so some no longer execute"; exit 1; }
@@ -3573,39 +3611,39 @@ jobs:
               exit 1
           fi
 
-      # A local build vendors apex-shell too, and it was vendoring the WRONG
+      # A local build vendors rime-shell too, and it was vendoring the WRONG
       # ONE. build-local.sh asked the remote for `refs/heads/main`
       # unconditionally while this workflow and build-image.yml had both already
       # been changed to pin the MATCHING branch — the third appearance of one
-      # defect. The bill is an hour per attempt: apex-os roadmap/v2.2 built
-      # against apex-shell main dies at Containerfile.base STEP 157/180 in
+      # defect. The bill is an hour per attempt: rime-os roadmap/v2.2 built
+      # against rime-shell main dies at Containerfile.base STEP 157/180 in
       # check-labwc-keybinds, on W-A-s (screen reader) and W-A-v (voice).
       #
       # The suite runs the real build-local.sh against LOCAL fixture remotes, so
       # it needs no network and builds nothing: it drives all three rungs of the
       # chain, the detached-HEAD case, an unreachable remote, and an explicit
-      # APEX_SHELL_REF. Proved in both directions before landing — 25 passed
+      # RIME_SHELL_REF. Proved in both directions before landing — 25 passed
       # against the fix, 8 passed / 17 failed against the block it replaced.
-      - name: build-local.sh pins the matching apex-shell branch
+      - name: build-local.sh pins the matching rime-shell branch
         if: ${{ !cancelled() }}
         run: ./tests/test-build-local-shell-ref.sh
 
       # ── LAST IN THIS JOB, AND THAT PLACEMENT IS THE POINT ──────────────────
-      # §16's OS-side CLI. `apex plugin` owns NO plugin rules: every verdict
-      # comes from apex-shell's own src/services/plugins/manifest.js, through
+      # §16's OS-side CLI. `rime plugin` owns NO plugin rules: every verdict
+      # comes from rime-shell's own src/services/plugins/manifest.js, through
       # node, because two implementations of a permission model drift and the
       # failure mode is a CLI that tells a user their plugin is fine while the
       # shell refuses it. The suite proves that differentially — it asks
       # manifest.js directly for each fixture and compares the reason code —
       # which is only meaningful because the CLI really does call that file.
       #
-      # It reuses the apex-shell tree vendored earlier in this job, and it must
-      # never touch the real ~/.config/apex-shell: `disable` MOVES a directory,
+      # It reuses the rime-shell tree vendored earlier in this job, and it must
+      # never touch the real ~/.config/rime-shell: `disable` MOVES a directory,
       # so the suite points both plugin directories at a temp tree and
       # HARD-EXITS if either resolves outside it.
       #
-      # EXPECT THIS RED UNTIL apex-shell PR #9 MERGES. manifest.js is on
-      # apex-shell's `p1/plugin-platform` branch and not on `main`, which is
+      # EXPECT THIS RED UNTIL rime-shell PR #9 MERGES. manifest.js is on
+      # rime-shell's `p1/plugin-platform` branch and not on `main`, which is
       # what the vendor step clones — the documented merge order (the shell
       # lands before or with the OS) doing its job, exactly as it did for 5.3's
       # keybind suite on PRs #27 and #28. The suite reports it as ONE labelled
@@ -3625,12 +3663,12 @@ jobs:
       # The shard split narrowed that blast radius rather than repealing the
       # rule: those suites now live in `engine-agent` and `engine-lint`, which
       # this step cannot reach at all. It stays LAST in `engine-desktop`
-      # because it still needs the apex-shell tree that shard vendors, and a
+      # because it still needs the rime-shell tree that shard vendors, and a
       # step expected to be red must stay below everything it could take with
       # it.
       - name: Run plugin CLI assertions
         if: ${{ !cancelled() }}
-        run: ./tests/test-apex-plugin.sh
+        run: ./tests/test-rime-plugin.sh
 
   engine-agent:
     name: Package engine — agent runtime
@@ -3645,7 +3683,7 @@ jobs:
       # daemon resolves the asking session from the connection's PEER
       # CREDENTIALS and not from anything the client sent. The negative control
       # is a session that files a request while claiming
-      # APEX_AGENT_SESSION=99999 and is still attributed correctly.
+      # RIME_AGENT_SESSION=99999 and is still attributed correctly.
       #
       # Needs no root: every approval uses --no-run, so the suite records
       # decisions without performing operations and never raises an
@@ -3730,7 +3768,7 @@ jobs:
       # pkexec, no pkcheck.
       #
       # The operation that then runs is contained by a mount namespace, with a
-      # stub bound over the absolute path `apex install` execs, so the real
+      # stub bound over the absolute path `rime install` execs, so the real
       # package engine is never reached. The two steps that genuinely need a
       # person — sudo's own authentication, and capability over the real
       # machine — are named at the end of the run with the commands to check
@@ -3754,7 +3792,7 @@ jobs:
         if: ${{ !cancelled() }}
         run: ./tests/test-agent-profile.sh
 
-      # The compositor adapter is faked through APEX_WINDOW_ADAPTER, so this
+      # The compositor adapter is faked through RIME_WINDOW_ADAPTER, so this
       # runs with no compositor at all — which is the whole reason the adapter
       # is a separate program. `restore` is only ever called with --dry-run, so
       # the suite cannot start a window.
@@ -3777,7 +3815,7 @@ jobs:
           # was checked. bwrap is installed two steps up, so a skip HERE means
           # that install was lost — and this turns that into a failure rather
           # than a green job that never ran §4's central assertion.
-          APEX_REQUIRE_SANDBOX: "1"
+          RIME_REQUIRE_SANDBOX: "1"
         run: ./tests/test-secret-broker.sh
 
       # P0-003's migration, against a fixture home under /var/tmp with two
@@ -3880,7 +3918,7 @@ jobs:
       # Both multiplexers run on an isolated socket (TMUX_TMPDIR,
       # ZELLIJ_SOCKET_DIR under the suite's own temp dir), and XDG_RUNTIME_DIR
       # is a fixture with no control socket — so this cannot reach an agent
-      # runtime, and every agent pane resolves to `apex agent run` against a
+      # runtime, and every agent pane resolves to `rime agent run` against a
       # stub on PATH.
       - name: Run terminal layout template assertions
         if: ${{ !cancelled() }}
@@ -3928,17 +3966,17 @@ jobs:
       # half uses `sudo -n`, which this runner has, and the suite says which
       # assertions it did not make when that is missing rather than passing
       # vacuously. Everything it touches is under one `mktemp -d -p /var/tmp`;
-      # APEX_BACKUP_KEYS keeps it out of /var/lib.
+      # RIME_BACKUP_KEYS keeps it out of /var/lib.
       #
       # There is no R2 section in it, and that is not an omission: `Api::loopback`
-      # is `#[cfg(test)]`, so a shipped apex-secretd always addresses
+      # is `#[cfg(test)]`, so a shipped rime-secretd always addresses
       # api.cloudflare.com and the store's host pin would refuse a credential
       # stored for anywhere else. The backup framework's own R2 call sequence is
       # proven in the `rust` job instead, against the same loopback double that
       # 401s an unauthenticated request.
       - name: §13.5 backup — encrypted at rest, versioned restore, and the four verdicts
         if: ${{ !cancelled() }}
-        run: ./tests/test-apex-backup.sh
+        run: ./tests/test-rime-backup.sh
 
       # P2-001's ssh target, against a REAL sshd on loopback — the fixture the
       # target's own source named as the reason it used to be refused, since a
@@ -3960,9 +3998,9 @@ jobs:
           set -euo pipefail
           sudo apt-get update -qq
           sudo apt-get install -y -qq openssh-server
-          ./tests/test-apex-backup-ssh.sh
+          ./tests/test-rime-backup-ssh.sh
 
-      # P2-001's s3 target, through a REAL apex-secretd, against a loopback
+      # P2-001's s3 target, through a REAL rime-secretd, against a loopback
       # double that recomputes the SigV4 signature with nothing but Python's
       # `hmac` and `hashlib` and answers 403 when it does not match.
       #
@@ -3976,7 +4014,7 @@ jobs:
       # example, which authorises nothing.
       - name: §13.5 backup to S3 — SigV4 against an independent verifier
         if: ${{ !cancelled() }}
-        run: ./tests/test-apex-backup-s3.sh
+        run: ./tests/test-rime-backup-s3.sh
 
       # ── suites that existed and that CI had never once invoked ───────────
       #
@@ -4012,7 +4050,7 @@ jobs:
           command -v nft >/dev/null && echo "have: $(nft --version)" || echo "MISSING: nft"
 
       # P1-044's default-drop policy, asserted rule by rule against the shipped
-      # files/system/nftables/apex.nft. It never loads the ruleset — `nft -c`
+      # files/system/nftables/rime.nft. It never loads the ruleset — `nft -c`
       # parses — so it cannot disconnect the machine running it, which is why
       # it is safe here and why its live sibling is not.
       #
@@ -4034,11 +4072,11 @@ jobs:
         if: ${{ !cancelled() }}
         run: |
           set -euo pipefail
-          out="$(./tests/test-apex-firewall.sh 2>&1)"
+          out="$(./tests/test-rime-firewall.sh 2>&1)"
           printf '%s\n' "$out"
-          summary="$(printf '%s' "$out" | grep -E '^apex-firewall: ' || true)"
+          summary="$(printf '%s' "$out" | grep -E '^rime-firewall: ' || true)"
           [ -n "$summary" ] || { echo "::error::the firewall suite printed no summary line"; exit 1; }
-          read -r passed _ failed _ skipped _ <<<"$(printf '%s' "$summary" | sed 's/^apex-firewall: //')"
+          read -r passed _ failed _ skipped _ <<<"$(printf '%s' "$summary" | sed 's/^rime-firewall: //')"
           echo "measured: passed=$passed failed=$failed skipped=$skipped"
           [ "$failed" = 0 ] || { echo "::error::$failed firewall assertions failed"; exit 1; }
           [ "$skipped" = 0 ] || {
@@ -4083,7 +4121,7 @@ jobs:
               exit 1
           }
 
-      # tests/test-apex-devices.sh — 108 assertions over six device areas, and
+      # tests/test-rime-devices.sh — 108 assertions over six device areas, and
       # until this line no CI run had executed one of them. It was DEBT in
       # tests/suites-not-in-ci.txt, not a decision.
       #
@@ -4093,7 +4131,7 @@ jobs:
       # it. Raise it with the suite. It is meant to be a tripwire on a suite
       # that stopped looking, and a tripwire 21 assertions behind is not one.
       #
-      # It is shell-only: it drives files/system/libexec/apex-devices against a
+      # It is shell-only: it drives files/system/libexec/rime-devices against a
       # fixture tree under mktemp, with a $PATH of its own stubs, so it reaches
       # no device on the machine running it. Engine job, because the engine
       # selector is `^(files/|tests/|…)` and the helper it drives lives under
@@ -4109,10 +4147,10 @@ jobs:
         if: ${{ !cancelled() }}
         run: |
           set -euo pipefail
-          rc=0; out="$(./tests/test-apex-devices.sh 2>&1)" || rc=$?
+          rc=0; out="$(./tests/test-rime-devices.sh 2>&1)" || rc=$?
           printf '%s\n' "$out"
           [ "$rc" = 0 ] || { echo "::error::the devices suite exited $rc"; exit 1; }
-          summary="$(printf '%s\n' "$out" | grep -E '^apex-devices: [0-9]+ passed, [0-9]+ failed, [0-9]+ skipped$' || true)"
+          summary="$(printf '%s\n' "$out" | grep -E '^rime-devices: [0-9]+ passed, [0-9]+ failed, [0-9]+ skipped$' || true)"
           [ -n "$summary" ] || { echo "::error::the devices suite printed no summary line"; exit 1; }
           [ "$(printf '%s\n' "$summary" | wc -l)" = 1 ] || { echo "::error::more than one line looked like the summary; the parse below would read the wrong one"; exit 1; }
           passed="$(printf '%s' "$summary" | awk '{print $2}')"
@@ -4129,7 +4167,7 @@ jobs:
 
       # tests/test-device-services-netns.sh — 12 assertions about whether a
       # printer, a Windows share and an NFS export can actually be reached
-      # through the shipped policy, and whether `apex firewall allow <name>`
+      # through the shipped policy, and whether `rime firewall allow <name>`
       # opens the port the catalogue says it does. It asserts no RULE; P1-044
       # owns those. It was DEBT in tests/suites-not-in-ci.txt.
       #
@@ -4220,36 +4258,36 @@ jobs:
           # libexec helpers are: it is the only thing under tests/ that
           # invokes `sudo`, so an unquoted expansion in it is an unquoted
           # expansion in a command that runs as root.
-          shellcheck -S warning files/system/libexec/apex-pkg \
+          shellcheck -S warning files/system/libexec/rime-pkg \
             tests/in-login-session.sh \
-            files/system/libexec/apex-boot-migrate \
+            files/system/libexec/rime-boot-migrate \
             tests/test-boot-migrate.sh \
-            files/system/libexec/apex-env \
-            files/system/libexec/apex-plugin \
-            files/system/libexec/apex-disposable \
-            files/system/libexec/apex-vm \
-            files/system/libexec/apex-screen-reader \
-            tests/test-apex-recover.sh \
-            tests/test-apex-pkg.sh tests/test-apex-deb.sh \
-            tests/test-apex-pkg.sh tests/test-apex-appimage.sh \
-            tests/test-apex-firstrun.sh \
-            tests/test-labwc-keybinds.sh tests/test-apex-env.sh \
-            tests/test-apex-resolve.sh tests/test-apex-blueprint.sh \
-            tests/test-apex-modes.sh tests/test-apex-plugin.sh \
-            tests/test-apex-host.sh tests/test-apex-dispatch.sh \
-            tests/test-apex-ai.sh tests/test-apex-env-devices-live.sh \
-            tests/test-apex-greet-sessions.sh \
-            tests/test-apex-session-watchdog.sh \
-            files/system/libexec/apex-session-watchdog \
-            tests/test-apex-greet-a11y.sh tests/test-apex-greet-layout.sh \
-            tests/test-apex-greet-session-bus.sh tests/test-apex-a11y-stack.sh \
+            files/system/libexec/rime-env \
+            files/system/libexec/rime-plugin \
+            files/system/libexec/rime-disposable \
+            files/system/libexec/rime-vm \
+            files/system/libexec/rime-screen-reader \
+            tests/test-rime-recover.sh \
+            tests/test-rime-pkg.sh tests/test-rime-deb.sh \
+            tests/test-rime-pkg.sh tests/test-rime-appimage.sh \
+            tests/test-rime-firstrun.sh \
+            tests/test-labwc-keybinds.sh tests/test-rime-env.sh \
+            tests/test-rime-resolve.sh tests/test-rime-blueprint.sh \
+            tests/test-rime-modes.sh tests/test-rime-plugin.sh \
+            tests/test-rime-host.sh tests/test-rime-dispatch.sh \
+            tests/test-rime-ai.sh tests/test-rime-env-devices-live.sh \
+            tests/test-rime-greet-sessions.sh \
+            tests/test-rime-session-watchdog.sh \
+            files/system/libexec/rime-session-watchdog \
+            tests/test-rime-greet-a11y.sh tests/test-rime-greet-layout.sh \
+            tests/test-rime-greet-session-bus.sh tests/test-rime-a11y-stack.sh \
             tests/test-labwc-keybind-reload.sh \
-            tests/test-apex-safe-graphics.sh \
-            tests/test-apex-gaming-session.sh \
-            files/system/libexec/apex-gaming-session \
-            files/system/libexec/apex-safe-graphics \
-            files/system/libexec/apex-safe-graphics-terminal \
-            tests/test-apex-chaos.sh tests/test-apex-vm.sh
+            tests/test-rime-safe-graphics.sh \
+            tests/test-rime-gaming-session.sh \
+            files/system/libexec/rime-gaming-session \
+            files/system/libexec/rime-safe-graphics \
+            files/system/libexec/rime-safe-graphics-terminal \
+            tests/test-rime-chaos.sh tests/test-rime-vm.sh
           # The chaos harness separately, with -x so the driver's `. lib.sh`
           # is followed, and the cases as bash fragments because they are
           # sourced rather than executed and have no shebang of their own.
@@ -4280,7 +4318,7 @@ jobs:
           # writing tests/test-foo.sh, landing it, and never adding a workflow
           # line leaves a file that looks like coverage and gates nothing.
           # Measured 2026-09-12: 70 suites, 13 named in no workflow at all —
-          # including tests/test-apex-lid.sh, sixty assertions for a feature the
+          # including tests/test-rime-lid.sh, sixty assertions for a feature the
           # owner asked for by name, which no CI run had ever executed.
           ./tests/check-suites-run-in-ci.sh
       # ── and the job-level twin of the step above ──────────────────────────
@@ -4302,8 +4340,8 @@ jobs:
 
       - name: The build context carries every tracked source file
         # `.containerignore` carried `**/target/`, which also matches
-        # apexd/apex-backup-core/src/target/ — a SOURCE module, the backup
-        # destinations. `COPY apexd/` then delivered a crate whose lib.rs says
+        # rimed/rime-backup-core/src/target/ — a SOURCE module, the backup
+        # destinations. `COPY rimed/` then delivered a crate whose lib.rs says
         # `pub mod target;` with no such file, and every image build died in
         # `base` with `error[E0583]: file not found for module target`, exit
         # 101, no image. Run 35608265004.
@@ -4318,7 +4356,7 @@ jobs:
 
       - name: No merge conflict markers reach the tip
         # Landed after a merge replay shipped `<<<<<<<`/`=======`/`>>>>>>>` into
-        # apex-shell's src/state/IpcManager.qml and a smoke script. The QML one
+        # rime-shell's src/state/IpcManager.qml and a smoke script. The QML one
         # is a PARSE ERROR, so IpcManager failed to load, so every singleton
         # importing src/ failed with it and the shell did not start at all —
         # nothing branched off the tip could be run. Seconds to check, and the
@@ -4534,7 +4572,7 @@ jobs:
       # THIS JOB DOES NOT SIGN, and that is a decision rather than an accident
       # of which secrets a pull request can see.
       #
-      # It used to decode `APEX_KEYSTORE_BASE64` into the WORKSPACE whenever the
+      # It used to decode `RIME_KEYSTORE_BASE64` into the WORKSPACE whenever the
       # secret was visible. Nothing consumed it and nothing published it, but
       # the arrangement meant that the day the production key is set as a
       # repository secret, it would begin appearing on a runner for every push
@@ -4545,7 +4583,7 @@ jobs:
       # shreds it in an `if: always()` step.
       #
       # Losing or leaking THIS key does not mean "future releases are unsigned"
-      # the way the Secure Boot key does. It means every APEX Remote install in
+      # the way the Secure Boot key does. It means every Rime Remote install in
       # the world can never be upgraded, because Android accepts an update only
       # from the key that signed what is installed, and the owner's only escape
       # is to uninstall — which destroys their paired device key. Same

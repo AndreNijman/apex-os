@@ -9,7 +9,7 @@
 #  only one of them is interesting:
 #
 #    * there IS no previous deployment. A machine that has never updated is in
-#      that state, tests/test-apex-recover.sh already covers it, and the
+#      that state, tests/test-rime-recover.sh already covers it, and the
 #      recovery surface says "nothing to roll back to yet".
 #    * there IS one and the machine cannot see it. A half-written ostree
 #      stateroot, a deploy directory whose mode was lost, a filesystem that
@@ -22,7 +22,7 @@
 #  denied is not absence", pointed at the one row where getting it wrong costs
 #  somebody their machine.
 #
-#  INJECTION       chmod 0000 on /ostree/deploy/apex/deploy, the directory
+#  INJECTION       chmod 0000 on /ostree/deploy/rime/deploy, the directory
 #                  holding both deployments.
 #  PROOF           the harness itself tries to list that directory and must be
 #                  refused. This is independent of the injector: `chmod`
@@ -32,7 +32,7 @@
 #                  not be. Running as root is the live example: root ignores
 #                  the mode, the read succeeds, and the case correctly reports
 #                  could-not-inject rather than a pass.
-#  SUBJECT         `apex recover status`, the surface APEX Settings polls.
+#  SUBJECT         `rime recover status`, the surface Rime Settings polls.
 #  SURVIVAL        it must name the refused read, must NOT claim there is
 #                  nothing to roll back to, and must not have written anything
 #                  into the machine tree while answering.
@@ -40,13 +40,13 @@
 
 CASE_TITLE="a rollback target that exists and cannot be read"
 CASE_CRITERION="1 (failed rollback), 3 (no silent corruption)"
-CASE_NEEDS="apex-binary"
+CASE_NEEDS="rime-binary"
 
 DEPLOY_DIR=""
 
 case_setup() {
     chaos_mk_recover_root "$CASE_ROOT"
-    DEPLOY_DIR="$CASE_ROOT/ostree/deploy/apex/deploy"
+    DEPLOY_DIR="$CASE_ROOT/ostree/deploy/rime/deploy"
     # Assert the fixture is the interesting one before anything is broken: two
     # deployments, so "nothing to roll back to" is a false statement rather
     # than an unlucky one.
@@ -68,9 +68,9 @@ case_setup() {
 # the claim is not an assertion.
 _surface() {
     local tag="$1"
-    APEX_RECOVER_ROOT="$CASE_ROOT" "$APEX_BIN" recover status 2>&1
+    RIME_RECOVER_ROOT="$CASE_ROOT" "$RIME_BIN" recover status 2>&1
     local rc=$?
-    APEX_RECOVER_ROOT="$CASE_ROOT" "$APEX_BIN" recover status --json \
+    RIME_RECOVER_ROOT="$CASE_ROOT" "$RIME_BIN" recover status --json \
         > "$CASE_DIR/$tag.json" 2>/dev/null || true
     printf '\n--- recover status --json is in %s.json ---\n' "$tag"
     return "$rc"
@@ -118,7 +118,7 @@ case_judge() {
     expect_json_nonempty "…and the detail names what could not be read" \
         "$CASE_DIR/observe.json" "${ROW}['detail']"
     # The recovery-routes summary carries the same claim in a boolean, and it
-    # is the one APEX Settings would grey a button on. `None` is "unknown";
+    # is the one Rime Settings would grey a button on. `None` is "unknown";
     # `False` would be the hidden rollback.
     expect_json "with the tree intact the rollback route is available" \
         "$CASE_DIR/baseline.json" "${ROUTE}['available']" "True"
@@ -128,16 +128,16 @@ case_judge() {
     expect_differs_from_baseline "the surface reacted to the fault at all" \
         "$CASE_BASELINE_OUT" "$CASE_OBSERVED"
 
-    # NOT asserted: that the exit code moves. `apex recover status` exits
+    # NOT asserted: that the exit code moves. `rime recover status` exits
     # non-zero on `Health::Attention` only, and deliberately not on
     # `Health::Unavailable` — every machine with no efivarfs, no GPU module
     # list, or a container's /proc has an unmeasurable row, and a status verb
     # that exited 1 on all of them would be useless as a check. The exit code
     # is recorded in the bundle as `observe.rc` so the decision stays visible;
-    # changing it is a product decision about what APEX Settings polls, not
+    # changing it is a product decision about what Rime Settings polls, not
     # something this case may make by going red.
 
-    # `apex recover status` is documented as spawning nothing and writing
+    # `rime recover status` is documented as spawning nothing and writing
     # nothing; under a fault is exactly when that must still hold. The one
     # expected change is the directory's own readability, which the snapshot
     # records as `dir:<unreadable>`.

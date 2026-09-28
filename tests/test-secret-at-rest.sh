@@ -5,7 +5,7 @@
 #  P0-002 criterion 1 is "secrets are no longer stored in agent-readable home
 #  paths". Two halves:
 #
-#    * the PATH half — the store is /var/lib/apex-secretd and not $HOME. That
+#    * the PATH half — the store is /var/lib/rime-secretd and not $HOME. That
 #      is a unit test (`paths::the_defaults_are_outside_home`) and it has been
 #      true since the crate landed.
 #    * the AT-REST half — a process running as the owner's uid cannot open the
@@ -15,7 +15,7 @@
 #      actually run as root in testing, so the at-rest half of criterion 1 is
 #      argued from the unit file rather than measured".
 #
-#  tests/test-secret-broker.sh starts apex-secretd as the invoking user and
+#  tests/test-secret-broker.sh starts rime-secretd as the invoking user and
 #  says in its own header that this costs it the at-rest half. This suite is
 #  that half, and nothing else: it starts the SAME binary as real root.
 #
@@ -36,7 +36,7 @@
 #  ── WHAT IS AND IS NOT TOUCHED ──────────────────────────────────────────────
 #
 #  Nothing outside a fresh mktemp directory. `--store` and `--socket` point the
-#  daemon there; the real /var/lib/apex-secretd and the shipped unit are never
+#  daemon there; the real /var/lib/rime-secretd and the shipped unit are never
 #  started, stopped or read. The one root-owned thing created is the store, and
 #  cleanup removes it with `sudo -n rm -rf` on exactly that path.
 #
@@ -102,16 +102,16 @@ fi
 ok "running as uid ${ME}, which is the account the boundary has to exclude"
 
 section "the binaries"
-cargo build --manifest-path "${ROOT}/apexd/Cargo.toml" \
-    --bin apex-secretd --bin apex-agentd --bin apex >/dev/null 2>&1 || {
-    bad "apex-secretd, apex-agentd and apex build"
+cargo build --manifest-path "${ROOT}/rimed/Cargo.toml" \
+    --bin rime-secretd --bin rime-agentd --bin rime >/dev/null 2>&1 || {
+    bad "rime-secretd, rime-agentd and rime build"
     printf '\nsecret-at-rest: %d passed, %d failed\n' "$pass" "$fail"; exit 1; }
-ok "apex-secretd, apex-agentd and apex build"
+ok "rime-secretd, rime-agentd and rime build"
 
-BIN="${CARGO_TARGET_DIR:-${ROOT}/apexd/target}/debug"
-SECRETD="${BIN}/apex-secretd"
-AGENTD="${BIN}/apex-agentd"
-APEX="${BIN}/apex"
+BIN="${CARGO_TARGET_DIR:-${ROOT}/rimed/target}/debug"
+SECRETD="${BIN}/rime-secretd"
+AGENTD="${BIN}/rime-agentd"
+Rime="${BIN}/rime"
 
 export XDG_RUNTIME_DIR="${WORK}/run"
 export XDG_STATE_HOME="${WORK}/state"
@@ -119,18 +119,18 @@ export XDG_CONFIG_HOME="${WORK}/config"
 mkdir -p "$XDG_RUNTIME_DIR" "$XDG_STATE_HOME" "$XDG_CONFIG_HOME"
 chmod 0700 "$XDG_RUNTIME_DIR"
 
-SENTINEL="apex-atrest-2b7d40e9-do-not-leak"
+SENTINEL="rime-atrest-2b7d40e9-do-not-leak"
 
 section "the service, as real root"
-export APEX_SECRETD_SOCKET="${WORK}/secretd.sock"
+export RIME_SECRETD_SOCKET="${WORK}/secretd.sock"
 STORE="${WORK}/store"
-# Every apex-secretd already on this machine, recorded BEFORE the spawn. There
+# Every rime-secretd already on this machine, recorded BEFORE the spawn. There
 # are none on the L16, but a developer running the shipped system unit would
-# make `pgrep -x apex-secretd` return two pids, and picking one by sort order
+# make `pgrep -x rime-secretd` return two pids, and picking one by sort order
 # would read the SYSTEM daemon's uid and store while claiming to describe this
 # one's. The difference is invisible in the output — both are root — so the set
 # is taken first and the new pid is the one that was not in it.
-PRE_SECRETD="$(pgrep -x apex-secretd 2>/dev/null | tr '\n' ' ')"
+PRE_SECRETD="$(pgrep -x rime-secretd 2>/dev/null | tr '\n' ' ')"
 # setsid so the daemon is not in this script's process group and a stray
 # Ctrl-C cannot take it down before cleanup records what it found.
 # shellcheck disable=SC2024  # the redirect is this shell's, deliberately.
@@ -138,21 +138,21 @@ PRE_SECRETD="$(pgrep -x apex-secretd 2>/dev/null | tr '\n' ' ')"
 # whole point of the suite is to measure what that uid can and cannot read. A
 # log the test user could not open would defeat it; `sudo tee` would make the
 # log root-owned and the cleanup unable to remove it.
-sudo -n setsid "$SECRETD" --socket "$APEX_SECRETD_SOCKET" --store "$STORE" \
+sudo -n setsid "$SECRETD" --socket "$RIME_SECRETD_SOCKET" --store "$STORE" \
     > "${WORK}/secretd.log" 2>&1 &
-for _ in $(seq 1 100); do [ -S "$APEX_SECRETD_SOCKET" ] && break; sleep 0.1; done
+for _ in $(seq 1 100); do [ -S "$RIME_SECRETD_SOCKET" ] && break; sleep 0.1; done
 # `pgrep -x`, matching the process NAME, not `pgrep -f` over the command line.
-# `sudo -n setsid apex-secretd --socket X` leaves sudo resident with that exact
+# `sudo -n setsid rime-secretd --socket X` leaves sudo resident with that exact
 # string in its own argv, so `pgrep -f … | head -n1` returns SUDO — whose
 # effective uid is also 0. The uid assertion below would then have been reading
 # the uid of sudo rather than of the daemon, i.e. assuming from the fact that
 # sudo was typed the very thing it claims to measure from the kernel.
 SECRETD_PID=""
-for _p in $(pgrep -x apex-secretd 2>/dev/null); do
+for _p in $(pgrep -x rime-secretd 2>/dev/null); do
     case " ${PRE_SECRETD} " in *" ${_p} "*) continue ;; esac
     SECRETD_PID="$_p"
 done
-[ -S "$APEX_SECRETD_SOCKET" ] || {
+[ -S "$RIME_SECRETD_SOCKET" ] || {
     bad "the secret service came up as root"
     sed 's/^/      /' "${WORK}/secretd.log"
     printf '\nsecret-at-rest: %d passed, %d failed\n' "$pass" "$fail"; exit 1; }
@@ -162,9 +162,9 @@ ok "the secret service came up as root"
 # sudo was typed. This is the premise every assertion below rests on, so it is
 # read rather than assumed.
 daemon_comm="$(ps -o comm= -p "$SECRETD_PID" 2>/dev/null | tr -d ' ')"
-[ "$daemon_comm" = "apex-secretd" ] \
-    && ok "the pid being measured is apex-secretd itself, not the sudo that started it" \
-    || bad "the pid being measured is apex-secretd itself (comm is '${daemon_comm}')"
+[ "$daemon_comm" = "rime-secretd" ] \
+    && ok "the pid being measured is rime-secretd itself, not the sudo that started it" \
+    || bad "the pid being measured is rime-secretd itself (comm is '${daemon_comm}')"
 daemon_uid="$(ps -o uid= -p "$SECRETD_PID" 2>/dev/null | tr -d ' ')"
 [ "$daemon_uid" = "0" ] \
     && ok "the daemon's real uid is 0" \
@@ -172,14 +172,14 @@ daemon_uid="$(ps -o uid= -p "$SECRETD_PID" 2>/dev/null | tr -d ' ')"
 
 # And it says so on the wire, which is what stops a test instance from looking
 # like a boundary. `warn_if_unprotected` prints only when protected is false.
-warn="$("$APEX" secret list 2>&1 >/dev/null)"
+warn="$("$Rime" secret list 2>&1 >/dev/null)"
 printf '%s' "$warn" | grep -q "not running as root" \
     && bad "the service reports itself protected" \
     || ok "the service reports itself protected"
 
 section "storing a credential as the owner"
-printf %s "$SENTINEL" | "$APEX" secret add demo --host 127.0.0.1 >/dev/null 2>&1
-"$APEX" secret list 2>/dev/null | grep -q demo \
+printf %s "$SENTINEL" | "$Rime" secret add demo --host 127.0.0.1 >/dev/null 2>&1
+"$Rime" secret list 2>/dev/null | grep -q demo \
     && ok "the credential was stored through the socket" \
     || { bad "the credential was stored through the socket"
          sed 's/^/      /' "${WORK}/secretd.log"; }
@@ -270,12 +270,12 @@ hits="$(grep -rl "$SENTINEL" "$WORK" 2>/dev/null | tr '\n' ' ')"
 # repository's own configuration, and the repository belongs to the user.
 section "the operation runs as the owner, not as root"
 
-# `apex secret use` goes through apex-agentd as well as apex-secretd — the
+# `rime secret use` goes through rime-agentd as well as rime-secretd — the
 # agent runtime owns the session and the project and forwards the capability
 # record. Started as the ordinary user, which is what it always is.
 "$AGENTD" > "${WORK}/agentd.log" 2>&1 &
 AGENTD_PID=$!
-AGENT_SOCK="${XDG_RUNTIME_DIR}/apex-agentd/control.sock"
+AGENT_SOCK="${XDG_RUNTIME_DIR}/rime-agentd/control.sock"
 for _ in $(seq 1 100); do [ -S "$AGENT_SOCK" ] && break; sleep 0.1; done
 
 # A loopback listener that ACCEPTS and then stalls. The child has to still be
@@ -306,10 +306,10 @@ git -C "$PROJ" remote add origin "http://127.0.0.1:${PORT}/demo.git"
 
 # `--scheme http` is accepted only for a loopback host, which this is. A
 # second service rather than reusing `demo`, whose scheme is https.
-printf %s "$SENTINEL" | "$APEX" secret add loop --host 127.0.0.1 --scheme http \
+printf %s "$SENTINEL" | "$Rime" secret add loop --host 127.0.0.1 --scheme http \
     --port "$PORT" >/dev/null 2>&1
-(cd "$PROJ" && "$APEX" secret grant loop git.fetch >/dev/null 2>&1)
-(cd "$PROJ" && timeout 25 "$APEX" secret use loop git.fetch origin \
+(cd "$PROJ" && "$Rime" secret grant loop git.fetch >/dev/null 2>&1)
+(cd "$PROJ" && timeout 25 "$Rime" secret use loop git.fetch origin \
     > "${WORK}/use.log" 2>&1) &
 USE_PID=$!
 

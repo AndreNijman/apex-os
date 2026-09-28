@@ -22,10 +22,10 @@
 set -euo pipefail
 
 REPO="$(cd "$(dirname "${BASH_SOURCE[0]}")/.." && pwd)"
-MIG="$REPO/files/system/libexec/apex-boot-migrate"
-UNIT="$REPO/files/system/units/apex-boot-migrate-confirm.service"
+MIG="$REPO/files/system/libexec/rime-boot-migrate"
+UNIT="$REPO/files/system/units/rime-boot-migrate-confirm.service"
 BASECF="$REPO/Containerfile.base"
-OPS="$REPO/apexd/apex/src/ops.rs"
+OPS="$REPO/rimed/rime/src/ops.rs"
 
 PASS=0 FAIL=0
 ok()  { PASS=$((PASS + 1)); printf '  ok   %s\n' "$*"; }
@@ -48,11 +48,11 @@ CODE="$TMP/code.sh"
 sed 's/[[:space:]]*#.*$//' "$MIG" > "$CODE"
 
 run_mig() {   # run the engine with a fixture state dir; never touches this machine
-    APEX_MIGRATE_STATE="$TMP/state" \
-    APEX_MIGRATE_ROOT="$TMP/sysroot" \
-    APEX_MIGRATE_ESP="$TMP/esp" \
-    APEX_MIGRATE_DRYRUN=1 \
-    APEX_MIGRATE_STORE="${STORE:-ostreeContainer}" \
+    RIME_MIGRATE_STATE="$TMP/state" \
+    RIME_MIGRATE_ROOT="$TMP/sysroot" \
+    RIME_MIGRATE_ESP="$TMP/esp" \
+    RIME_MIGRATE_DRYRUN=1 \
+    RIME_MIGRATE_STORE="${STORE:-ostreeContainer}" \
         bash "$MIG" "$@" 2>&1
 }
 
@@ -163,13 +163,13 @@ for token in not-root not-uefi already-migrated update-staged bootc-too-old \
         bad "no refusal for: $token"
     fi
 done
-# A refusal must exit 10 and say nothing was changed: `apex update` reads that
+# A refusal must exit 10 and say nothing was changed: `rime update` reads that
 # code to mean "carry on with the normal update", and anything else would make
 # a machine that cannot migrate also fail to update.
 if grep -qE '^refuse\(\).*exit 10|exit 10; \}' "$CODE"; then
     ok "a refusal exits 10"
 else
-    bad "a refusal does not exit 10 — apex update would treat it as a failure"
+    bad "a refusal does not exit 10 — rime update would treat it as a failure"
 fi
 
 # ═════════════════════════════════════════════════════════════════════════════
@@ -246,8 +246,8 @@ fi
 
 # ═════════════════════════════════════════════════════════════════════════════
 sec "a machine that boots from another disk's ESP is told, not refused"
-# katana boots APEX off the 200 MiB ESP on the WINDOWS disk while its own
-# 512 MiB EFI-SYSTEM sits unused on the APEX disk. find_esp resolves the
+# katana boots Rime off the 200 MiB ESP on the WINDOWS disk while its own
+# 512 MiB EFI-SYSTEM sits unused on the Rime disk. find_esp resolves the
 # machine's OWN disk, so migrating moves the boot onto it -- the right answer,
 # and a change of disk the user should hear about. It must stay a note: a
 # refusal would keep katana depending on another operating system's disk
@@ -312,14 +312,14 @@ fi
 # Firmware prints the loader two ways and the L16 uses the one WITHOUT the
 # File() wrapper, so both shapes are fixtures rather than one being assumed.
 # Measured on the L16, read-only, 2026-09-21:
-#   Boot0000* APEX-OS	HD(1,GPT,1c417de2-…,0x800,0x12c000)/\EFI\fedora\shimx64.efi
+#   Boot0000* Rime OS	HD(1,GPT,1c417de2-…,0x800,0x12c000)/\EFI\fedora\shimx64.efi
 cat > "$FAKEBIN/efibootmgr" <<'FAKE'
 #!/usr/bin/env bash
 cat <<'OUT'
 BootCurrent: 0000
 Timeout: 0 seconds
 BootOrder: 0000,0020,0004
-Boot0000* APEX-OS	HD(1,GPT,1c417de2-5766-455f-9318-198610885424,0x800,0x12c000)/\EFI\fedora\shimx64.efi
+Boot0000* Rime OS	HD(1,GPT,1c417de2-5766-455f-9318-198610885424,0x800,0x12c000)/\EFI\fedora\shimx64.efi
 Boot0004* UEFI: IP4 Realtek PCIe GBE	PciRoot(0x0)/Pci(0x1c,0x4)/MAC(001122334455,0)
 OUT
 FAKE
@@ -399,7 +399,7 @@ fi
 
 # ═════════════════════════════════════════════════════════════════════════════
 sec "the confirm unit"
-grep -q '^ConditionPathExists=/var/lib/apex/boot-migrate/phase$' "$UNIT" \
+grep -q '^ConditionPathExists=/var/lib/rime/boot-migrate/phase$' "$UNIT" \
     && ok "inert on a machine that never started a migration" \
     || bad "the unit runs on machines with no migration in flight"
 grep -q '^Wants=boot-complete.target$' "$UNIT" \
@@ -413,15 +413,15 @@ fi
 grep -q '^WantedBy=multi-user.target$' "$UNIT" \
     && ok "WantedBy, so a machine that cannot run it still boots" \
     || bad "the unit is not WantedBy=multi-user.target"
-grep -q 'ExecStart=/usr/libexec/apex-boot-migrate confirm' "$UNIT" \
+grep -q 'ExecStart=/usr/libexec/rime-boot-migrate confirm' "$UNIT" \
     && ok "runs the engine's confirm verb" \
-    || bad "the unit runs something other than 'apex-boot-migrate confirm'"
+    || bad "the unit runs something other than 'rime-boot-migrate confirm'"
 
 # ═════════════════════════════════════════════════════════════════════════════
-sec "apex update runs it, and a refusal does not stop the update"
+sec "rime update runs it, and a refusal does not stop the update"
 grep -q 'fn migrate_boot_path' "$OPS" \
     && ok "ops.rs has the migration step" \
-    || bad "apex update does not call the migration"
+    || bad "rime update does not call the migration"
 grep -q 'Ok(10) =>' "$OPS" \
     && ok "ops.rs treats exit 10 (refused) as 'carry on'" \
     || bad "a refusal is not distinguished from a failure"
@@ -435,10 +435,10 @@ fi
 
 # ═════════════════════════════════════════════════════════════════════════════
 sec "the image ships it"
-grep -q 'COPY --chmod=0755 files/system/libexec/apex-boot-migrate' "$BASECF" \
+grep -q 'COPY --chmod=0755 files/system/libexec/rime-boot-migrate' "$BASECF" \
     && ok "Containerfile.base ships the engine" \
     || bad "the engine is not in the image"
-grep -q 'systemctl enable apex-boot-migrate-confirm.service' "$BASECF" \
+grep -q 'systemctl enable rime-boot-migrate-confirm.service' "$BASECF" \
     && ok "the confirm unit is enabled at build time" \
     || bad "the confirm unit is shipped but never enabled"
 for dep in podman mkfs.vfat rsync efibootmgr unshare; do
@@ -459,11 +459,11 @@ rc=0; run_mig auto >/dev/null 2>&1 || rc=$?
 if [[ "$rc" == 3 ]]; then
     ok "auto on a confirmed machine exits 3 (nothing to do), not 10 (refused)"
 else
-    bad "auto on a confirmed machine exits $rc — apex update would print a refusal forever"
+    bad "auto on a confirmed machine exits $rc — rime update would print a refusal forever"
 fi
 grep -q 'Ok(3) => false' "$OPS" \
-    && ok "apex update treats exit 3 as silence" \
-    || bad "apex update does not handle the 'nothing to do' code"
+    && ok "rime update treats exit 3 as silence" \
+    || bad "rime update does not handle the 'nothing to do' code"
 
 # 2. Two updates in one boot must not re-run the install.
 rm -rf "$TMP/state"; mkdir -p "$TMP/state"
@@ -533,7 +533,7 @@ fi
 #     state/deploy/<digest>/var  ->  ../../os/<stateroot>/var
 #
 # `find` walks in readdir order, not sorted, so a lookup without `-type d`
-# returns whichever the filesystem hands back first. Measured on the real APEX
+# returns whichever the filesystem hands back first. Measured on the real Rime
 # image on btrfs, 2026-09-22: it returned the SYMLINK, join_state's
 # `[ ! -L "$newvar" ]` was false, and the migration failed `state-join` AFTER a
 # completely successful install. The predecessor's ext4 fedora-bootc guest got
@@ -611,7 +611,7 @@ grep -q 'secure-boot-unknown' "$CODE" \
     || bad "an unreadable SecureBoot variable is treated as 'off'"
 
 # ═════════════════════════════════════════════════════════════════════════════
-sec "APEX never writes Windows' ESP — behavioural, both ways"
+sec "Rime never writes Windows' ESP — behavioural, both ways"
 # Not a grep. These RUN the engine against two fixture ESPs that differ by one
 # file and compare what it decides, so the assertion fails if the refusal is
 # deleted AND fails if it is made unconditional. A grep for the refusal's name
@@ -621,15 +621,15 @@ sec "APEX never writes Windows' ESP — behavioural, both ways"
 # `precheck --explain` is what makes this possible without root or loopback.
 # It evaluates every check instead of stopping at the first refusal, so an
 # unprivileged runner gets past `not-root` and reaches the ESP checks, and
-# APEX_MIGRATE_ESP points the ESP content test at a directory. The runner is
+# RIME_MIGRATE_ESP points the ESP content test at a directory. The runner is
 # not root, has no /dev/loop-control and may not be on UEFI at all — none of
 # which this needs.
 explain_with_esp() {   # $1 = fixture ESP dir; prints the decision table
-    APEX_MIGRATE_STATE="$TMP/state" \
-    APEX_MIGRATE_ROOT="$TMP/sysroot" \
-    APEX_MIGRATE_ESP="$1" \
-    APEX_MIGRATE_FAKEROOT="$TMP/fakeroot" \
-    APEX_MIGRATE_STORE=ostreeContainer \
+    RIME_MIGRATE_STATE="$TMP/state" \
+    RIME_MIGRATE_ROOT="$TMP/sysroot" \
+    RIME_MIGRATE_ESP="$1" \
+    RIME_MIGRATE_FAKEROOT="$TMP/fakeroot" \
+    RIME_MIGRATE_STORE=ostreeContainer \
         bash "$MIG" precheck --explain 2>&1
 }
 
@@ -648,7 +648,7 @@ own_table="$(explain_with_esp "$TMP/esp-own" || true)"
 if grep -qE '^REFUSE +esp-is-windows' <<<"$win_table"; then
     ok "an ESP carrying bootmgfw.efi is REFUSED (esp-is-windows)"
 else
-    bad "an ESP carrying Windows' loader was allowed — APEX must never write it"
+    bad "an ESP carrying Windows' loader was allowed — Rime must never write it"
 fi
 if grep -qE 'esp-is-windows' <<<"$own_table"; then
     bad "esp-is-windows fires on an ESP with no Windows loader — it is unconditional, so it proves nothing"
@@ -656,7 +656,7 @@ else
     ok "an ESP with no Windows loader raises no esp-is-windows verdict"
 fi
 
-# The refusal must be a REFUSE and not a NOTE. A note would let `apex update`
+# The refusal must be a REFUSE and not a NOTE. A note would let `rime update`
 # carry straight on into the write, which is the whole thing being prevented.
 if grep -qE '^NOTE +esp-is-windows' <<<"$win_table"; then
     bad "esp-is-windows is a NOTE — the migration would proceed onto Windows' ESP anyway"
@@ -669,7 +669,7 @@ fi
 if grep -q 'esp-is-windows' "$CODE" && \
    awk '/refuse "esp-is-windows"/{p=1} p{print} p && /^        fi/{exit}' "$CODE" \
      | grep -q 'ESP of its OWN'; then
-    ok "the esp-is-windows refusal names its remedy (an ESP of APEX's own)"
+    ok "the esp-is-windows refusal names its remedy (an ESP of Rime's own)"
 else
     bad "the refusal states no remedy, so a user cannot act on it"
 fi
@@ -684,11 +684,11 @@ else
 fi
 
 # The decision doc's claim, pinned as an assertion so it cannot drift back:
-# APEX_MIGRATE_ESP does NOT steer bootc, and this file must not say it does.
+# RIME_MIGRATE_ESP does NOT steer bootc, and this file must not say it does.
 if grep -q 'overridden' "$CODE"; then
-    bad "a verdict still calls APEX_MIGRATE_ESP an override of the write — it only moves the measurement"
+    bad "a verdict still calls RIME_MIGRATE_ESP an override of the write — it only moves the measurement"
 else
-    ok "nothing claims APEX_MIGRATE_ESP steers where bootc writes"
+    ok "nothing claims RIME_MIGRATE_ESP steers where bootc writes"
 fi
 
 # ═════════════════════════════════════════════════════════════════════════════
@@ -706,11 +706,11 @@ sec "A half-finished composefs deployment is refused — behavioural, both ways"
 # is recorded, so the refusal cannot pass by being unconditional and cannot
 # pass by being deleted.
 explain_with_root() {   # $1 = fixture sysroot, $2 = fixture state dir
-    APEX_MIGRATE_STATE="$2" \
-    APEX_MIGRATE_ROOT="$1" \
-    APEX_MIGRATE_ESP="$TMP/esp-own" \
-    APEX_MIGRATE_FAKEROOT="$TMP/fakeroot" \
-    APEX_MIGRATE_STORE=ostreeContainer \
+    RIME_MIGRATE_STATE="$2" \
+    RIME_MIGRATE_ROOT="$1" \
+    RIME_MIGRATE_ESP="$TMP/esp-own" \
+    RIME_MIGRATE_FAKEROOT="$TMP/fakeroot" \
+    RIME_MIGRATE_STORE=ostreeContainer \
         bash "$MIG" precheck --explain 2>&1
 }
 mkdir -p "$TMP/sr-clean" "$TMP/st-clean" \

@@ -4,8 +4,8 @@
 #
 #  `.containerignore` carried `**/target/`. That is the obvious way to keep
 #  cargo build output out of the context, and it also matches
-#  `apexd/apex-backup-core/src/target/`, which is SOURCE: the backup
-#  destinations. `COPY apexd/` then delivered a crate whose lib.rs declares
+#  `rimed/rime-backup-core/src/target/`, which is SOURCE: the backup
+#  destinations. `COPY rimed/` then delivered a crate whose lib.rs declares
 #  `pub mod target;` with no such file, and every image build died in `base`:
 #
 #      error[E0583]: file not found for module `target`

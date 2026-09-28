@@ -1,6 +1,6 @@
 #!/usr/bin/env bash
 # ─────────────────────────────────────────────────────────────────────────────
-#  mutate-greet-atspi.sh — prove every assertion in test-apex-greet-atspi.sh is
+#  mutate-greet-atspi.sh — prove every assertion in test-rime-greet-atspi.sh is
 #  able to fail.
 #
 #  A suite that has never been seen to go red is a suite nobody has checked. The
@@ -22,11 +22,11 @@
 set -uo pipefail
 cd "$(dirname "$0")/.." || exit 2
 
-SURFACE="files/desktop/apex-greet/GreetSurface.qml"
+SURFACE="files/desktop/rime-greet/GreetSurface.qml"
 FIXTURE="tests/greet-atspi-app.qml"
 LIB="tests/lib/atspi.sh"
 FILES="$SURFACE $FIXTURE $LIB"
-SUITE="./tests/test-apex-greet-atspi.sh"
+SUITE="./tests/test-rime-greet-atspi.sh"
 
 applied=0; noapply=0; caught=0; survived=0
 
@@ -79,7 +79,7 @@ PY
     else
         printf '%-5s SURVIVED  %s\n' "$id" "$want"
         printf '      ── what the suite said instead ──\n'
-        printf '%s\n' "$out" | grep -E '^(FAIL|SKIP|apex-greet-atspi)' | sed 's/^/      /'
+        printf '%s\n' "$out" | grep -E '^(FAIL|SKIP|rime-greet-atspi)' | sed 's/^/      /'
         survived=$((survived + 1))
     fi
     restore
@@ -87,8 +87,8 @@ PY
 
 echo "── baseline: the suite must be green before any mutant means anything ──"
 base="$(run_suite)"
-printf '%s\n' "$base" | grep -E '^apex-greet-atspi'
-if ! printf '%s' "$base" | grep -qE '^apex-greet-atspi: [0-9]+ passed, 0 failed'; then
+printf '%s\n' "$base" | grep -E '^rime-greet-atspi'
+if ! printf '%s' "$base" | grep -qE '^rime-greet-atspi: [0-9]+ passed, 0 failed'; then
     echo "ABORT: the suite is not green to begin with" >&2
     printf '%s\n' "$base" | grep -E '^(FAIL|SKIP)' >&2
     exit 3

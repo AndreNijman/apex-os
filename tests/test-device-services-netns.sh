@@ -7,7 +7,7 @@
 #  ── What this is NOT ────────────────────────────────────────────────────────
 #  It is not a test of the firewall. P1-044 owns the base policy, the helper
 #  and the question "does the policy drop what it says it drops", and proves
-#  those in `tests/test-apex-firewall-live.sh`. Nothing here asserts a rule.
+#  those in `tests/test-rime-firewall-live.sh`. Nothing here asserts a rule.
 #
 #  The question here is the one a user asks about a device: my printer is
 #  shared, so why can nobody print to it. A desktop feature that fails because
@@ -26,14 +26,14 @@
 #  Nothing here reads a rule; every verdict is a packet that arrived or did not.
 #
 #  ── Where the port numbers come from ────────────────────────────────────────
-#  From `files/system/firewall/services`, the catalogue `apex firewall allow`
-#  reads, rather than hardcoded into the probes. `apex firewall allow ipp` opens
+#  From `files/system/firewall/services`, the catalogue `rime firewall allow`
+#  reads, rather than hardcoded into the probes. `rime firewall allow ipp` opens
 #  whatever that file says `ipp` is, so if the catalogue named the wrong port
 #  the remedy would report success and change nothing.
 #
 #  ── Why it cannot touch the machine running it ──────────────────────────────
 #  The run happens inside `unshare -rmn`: a fresh user, mount and network
-#  namespace. nftables tables are network-namespace scoped, so `nft -f apex.nft`
+#  namespace. nftables tables are network-namespace scoped, so `nft -f rime.nft`
 #  in there is invisible to the host, whose ruleset, routes and interfaces are
 #  never read or written. It needs no root and asks for none. The machine that
 #  runs this suite is somebody's workstation on their real network, and a test
@@ -54,13 +54,13 @@
 set -uo pipefail
 cd "$(dirname "$0")/.." || exit 2
 
-RULES=files/system/nftables/apex.nft
+RULES=files/system/nftables/rime.nft
 CATALOGUE=files/system/firewall/services
 # The hotspot half calls the shipped tool rather than `nft add element`, because
 # the thing under test is what NetworkManager's dispatcher invokes: the name
 # validation, the not-loaded case and the message all live in there, and a test
 # that reached past them would prove the ruleset works and the product does not.
-FIREWALL=files/system/libexec/apex-firewall
+FIREWALL=files/system/libexec/rime-firewall
 for f in "$RULES" "$CATALOGUE" "$FIREWALL"; do
     [ -f "$f" ] || { echo "cannot find $f"; exit 2; }
 done
@@ -99,7 +99,7 @@ for spec in "ipp 631 CUPS" "samba 445 smbd" "nfs 2049 nfsd"; do
     [ "$got" = "$2" ] \
         && ok "$1 is port $2, which is what $3 binds" \
         || bad "$1 is port $2, which is what $3 binds" \
-               "the catalogue says $got, so \`apex firewall allow $1\` opens the wrong port"
+               "the catalogue says $got, so \`rime firewall allow $1\` opens the wrong port"
 done
 echo
 
@@ -128,7 +128,7 @@ fi
 # as long as the experiment and no longer. It prints one `CASE <name> <verdict>`
 # line per probe and the grading happens out here, so a namespace that dies half
 # way through reads as missing cases rather than as passes.
-INNER=$(mktemp /tmp/apex-devsvc-inner.XXXXXX.sh) || exit 2
+INNER=$(mktemp /tmp/rime-devsvc-inner.XXXXXX.sh) || exit 2
 trap 'rm -f "$INNER"' EXIT
 
 cat > "$INNER" <<'INNER_EOF'
@@ -145,10 +145,10 @@ sleep 0.3
 kill -0 "$PEER" 2>/dev/null || fatal "the peer namespace did not start"
 trap 'kill "$PEER" 2>/dev/null' EXIT
 
-ip link add veth-p type veth peer name apexhost || fatal "veth pair"
+ip link add veth-p type veth peer name rimehost || fatal "veth pair"
 ip link set veth-p netns "$PEER"                || fatal "move the peer end"
-ip addr add 10.91.0.1/24 dev apexhost           || fatal "address on this side"
-ip link set apexhost up; ip link set lo up
+ip addr add 10.91.0.1/24 dev rimehost           || fatal "address on this side"
+ip link set rimehost up; ip link set lo up
 nsenter -t "$PEER" -n ip addr add 10.91.0.2/24 dev veth-p || fatal "peer address"
 nsenter -t "$PEER" -n ip link set veth-p up
 nsenter -t "$PEER" -n ip link set lo up
@@ -157,10 +157,10 @@ nsenter -t "$PEER" -n ip link set lo up
 # hotspot exception is NOT scoped to: every "still shut" verdict below is a
 # packet that went out of this one, and without it "the exception is scoped to
 # one link" would be a claim about a rule's text rather than about traffic.
-ip link add veth-q type veth peer name apexhost2 || fatal "second veth pair"
+ip link add veth-q type veth peer name rimehost2 || fatal "second veth pair"
 ip link set veth-q netns "$PEER"                 || fatal "move the second peer end"
-ip addr add 10.92.0.1/24 dev apexhost2           || fatal "address on the second link"
-ip link set apexhost2 up
+ip addr add 10.92.0.1/24 dev rimehost2           || fatal "address on the second link"
+ip link set rimehost2 up
 nsenter -t "$PEER" -n ip addr add 10.92.0.2/24 dev veth-q || fatal "second peer address"
 nsenter -t "$PEER" -n ip link set veth-q up
 
@@ -171,10 +171,10 @@ unshare -n sleep 180 & SRV=$!
 sleep 0.3
 kill -0 "$SRV" 2>/dev/null || fatal "the server namespace did not start"
 trap 'kill "$PEER" "$SRV" 2>/dev/null' EXIT
-ip link add veth-s type veth peer name apexsrv || fatal "server veth pair"
+ip link add veth-s type veth peer name rimesrv || fatal "server veth pair"
 ip link set veth-s netns "$SRV"                || fatal "move the server end"
-ip addr add 10.93.0.1/24 dev apexsrv           || fatal "address on the server link"
-ip link set apexsrv up
+ip addr add 10.93.0.1/24 dev rimesrv           || fatal "address on the server link"
+ip link set rimesrv up
 nsenter -t "$SRV" -n ip addr add 10.93.0.2/24 dev veth-s || fatal "server address"
 nsenter -t "$SRV" -n ip link set veth-s up
 nsenter -t "$SRV" -n ip link set lo up
@@ -193,8 +193,8 @@ echo 1 > /proc/sys/net/ipv4/ip_forward 2>/dev/null || fatal "cannot enable forwa
 # SO_BROADCAST and send from the peer's matching address.
 #
 # The destination is a parameter because the interface a packet arrives on is
-# the whole question for the hotspot rules: 10.91.0.1 lands on apexhost, the
-# link this machine shares, and 10.92.0.1 lands on apexhost2, which it does not.
+# the whole question for the hotspot rules: 10.91.0.1 lands on rimehost, the
+# link this machine shares, and 10.92.0.1 lands on rimehost2, which it does not.
 udp_probe() {
     local dport=$1 dst=${2:-10.91.0.1} sport=${3:-0} mode=${4:-unicast} out tag
     tag="${dport}.${dst##*.}.${sport}"
@@ -205,7 +205,7 @@ s.setsockopt(socket.SOL_SOCKET, socket.SO_REUSEADDR, 1)
 s.bind(("0.0.0.0", int(sys.argv[1])))
 # A multicast datagram is only delivered to a socket that JOINED the group.
 # Without this the case fails for a reason that has nothing to do with the
-# firewall, which is how the equivalent probe in test-apex-firewall-live.sh
+# firewall, which is how the equivalent probe in test-rime-firewall-live.sh
 # first went red.
 if len(sys.argv) > 2 and sys.argv[2] == "mcast":
     s.setsockopt(socket.IPPROTO_IP, socket.IP_ADD_MEMBERSHIP,
@@ -246,7 +246,7 @@ elif mode == "bcast":
 if sport:
     s.bind((src, sport))
 for _ in range(3):
-    s.sendto(b"apex-probe", (dst, dport))
+    s.sendto(b"rime-probe", (dst, dport))
 PY
     wait "$rxpid" 2>/dev/null
     out=$(cat "/tmp/.rx.$tag" 2>/dev/null); rm -f "/tmp/.rx.$tag"
@@ -280,7 +280,7 @@ PY
 import socket
 s = socket.socket(socket.AF_INET, socket.SOCK_DGRAM)
 for _ in range(3):
-    s.sendto(b"apex-probe", ("10.93.0.2", 9999))
+    s.sendto(b"rime-probe", ("10.93.0.2", 9999))
 PY
     wait "$rxpid" 2>/dev/null
     out=$(cat /tmp/.rx.fwd 2>/dev/null); rm -f /tmp/.rx.fwd
@@ -341,7 +341,7 @@ echo "CASE hs-dnsudp-shut    $(udp_probe 53)"
 echo "CASE hs-dnstcp-shut    $(tcp_probe 53)"
 
 # Opened the way NetworkManager's dispatcher opens it.
-if "$FIREWALL" hotspot add apexhost 2>&1 | grep -q "opened DHCP and DNS on 'apexhost'"; then
+if "$FIREWALL" hotspot add rimehost 2>&1 | grep -q "opened DHCP and DNS on 'rimehost'"; then
     echo "CASE hs-add            SAID-SO"
 else
     echo "CASE hs-add            NO"
@@ -363,23 +363,23 @@ echo "CASE hs-smb-on-shared  $(tcp_probe "$SMB")"
 # elements quoted, and wraps them one per line as soon as there is more than
 # one, so this is where a line-at-a-time read of `elements = { ... }` reports
 # nothing and the tool says the machine is sharing on no link at all.
-"$FIREWALL" hotspot add apexhost2 >/dev/null 2>&1
+"$FIREWALL" hotspot add rimehost2 >/dev/null 2>&1
 LIST="$("$FIREWALL" hotspot list 2>&1 | tr '\n' ' ')"
-# `grep -qw`, not a `*apexhost*` glob: apexhost2 CONTAINS apexhost, so a glob
+# `grep -qw`, not a `*rimehost*` glob: rimehost2 CONTAINS rimehost, so a glob
 # for the first name is satisfied by the second one and a parser that dropped
 # the first element would pass. That verdict could not fire until this line
 # said -w.
 v=NAMED
-grep -qw apexhost  <<<"$LIST" || v=LOST-FIRST
-grep -qw apexhost2 <<<"$LIST" || v=LOST-SECOND
+grep -qw rimehost  <<<"$LIST" || v=LOST-FIRST
+grep -qw rimehost2 <<<"$LIST" || v=LOST-SECOND
 case "$LIST" in *'"'*)           v=QUOTED ;; esac
 case "$LIST" in *'not sharing'*) v=SAID-NOT-SHARING ;; esac
 echo "CASE hs-list           $v"
 
 # Down again. The dispatcher's `down` path runs this, and a link left open
 # after the hotspot stops is the failure this whole mechanism must not have.
-"$FIREWALL" hotspot remove apexhost2 >/dev/null 2>&1
-"$FIREWALL" hotspot remove apexhost  >/dev/null 2>&1
+"$FIREWALL" hotspot remove rimehost2 >/dev/null 2>&1
+"$FIREWALL" hotspot remove rimehost  >/dev/null 2>&1
 echo "CASE hs-dhcp-closed    $(dhcp_probe)"
 echo "CASE hs-dnsudp-closed  $(udp_probe 53)"
 
@@ -391,21 +391,21 @@ echo "CASE hs-dnsudp-closed  $(udp_probe 53)"
 # a forward chain with policy drop, added and then deleted, so that ARRIVED is
 # a measurement rather than the only answer this probe can give.
 echo "CASE fwd-open          $(forward_probe)"
-if nft add chain inet apex fwdprobe '{ type filter hook forward priority filter; policy drop; }' 2>/dev/null; then
+if nft add chain inet rime fwdprobe '{ type filter hook forward priority filter; policy drop; }' 2>/dev/null; then
     echo "CASE fwd-dropped       $(forward_probe)"
-    nft delete chain inet apex fwdprobe 2>/dev/null
+    nft delete chain inet rime fwdprobe 2>/dev/null
     echo "CASE fwd-reopen        $(forward_probe)"
 else
     echo "CASE fwd-dropped       SETUP"
     echo "CASE fwd-reopen        SETUP"
 fi
 
-# The documented remedy. `apex firewall allow <name>` writes the catalogue's
+# The documented remedy. `rime firewall allow <name>` writes the catalogue's
 # port into this set; doing that here by catalogue number proves the remedy
 # reopens the service rather than recording an intention nothing acts on.
 for spec in "ipp $IPP" "samba $SMB" "nfs $NFS"; do
     set -- $spec
-    if nft add element inet apex allowed_tcp "{ $2 }" 2>/dev/null; then
+    if nft add element inet rime allowed_tcp "{ $2 }" 2>/dev/null; then
         echo "CASE $1-allowed    $(tcp_probe "$2")"
     else
         echo "CASE $1-allowed    SETUP"
@@ -488,9 +488,9 @@ echo "── a hotspot, where this machine is the server on the link ───�
            "the TCP half of 53 is open with no hotspot running"
 
 [ "$(verdict hs-add)" = SAID-SO ] \
-    && ok "\`apex firewall hotspot add\` opens the link and says which" \
-    || bad "\`apex firewall hotspot add\` opens the link and says which" \
-           "the command the NM dispatcher runs did not report opening apexhost"
+    && ok "\`rime firewall hotspot add\` opens the link and says which" \
+    || bad "\`rime firewall hotspot add\` opens the link and says which" \
+           "the command the NM dispatcher runs did not report opening rimehost"
 
 [ "$(verdict hs-dhcp-open)" = ARRIVED ] \
     && ok "the client's DHCP DISCOVER now reaches dnsmasq" \
@@ -560,9 +560,9 @@ echo "── and the remedy the tools are supposed to name ───────
 for spec in "ipp $IPP" "samba $SMB" "nfs $NFS"; do
     set -- $spec
     case "$(verdict "$1-allowed")" in
-        ARRIVED) ok "\`apex firewall allow $1\` would make port $2 reachable" ;;
-        SETUP)   skipped "\`apex firewall allow $1\` would make port $2 reachable" "the set would not take an element" ;;
-        *)       bad "\`apex firewall allow $1\` would make port $2 reachable" \
+        ARRIVED) ok "\`rime firewall allow $1\` would make port $2 reachable" ;;
+        SETUP)   skipped "\`rime firewall allow $1\` would make port $2 reachable" "the set would not take an element" ;;
+        *)       bad "\`rime firewall allow $1\` would make port $2 reachable" \
                      "$2 stayed shut with $2 in allowed_tcp, so the advice would be wrong" ;;
     esac
 done

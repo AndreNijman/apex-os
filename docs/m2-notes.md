@@ -1,8 +1,8 @@
-# APEX-OS M2 notes (shell provisioner + edition branding + greeter finalization)
+# Rime OS M2 notes (shell provisioner + edition branding + greeter finalization)
 
-M2 wires the public **APEX Shell** (`github.com/AndreNijman/apex-shell`) into
+M2 wires the public **Rime Shell** (`github.com/AndreNijman/rime-shell`) into
 the image as a per-user first-login clone, drives the boot-splash branding from
-the edition stamp, and finalizes the apex-greet display manager's session
+the edition stamp, and finalizes the rime-greet display manager's session
 picker.
 
 Everything M2 adds lives in the **flavor** Containerfiles (`Containerfile.daily`
@@ -15,8 +15,8 @@ both flavors; only the Plymouth theme differs per edition.
 
 | Path | What |
 |------|------|
-| `files/system/units/apex-shell-firstrun.service` | **New.** Per-user systemd USER unit; runs the provisioner once per user (run-once gate + retry-on-failure). |
-| `files/system/libexec/apex-shell-firstrun` | **New.** The provisioner script (installed to `/usr/libexec/`). Clones APEX Shell + seeds per-user config. |
+| `files/system/units/rime-shell-firstrun.service` | **New.** Per-user systemd USER unit; runs the provisioner once per user (run-once gate + retry-on-failure). |
+| `files/system/libexec/rime-shell-firstrun` | **New.** The provisioner script (installed to `/usr/libexec/`). Clones Rime Shell + seeds per-user config. |
 | `files/desktop/wayland-sessions/niri.desktop` | **New.** niri wayland-session for the greeter picker. |
 | `Containerfile.daily` | **Edited.** Adds Plymouth (chartreuse) + provisioner wiring + session curation. |
 | `Containerfile.gaming` | **Edited.** Adds Plymouth (gold) + provisioner wiring + session curation (after the GPU stage). |
@@ -26,8 +26,8 @@ both flavors; only the Plymouth theme differs per edition.
 
 ### Why a per-user clone (not /etc/skel)
 
-APEX Shell is a **live git checkout** the user updates in place: its own
-auto-updater pulls `~/.local/src/apex-shell`, and Quickshell hot-reloads from
+Rime Shell is a **live git checkout** the user updates in place: its own
+auto-updater pulls `~/.local/src/rime-shell`, and Quickshell hot-reloads from
 there. An `/etc/skel` copy would be a detached, non-git snapshot the updater and
 hot-reload could not drive. Every user therefore gets their own clone at first
 login.
@@ -35,47 +35,47 @@ login.
 ### Why it replicates the shell's install.sh instead of running it
 
 The public repo's `install.sh` (+ `dots-extra/install-arch.sh`, inspected during
-this work) **cannot** run on APEX-OS:
+this work) **cannot** run on Rime OS:
 
-- it `die`s at once on any non-Arch distro (APEX-OS is `fedora-bootc:43`);
+- it `die`s at once on any non-Arch distro (Rime OS is `fedora-bootc:43`);
 - step 4 runs `sudo pacman`/AUR installs, which an unprivileged user service
   cannot do and which are pointless because the image already carries every
   dependency;
 - it requires a **pre-existing** `~/.config/hypr` config (else it `die`s).
 
-`/usr/libexec/apex-shell-firstrun` instead reproduces the installer's per-user
+`/usr/libexec/rime-shell-firstrun` instead reproduces the installer's per-user
 *seeding* steps (not package installation), and keeps them close to the
 original so the shell's updater + hot-reload keep working:
 
 1. **Wait for network**: polls `git ls-remote` for up to ~30 s (first login can
    beat NetworkManager online). Still offline → exit non-zero, marker NOT written.
-2. **Clone** `https://github.com/AndreNijman/apex-shell` shallow (`--depth 1`)
-   into `~/.local/src/apex-shell` (or `fetch`/`reset --hard` an existing clone;
+2. **Clone** `https://github.com/AndreNijman/rime-shell` shallow (`--depth 1`)
+   into `~/.local/src/rime-shell` (or `fetch`/`reset --hard` an existing clone;
    scrubs a partial dir from a failed prior run).
 3. **Render matugen**: `sed`s `@SRCDIR@`/`@HOME@` in the repo's
-   `src/config/matugen.toml.in` into `~/.config/apex-shell/matugen.toml`
+   `src/config/matugen.toml.in` into `~/.config/rime-shell/matugen.toml`
    (matugen needs absolute paths; this is install.sh step 5).
 4. **Seed config dirs/defaults** (install-arch.sh step 6):
-   `~/.config/apex-shell/src/user_data/{config_Provider.json=conf, keybinds.json={}}`,
+   `~/.config/rime-shell/src/user_data/{config_Provider.json=conf, keybinds.json={}}`,
    `~/.config/hypr/shaders`, `~/.config/matugen/templates`,
-   `~/.cache/apex-shell/colors.json`, `hypridle.conf`, and
-   `~/Pictures/Wallpapers` (shell's shipped wallpapers + the system APEX
+   `~/.cache/rime-shell/colors.json`, `hypridle.conf`, and
+   `~/Pictures/Wallpapers` (shell's shipped wallpapers + the system Rime
    wallpaper).
 5. **Hyprland autostart** (install-arch.sh step 5, self-seeding): if no
    `~/.config/hypr/hyprland.conf` exists it seeds one (distro default if present,
-   else a minimal usable base), then appends the APEX Shell `exec-once` block
+   else a minimal usable base), then appends the Rime Shell `exec-once` block
    (guarded by a marker so re-runs never duplicate it).
-6. **niri autostart** (APEX-OS addition: the shell's installer covers only
+6. **niri autostart** (Rime OS addition: the shell's installer covers only
    Hyprland, but the shell auto-detects niri and the greeter offers it): if niri
    is installed, seed `~/.config/niri/config.kdl` with `spawn-at-startup` for the
    shell.
-7. **Marker**: `touch ~/.config/apex-shell/.provisioned` **only on full
+7. **Marker**: `touch ~/.config/rime-shell/.provisioned` **only on full
    success** (`set -e`). Its presence makes systemd skip the unit on every
    future login.
 
 ### Idempotency & failure tolerance
 
-- The unit's `ConditionPathExists=!%h/.config/apex-shell/.provisioned` skips the
+- The unit's `ConditionPathExists=!%h/.config/rime-shell/.provisioned` skips the
   whole unit once provisioned.
 - The script no-ops if the marker exists, and a guard protects every seeding
   step (`-n` / marker greps / `|| true` on non-critical copies).
@@ -85,9 +85,9 @@ original so the shell's updater + hot-reload keep working:
 
 ### Enablement
 
-`systemctl --global enable apex-shell-firstrun.service` at image-build time
+`systemctl --global enable rime-shell-firstrun.service` at image-build time
 (in the flavor Containerfiles) symlinks the unit at
-`/usr/lib/systemd/user/apex-shell-firstrun.service` into every user's
+`/usr/lib/systemd/user/rime-shell-firstrun.service` into every user's
 `default.target.wants`. The unit uses `WantedBy=default.target` (not
 `graphical-session.target`) because the user manager always reaches
 default.target when it starts at login, while a bare Hyprland/greetd session
@@ -111,48 +111,48 @@ The flavor image stamps the edition once, and everything downstream reads it:
 Containerfile.daily   → /usr/lib/os-release: VARIANT="Daily"  VARIANT_ID=daily
 Containerfile.gaming  → /usr/lib/os-release: VARIANT="Gaming" VARIANT_ID=gaming
         │
-        ├─ apex-greet (greeter)  GreetContext.qml reads /etc/apex-greet/edition
+        ├─ rime-greet (greeter)  GreetContext.qml reads /etc/rime-greet/edition
         │     override → else /etc/os-release VARIANT_ID → else "mono".
         │     daily → chartreuse spark + #d9f99d accent
         │     gaming → gold spark + #fde047 accent      ← VERIFIED, no change
         │
         ├─ Plymouth (boot splash)  set per-flavor in the Containerfile:
-        │     daily  → apex-os-chartreuse
-        │     gaming → apex-os-gold
+        │     daily  → rime-os-chartreuse
+        │     gaming → rime-os-gold
         │
-        └─ Wallpaper  /usr/share/backgrounds/apex/default.jpg (base installs it)
+        └─ Wallpaper  /usr/share/backgrounds/rime/default.jpg (base installs it)
               greeter → hardcoded to that path (GreetSurface.qml) ← VERIFIED
               shell   → provisioner copies it into ~/Pictures/Wallpapers
 ```
 
-**apex-greet edition resolution: verified, no change needed.** `GreetContext.qml`
-resolves the edition from `/etc/apex-greet/edition` → `/etc/os-release`
+**rime-greet edition resolution: verified, no change needed.** `GreetContext.qml`
+resolves the edition from `/etc/rime-greet/edition` → `/etc/os-release`
 `VARIANT_ID` → `mono`. The flavor stamps (`VARIANT_ID=daily` / `=gaming`) are
 the same strings the greeter special-cases, so the greeter picks the
 chartreuse/gold spark + accent with no extra configuration.
 
 **Plymouth.** Each flavor:
-1. `COPY files/branding/plymouth/apex-os-<color> /usr/share/plymouth/themes/…`
+1. `COPY files/branding/plymouth/rime-os-<color> /usr/share/plymouth/themes/…`
 2. `dnf5 install plymouth plymouth-scripts plymouth-plugin-script` (own layer).
    The theme needs `plymouth-plugin-script` because its `.plymouth` declares
    `ModuleName=script`.
-3. `plymouth-set-default-theme apex-os-<color>` (sets the default; **no** `-R`).
+3. `plymouth-set-default-theme rime-os-<color>` (sets the default; **no** `-R`).
 4. **Rebuild the initramfs ourselves**, the bootc-correct step. bootc boots
    from `/usr/lib/modules/<kver>/initramfs.img`, not a host-side `/boot`
    initrd, so `-R`'s host dracut path is wrong here. We run
    `dracut --force --no-hostonly --reproducible --zstd --add plymouth --kver
-   <kver>` (kver from `/usr/lib/apex-cachyos-kver`, which the base stamps),
+   <kver>` (kver from `/usr/lib/rime-cachyos-kver`, which the base stamps),
    mirroring the base's Stage-1 flags, which bakes the theme into the shipped
    initramfs. In gaming this step sits **after** the NVIDIA akmod stage so it is
    the last initramfs regeneration.
-5. Kernel args: `/usr/lib/bootc/kargs.d/20-apex-plymouth.toml` → `quiet splash`
+5. Kernel args: `/usr/lib/bootc/kargs.d/20-rime-plymouth.toml` → `quiet splash`
    (per `files/branding/plymouth/README.md`). **Tradeoff:** `quiet` raises the
    console loglevel, trimming the verbose serial output the base's
-   `10-apex-serial.toml` enabled for CI/QEMU observability (warnings/errors still
+   `10-rime-serial.toml` enabled for CI/QEMU observability (warnings/errors still
    print). Drop `quiet` if you want noisier boot logs; bootc merges all
    `kargs.d` files.
 
-## 3. apex-greet DM finalization (session picker)
+## 3. rime-greet DM finalization (session picker)
 
 `GreetContext.qml` enumerates `/usr/share/wayland-sessions/*.desktop` (parses
 `Name` + `Exec`) into the greeter's `‹ Session ›` picker. The task: offer
@@ -167,10 +167,10 @@ chartreuse/gold spark + accent with no extra configuration.
   logins. The flavors `rm -f` `sway.desktop` + `labwc.desktop`. (Removing the
   session files does not touch the sway binary the greeter host uses.)
   > **SUPERSEDED for labwc.** The greeter now offers labwc as a first-class user
-  > session via `apex-labwc.desktop`, with its own APEX config seeded per user.
+  > session via `rime-labwc.desktop`, with its own Rime config seeded per user.
   > The *stock* `labwc.desktop` still gets removed for the reason above (it
-  > launches labwc bare, with no APEX Shell), so both statements hold: the stock
-  > entry stays deleted, and a separate APEX entry goes in after it.
+  > launches labwc bare, with no Rime Shell), so both statements hold: the stock
+  > entry stays deleted, and a separate Rime entry goes in after it.
 - **Hyprland session**: the `hyprland` package ships its own
   `hyprland.desktop`; the flavors keep it and, as a defence, write a minimal one
   if it is missing.
@@ -190,7 +190,7 @@ discipline):
 
 | Package (Fedora) | Why | Source |
 |---|---|---|
-| `git-core` | The provisioner clones/fetches APEX Shell at first login. `git-core` is sufficient (no need for the full `git` metapackage). | Fedora |
+| `git-core` | The provisioner clones/fetches Rime Shell at first login. `git-core` is sufficient (no need for the full `git` metapackage). | Fedora |
 | `niri` | The greeter offers a niri session; the binary must exist for it to launch (and for the provisioner to seed niri autostart). Fedora's `niri` also ships its own `/usr/share/wayland-sessions/niri.desktop` (ours overrides it). | Fedora |
 
 For now each flavor installs `plymouth` / `plymouth-scripts` /
@@ -201,7 +201,7 @@ editions install them). If you hoist them, keep the per-flavor
 differs per edition and the initramfs regeneration has to follow the theme
 change.
 
-### Required for APEX Shell to run
+### Required for Rime Shell to run
 
 These come from the shell's `flake.nix` + `dots-extra/install-arch.sh`. The
 base's desktop stack has `hyprland`, `quickshell`, `qt6*`, `foot`,
@@ -268,10 +268,10 @@ the M1 recipe (`docs/m1-notes.md`):
 
 ```sh
 # 1. Build base, then a flavor (rootful; kernel %posttrans + akmod need device access)
-sudo podman build --isolation=chroot -f Containerfile.base -t apex-os-base:latest .
+sudo podman build --isolation=chroot -f Containerfile.base -t rime-os-base:latest .
 sudo podman build --isolation=chroot \
-  --build-arg BASE=localhost/apex-os-base:latest \
-  -f Containerfile.daily -t apex-os:daily .
+  --build-arg BASE=localhost/rime-os-base:latest \
+  -f Containerfile.daily -t rime-os:daily .
 #   (gaming: -f Containerfile.gaming --build-arg GPU=mesa|nvidia)
 #   NOTE: builds require the base package additions in §4 (git-core, niri, …).
 
@@ -282,7 +282,7 @@ sudo podman run --rm --privileged \
   -v "$(pwd)/output":/output \
   -v /var/lib/containers/storage:/var/lib/containers/storage \
   quay.io/centos-bootc/bootc-image-builder:latest \
-  --type qcow2 --rootfs xfs --local apex-os:daily
+  --type qcow2 --rootfs xfs --local rime-os:daily
 
 # 3. Boot it (KVM host)
 qemu-system-x86_64 -m 4096 -smp 4 -enable-kvm \
@@ -295,31 +295,31 @@ Checks to make in the VM:
 
 - **Plymouth:** the correct spark (chartreuse=daily / gold=gaming) shows during
   boot. `plymouth-set-default-theme --list` inside the image should list
-  `apex-os-<color>`; `lsinitrd /usr/lib/modules/<kver>/initramfs.img | grep -i
+  `rime-os-<color>`; `lsinitrd /usr/lib/modules/<kver>/initramfs.img | grep -i
   plymouth` should show the theme + script plugin baked in.
-- **Greeter:** apex-greet paints with the edition spark/accent; the `‹ Session ›`
+- **Greeter:** rime-greet paints with the edition spark/accent; the `‹ Session ›`
   picker offers **Hyprland + niri** and **not** sway/labwc.
-  > **SUPERSEDED.** The picker now also offers **labwc (APEX)**. sway remains
+  > **SUPERSEDED.** The picker now also offers **labwc (Rime)**. sway remains
   > greeter-host only.
   (The base's open item, live layer-shell render under sway on real GL, is
   unchanged and still a HW-verify item; see `docs/m1-notes.md`.)
-- **Provisioner:** on first login the provisioner clones `~/.local/src/apex-shell`,
-  and `~/.config/apex-shell/{matugen.toml,.provisioned}` + `~/.config/hypr/
-  hyprland.conf` (with the APEX autostart block) exist; `systemctl --user status
-  apex-shell-firstrun` shows a clean oneshot. Log out and in once if the shell
+- **Provisioner:** on first login the provisioner clones `~/.local/src/rime-shell`,
+  and `~/.config/rime-shell/{matugen.toml,.provisioned}` + `~/.config/hypr/
+  hyprland.conf` (with the Rime autostart block) exist; `systemctl --user status
+  rime-shell-firstrun` shows a clean oneshot. Log out and in once if the shell
   did not autostart in the first session (timing caveat above). Re-login does
   no work (Condition gate).
-- **SELinux (carried from apex-greet README):** if `last-user`/`last-session`
+- **SELinux (carried from rime-greet README):** if `last-user`/`last-session`
   prefill is missing, check `ausearch -m avc -ts recent` for a denied write to
-  `/var/lib/apex-greet` by the `greetd` domain.
+  `/var/lib/rime-greet` by the `greetd` domain.
 
 ### Static validation done on this branch (no image/systemd/GL available here)
 
-- `bash -n files/system/libexec/apex-shell-firstrun`: clean.
-- `apex-shell-firstrun.service` parsed as INI; `%h` specifier + all
+- `bash -n files/system/libexec/rime-shell-firstrun`: clean.
+- `rime-shell-firstrun.service` parsed as INI; `%h` specifier + all
   `[Unit]/[Service]/[Install]` keys intact. (`systemd-analyze verify` was not
   available on this host; run it in the Fedora build container.)
-- Cloned the public `apex-shell` shallow and read its `install.sh` +
+- Cloned the public `rime-shell` shallow and read its `install.sh` +
   `dots-extra/install-arch.sh` end to end, to model the provisioner's seeding on
   them.
 - Cross-checked the Plymouth theme dirs, wallpaper, and greeter QML paths

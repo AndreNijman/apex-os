@@ -1,11 +1,11 @@
-# APEX-OS installer live-environment rootfs.
+# Rime OS installer live-environment rootfs.
 #
-# A small Fedora rootfs (NOT the APEX image) that boots as a live ISO and runs
-# the GTK installer over the apex-install engine. The netinstall build downloads
-# the APEX image (a digest pinned at ISO build time) during the install; the
+# A small Fedora rootfs (NOT the Rime image) that boots as a live ISO and runs
+# the GTK installer over the rime-install engine. The netinstall build downloads
+# the Rime image (a digest pinned at ISO build time) during the install; the
 # offline build embeds it in this env's container storage and installs from it.
 #
-# NOTE: the APEX image is NOT embedded here. `skopeo copy … containers-storage:`
+# NOTE: the Rime image is NOT embedded here. `skopeo copy … containers-storage:`
 # cannot run inside a podman build (the build container's fs is overlayfs and
 # containers/storage refuses overlay-on-overlay). build-live-iso.sh injects the
 # store into the exported rootfs on the HOST instead (step 3 there).
@@ -17,7 +17,7 @@ FROM registry.fedoraproject.org/fedora:43
 # ── Firmware: its OWN transaction, with weak deps ENABLED on purpose ─────────
 # The live env shipped with /lib/firmware absent entirely, so i915/amdgpu could
 # not initialise, KMS failed, and the installer black-screened on an Acer Aspire
-# that only booted with nomodeset (apex-logs 48).
+# that only booted with nomodeset (rime-logs 48).
 #
 # The first fix — adding `linux-firmware` to the big install below — did NOT
 # work, and the failure was silent: `linux-firmware` is a METAPACKAGE whose GPU
@@ -95,7 +95,7 @@ RUN set -eux; \
 # was only ever in the live environment.
 #
 # newt (whiptail) is REMOVED on purpose: the whiptail text installer is being
-# deleted from apex-install in this same change. It existed as a fallback, and
+# deleted from rime-install in this same change. It existed as a fallback, and
 # on real hardware it is where users got STRANDED — the GUI failed to start
 # silently (missing typelib + no seat, both fixed here) and the launcher
 # dropped them into a text UI they were never meant to see. The GUI is now the
@@ -108,9 +108,9 @@ RUN set -eux; \
 # NetworkManager-wifi, now this). python3-gobject only *recommends* it, so
 # install_weak_deps=False silently dropped it and the built image had no
 # /usr/lib64/girepository-1.0/cairo-1.0.typelib. Result, measured in
-# localhost/apex-installer:latest: EVERY `import gi` fails with
+# localhost/rime-installer:latest: EVERY `import gi` fails with
 #   ImportError: Typelib file for namespace 'cairo', version '1.0' not found
-# so apex-installer-gui died before it could draw a window and the installer
+# so rime-installer-gui died before it could draw a window and the installer
 # fell back to the text UI on real hardware. `dnf repoquery --whatprovides`
 # names gobject-introspection as the owner of that typelib.
 #
@@ -154,20 +154,20 @@ RUN dnf -y install --setopt=install_weak_deps=False \
 
 # The installer TUI.
 # The install ENGINE (also the text-mode UI), the graphical front end, and the
-# launcher that picks between them. One engine, two front ends: apex-installer-gui
-# collects answers and drives `apex-install --headless`, so every disk guard and
+# launcher that picks between them. One engine, two front ends: rime-installer-gui
+# collects answers and drives `rime-install --headless`, so every disk guard and
 # safety check lives in exactly one place.
-COPY apex-install         /usr/bin/apex-install
-COPY apex-installer-gui   /usr/bin/apex-installer-gui
-COPY apex-installer-launch /usr/bin/apex-installer-launch
+COPY rime-install         /usr/bin/rime-install
+COPY rime-installer-gui   /usr/bin/rime-installer-gui
+COPY rime-installer-launch /usr/bin/rime-installer-launch
 # The session script owns the cage loop so the keyboard page can restart the
 # compositor (a wlroots keymap is compiled once, at startup, from
-# XKB_DEFAULT_LAYOUT). apex-installer-launch EXECS this path, so an image
+# XKB_DEFAULT_LAYOUT). rime-installer-launch EXECS this path, so an image
 # missing it has no installer at all.
-COPY apex-installer-session /usr/bin/apex-installer-session
-RUN chmod 0755 /usr/bin/apex-install /usr/bin/apex-installer-gui \
-                /usr/bin/apex-installer-launch \
-                /usr/bin/apex-installer-session
+COPY rime-installer-session /usr/bin/rime-installer-session
+RUN chmod 0755 /usr/bin/rime-install /usr/bin/rime-installer-gui \
+                /usr/bin/rime-installer-launch \
+                /usr/bin/rime-installer-session
 
 # ── Build-time assertions: the GUI stack must provably work ──────────────────
 # Every previous instance of this class of bug shipped SILENTLY: the missing
@@ -196,23 +196,23 @@ RUN set -eu; \
     if ldd /usr/bin/cage | grep 'not found'; then \
         echo "FATAL: cage has unresolved shared libraries (above)"; exit 1; fi; \
     echo "OK: every shared library cage links against resolves"; \
-    python3 -m py_compile /usr/bin/apex-installer-gui \
-        || { echo "FATAL: apex-installer-gui has a Python syntax error"; exit 1; }; \
+    python3 -m py_compile /usr/bin/rime-installer-gui \
+        || { echo "FATAL: rime-installer-gui has a Python syntax error"; exit 1; }; \
     rm -rf /usr/bin/__pycache__; \
-    echo "OK: apex-installer-gui compiles"; \
-    bash -n /usr/bin/apex-install \
-        || { echo "FATAL: apex-install has a bash syntax error"; exit 1; }; \
-    echo "OK: apex-install parses"; \
-    bash -n /usr/bin/apex-installer-launch \
-        || { echo "FATAL: apex-installer-launch has a bash syntax error"; exit 1; }; \
-    echo "OK: apex-installer-launch parses"; \
-    bash -n /usr/bin/apex-installer-session \
-        || { echo "FATAL: apex-installer-session has a bash syntax error"; exit 1; }; \
-    echo "OK: apex-installer-session parses"; \
-    _t=$(grep -oE '^GUI_CMD=\(([^ )]+)' /usr/bin/apex-installer-launch | cut -d'(' -f2); \
+    echo "OK: rime-installer-gui compiles"; \
+    bash -n /usr/bin/rime-install \
+        || { echo "FATAL: rime-install has a bash syntax error"; exit 1; }; \
+    echo "OK: rime-install parses"; \
+    bash -n /usr/bin/rime-installer-launch \
+        || { echo "FATAL: rime-installer-launch has a bash syntax error"; exit 1; }; \
+    echo "OK: rime-installer-launch parses"; \
+    bash -n /usr/bin/rime-installer-session \
+        || { echo "FATAL: rime-installer-session has a bash syntax error"; exit 1; }; \
+    echo "OK: rime-installer-session parses"; \
+    _t=$(grep -oE '^GUI_CMD=\(([^ )]+)' /usr/bin/rime-installer-launch | cut -d'(' -f2); \
     [ -x "$_t" ] \
-        || { echo "FATAL: apex-installer-launch execs '$_t', which is not an executable in this image"; exit 1; }; \
-    echo "OK: apex-installer-launch's exec target $_t is present and executable"; \
+        || { echo "FATAL: rime-installer-launch execs '$_t', which is not an executable in this image"; exit 1; }; \
+    echo "OK: rime-installer-launch's exec target $_t is present and executable"; \
     [ -r /usr/share/X11/xkb/rules/base.lst ] \
         || { echo "FATAL: xkb base.lst missing — the keyboard page would list no layouts"; exit 1; }; \
     echo "OK: xkb layout database present"; \
@@ -220,14 +220,14 @@ RUN set -eu; \
         || { echo "FATAL: seatd.service unit file missing"; exit 1; }; \
     echo "OK: seatd.service unit present"
 
-# Unattended-install marker. apex-install only honours `apex.unattended` when
+# Unattended-install marker. rime-install only honours `rime.unattended` when
 # this file exists — baked ONLY for test/CI builds (ALLOW_UNATTENDED=1). The
 # PRODUCTION build (default 0) omits it, so the flashed USB has no unattended
 # path at all. build-live-iso.sh also drops the unattended boot-menu entry in
 # production.
 ARG ALLOW_UNATTENDED=0
 RUN if [ "$ALLOW_UNATTENDED" = 1 ]; then \
-        install -Dm644 /dev/null /usr/share/apex-installer/allow-unattended; \
+        install -Dm644 /dev/null /usr/share/rime-installer/allow-unattended; \
         echo "installer image: UNATTENDED TEST MODE ENABLED"; \
     else echo "installer image: production build (no unattended)"; fi
 
@@ -242,14 +242,14 @@ RUN if [ "$ALLOW_UNATTENDED" = 1 ]; then \
 # page and the carry-the-network-over step need it), but waiting for a route is
 # pointless in an installer that works fully offline, and it blocks the boot
 # transaction for up to 90s on any machine with an unplugged Ethernet port.
-# apex-installer.service is Type=idle, so systemd caps that delay at 5s rather
+# rime-installer.service is Type=idle, so systemd caps that delay at 5s rather
 # than 90 — but 5 extra seconds of blank console before the GUI paints is still
 # 5 seconds in which a user with no feedback concludes the installer has hung.
 # Observed in the QEMU boot test: "Starting NetworkManager Wait Online" sat on
 # the console with nothing after it.
-COPY apex-installer.service /usr/lib/systemd/system/apex-installer.service
+COPY rime-installer.service /usr/lib/systemd/system/rime-installer.service
 RUN systemctl set-default multi-user.target \
-    && systemctl enable apex-installer.service \
+    && systemctl enable rime-installer.service \
     && systemctl enable NetworkManager.service \
     && systemctl enable seatd.service \
     && systemctl mask getty@tty1.service \
@@ -258,7 +258,7 @@ RUN systemctl set-default multi-user.target \
 
 # Live-env-only root login (tty2 / serial) for rescue & debugging. This is the
 # throwaway live session, not the installed system.
-RUN echo 'root:apex' | chpasswd
+RUN echo 'root:rime' | chpasswd
 
 # A friendly hostname in the live env.
-RUN echo apex-installer > /etc/hostname
+RUN echo rime-installer > /etc/hostname

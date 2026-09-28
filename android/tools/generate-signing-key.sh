@@ -1,6 +1,6 @@
 #!/usr/bin/env bash
 # ─────────────────────────────────────────────────────────────────────────────
-#  generate-signing-key.sh — make the key that every APEX Remote release is
+#  generate-signing-key.sh — make the key that every Rime Remote release is
 #  signed with, once, on your own machine.
 #
 #      android/tools/generate-signing-key.sh
@@ -29,7 +29,7 @@
 #  directory is lost, GitHub keeps signing releases perfectly well with a key
 #  you can never retrieve — it has the shape of a backup without being one. The
 #  day that copy is also lost, or the day you need to sign anything outside
-#  Actions, every APEX Remote install in the world becomes un-upgradable:
+#  Actions, every Rime Remote install in the world becomes un-upgradable:
 #  Android accepts an update only from the key that signed what is installed,
 #  and the owner's only escape is to uninstall, which destroys their paired
 #  device key and their agent history.
@@ -38,8 +38,8 @@
 #  of them is not network-attached.
 #
 #  Options, none of which you normally need:
-#      --out DIR       where to write it (default: ~/apex-android-signing)
-#      --alias NAME    the key alias (default: apex-release)
+#      --out DIR       where to write it (default: ~/rime-android-signing)
+#      --alias NAME    the key alias (default: rime-release)
 #      --dname STRING  the certificate subject
 #      --repo DIR      the checkout whose published fingerprint to update
 #                      (default: the one this script lives in)
@@ -50,7 +50,7 @@ set -uo pipefail
 fatal() { echo "" >&2; echo "FATAL: $*" >&2; exit 1; }
 say()   { printf '%s\n' "$*"; }
 
-out=""; alias_name="apex-release"; dname="CN=APEX-OS, O=APEX-OS, C=AU"
+out=""; alias_name="rime-release"; dname="CN=APEX-OS, O=Rime OS, C=AU"
 repo=""; write_pin=1
 while [ $# -gt 0 ]; do
     case "$1" in
@@ -68,7 +68,7 @@ here=$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)
 android=$(dirname "$here")
 [ -n "$repo" ] || repo=$(dirname "$android")
 pin_file="$repo/android/signing-certificate.sha256"
-[ -n "$out" ] || out="$HOME/apex-android-signing"
+[ -n "$out" ] || out="$HOME/rime-android-signing"
 
 # ── This does not run in CI ──────────────────────────────────────────────────
 #
@@ -160,8 +160,8 @@ chmod 600 "$pw_file"
 # MEASURED, not assumed: a PKCS12 keystore cannot hold a key password that
 # differs from the store password — keytool says
 #   "Different store and key passwords not supported for PKCS12 KeyStores"
-# and ignores the one you gave it. That is why APEX_KEY_PASSWORD and
-# APEX_KEYSTORE_PASSWORD below are the same value, and it is not an oversight.
+# and ignores the one you gave it. That is why APEX_KEY_PASSWORD and  (rime-rename: keep: the GitHub secrets keep their names)
+# APEX_KEYSTORE_PASSWORD below are the same value, and it is not an oversight.  (rime-rename: keep: the GitHub secrets keep their names)
 ks="$out/release.jks"
 if ! "$KEYTOOL" -genkeypair \
         -storetype PKCS12 \
@@ -228,10 +228,10 @@ if [ "$write_pin" = 1 ]; then
     for doc in "$repo/README.md" "$repo"/docs/*.md; do
         [ -f "$doc" ] || continue
         grep -q 'fingerprint:begin' "$doc" 2>/dev/null || continue
-        APEX_FP="$fingerprint" python3 - "$doc" <<'PY' || fatal "could not update the fingerprint in $doc"
+        RIME_FP="$fingerprint" python3 - "$doc" <<'PY' || fatal "could not update the fingerprint in $doc"
 import os, re, sys
 path = sys.argv[1]
-fp = os.environ["APEX_FP"]
+fp = os.environ["RIME_FP"]
 text = open(path, encoding="utf-8").read()
 new, n = re.subn(
     r"(<!-- fingerprint:begin -->\n).*?(\n<!-- fingerprint:end -->)",
@@ -250,7 +250,7 @@ PY
 fi
 
 cat > "$out/BACKUP-README.txt" <<BACKUP
-APEX Remote — Android release signing key
+Rime Remote — Android release signing key
 =========================================
 
 Generated: $(date -Is)
@@ -261,7 +261,7 @@ SHA-256 certificate fingerprint:
 
 WHAT THIS IS
 
-  release.jks     the private key every published APEX Remote APK is signed
+  release.jks     the private key every published Rime Remote APK is signed
                   with, plus its self-signed certificate.
   password.txt    the password to it. The keystore is useless without this
                   file, so the two are ONE backup unit, never separated.
@@ -271,7 +271,7 @@ WHAT THIS IS
 WHAT IT COSTS TO LOSE IT
 
   Android will install an update only if it is signed by the same key as the
-  version already installed. Lose this key and every APEX Remote install in
+  version already installed. Lose this key and every Rime Remote install in
   the world is frozen: the only way for an owner to move to a newer build is
   to uninstall, and uninstalling destroys the phone's paired device key and
   its history. There is no server-side fix and no appeal.
@@ -289,7 +289,7 @@ WHILE IT STILL EXISTS, IT CAN BE ROTATED
   \`apksigner rotate\` produces a SigningCertificateLineage that lets a NEW key
   take over from this one, and this app already enables the v3 signature that
   carries it. That works only while this key still exists. The procedure is in
-  docs/android-signing.md of the apex-os repository — read it before you need
+  docs/android-signing.md of the rime-os repository — read it before you need
   it, because after this key is lost it is worth nothing.
 BACKUP
 chmod 600 "$out/BACKUP-README.txt"
@@ -330,22 +330,22 @@ say ""
 say "2. Then give GitHub its working copy. Four secrets, read from files so"
 say "   that no password is ever typed into a shell and into its history:"
 say ""
-say "     gh secret set APEX_KEYSTORE_BASE64   -R AndreNijman/apex-os < $out/keystore.base64"
-say "     gh secret set APEX_KEYSTORE_PASSWORD -R AndreNijman/apex-os < $pw_file"
-say "     gh secret set APEX_KEY_PASSWORD      -R AndreNijman/apex-os < $pw_file"
-say "     printf '%s' '$alias_name' | gh secret set APEX_KEY_ALIAS -R AndreNijman/apex-os"
+say "     gh secret set APEX_KEYSTORE_BASE64   -R AndreNijman/apex-os < $out/keystore.base64"  # rime-rename: keep (the GitHub secret names; the old repo name redirects)
+say "     gh secret set APEX_KEYSTORE_PASSWORD -R AndreNijman/apex-os < $pw_file"  # rime-rename: keep (the GitHub secret names; the old repo name redirects)
+say "     gh secret set APEX_KEY_PASSWORD      -R AndreNijman/apex-os < $pw_file"  # rime-rename: keep (the GitHub secret names; the old repo name redirects)
+say "     printf '%s' '$alias_name' | gh secret set APEX_KEY_ALIAS -R AndreNijman/apex-os"  # rime-rename: keep (the GitHub secret names; the old repo name redirects)
 say ""
-say "   APEX_KEY_PASSWORD is the same value as APEX_KEYSTORE_PASSWORD on"
+say "   APEX_KEY_PASSWORD is the same value as APEX_KEYSTORE_PASSWORD on"  # rime-rename: keep (the GitHub secret names; the old repo name redirects)
 say "   purpose: a PKCS12 keystore cannot have two different passwords."
 say ""
 say "3. Check they arrived — the names are readable even though the values are"
 say "   not, which is the whole point:"
 say ""
-say "     gh secret list -R AndreNijman/apex-os"
+say "     gh secret list -R AndreNijman/apex-os"  # rime-rename: keep (the GitHub secret names; the old repo name redirects)
 say ""
 say "4. Then a dry run before any real release:"
 say ""
-say "     gh workflow run release-android.yml -R AndreNijman/apex-os -f dry_run=true"
+say "     gh workflow run release-android.yml -R AndreNijman/apex-os -f dry_run=true"  # rime-rename: keep (the GitHub secret names; the old repo name redirects)
 say ""
 say "The password is NOT printed here on purpose. It is in $pw_file."
 say "──────────────────────────────────────────────────────────────────────────"

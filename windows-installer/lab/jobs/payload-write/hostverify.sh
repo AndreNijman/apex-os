@@ -1,5 +1,5 @@
 #!/bin/bash
-# Runs inside localhost/apex-winlab:latest. /w = winlab scratch, /o = mine.
+# Runs inside localhost/apex-winlab:latest (rime-rename: keep: the lab image). /w = winlab scratch, /o = mine.
 set -uo pipefail
 echo "--- pristine fixture-a.raw must still be the 10:20 baseline ---"
 stat -c '%n  %s bytes  mtime %y' /w/fixture-a.raw

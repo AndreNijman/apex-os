@@ -39,7 +39,7 @@ ROOT="$(cd "$(dirname "${BASH_SOURCE[0]}")/.." && pwd)"
 
 # Before the temp tree, the daemon or the build: this suite needs an
 # environment the daemon will observe as LOCAL, and that has to be arranged
-# from outside the suite. `apex-agentd` places a peer from its cgroup, and a
+# from outside the suite. `rime-agentd` places a peer from its cgroup, and a
 # process started by systemd — a CI job, a timer-dispatched agent — is in
 # neither a login session nor a user service, so §7 refuses it before the
 # behaviour under test is reached. Here it stops the suite starting the
@@ -48,10 +48,10 @@ ROOT="$(cd "$(dirname "${BASH_SOURCE[0]}")/.." && pwd)"
 # session it created or — saying why, out loud — in place; either way the
 # suite runs exactly once, so this is `exec` and not a call. Same block, and
 # the same reason, as tests/test-privilege-requests.sh.
-if [ -z "${APEX_LOGIN_SESSION_WRAPPED:-}" ] && [ -x "${ROOT}/tests/in-login-session.sh" ]; then
+if [ -z "${RIME_LOGIN_SESSION_WRAPPED:-}" ] && [ -x "${ROOT}/tests/in-login-session.sh" ]; then
     exec "${ROOT}/tests/in-login-session.sh" "${BASH_SOURCE[0]}" "$@"
 fi
-WORK="$(mktemp -d -p /var/tmp apex-profile-XXXXXX)"
+WORK="$(mktemp -d -p /var/tmp rime-profile-XXXXXX)"
 
 pass=0; fail=0
 ok()  { printf 'PASS  %s\n' "$1"; pass=$((pass + 1)); }
@@ -80,17 +80,17 @@ for tool in cargo python3 bwrap; do
 done
 
 section "the binaries"
-if ! cargo build --manifest-path "${ROOT}/apexd/Cargo.toml" \
-        --bin apex-agentd --bin apex >/dev/null 2>&1; then
-    bad "apex-agentd and apex build"
+if ! cargo build --manifest-path "${ROOT}/rimed/Cargo.toml" \
+        --bin rime-agentd --bin rime >/dev/null 2>&1; then
+    bad "rime-agentd and rime build"
     printf '\nprofile: %d passed, %d failed\n' "$pass" "$fail"
     exit 1
 fi
-ok "apex-agentd and apex build"
+ok "rime-agentd and rime build"
 
-BIN="${CARGO_TARGET_DIR:-${ROOT}/apexd/target}/debug"
-AGENTD="${BIN}/apex-agentd"
-APEX="${BIN}/apex"
+BIN="${CARGO_TARGET_DIR:-${ROOT}/rimed/target}/debug"
+AGENTD="${BIN}/rime-agentd"
+Rime="${BIN}/rime"
 
 # ── a fixture profile ────────────────────────────────────────────────────────
 # The shape of a real ~/.claude: instructions, a skill, a slash command, a
@@ -158,11 +158,11 @@ SECRETS=(PRIVATE-TRANSCRIPT PRIVATE-SNAPSHOT PRIVATE-OAUTH PRIVATE-DAEMON-KEY
 
 # ── list and inspect ─────────────────────────────────────────────────────────
 section "list and inspect"
-out="$("$APEX" agent profile list 2>&1)"
+out="$("$Rime" agent profile list 2>&1)"
 printf '%s' "$out" | grep -q '^claude' \
     && ok "list names the claude profile" || { bad "list names the claude profile"; echo "$out"; }
 
-"$APEX" agent profile inspect claude --json > "${WORK}/inspect.json" 2>"${WORK}/inspect.err"
+"$Rime" agent profile inspect claude --json > "${WORK}/inspect.json" 2>"${WORK}/inspect.err"
 python3 - "${WORK}/inspect.json" <<'PY' > "${WORK}/inspect.out" 2>&1
 import json, sys
 rows = {r["path"]: r for r in json.load(open(sys.argv[1]))}
@@ -188,7 +188,7 @@ grep -qx 'ok' "${WORK}/inspect.out" && [ "$(sort -u "${WORK}/inspect.out" | tr -
 
 # ── doctor ───────────────────────────────────────────────────────────────────
 section "doctor"
-out="$("$APEX" agent profile doctor claude 2>&1)"; rc=$?
+out="$("$Rime" agent profile doctor claude 2>&1)"; rc=$?
 missing=""
 for want in config statusline hooks commands skills plugins mcp credentials; do
     printf '%s' "$out" | grep -qx "$want" || missing="${missing} ${want}"
@@ -210,21 +210,21 @@ printf '%s' "$out" | grep -q '.credentials.json' && printf '%s' "$out" | grep -q
 
 # A skill directory with no SKILL.md does not load, and nothing upstream says so.
 mkdir -p "${C}/skills/broken"
-out="$("$APEX" agent profile doctor claude 2>&1)"; rc=$?
+out="$("$Rime" agent profile doctor claude 2>&1)"; rc=$?
 [ "$rc" != 0 ] && printf '%s' "$out" | grep -q 'broken' \
     && ok "a skill that will not load is a problem and a non-zero exit" \
     || { bad "a skill that will not load is a problem and a non-zero exit"; echo "$out"; }
 rmdir "${C}/skills/broken"
 
-out="$("$APEX" agent profile doctor codex 2>&1)"
+out="$("$Rime" agent profile doctor codex 2>&1)"
 printf '%s' "$out" | grep -q 'no profile description' \
-    && ok "an agent APEX has no profile for is refused by name" \
-    || { bad "an agent APEX has no profile for is refused by name"; echo "$out"; }
+    && ok "an agent Rime has no profile for is refused by name" \
+    || { bad "an agent Rime has no profile for is refused by name"; echo "$out"; }
 
 # ── export ───────────────────────────────────────────────────────────────────
 section "export"
 BUNDLE="${WORK}/bundle"
-out="$("$APEX" agent profile export claude --to "$BUNDLE" 2>&1)"; rc=$?
+out="$("$Rime" agent profile export claude --to "$BUNDLE" 2>&1)"; rc=$?
 [ "$rc" = 0 ] && ok "export writes a bundle" || { bad "export writes a bundle"; echo "$out"; }
 
 for want in profile/CLAUDE.md profile/settings.json profile/skills/demo/SKILL.md \
@@ -271,7 +271,7 @@ grep -qx ok "${WORK}/manifest.out" \
     && ok "the bundle keeps the names and drops the values" \
     || { bad "the bundle keeps the names and drops the values"; cat "${WORK}/manifest.out"; }
 
-out="$("$APEX" agent profile export claude --to "$BUNDLE" 2>&1)"
+out="$("$Rime" agent profile export claude --to "$BUNDLE" 2>&1)"
 printf '%s' "$out" | grep -q 'pass --force' \
     && ok "export refuses to write over an occupied directory" \
     || { bad "export refuses to write over an occupied directory"; echo "$out"; }
@@ -283,14 +283,14 @@ mkdir -p "${OTHER}/.claude"
 printf '{"model":"sonnet","env":{"GITHUB_TOKEN":"ghp_THEIR-OWN-VALUE"}}\n' \
     > "${OTHER}/.claude/settings.json"
 
-out="$(HOME="$OTHER" "$APEX" agent profile sync claude --from "$BUNDLE" --dry-run 2>&1)"
+out="$(HOME="$OTHER" "$Rime" agent profile sync claude --from "$BUNDLE" --dry-run 2>&1)"
 printf '%s' "$out" | grep -q 'would change' \
     && ok "a dry run says what it would do and does nothing" \
     || { bad "a dry run says what it would do and does nothing"; echo "$out"; }
 [ ! -e "${OTHER}/.claude/CLAUDE.md" ] \
     && ok "a dry run wrote nothing" || bad "a dry run wrote nothing"
 
-out="$(HOME="$OTHER" "$APEX" agent profile sync claude --from "$BUNDLE" 2>&1)"; rc=$?
+out="$(HOME="$OTHER" "$Rime" agent profile sync claude --from "$BUNDLE" 2>&1)"; rc=$?
 [ "$rc" = 0 ] && ok "sync applies the bundle" || { bad "sync applies the bundle"; echo "$out"; }
 [ -f "${OTHER}/.claude/skills/demo/SKILL.md" ] \
     && ok "the skills arrived" || bad "the skills arrived"
@@ -311,7 +311,7 @@ printf '%s' "$out" | grep -q 'GITHUB_TOKEN' \
     && ok "the operator is told which values the bundle could not carry" \
     || { bad "the operator is told which values the bundle could not carry"; echo "$out"; }
 
-out="$(HOME="$OTHER" "$APEX" agent profile sync claude --from "$BUNDLE" 2>&1)"
+out="$(HOME="$OTHER" "$Rime" agent profile sync claude --from "$BUNDLE" 2>&1)"
 printf '%s' "$out" | grep -q 'nothing to change' \
     && ok "a second sync of the same bundle changes nothing" \
     || { bad "a second sync of the same bundle changes nothing"; echo "$out"; }
@@ -322,7 +322,7 @@ mkdir -p "${HOSTILE}/home/.ssh"
 printf 'ssh-rsa AAAA attacker\n' > "${HOSTILE}/home/.ssh/authorized_keys"
 printf '{"version":1,"agent":"claude","files":[{"path":"home/.ssh/authorized_keys","class":"reusable"}]}\n' \
     > "${HOSTILE}/manifest.json"
-HOME="$OTHER" "$APEX" agent profile sync claude --from "$HOSTILE" >/dev/null 2>&1
+HOME="$OTHER" "$Rime" agent profile sync claude --from "$HOSTILE" >/dev/null 2>&1
 [ ! -e "${OTHER}/.ssh/authorized_keys" ] \
     && ok "a manifest naming a path outside the profile reaches nothing" \
     || bad "a manifest naming a path outside the profile reaches nothing"
@@ -404,7 +404,7 @@ mkdir -p "${HOME}/.ssh"; printf 'PRIVATE-SSH-KEY\n' > "${HOME}/.ssh/id_ed25519"
 mkdir -p "${WORK}/proj"
 "$AGENTD" > "${WORK}/agentd.log" 2>&1 &
 DAEMON_PID=$!
-SOCK="${XDG_RUNTIME_DIR}/apex-agentd/control.sock"
+SOCK="${XDG_RUNTIME_DIR}/rime-agentd/control.sock"
 for _ in $(seq 1 50); do [ -S "$SOCK" ] && break; sleep 0.1; done
 if [ -S "$SOCK" ]; then
     ok "the daemon came up on an isolated socket"
@@ -415,7 +415,7 @@ else
     exit 1
 fi
 
-out="$("$APEX" agent run --detach --agent claude --sandbox project --network offline \
+out="$("$Rime" agent run --detach --agent claude --sandbox project --network offline \
         --cwd "${WORK}/proj" 2>&1)"
 id="$(printf '%s' "$out" | sed -n 's/^session \([0-9]*\) .*/\1/p' | head -1)"
 if [ -n "$id" ]; then
@@ -517,8 +517,8 @@ GIT_SEEN="${WORK}/proj/probe-git.txt"
 GH_SEEN="${WORK}/proj/probe-gh.txt"
 if [ -s "$GIT_SEEN" ]; then
     grep -q 'bin/git' "$GIT_SEEN" \
-        && ok "the session's git is APEX's shim" \
-        || { bad "the session's git is APEX's shim"; cat "$GIT_SEEN"; }
+        && ok "the session's git is Rime's shim" \
+        || { bad "the session's git is Rime's shim"; cat "$GIT_SEEN"; }
     grep -q 'git version' "$GIT_SEEN" \
         && ok "and it still answers as git for everything it does not broker" \
         || { bad "the shim did not pass through"; cat "$GIT_SEEN"; }

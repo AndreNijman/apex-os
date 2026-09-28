@@ -1,0 +1,72 @@
+# Rime OS — add the Flathub remote on first boot.
+#
+# Why a first-boot unit and not a build-time `flatpak remote-add`:
+# on bootc, `flatpak remote-add --system` writes to /var/lib/flatpak, but /var
+# is machine-local state that bootc seeds once and never updates — a remote
+# added at build time is fragile across image upgrades. Adding it on the
+# running system is the robust, uBlue-idiomatic pattern.
+#
+# Idempotent: `--if-not-exists` is a no-op if the remote already exists, and the
+# stamp keeps the unit from doing work on every subsequent boot. The shipped
+# /etc/flatpak/flathub.flatpakrepo carries Flathub's URL + GPG key, so no remote
+# repo definition needs fetching (only network to actually install apps later).
+[Unit]
+StartLimitIntervalSec=20min
+StartLimitBurst=10
+Description=Rime OS: register the Flathub Flatpak remote (first boot)
+Documentation=https://flathub.org
+After=network-online.target
+Wants=network-online.target
+ConditionPathExists=!/var/lib/flatpak/.rime-flathub-added
+# The shipped repo file must be present to add the remote from it.
+ConditionPathExists=/etc/flatpak/flathub.flatpakrepo
+
+# ── Boot never waits for this ────────────────────────────────────────────────
+# A target orders itself After= every unit it Wants, so with default
+# dependencies multi-user.target (and graphical.target behind it) waited for
+# this oneshot: every attempt, and every 60 s RestartSec pause in between. On a
+# first boot with no network that was ten failed attempts a minute apart, and
+# the console showed "A start job is running … (9min / no limit)", because a
+# Type=oneshot's TimeoutStartSec defaults to infinity. DefaultDependencies=no
+# removes that implicit ordering; the four lines below put back what the
+# defaults provided, so the unit still starts after basic system setup and
+# still stops cleanly at shutdown. It keeps running and retrying in the
+# background; boot just stops waiting for it.
+DefaultDependencies=no
+Requires=sysinit.target
+After=sysinit.target basic.target
+Conflicts=shutdown.target
+Before=shutdown.target
+
+[Service]
+Type=oneshot
+RemainAfterExit=yes
+ExecStart=/usr/bin/flatpak remote-add --if-not-exists --system flathub /etc/flatpak/flathub.flatpakrepo
+# Stamp only on success (remote-add above); co-located with flatpak state,
+# which remote-add has just created.
+ExecStartPost=/usr/bin/touch /var/lib/flatpak/.rime-flathub-added
+# Retry inside this boot rather than only on the next one.
+#
+# `SuccessExitStatus=0` used to sit here, with a comment claiming it stopped a
+# networkless boot from wedging. It never did anything: 0 is already success by
+# definition, so the line was a no-op and the unit simply entered `failed` the
+# moment remote-add did. A laptop that associates with Wi-Fi a few
+# seconds after network-online.target fires — which that target permits, since
+# it means "a network is configured", not "the internet answers" — therefore
+# showed `Failed Units: 1` in every login greeting until the next reboot, for a
+# background download of an optional application.
+#
+# Type=oneshot accepts Restart=on-failure (only always/on-success are refused),
+# so the transient case now resolves itself. The burst is bounded: ten tries a
+# minute apart, then stop. The stamp is still written only on success, so a
+# genuinely offline machine installs on a later boot exactly as before.
+Restart=on-failure
+RestartSec=60s
+# One attempt may not hang. remote-add reads a local .flatpakrepo and
+# finishes in well under a second when it works; two minutes only catches a
+# stall (a DNS lookup or TCP connect that never answers), which then counts
+# as a failure and is retried like one.
+TimeoutStartSec=2min
+
+[Install]
+WantedBy=multi-user.target

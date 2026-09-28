@@ -1,6 +1,6 @@
 # shellcheck shell=bash
 # ─────────────────────────────────────────────────────────────────────────────
-#  tests/lib/atspi.sh — a PRIVATE accessibility bus, for asking an APEX surface
+#  tests/lib/atspi.sh — a PRIVATE accessibility bus, for asking a Rime surface
 #  what a screen reader actually receives.
 #
 #  Source it; do not execute it.
@@ -14,7 +14,7 @@
 #  QQuickItems — it speaks AT-SPI over D-Bus and reads whatever the toolkit
 #  bridge chose to publish. Those two trees are NOT the same tree: the bridge
 #  drops items, collapses wrappers, suppresses names (see the passwordEdit note
-#  in test-apex-greet-a11y.sh) and applies its own role mapping. An assertion on
+#  in test-rime-greet-a11y.sh) and applies its own role mapping. An assertion on
 #  the QML side cannot see any of that.
 #
 #  So this file stands up the real thing: a D-Bus session bus, the real
@@ -152,7 +152,7 @@ atspi_require() {
 }
 
 atspi_start() {
-    ATSPI_W="$(mktemp -d "${TMPDIR:-/tmp}/apex-atspi.XXXXXX")" || return 1
+    ATSPI_W="$(mktemp -d "${TMPDIR:-/tmp}/rime-atspi.XXXXXX")" || return 1
     chmod 700 "$ATSPI_W"
     ATSPI_RUNTIME="$ATSPI_W/run"
     mkdir -p "$ATSPI_RUNTIME" && chmod 700 "$ATSPI_RUNTIME" || return 1
@@ -233,8 +233,8 @@ EOF
     # success, so the properties read back false and Qt's bridge publishes
     # nothing at all.
     #
-    # Measured on a booted APEX desktop, 2026-09-18, with a private HOME (the
-    # one apex-shell's tests/lib/headless.sh creates, which has no dconf
+    # Measured on a booted Rime desktop, 2026-09-18, with a private HOME (the
+    # one rime-shell's tests/lib/headless.sh creates, which has no dconf
     # database):
     #
     #     dconf backend : Set IsEnabled <true> -> () ... GetAll -> false, false
@@ -256,7 +256,7 @@ EOF
     # internally and the write always worked. That is why this was invisible
     # until a suite ran the stack against a private HOME on a desktop machine.
     #
-    # The copy of this file in apex-shell carries the same fix. FIX BOTH.
+    # The copy of this file in rime-shell carries the same fix. FIX BOTH.
     GSETTINGS_BACKEND=memory \
         "$ATSPI_BUS_LAUNCHER" >"$ATSPI_W/launcher.out" 2>"$ATSPI_W/launcher.err" &
     ATSPI_LAUNCHER_PID=$!
@@ -356,7 +356,7 @@ EOF
     # Reachability is still the OTHER gate, and still the shipped greeter's
     # problem: an application with no D-Bus session bus cannot resolve
     # org.a11y.Bus and publishes nothing whatever these flags say. See
-    # tests/test-apex-greet-session-bus.sh.
+    # tests/test-rime-greet-session-bus.sh.
     #
     # QT_LINUX_ACCESSIBILITY_ALWAYS_ON is still deliberately NOT set. It forces
     # the bridge past every check including reachability, which would make this

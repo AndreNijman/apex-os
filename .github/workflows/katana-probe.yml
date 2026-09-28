@@ -83,23 +83,23 @@ jobs:
           deny "read his ssh dir"                ls /var/home/andre/.ssh
           deny "read his known_hosts"            cat /var/home/andre/.ssh/known_hosts
           deny "read his gh credentials"         cat /var/home/andre/.config/gh/hosts.yml
-          deny "list his APEX worktrees"         ls /var/home/andre/Projects/apex
+          deny "list his APEX worktrees"         ls /var/home/andre/Projects/apex  # rime-rename: keep (a real path on katana, outside any image)
           deny "list his games library"          ls /var/home/andre/Games
           deny "list his dev scratch"            ls /var/lab/scratch
 
           echo "--- the runner's own credential ---"
-          deny "read the token that registers the runner" cat /etc/apex-runner/gh-token
+          deny "read the token that registers the runner" cat /etc/apex-runner/gh-token  # rime-rename: keep (katana's real path)
 
           echo "--- the runner's own backups of Andre's data ---"
           # This unit archived his Steam Proton prefix while repartitioning.
           # It is his data, this unit put it there, and a prefix can carry
           # cached credentials — so the probe checks what it created, not only
           # what was already on the machine.
-          deny "read the backup of his Steam prefix" ls /var/lib/apex/katana-runner-20260920
+          deny "read the backup of his Steam prefix" ls /var/lib/apex/katana-runner-20260920  # rime-rename: keep (katana's real path)
 
           echo "--- tamper with the runner itself ---"
           deny "write into the runner's bin/"    touch /var/lab/runner/actions-runner/bin/pwned
-          deny "edit the runner's systemd unit"  touch /etc/systemd/system/apex-github-runner.service
+          deny "edit the runner's systemd unit"  touch /etc/systemd/system/apex-github-runner.service  # rime-rename: keep (katana's real unit)
           # THE ATTACK THE ABOVE TWO DO NOT COVER, and which succeeded until
           # 2026-09-20: write permission on a DIRECTORY lets you rename or
           # unlink entries in it whatever their ownership. `touch bin/pwned` is

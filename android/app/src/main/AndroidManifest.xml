@@ -27,9 +27,9 @@
 
     <!-- Keeping this app from drifting away from the machines it talks to.
 
-         This phone is not running APEX-OS. The APK is in no image and `apex
+         This phone is not running Rime OS. The APK is in no image and `rime
          update` cannot reach it, so unlike the ChatGPT and Claude DESKTOP apps
-         — which must not self-update, because `sudo apex update` already moves
+         — which must not self-update, because `sudo rime update` already moves
          them — there is no other path here. Without this permission the app
          only ever moves forward when its owner remembers to go and look, and a
          client that falls behind the OS is the exact failure the protocol
@@ -123,7 +123,7 @@
         android:icon="@mipmap/ic_launcher"
         android:label="@string/app_name"
         android:supportsRtl="true"
-        android:theme="@style/Theme.ApexRemote">
+        android:theme="@style/Theme.RimeRemote">
 
         <!--
           `allowBackup` is false and the extraction rules deny everything, on
@@ -153,7 +153,8 @@
                 <action android:name="android.intent.action.VIEW" />
                 <category android:name="android.intent.category.DEFAULT" />
                 <category android:name="android.intent.category.BROWSABLE" />
-                <data android:scheme="apex-remote" />
+                <!-- rime-rename: keep: Pairing.SCHEME, the scheme every desktop prints -->
+                <data android:scheme="apex-remote" /> <!-- rime-rename: keep -->
             </intent-filter>
         </activity>
 
@@ -170,7 +171,7 @@
             android:name=".update.UpdateInstallReceiver"
             android:exported="false">
             <intent-filter>
-                <action android:name="com.apexos.remote.UPDATE_STATUS" />
+                <action android:name="com.rimeos.remote.UPDATE_STATUS" />
             </intent-filter>
         </receiver>
 

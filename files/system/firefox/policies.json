@@ -1,5 +1,5 @@
 {
-  "//": "APEX-OS Firefox defaults (apex-logs 28-dark-mode.md). Sets dark UI + dark",
+  "//": "Rime OS Firefox defaults (rime-logs 28-dark-mode.md). Sets dark UI + dark",
   "//2": "content by default; Status 'default' means users can still change it.",
   "policies": {
     "Preferences": {
@@ -21,5 +21,5 @@
       }
     }
   },
-  "//3": "Homepage/newtab: Fedora's firefox package sets browser.startup.homepage to the literal data: URL 'data:text/plain,browser.startup.homepage=https://start.fedoraproject.org/' and pins a Fedora Start Page tile. Enterprise policy is applied AFTER default prefs, so this wins regardless of what the package ships; the matching zz-apex-default-prefs.js is the belt to this braces. Status 'default' keeps both user-changeable."
+  "//3": "Homepage/newtab: Fedora's firefox package sets browser.startup.homepage to the literal data: URL 'data:text/plain,browser.startup.homepage=https://start.fedoraproject.org/' and pins a Fedora Start Page tile. Enterprise policy is applied AFTER default prefs, so this wins regardless of what the package ships; the matching zz-rime-default-prefs.js is the belt to this braces. Status 'default' keeps both user-changeable."
 }

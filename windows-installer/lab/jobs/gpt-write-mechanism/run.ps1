@@ -1,5 +1,5 @@
 # ─────────────────────────────────────────────────────────────────────────────
-#  jobs/gpt-write-mechanism -- the measurement docs/apex-owns-its-esp.md
+#  jobs/gpt-write-mechanism -- the measurement docs/rime-owns-its-esp.md
 #  deliberately left undecided.
 #
 #  The second product decision (2026-09-21, b137f03f) settled that the TOOL
@@ -41,14 +41,14 @@
 #  authorises, and round 38 already measured that Windows drops the volume
 #  object the instant the type GUID changes.
 #
-#  apex-windows-installer.exe still cannot write. Section 0 of
+#  rime-windows-installer.exe still cannot write. Section 0 of
 #  tests/test-windows-installer.sh scans windows-installer/src/ for *.rs only;
 #  this job is PowerShell in the lab and is deliberately outside it. The .exe's
 #  role here is the same as in payload-write: it is the thing asked whether the
 #  result is coherent.
 # ─────────────────────────────────────────────────────────────────────────────
 $ErrorActionPreference = 'Continue'
-$exe = Join-Path $PSScriptRoot 'apex-windows-installer.exe'
+$exe = Join-Path $PSScriptRoot 'rime-windows-installer.exe'
 
 $LINUX_GUID  = '0fc63daf-8483-4772-8e79-3d69d8477de4'
 $BASIC_GUID  = 'ebd0a0a2-b9e5-4433-87c0-68b6b72699c7'
@@ -72,7 +72,7 @@ function Invoke-Installer { param([string]$Cmd) & cmd /c "`"$exe`" $Cmd 2>&1" }
 function Get-Crc32 {
     param([byte[]]$Bytes, [int]$Offset = 0, [int]$Length = -1)
     if ($Length -lt 0) { $Length = $Bytes.Length - $Offset }
-    return [ApexLab.Native]::Crc32($Bytes, $Offset, $Length)
+    return [RimeLab.Native]::Crc32($Bytes, $Offset, $Length)
 }
 
 # ── raw device I/O ──────────────────────────────────────────────────────────
@@ -205,7 +205,7 @@ function Test-GptConsistent {
 #    GET_DRIVE_LAYOUT_EX  CTL_CODE(7,0x14,BUFFERED,ANY)        = 0x00070050
 #    SET_DRIVE_LAYOUT_EX  CTL_CODE(7,0x15,BUFFERED,READ|WRITE) = 0x0007C054
 #    UPDATE_PROPERTIES    CTL_CODE(7,0x50,BUFFERED,ANY)        = 0x00070140
-Add-Type -Namespace ApexLab -Name Native -MemberDefinition @'
+Add-Type -Namespace RimeLab -Name Native -MemberDefinition @'
 public static uint Crc32(byte[] data, int offset, int length) {
     uint[] table = new uint[256];
     for (uint i = 0; i < 256; i++) {
@@ -256,7 +256,7 @@ function Invoke-Ioctl {
         $out = if ($OutLen -gt 0) { New-Object byte[] $OutLen } else { $null }
         $br  = [uint32]0
         $inLen = if ($null -eq $In) { [uint32]0 } else { [uint32]$In.Length }
-        $ok = [ApexLab.Native]::DeviceIoControl($fs.SafeFileHandle, $Code, $In, $inLen,
+        $ok = [RimeLab.Native]::DeviceIoControl($fs.SafeFileHandle, $Code, $In, $inLen,
                                                 $out, [uint32]$OutLen, [ref]$br, [System.IntPtr]::Zero)
         $err = if ($ok) { 0 } else { [System.Runtime.InteropServices.Marshal]::GetLastWin32Error() }
         return [pscustomobject]@{ Ok = $ok; Error = $err; Bytes = $br; Out = $out; What = $What }
@@ -266,10 +266,10 @@ function Invoke-Ioctl {
 # ── which disks are we talking about ────────────────────────────────────────
 '=== disks ==='
 $sysDisk = Get-Disk | Where-Object { $_.IsSystem -or $_.IsBoot } | Select-Object -First 1
-if (-not $sysDisk) { $sysDisk = Get-Disk | Where-Object FriendlyName -eq 'APEX-LAB-SYSTEM' | Select-Object -First 1 }
-$faDisk  = Get-Disk | Where-Object FriendlyName -eq 'APEX-FIXTURE-A' | Select-Object -First 1
+if (-not $sysDisk) { $sysDisk = Get-Disk | Where-Object FriendlyName -eq 'RIME-LAB-SYSTEM' | Select-Object -First 1 }
+$faDisk  = Get-Disk | Where-Object FriendlyName -eq 'RIME-FIXTURE-A' | Select-Object -First 1
 if (-not $sysDisk) { 'FATAL: no system disk found'; exit 2 }
-if (-not $faDisk)  { 'FATAL: no APEX-FIXTURE-A found'; exit 2 }
+if (-not $faDisk)  { 'FATAL: no RIME-FIXTURE-A found'; exit 2 }
 $sysPath = "\\.\PhysicalDrive$($sysDisk.Number)"
 $faPath  = "\\.\PhysicalDrive$($faDisk.Number)"
 "system disk : $($sysDisk.FriendlyName) number=$($sysDisk.Number) IsSystem=$($sysDisk.IsSystem) IsBoot=$($sysDisk.IsBoot) -> $sysPath"

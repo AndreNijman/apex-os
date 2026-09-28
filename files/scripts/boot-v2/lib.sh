@@ -5,7 +5,7 @@
 #  Sourced by the scripts beside it. Everything here operates on files inside a
 #  work directory the caller names; nothing in this directory may read or write
 #  the host's ESP, `/boot`, `/boot/efi`, `/efi` or EFI variables. See
-#  AGENTS.md "Touching a machine's boot path" — the katana is a real APEX
+#  AGENTS.md "Touching a machine's boot path" — the katana is a real Rime
 #  machine and the build box at the same time, so a guest ESP is always an
 #  image file and `--esp-path`-style arguments are always explicit.
 #
@@ -65,7 +65,7 @@ die()  { printf '!!! %s\n' "$*" >&2; exit 1; }
 # raw ONCE into a cache directory and reused. This is the whole reason the lab
 # does not simply use the raw 2 MB pair, and finding it cost a full LUKS
 # scenario reporting six failures that were all one missing firmware feature.
-BOOTV2_FW_CACHE="${APEX_BOOTLAB_FW:-${TMPDIR:-/tmp}/apex-bootlab-fw}"
+BOOTV2_FW_CACHE="${RIME_BOOTLAB_FW:-${TMPDIR:-/tmp}/rime-bootlab-fw}"
 
 # _ovmf_raw CODE|VARS — echo a raw firmware image path, converting if needed.
 _ovmf_raw() {
@@ -138,7 +138,7 @@ ovmf_build_id() {
 # those two changes the enforcement as well as the code. A dbx update, which
 # the firmware-change scenario does use, moves PCR 7 and never PCR 0.
 #
-# So the second build is an INPUT, named by $APEX_BOOTLAB_FW_ALT: a raw `.fd`
+# So the second build is an INPUT, named by $RIME_BOOTLAB_FW_ALT: a raw `.fd`
 # or a `.qcow2` (converted here, once, like the discovered pair). It must be a
 # Secure Boot build of a different edk2 revision; the scenario that uses it
 # asserts both rather than trusting this comment.
@@ -147,7 +147,7 @@ ovmf_build_id() {
 # things to a reader: 1 nobody asked for one, 2 the path is wrong, 3 the
 # conversion failed.
 ovmf_code_alt() {
-    local p="${APEX_BOOTLAB_FW_ALT:-}"
+    local p="${RIME_BOOTLAB_FW_ALT:-}"
     [[ -n "$p" ]] || return 1
     [[ -f "$p" ]] || return 2
     case "$p" in
@@ -170,7 +170,7 @@ ovmf_code_alt() {
 # and Microsoft certificates already enrolled as PK/KEK/db. virt-fw-vars'
 # --add-db APPENDS, and --no-microsoft only means "do not add more", so
 # building on that template leaves a firmware that trusts Microsoft's UEFI CA.
-# Every "only APEX-signed images load" assertion would then be false while
+# Every "only Rime-signed images load" assertion would then be false while
 # still passing, because a Fedora-signed shim would satisfy db too.
 ovmf_vars_template() {
     local v
@@ -217,10 +217,10 @@ esp_disk_create() {
     rm -f "$disk" "$disk.esp"
     truncate -s "${total_mib}M" "$disk"
     parted -s "$disk" mklabel gpt \
-        mkpart APEXESP fat32 1MiB "$(( esp_mib + 1 ))MiB" \
+        mkpart RIMEESP fat32 1MiB "$(( esp_mib + 1 ))MiB" \
         set 1 esp on
     truncate -s "${esp_mib}M" "$disk.esp"
-    mkfs.vfat -F 32 -n APEXESP "$disk.esp" >/dev/null
+    mkfs.vfat -F 32 -n RIMEESP "$disk.esp" >/dev/null
     # Verify the partition really is an ESP: `set 1 esp on` silently doing
     # nothing would produce a disk that boots but on which bless-boot cannot
     # find the ESP, which is exactly the failure this layout exists to avoid.
@@ -290,14 +290,14 @@ esp_mkdir_p() {
 # The clean shutdown at the end is not hygiene. swtpm writes its NV state when
 # it exits, and starting qemu's swtpm on a half-written state file loses the
 # sealed object — which reaches the guest as an unlock failure indistinguishable
-# from a broken PCR policy. apex-luks-enroll learned this the same way.
+# from a broken PCR policy. rime-luks-enroll learned this the same way.
 swtpm_session() {
     local state="$1" tag="$2"; shift 2
-    # Not 2321: apex-luks-enroll owns that port and a scenario may run while its
+    # Not 2321: rime-luks-enroll owns that port and a scenario may run while its
     # emulator is still shutting down. A collision would present as a sealed
     # object that cannot be unsealed, which is the failure this whole file is
     # trying to make legible.
-    local port="${APEX_SWTPM_SESSION_PORT:-2381}"
+    local port="${RIME_SWTPM_SESSION_PORT:-2381}"
     [[ -d "$state" ]] || die "swtpm_session: no TPM state directory at $state"
 
     swtpm socket --tpm2 --tpmstate "dir=$state" \
@@ -557,7 +557,7 @@ bad()  { BOOTV2_FAIL=$((BOOTV2_FAIL + 1)); printf '  FAIL %s\n' "$*" >&2; }
 # properties exists. A check that could not be PERFORMED is neither a pass nor
 # a failure, and this program's standing rule is that COULD-NOT-RUN must never
 # be recorded as either. `ok` would buy a green square by redefining the word;
-# `bad` would report a laptop's kernel configuration as an APEX defect.
+# `bad` would report a laptop's kernel configuration as a Rime defect.
 #
 # It does not fail the run — a CI machine without S3 has disproved nothing —
 # but the summary line says COULD-NOT-RUN in capitals and lists every reason,

@@ -23,7 +23,7 @@ Mapping all 27 sections against the phases:
 | §22 boot architecture | 10 | P2 |
 | **§15 unified search and command surface** | **none** | **P3** |
 | **§19 recovery, repair and disposable execution** | **none** | **P3** |
-| **§21 make APEX understand intent** | **none** | **P3** |
+| **§21 make Rime understand intent** | **none** | **P3** |
 | §1, §24, §25, §26, §27 | n/a | direction, criteria, anti-goals, architecture diagram, positioning; nothing to implement |
 
 That leaves P3 with exactly three sections. Two are substantial features; the
@@ -34,13 +34,13 @@ third is one missing concept.
 §21's example is a **Task**:
 
 ```
-Task: Fix APEX installer bug
-  Project:     apex-os
+Task: Fix Rime installer bug
+  Project:     rime-os
   Environment: Fedora build capsule
   Windows:     editor, browser, logs
   Agents:      Claude, Codex reviewer
   Checkpoint:  before changes
-  Permissions: project files, GitHub apex-os, network
+  Permissions: project files, GitHub rime-os, network
 ```
 
 Seven of the eight concepts it lists already exist and shipped in P0-P2:
@@ -56,7 +56,7 @@ eight features.
 ## §15 already has its extension point
 
 P1's §16 work shipped a **`launcher-provider`** plugin extension point
-(apex-shell, "feat(plugins): launcher-provider and quick-settings-tile"). So
+(rime-shell, "feat(plugins): launcher-provider and quick-settings-tile"). So
 §15's "provider API so third parties can add results" exists. Beyond it, §15
 asks for the set of **built-in** providers (apps, files, settings, windows,
 clipboard, calculator, commands, projects, agents, SSH hosts, package search),
@@ -71,12 +71,12 @@ reach, and the preview stops a fuzzy match from doing something irreversible.
 
 ## Standing constraints, unchanged
 
-* Nothing merged to `apex-os/main` or `apex-shell/main` until Andre asks for
-  the single image build. Merge targets so far: apex-os **#35** (P1), apex-os
-  **#36** (P2), apex-shell **#15** (P2 §20 shell half).
+* Nothing merged to `rime-os/main` or `rime-shell/main` until Andre asks for
+  the single image build. Merge targets so far: rime-os **#35** (P1), rime-os
+  **#36** (P2), rime-shell **#15** (P2 §20 shell half).
 * Never cause a polkit or keyring password prompt.
 * Never run a test that opens a window on the developer's desktop.
-  `APEX_LABWC_SESSION_TESTS` stays unset; `test-apex-firstrun.sh` now asserts
+  `RIME_LABWC_SESSION_TESTS` stays unset; `test-rime-firstrun.sh` now asserts
   its own socket count for this reason.
 * The katana on the LAN is free for builds, VMs, clippy and shellcheck.
 * Conventional Commits, zero AI attribution, author AndreNijman only.
@@ -92,7 +92,7 @@ reach, and the preview stops a fuzzy match from doing something irreversible.
 
 ## The UI mismatch had one cause, and it was measurable
 
-Andre reported that the Agent tab "didn't match apex shell at all". The cause
+Andre reported that the Agent tab "didn't match rime shell at all". The cause
 was a single systematic error rather than a matter of taste.
 
 `Theme` exposes two scalers, and they are not interchangeable:
@@ -126,7 +126,7 @@ copied the surrounding idiom and contributed twelve of the 42. A wrong local
 convention spreads through copying, which is the argument for a check rather
 than a one-off fix.
 
-The fix is apex-shell `ad53f5d` on `p2/remote-agent-status` (PR #15). All 32
+The fix is rime-shell `ad53f5d` on `p2/remote-agent-status` (PR #15). All 32
 `font.pixelSize` calls still use `fs()`; the conversion asserted this rather
 than assuming it.
 
@@ -157,15 +157,15 @@ complete, merge everything and kick off the real final image build.**
 
 Merge order, and why:
 
-1. **apex-shell first.** PR #15 (P2 §20 + the scaler fix), then the P3 shell
-   branches. apex-shell has no image build of its own, and `Containerfile.base`
+1. **rime-shell first.** PR #15 (P2 §20 + the scaler fix), then the P3 shell
+   branches. rime-shell has no image build of its own, and `Containerfile.base`
    resolves the shell by `git ls-remote refs/heads/main` **at build time**, so
    the shell must be on `main` before the OS build starts, or the image vendors
    a shell without this work.
-2. **apex-os P1 #35**, then **P2 #36**, then P3. P2 branched from P1 and P3 from
+2. **rime-os P1 #35**, then **P2 #36**, then P3. P2 branched from P1 and P3 from
    P2, so this is the order they were built in.
 3. `build-image.yml` fires on push to `main` for paths
-   `Containerfile*|files/**|apexd/**|config/**|kernel/**|.github/**`. Therefore
+   `Containerfile*|files/**|rimed/**|config/**|kernel/**|.github/**`. Therefore
    **merging to `main` IS the final build**, with no separate dispatch.
 
 Before merging, verify rather than assume: every suite green, `cargo clippy
@@ -174,7 +174,7 @@ that opens a window on his desktop. Do not merge red.
 
 ## The polish pass found a worse bug than the one it was sent for
 
-Branch apex-shell `p3/ui-polish`, four commits, pushed.
+Branch rime-shell `p3/ui-polish`, four commits, pushed.
 
 **Two home-dashboard cards never followed the wallpaper.**
 `src/services/home/CalendarCard.qml` and `ProfileCard.qml` had
@@ -261,7 +261,7 @@ refactor with real regression risk, and it did not cause the reported defect.
 
 ## The §24 audit, and what it changed
 
-APEX was audited against the roadmap's own definition of done (§24's ten user
+Rime was audited against the roadmap's own definition of done (§24's ten user
 rows and §25's non-negotiable rules), deliberately looking for claims that were
 true for the wrong reason. Verdict: **2 of 10 rows met, 6 partly, 2 not met**,
 and one §25 rule broken outright. The audit is at
@@ -270,7 +270,7 @@ and one §25 rule broken outright. The audit is at
 The audit was only worth running if it found something. It found the
 following, all since fixed.
 
-### `apex game status` was reporting the plan, not the outcome
+### `rime game status` was reporting the plan, not the outcome
 
 `irqs_steered` was `steer.len()`, computed **before any write**. The applier
 threw every error to stderr and discarded `write_tolerant`'s landed/refused
@@ -306,7 +306,7 @@ measured nothing**, a second vacuous pass found while fixing the first.
 
 `test-secret-broker.sh` keeps one honest skip (without bubblewrap it cannot
 build a confined session at all), but its CI step now sets
-`APEX_REQUIRE_SANDBOX`, so the job cannot be green having skipped §4's central
+`RIME_REQUIRE_SANDBOX`, so the job cannot be green having skipped §4's central
 assertion.
 
 The aggregate gate itself was examined and left alone, with the reasoning
@@ -317,7 +317,7 @@ suites.
 
 ### A niri user changed a setting and nothing happened
 
-`apex-input-apply` told the user, **in a comment**, to hand-add an include line.
+`rime-input-apply` told the user, **in a comment**, to hand-add an include line.
 No `files/desktop/niri/` existed at all, while Hyprland's include ships as real
 config. A niri user therefore changed a touchpad setting, the UI reported
 success, and nothing happened. §24's niri row is
@@ -367,16 +367,16 @@ in-flight edits risked destroying work to fix attribution.
 commit, built from a copy of `main.rs` taken before another's landed, removed
 `mod task;` and the `Cmd::Task` arm. Nothing failed to compile: removing the
 `mod` also stops the file being compiled, so there is no orphaned reference, no
-dead-code warning and no test failure. `apex task` was gone, and a person
+dead-code warning and no test failure. `rime task` was gone, and a person
 re-reading a diff caught it.
 
-`tests/test-apex-verbs.sh` now asks the built binary what it can do: 44 verbs
+`tests/test-rime-verbs.sh` now asks the built binary what it can do: 44 verbs
 enumerated by name. It is proven against the real failure: removing
 `mod task;` compiles with zero errors and turns this suite red.
 
 ## Shell branches consolidated
 
-Five apex-shell branches existed by the end of P3. `p3/recovery-ui` already
+Five rime-shell branches existed by the end of P3. `p3/recovery-ui` already
 contained `p3/ui-polish`, which already contained `p2/remote-agent-status`, so
 the consolidation was three merges rather than five:
 
@@ -422,21 +422,21 @@ and `amd-zen` have none. That is a real limit on the Gamer and Creator rows.
 > was written: the ThinkPad L16 is a Radeon 780M (`0x1002`, amdgpu) and the MSI
 > Katana is an Alder Lake-P Iris Xe (`0x8086`, i915) beside an RTX 3070 Mobile
 > (`0x10de`). All three vendors were on the two machines the whole time, and
-> nothing had asked either of them. `apexd-core/tests/gpu_parity.rs` is built
+> nothing had asked either of them. `rimed-core/tests/gpu_parity.rs` is built
 > from what they actually publish.
 
 Both are recorded as gaps rather than quietly counted as met.
 
 ## A local build was vendoring a stale shell, and that is why the check mattered
 
-apex-shell merged first, deliberately: `Containerfile.base` resolves the shell
+rime-shell merged first, deliberately: `Containerfile.base` resolves the shell
 with `git ls-remote refs/heads/main` **at build time**, so an OS build started
 before the shell lands vendors a shell without the work.
 
 After the merge, the validation build was restarted, and its log showed
 `--> Using cache` on the shell clone layer. `git clone --branch main` is a cache
 hit forever: podman cannot know the remote moved. As a result **every local
-build after the first vendored whatever apex-shell was at that first build**,
+build after the first vendored whatever rime-shell was at that first build**,
 indefinitely, and the validation about to be trusted was against the pre-merge
 shell.
 
@@ -448,8 +448,8 @@ to reach the remote is fatal rather than a fallback to `main`, because the
 point is to stop a build quietly vendoring a stale shell.
 
 The restarted build's own first line confirms it:
-`== shell == vendoring apex-shell 9141ea7f05e71bf36610319e46478c2d3b073aa0`,
-the merge commit of apex-shell #16.
+`== shell == vendoring rime-shell 9141ea7f05e71bf36610319e46478c2d3b073aa0`,
+the merge commit of rime-shell #16.
 
 This is the third time tonight a green result was produced against the wrong
 artifact: `diff` deciding a verdict in a container that has no `diff`, the
@@ -460,10 +460,10 @@ the code was correct and the *measurement* was not.
 
 | repo | state |
 | --- | --- |
-| apex-shell | **merged**: PR #16 into `main` at `9141ea7`; #15 auto-closed, its commits contained |
-| apex-os | `p3/base`, 179 commits ahead of `main`, containing P1 (`p1/integration-2`) and P2 (`p2/base`), verified with `merge-base --is-ancestor` |
+| rime-shell | **merged**: PR #16 into `main` at `9141ea7`; #15 auto-closed, its commits contained |
+| rime-os | `p3/base`, 179 commits ahead of `main`, containing P1 (`p1/integration-2`) and P2 (`p2/base`), verified with `merge-base --is-ancestor` |
 
-apex-os final verification before merge:
+rime-os final verification before merge:
 
 | | result |
 | --- | --- |
@@ -476,11 +476,11 @@ Merging `p3/base` to `main` fires `build-image.yml`. That is the final build.
 
 ## Merged, and what the first real build found
 
-**apex-shell** merged first at `9141ea7` (PR #16). That order was mandatory,
+**rime-shell** merged first at `9141ea7` (PR #16). That order was mandatory,
 because `Containerfile.base` resolves the shell with
 `git ls-remote refs/heads/main` at build time.
 
-**apex-os** merged at `dd1fed8`, 179 commits, P1 + P2 + P3 together. The
+**rime-os** merged at `dd1fed8`, 179 commits, P1 + P2 + P3 together. The
 repository disallows both merge commits and rebase, and squashing would have
 collapsed 179 commit messages into one; `main` was an unprotected ancestor, so a
 fast-forward preserved the history exactly. PR #37 shows MERGED.

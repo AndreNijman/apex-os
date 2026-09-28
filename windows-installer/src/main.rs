@@ -1,20 +1,20 @@
-//! APEX portable Windows installer — survey and inspection.
+//! Rime portable Windows installer — survey and inspection.
 //!
 //! Nothing in this binary writes to a disk or to a firmware variable. It opens
 //! handles for reading only; there is no code path from any of these commands
 //! to a write, and that is checked by `tests/test-windows-installer.sh` rather
 //! than asserted here.
 
-use apex_windows_installer::{Scan, enumerate, lab_policy, open_image, scan};
+use rime_windows_installer::{Scan, enumerate, lab_policy, open_image, scan};
 use std::{env, io, path::Path, process::ExitCode};
 
 const USAGE: &str = "\
-apex-windows-installer -- APEX installer for Windows (survey stage)
+rime-windows-installer -- Rime installer for Windows (survey stage)
 
-  apex-windows-installer survey        every disk, its identity, its partitions
-  apex-windows-installer inspect GUID  one partition by its GPT GUID, including
+  rime-windows-installer survey        every disk, its identity, its partitions
+  rime-windows-installer inspect GUID  one partition by its GPT GUID, including
                                        reading every byte of it
-  apex-windows-installer lab FILE.img  the offline image laboratory
+  rime-windows-installer lab FILE.img  the offline image laboratory
 
 This build opens disks read-only: installation and firmware changes are disabled.
 No partition, no file and no firmware variable is written by any command above.";
@@ -95,9 +95,9 @@ fn inspect(_: &str) -> Result<(), Box<dyn std::error::Error>> {
 
 #[cfg(windows)]
 mod win {
-    use apex_windows_installer::plan::{self, Claim, DiskIdentity, PartitionFacts, Verdict};
-    use apex_windows_installer::windows as w;
-    use apex_windows_installer::{Scan, enumerate_in, scan};
+    use rime_windows_installer::plan::{self, Claim, DiskIdentity, PartitionFacts, Verdict};
+    use rime_windows_installer::windows as w;
+    use rime_windows_installer::{Scan, enumerate_in, scan};
 
     /// One disk, with both readings of its partition table and everything
     /// Windows is doing with it.
@@ -215,7 +215,7 @@ mod win {
 
     pub fn print_survey() -> Result<(), Box<dyn std::error::Error>> {
         let (disks, vols, problems) = surveyed();
-        println!("APEX WINDOWS INSTALLER -- READ-ONLY SURVEY. Nothing is written.");
+        println!("Rime WINDOWS INSTALLER -- READ-ONLY SURVEY. Nothing is written.");
         println!("disks-found: {}", disks.len());
         for d in &disks {
             println!("\nDISK {}", d.identity.gpt_disk_guid);
@@ -251,7 +251,7 @@ mod win {
                 }
                 match verdict {
                     Verdict::ContentCheckAllowed => println!(
-                        "    VERDICT: may be content-checked. Run: apex-windows-installer inspect {}",
+                        "    VERDICT: may be content-checked. Run: rime-windows-installer inspect {}",
                         p.id
                     ),
                     Verdict::Refused(r) => {

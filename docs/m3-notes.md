@@ -1,7 +1,7 @@
-# APEX-OS M3 notes (apexd v1: power engine)
+# Rime OS M3 notes (rimed v1: power engine)
 
-M3 delivers the first-party power daemon `apexd`, its control CLI `apex`, and
-the pure, unit-tested core `apexd-core`. It folds the hand-tuned L16
+M3 delivers the first-party power daemon `rimed`, its control CLI `rime`, and
+the pure, unit-tested core `rimed-core`. It folds the hand-tuned L16
 "powermode" design (see the decisions vault note) into a daemon with a frozen
 D-Bus API, AC/battery auto-switching (which the Void box never had), a gated
 RyzenAdj EC-defeat loop, and Prometheus metrics.
@@ -9,13 +9,13 @@ RyzenAdj EC-defeat loop, and Prometheus metrics.
 ## Workspace
 
 ```
-apexd/                 cargo workspace root
-  apexd-core/          lib: fingerprint, profiles, layered selection, tier engine, SysWriter
-  apexd/               bin: zbus D-Bus service + AC loop + gated ryzenadj + metrics
-  apex/                bin: control CLI (D-Bus client + local read-only fallbacks)
+rimed/                 cargo workspace root
+  rimed-core/          lib: fingerprint, profiles, layered selection, tier engine, SysWriter
+  rimed/               bin: zbus D-Bus service + AC loop + gated ryzenadj + metrics
+  rime/                bin: control CLI (D-Bus client + local read-only fallbacks)
 config/sysprofiles/    the six shipped profiles (embedded via include_str! + on-disk override)
 files/system/          D-Bus policy + activation, polkit policy
-docs/apexd-dbus.md     the frozen D-Bus contract
+docs/rimed-dbus.md     the frozen D-Bus contract
 ```
 
 All hardware effects go through the `SysWriter` trait. `RealWriter` writes
@@ -85,12 +85,12 @@ desktop, an unknown Intel hybrid and a uniform Intel laptop.
 ## On-box validation (THIS machine: read-only, dry-run, daemon NOT started)
 
 This physical box *is* the amd-zen / thinkpad-l16-g2 target. Validation ran
-only `apex` with `APEXD_DRY_RUN=1`. The writing daemon never started and
+only `rime` with `RIMED_DRY_RUN=1`. The writing daemon never started and
 nothing wrote to sysfs (verified: after all commands,
 `charge_control_end_threshold` stayed 90, `scaling_governor` stayed
 `performance` and `platform_profile` stayed `performance`).
 
-`APEXD_DRY_RUN=1 apex fingerprint`:
+`RIMED_DRY_RUN=1 rime fingerprint`:
 
 ```
 Machine
@@ -116,16 +116,16 @@ Profile (layered selection)
   active        : thinkpad-l16-g2
 ```
 
-`APEXD_DRY_RUN=1 apex status` also printed the full dry-run tier plan for
+`RIMED_DRY_RUN=1 rime status` also printed the full dry-run tier plan for
 `thinkpad-l16-g2`, from ultra-max (including
 `ryzenadj stapm=62000mW fast=75000mW slow=62000mW tctl=95C`) down to power-saver
 (`powersave` / `power` / `low-power`), plus charge defaults 75/80 and
 `auto-switch defaults: AC -> performance, battery -> balanced`, under the banner
-`apexd: not running — showing local dry-run view.`
+`rimed: not running — showing local dry-run view.`
 
-`apex doctor` (this box): PASS on profile resolution, EPP-capable driver
+`rime doctor` (this box): PASS on profile resolution, EPP-capable driver
 (`amd-pstate-epp`), ACPI `platform_profile` present, charge-threshold control
-present, **`ryzenadj` on PATH**, and `s2idle` active. It warned only on "apexd
+present, **`ryzenadj` on PATH**, and `s2idle` active. It warned only on "rimed
 running" and "metrics endpoint reachable", both expected because nobody started
 the daemon.
 
@@ -153,11 +153,11 @@ All of this is code-complete and compiles, but none of it ran at runtime here
    reconciliation need a live daemon and a real plug/unplug event.
 5. **Prometheus endpoint on :9723** and the `.Metrics.Snapshot` a{sv}. The
    render/gather code is unit-reviewable, but nothing bound the socket here.
-6. **`apex pin|rollback|update|changelog`.** These shell out to
+6. **`rime pin|rollback|update|changelog`.** These shell out to
    `ostree`/`bootc`/`fwupdmgr`/`skopeo`, which have an effect only on a bootc
    deployment, not on this Void host. The command wiring and the missing-binary
    graceful-degrade paths are in place; the real effects need an installed
-   APEX-OS image (M4).
+   Rime OS image (M4).
 7. **The MSI Katana (`msi-katana-gf76`) and Intel-hybrid paths.** Unit tests
    cover selection with synthetic fingerprints, but only that machine can
    confirm real Intel P/E hybrid detection (`/sys/devices/cpu_core` +
@@ -168,10 +168,10 @@ All of this is code-complete and compiles, but none of it ran at runtime here
 
 ## Integration handoff
 
-- At M3, apex-shell's `PowerProfileService` drives the legacy
+- At M3, rime-shell's `PowerProfileService` drives the legacy
   `/usr/local/bin/powermode` CLI and watches `/run/powermode/mode`. Moving it
-  to `apexd` is an M-shell task: change `setProfile(id)` to call `.Power.SetTier`
+  to `rimed` is an M-shell task: change `setProfile(id)` to call `.Power.SetTier`
   and bind `current`/`Tier` + the `TierChanged` signal. The tier IDs already
   match, so the work is a backend swap with no redesign.
-- The daemon reads profiles from `/usr/share/apexos/sysprofiles/` if present,
+- The daemon reads profiles from `/usr/share/rimeos/sysprofiles/` if present,
   else the embedded copies of `config/sysprofiles/*.toml`.

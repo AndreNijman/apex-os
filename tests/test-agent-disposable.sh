@@ -1,15 +1,15 @@
 #!/usr/bin/env bash
 # ─────────────────────────────────────────────────────────────────────────────
-#  End-to-end assertions for `apex agent run --disposable` (P1-037): an agent
+#  End-to-end assertions for `rime agent run --disposable` (P1-037): an agent
 #  session that runs inside a disposable capsule and discards its state.
 #
 #  ── What is real here and what is faked, exactly ────────────────────────────
-#  The REAL disposable engine runs — `files/system/libexec/apex-disposable`
-#  from this checkout, reached through APEX_DISPOSABLE_ENGINE. Real name
+#  The REAL disposable engine runs — `files/system/libexec/rime-disposable`
+#  from this checkout, reached through RIME_DISPOSABLE_ENGINE. Real name
 #  validation, real copy-in, real `trap`-driven teardown, real copy-out
 #  boundary. The REAL daemon spawns it on a real PTY.
 #
-#  Only the CAPSULE ENGINE is faked, through APEX_DISPOSABLE_ENV_ENGINE, which
+#  Only the CAPSULE ENGINE is faked, through RIME_DISPOSABLE_ENV_ENGINE, which
 #  the disposable engine already documents as overridable. The fake:
 #
 #    * LOGS every invocation, and that is the point rather than a convenience.
@@ -44,12 +44,12 @@
 #  of the --worktree refusal (a linked worktree's .git is a pointer to a host
 #  path a real capsule cannot reach) is NOT demonstrated here — only the
 #  refusal is. Nor is anything about a real container: no namespaces, no
-#  /run/host, no image. What is real is APEX's own chain — the daemon, the
+#  /run/host, no image. What is real is Rime's own chain — the daemon, the
 #  engine, the argv, the copy boundary and the teardown.
 #
 #  NOTHING HERE TOUCHES A RUNNING DAEMON, and nothing touches the user's own
 #  disposable environments: its own XDG_RUNTIME_DIR, XDG_STATE_HOME,
-#  XDG_CONFIG_HOME, APEX_AGENT_SCRATCH_ROOT and APEX_DISPOSABLE_ROOT, and the
+#  XDG_CONFIG_HOME, RIME_AGENT_SCRATCH_ROOT and RIME_DISPOSABLE_ROOT, and the
 #  daemon is killed by the pid this script started — never by name.
 #
 #      ./tests/test-agent-disposable.sh
@@ -61,7 +61,7 @@ ROOT="$(cd "$(dirname "${BASH_SOURCE[0]}")/.." && pwd)"
 
 # Before the temp tree, the daemon or the build: this suite needs an
 # environment the daemon will observe as LOCAL, and that has to be arranged
-# from outside the suite. `apex-agentd` places a peer from its cgroup, and a
+# from outside the suite. `rime-agentd` places a peer from its cgroup, and a
 # process started by systemd — a CI job, a timer-dispatched agent — is in
 # neither a login session nor a user service, so §7 refuses it before the
 # behaviour under test is reached. Here it stops the suite starting the
@@ -70,7 +70,7 @@ ROOT="$(cd "$(dirname "${BASH_SOURCE[0]}")/.." && pwd)"
 # session it created or — saying why, out loud — in place; either way the
 # suite runs exactly once, so this is `exec` and not a call. Same block, and
 # the same reason, as tests/test-privilege-requests.sh.
-if [ -z "${APEX_LOGIN_SESSION_WRAPPED:-}" ] && [ -x "${ROOT}/tests/in-login-session.sh" ]; then
+if [ -z "${RIME_LOGIN_SESSION_WRAPPED:-}" ] && [ -x "${ROOT}/tests/in-login-session.sh" ]; then
     exec "${ROOT}/tests/in-login-session.sh" "${BASH_SOURCE[0]}" "$@"
 fi
 WORK="$(mktemp -d)"
@@ -93,7 +93,7 @@ cleanup() {
     [ -n "$DAEMON_PID" ] && kill -9 "$DAEMON_PID" 2>/dev/null
     for p in $EXTRA_PIDS; do kill -9 "$p" 2>/dev/null; done
     # Anything still naming this suite's own scratch directory. Matched on the
-    # fixture path and never on a program name: a live apex-agentd with other
+    # fixture path and never on a program name: a live rime-agentd with other
     # people's sessions on it must not be reachable from here.
     for p in $(pgrep -f "$WORK" 2>/dev/null); do kill -9 "$p" 2>/dev/null; done
     rm -rf "$WORK"
@@ -115,18 +115,18 @@ if [ "$(id -u)" = 0 ]; then
 fi
 
 section "the binaries"
-if ! cargo build --manifest-path "${ROOT}/apexd/Cargo.toml" \
-        --bin apex-agentd --bin apex >/dev/null 2>&1; then
-    bad "apex-agentd and apex build"
+if ! cargo build --manifest-path "${ROOT}/rimed/Cargo.toml" \
+        --bin rime-agentd --bin rime >/dev/null 2>&1; then
+    bad "rime-agentd and rime build"
     give_up
 fi
-ok "apex-agentd and apex build"
+ok "rime-agentd and rime build"
 
-BIN="${CARGO_TARGET_DIR:-${ROOT}/apexd/target}/debug"
-AGENTD="${BIN}/apex-agentd"
-APEX="${BIN}/apex"
+BIN="${CARGO_TARGET_DIR:-${ROOT}/rimed/target}/debug"
+AGENTD="${BIN}/rime-agentd"
+Rime="${BIN}/rime"
 
-ENGINE="${ROOT}/files/system/libexec/apex-disposable"
+ENGINE="${ROOT}/files/system/libexec/rime-disposable"
 if [ -x "$ENGINE" ]; then
     ok "the real disposable engine is in this checkout and executable"
 else
@@ -139,23 +139,23 @@ fi
 export XDG_RUNTIME_DIR="${WORK}/run"
 export XDG_STATE_HOME="${WORK}/state"
 export XDG_CONFIG_HOME="${WORK}/config"
-export APEX_AGENT_SCRATCH_ROOT="${WORK}/scratch"
-export APEX_DISPOSABLE_ENGINE="$ENGINE"
-export APEX_DISPOSABLE_ROOT="${WORK}/disp"
-mkdir -p "$XDG_RUNTIME_DIR" "$XDG_STATE_HOME" "$XDG_CONFIG_HOME" "$APEX_DISPOSABLE_ROOT"
+export RIME_AGENT_SCRATCH_ROOT="${WORK}/scratch"
+export RIME_DISPOSABLE_ENGINE="$ENGINE"
+export RIME_DISPOSABLE_ROOT="${WORK}/disp"
+mkdir -p "$XDG_RUNTIME_DIR" "$XDG_STATE_HOME" "$XDG_CONFIG_HOME" "$RIME_DISPOSABLE_ROOT"
 chmod 0700 "$XDG_RUNTIME_DIR"
 
-PRE_SCRATCH="$(ls /tmp/apex-agent 2>/dev/null | sort | tr '\n' ' ')"
-REAL_DISP="${HOME}/.local/state/apex/disposable"
+PRE_SCRATCH="$(ls /tmp/rime-agent 2>/dev/null | sort | tr '\n' ' ')"
+REAL_DISP="${HOME}/.local/state/rime/disposable"
 PRE_REAL="$(ls "$REAL_DISP" 2>/dev/null | sort | tr '\n' ' ')"
 
 # ── the fake capsule engine ──────────────────────────────────────────────────
 CAPLOG="${WORK}/capsule.log"
 : > "$CAPLOG"
-FAKE="${WORK}/fake-apex-env"
+FAKE="${WORK}/fake-rime-env"
 cat > "$FAKE" <<'FAKE_EOF'
 #!/usr/bin/env bash
-# A stand-in for /usr/libexec/apex-env. It records what it was asked and, for
+# A stand-in for /usr/libexec/rime-env. It records what it was asked and, for
 # `exec`, runs the command with HOME pointed at the environment's throwaway
 # home — which is what a real capsule does to HOME, and what makes the
 # daemon's `cd -- "$HOME/in/$1"` script really run.
@@ -171,7 +171,7 @@ case "$verb" in
         name="${1:-}"; shift
         [ "${1:-}" = -- ] && shift
         log "exec ${name} -- $*"
-        home="${APEX_DISPOSABLE_ROOT}/${name}/home"
+        home="${RIME_DISPOSABLE_ROOT}/${name}/home"
         HOME="$home" exec "$@"
         ;;
     enter)
@@ -189,7 +189,7 @@ case "$verb" in
 esac
 FAKE_EOF
 chmod +x "$FAKE"
-export APEX_DISPOSABLE_ENV_ENGINE="$FAKE"
+export RIME_DISPOSABLE_ENV_ENGINE="$FAKE"
 export CAPSULE_LOG="$CAPLOG"
 
 # ── the fixture project ──────────────────────────────────────────────────────
@@ -207,7 +207,7 @@ git_q -C "$PROJ" commit -qm "base"
 section "the daemon"
 "$AGENTD" > "${WORK}/agentd.log" 2>&1 &
 DAEMON_PID=$!
-SOCK="${XDG_RUNTIME_DIR}/apex-agentd/control.sock"
+SOCK="${XDG_RUNTIME_DIR}/rime-agentd/control.sock"
 for _ in $(seq 1 50); do [ -S "$SOCK" ] && break; sleep 0.1; done
 if [ -S "$SOCK" ]; then
     ok "the daemon came up on an isolated socket"
@@ -227,7 +227,7 @@ cat > "$AGENT_SH" <<'AGENT_EOF'
 # $1 is where to report, and it is an ARGUMENT rather than an environment
 # variable on purpose: this process is spawned by the DAEMON, whose environment
 # was fixed before the suite chose this path. An earlier version of this suite
-# passed it as OBSERVE= on the `apex` command line and the agent wrote to the
+# passed it as OBSERVE= on the `rime` command line and the agent wrote to the
 # empty string.
 observe="$1"; shift
 {
@@ -265,7 +265,7 @@ no_create_appears() {   # no_create_appears <count before>
     return 0
 }
 session_count() {
-    "$APEX" agent list --all 2>/dev/null | grep -cE '^[[:space:]]*[0-9]+[[:space:]]'
+    "$Rime" agent list --all 2>/dev/null | grep -cE '^[[:space:]]*[0-9]+[[:space:]]'
 }
 
 wait_gone() {   # wait_gone <path>
@@ -279,7 +279,7 @@ wait_file() {   # wait_file <path>
 
 run_disposable() {   # run_disposable <observe file> [extra args...]
     local observe="$1"; shift
-    "$APEX" agent run --agent generic --sandbox unrestricted \
+    "$Rime" agent run --agent generic --sandbox unrestricted \
         --disposable --cwd "$PROJ" -d "$@" \
         -- /bin/bash "$AGENT_SH" "$observe" hello 'a b' '$(id -un)' ';touch pwned' \
         2>"${WORK}/run.err" \
@@ -331,7 +331,7 @@ else
 fi
 # --home is what makes it disposable: without it the capsule shares the real
 # home and "delete the environment" would mean deleting the user's home.
-if grep -q "^create ${CAPSULE} .*--home=${APEX_DISPOSABLE_ROOT}/${CAPSULE}/home" "$CAPLOG"; then
+if grep -q "^create ${CAPSULE} .*--home=${RIME_DISPOSABLE_ROOT}/${CAPSULE}/home" "$CAPLOG"; then
     ok "the capsule was given a throwaway home, not the user's"
 else
     bad "the capsule was given a throwaway home, not the user's"
@@ -340,7 +340,7 @@ fi
 
 # 2. the agent's working directory is the COPY, not the host worktree
 observed_pwd="$(sed -n 's/^pwd=//p' "$OBS1")"
-want_pwd="${APEX_DISPOSABLE_ROOT}/${CAPSULE}/home/in/proj"
+want_pwd="${RIME_DISPOSABLE_ROOT}/${CAPSULE}/home/in/proj"
 if [ "$observed_pwd" = "$want_pwd" ]; then
     ok "the agent started in the COPY of the worktree (${observed_pwd})"
 else
@@ -372,11 +372,11 @@ fi
 # whole feature is a rename: "delete the environment" would mean deleting
 # $HOME, which is why the engine makes --home mandatory.
 observed_home="$(sed -n 's/^home=//p' "$OBS1")"
-if [ "$observed_home" = "${APEX_DISPOSABLE_ROOT}/${CAPSULE}/home" ]; then
+if [ "$observed_home" = "${RIME_DISPOSABLE_ROOT}/${CAPSULE}/home" ]; then
     ok "the agent's HOME was the throwaway home (${observed_home})"
 else
     bad "the agent's HOME was the throwaway home"
-    echo "      home was '${observed_home}', wanted '${APEX_DISPOSABLE_ROOT}/${CAPSULE}/home'" >&2
+    echo "      home was '${observed_home}', wanted '${RIME_DISPOSABLE_ROOT}/${CAPSULE}/home'" >&2
 fi
 if [ "$observed_home" != "$HOME" ]; then
     ok "and NOT the user's real home"
@@ -419,11 +419,11 @@ fi
 # ── teardown ─────────────────────────────────────────────────────────────────
 section "the environment is gone when the session ends"
 
-if wait_gone "${APEX_DISPOSABLE_ROOT}/${CAPSULE}"; then
+if wait_gone "${RIME_DISPOSABLE_ROOT}/${CAPSULE}"; then
     ok "the environment directory was deleted"
 else
     bad "the environment directory was deleted"
-    ls -la "$APEX_DISPOSABLE_ROOT" 2>&1 | sed 's/^/      /' >&2
+    ls -la "$RIME_DISPOSABLE_ROOT" 2>&1 | sed 's/^/      /' >&2
 fi
 if grep -q "^rm ${CAPSULE}$" "$CAPLOG"; then
     ok "the container was removed through the capsule engine too"
@@ -480,7 +480,7 @@ else
     bad "a second session ran with --copy-out"
     sed 's/^/      /' "${WORK}/run.err" >&2
 fi
-wait_gone "${APEX_DISPOSABLE_ROOT}/disp-agent${SID2}"
+wait_gone "${RIME_DISPOSABLE_ROOT}/disp-agent${SID2}"
 if [ -f "${RESULTS}/result.txt" ] \
    && [ "$(cat "${RESULTS}/result.txt")" = "the result" ]; then
     ok "what the agent put in ~/out arrived at the --copy-out destination"
@@ -504,7 +504,7 @@ fi
 # ── the refusals ─────────────────────────────────────────────────────────────
 section "two mechanisms that are refused together, not combined"
 
-before_entries="$(ls "$APEX_DISPOSABLE_ROOT" 2>/dev/null | wc -l)"
+before_entries="$(ls "$RIME_DISPOSABLE_ROOT" 2>/dev/null | wc -l)"
 before_creates="$(grep -c '^create ' "$CAPLOG")"
 before_sessions="$(session_count)"
 # Guard against the way this assertion was vacuous once already: if the count
@@ -515,9 +515,9 @@ if [ "$before_sessions" -ge 2 ]; then
 else
     bad "the session count reads the daemon's list"
     echo "      counted ${before_sessions}; the suite has started 2 sessions by now" >&2
-    "$APEX" agent list --all 2>&1 | sed 's/^/      | /' >&2
+    "$Rime" agent list --all 2>&1 | sed 's/^/      | /' >&2
 fi
-out="$("$APEX" agent run --agent generic --sandbox strict --disposable \
+out="$("$Rime" agent run --agent generic --sandbox strict --disposable \
         --cwd "$PROJ" -d -- /bin/true 2>&1)"
 rc=$?
 if [ "$rc" -ne 0 ] && printf '%s' "$out" | grep -q "different mechanisms"; then
@@ -538,7 +538,7 @@ else
     bad "the refusal happened BEFORE any environment was created"
     grep '^create' "$CAPLOG" | sed 's/^/      | /' >&2
 fi
-after_entries="$(ls "$APEX_DISPOSABLE_ROOT" 2>/dev/null | wc -l)"
+after_entries="$(ls "$RIME_DISPOSABLE_ROOT" 2>/dev/null | wc -l)"
 if [ "$before_entries" = "$after_entries" ]; then
     ok "and no environment directory was left behind by the refusal"
 else
@@ -551,7 +551,7 @@ if [ "$(session_count)" = "$before_sessions" ]; then
     ok "and the refused run started no session at all"
 else
     bad "and the refused run started no session at all"
-    "$APEX" agent list 2>&1 | sed 's/^/      | /' >&2
+    "$Rime" agent list 2>&1 | sed 's/^/      | /' >&2
 fi
 
 # This one is refused by CLAP, not by the daemon: `--copy-out` is declared
@@ -559,7 +559,7 @@ fi
 # what it is — the daemon's own arm answers every other client of the socket
 # and is covered by the `copy_out_without_a_capsule_is_refused_not_ignored`
 # unit test, not by this line.
-out="$("$APEX" agent run --agent generic --sandbox unrestricted \
+out="$("$Rime" agent run --agent generic --sandbox unrestricted \
         --copy-out "$RESULTS" --cwd "$PROJ" -d -- /bin/true 2>&1)"
 rc=$?
 if [ "$rc" -ne 0 ] && printf '%s' "$out" | grep -q -- "--disposable"; then
@@ -574,8 +574,8 @@ fi
 # No clap conflict declared for these, deliberately, so what is exercised here
 # is the daemon's own check — the answer every client of the socket gets.
 before_creates="$(grep -c '^create ' "$CAPLOG")"
-WT_BEFORE="$(ls "${PROJ}/.apex/worktrees" 2>/dev/null | sort | tr '\n' ' ')"
-out="$("$APEX" agent run --agent generic --sandbox unrestricted --disposable \
+WT_BEFORE="$(ls "${PROJ}/.rime/worktrees" 2>/dev/null | sort | tr '\n' ' ')"
+out="$("$Rime" agent run --agent generic --sandbox unrestricted --disposable \
         --worktree throwaway --cwd "$PROJ" -d -- /bin/true 2>&1)"
 rc=$?
 if [ "$rc" -ne 0 ] && printf '%s' "$out" | grep -q "left empty"; then
@@ -587,7 +587,7 @@ else
 fi
 # The refusal is BEFORE ensure_worktree, which is the point: a refusal that
 # happened afterwards would leave the empty branch it warns about.
-WT_AFTER="$(ls "${PROJ}/.apex/worktrees" 2>/dev/null | sort | tr '\n' ' ')"
+WT_AFTER="$(ls "${PROJ}/.rime/worktrees" 2>/dev/null | sort | tr '\n' ' ')"
 if [ "$WT_BEFORE" = "$WT_AFTER" ]; then
     ok "and no host worktree was created before refusing (the empty branch it warns about)"
 else
@@ -601,7 +601,7 @@ else
     git_q -C "$PROJ" branch -a | sed 's/^/      | /' >&2
 fi
 
-out="$("$APEX" agent run --agent generic --sandbox unrestricted --disposable \
+out="$("$Rime" agent run --agent generic --sandbox unrestricted --disposable \
         --checkpoint --cwd "$PROJ" -d -- /bin/true 2>&1)"
 rc=$?
 if [ "$rc" -ne 0 ] && printf '%s' "$out" | grep -q "never touched"; then
@@ -629,17 +629,17 @@ printf 'pwd=%s\n' "$PWD" > "$1"
 sleep 600
 HOLD_EOF
 chmod +x "$HOLD"
-SID3="$("$APEX" agent run --agent generic --sandbox unrestricted \
+SID3="$("$Rime" agent run --agent generic --sandbox unrestricted \
     --disposable --cwd "$PROJ" -d -- /bin/bash "$HOLD" "$OBS3" 2>"${WORK}/run3.err" \
     | sed -n 's/^session \([0-9]\+\) .*/\1/p' | head -1)"
 wait_file "$OBS3"
-status="$("$APEX" agent status "$SID3" 2>&1)"
+status="$("$Rime" agent status "$SID3" 2>&1)"
 printf '%s\n' "$status" | sed 's/^/      | /'
 if printf '%s' "$status" | grep -q "disp-agent${SID3}" \
    && printf '%s' "$status" | grep -q "disposable"; then
-    ok "apex agent status names the disposable capsule"
+    ok "rime agent status names the disposable capsule"
 else
-    bad "apex agent status names the disposable capsule"
+    bad "rime agent status names the disposable capsule"
 fi
 if printf '%s' "$status" | grep -qi "COPY"; then
     ok "and says the working tree is a copy that is deleted with the session"
@@ -647,12 +647,12 @@ else
     bad "and says the working tree is a copy that is deleted with the session"
 fi
 # Killing the session must tear the environment down: the engine's TERM trap.
-"$APEX" agent kill "$SID3" >/dev/null 2>&1
-if wait_gone "${APEX_DISPOSABLE_ROOT}/disp-agent${SID3}"; then
+"$Rime" agent kill "$SID3" >/dev/null 2>&1
+if wait_gone "${RIME_DISPOSABLE_ROOT}/disp-agent${SID3}"; then
     ok "killing the session tears the environment down (the engine's TERM trap)"
 else
     bad "killing the session tears the environment down (the engine's TERM trap)"
-    ls -la "$APEX_DISPOSABLE_ROOT" 2>&1 | sed 's/^/      /' >&2
+    ls -la "$RIME_DISPOSABLE_ROOT" 2>&1 | sed 's/^/      /' >&2
 fi
 
 # ── the DAEMON's own death, measured rather than asserted ─────────────────
@@ -665,25 +665,25 @@ fi
 #
 # Two deaths are run because they LOOK like two routes. They are not, and that
 # is this section's finding rather than its premise — the first draft said the
-# SIGTERM half was APEX's own shutdown doing the work, and nothing had checked
+# SIGTERM half was Rime's own shutdown doing the work, and nothing had checked
 # it:
 #
-#   SIGKILL — none of APEX's code runs. What reaches the engine is the kernel's
+#   SIGKILL — none of Rime's code runs. What reaches the engine is the kernel's
 #   doing: the dead daemon's PTY master fd closes, and the kernel sends SIGHUP
 #   to the foreground process group of the slave. The engine traps EXIT, INT
 #   and TERM but NOT HUP, and bash runs an EXIT trap even while it is dying of
 #   an untrapped fatal signal (measured: exit status 129, trap body executed).
 #
-#   SIGTERM — the SAME kernel route, because APEX's own shutdown DOES NOT RUN.
-#   `block_termination_signals` (apex-agentd/src/main.rs:169) installs the mask
+#   SIGTERM — the SAME kernel route, because Rime's own shutdown DOES NOT RUN.
+#   `block_termination_signals` (rime-agentd/src/main.rs:169) installs the mask
 #   AFTER `spawn_expiry_thread` at 164 has already started a thread. Threads do
 #   inherit a mask, so that one thread — and only it — runs unmasked, and a
 #   process-directed signal goes to the first thread that does not block it.
 #   MEASURED on /proc/<pid>/task/*/status, a scratch daemon of its own:
 #
-#       apex-agentd      SigBlk=0000000000004003  syscall=288
-#       apex-agentd-gra  SigBlk=0000000000000000  syscall=230  ← spawned at 164
-#       apex-agentd-sig  SigBlk=0000000000000000  syscall=128  ← see below
+#       rime-agentd      SigBlk=0000000000004003  syscall=288
+#       rime-agentd-gra  SigBlk=0000000000000000  syscall=230  ← spawned at 164
+#       rime-agentd-sig  SigBlk=0000000000000000  syscall=128  ← see below
 #
 #   so SIGTERM lands on the grants thread and the daemon dies by DEFAULT
 #   DISPOSITION: measured exit status 143, the log holding only its `listening
@@ -701,8 +701,8 @@ fi
 # Which is why the mutation that proves this section can go red is "make the
 # ENGINE ignore SIGHUP", and why it reddens BOTH halves, four assertions each.
 # Two mutations inside `registry::terminate` — send only SIGTERM, and signal
-# nobody at all — both SURVIVE with everything green: APEX's own shutdown
-# signalling is not what tears a capsule down. (`apex agent kill` is a third
+# nobody at all — both SURVIVE with everything green: Rime's own shutdown
+# signalling is not what tears a capsule down. (`rime agent kill` is a third
 # path again, `Request::Signal` → `pty::signal_group`, never `terminate`, and
 # it is unaffected by either mutation.)
 #
@@ -732,8 +732,8 @@ section "the capsule when the DAEMON dies"
 MAIN_RUNTIME="$XDG_RUNTIME_DIR"
 MAIN_STATE="$XDG_STATE_HOME"
 MAIN_CONFIG="$XDG_CONFIG_HOME"
-MAIN_SCRATCH="$APEX_AGENT_SCRATCH_ROOT"
-MAIN_DISP="$APEX_DISPOSABLE_ROOT"
+MAIN_SCRATCH="$RIME_AGENT_SCRATCH_ROOT"
+MAIN_DISP="$RIME_DISPOSABLE_ROOT"
 MAIN_CAPLOG="$CAPSULE_LOG"
 
 HOLD2="${WORK}/hold-for-death.sh"
@@ -751,17 +751,17 @@ daemon_death_case() {   # daemon_death_case <label> <signal> <how it reads>
     export XDG_RUNTIME_DIR="${dir}/run"
     export XDG_STATE_HOME="${dir}/state"
     export XDG_CONFIG_HOME="${dir}/config"
-    export APEX_AGENT_SCRATCH_ROOT="${dir}/scratch"
-    export APEX_DISPOSABLE_ROOT="${dir}/disp"
+    export RIME_AGENT_SCRATCH_ROOT="${dir}/scratch"
+    export RIME_DISPOSABLE_ROOT="${dir}/disp"
     export CAPSULE_LOG="${dir}/capsule.log"
-    mkdir -p "$XDG_RUNTIME_DIR" "$XDG_STATE_HOME" "$XDG_CONFIG_HOME" "$APEX_DISPOSABLE_ROOT"
+    mkdir -p "$XDG_RUNTIME_DIR" "$XDG_STATE_HOME" "$XDG_CONFIG_HOME" "$RIME_DISPOSABLE_ROOT"
     chmod 0700 "$XDG_RUNTIME_DIR"
     : > "$CAPSULE_LOG"
 
     "$AGENTD" > "${dir}/agentd.log" 2>&1 &
     local dpid=$!
     EXTRA_PIDS="${EXTRA_PIDS} ${dpid}"
-    local sock="${XDG_RUNTIME_DIR}/apex-agentd/control.sock"
+    local sock="${XDG_RUNTIME_DIR}/rime-agentd/control.sock"
     local _
     for _ in $(seq 1 60); do [ -S "$sock" ] && break; sleep 0.1; done
     if [ ! -S "$sock" ]; then
@@ -773,11 +773,11 @@ daemon_death_case() {   # daemon_death_case <label> <signal> <how it reads>
 
     local obs="${dir}/observed"
     local sid
-    sid="$("$APEX" agent run --agent generic --sandbox unrestricted \
+    sid="$("$Rime" agent run --agent generic --sandbox unrestricted \
         --disposable --cwd "$PROJ" -d -- /bin/bash "$HOLD2" "$obs" \
         2>"${dir}/run.err" | sed -n 's/^session \([0-9]\+\) .*/\1/p' | head -1)"
     local capsule="disp-agent${sid}"
-    local envdir="${APEX_DISPOSABLE_ROOT}/${capsule}"
+    local envdir="${RIME_DISPOSABLE_ROOT}/${capsule}"
     # The precondition, asserted rather than assumed. Everything below is a
     # statement about a capsule that was running, and if none was running then
     # "the environment is gone" is true of a directory that never existed.
@@ -807,7 +807,7 @@ daemon_death_case() {   # daemon_death_case <label> <signal> <how it reads>
         ok "the environment is gone after the daemon was ${reads}"
     else
         bad "the environment is gone after the daemon was ${reads}"
-        ls -la "$APEX_DISPOSABLE_ROOT" 2>&1 | sed 's/^/      /' >&2
+        ls -la "$RIME_DISPOSABLE_ROOT" 2>&1 | sed 's/^/      /' >&2
     fi
     # A directory that merely vanished is not a teardown. The engine's own
     # removal pass is what asks the capsule engine to remove the container, so
@@ -833,11 +833,11 @@ daemon_death_case() {   # daemon_death_case <label> <signal> <how it reads>
         echo "      still alive: ${survivors}" >&2
         ps -o pid=,args= -p ${survivors} 2>&1 | sed 's/^/      | /' >&2
     fi
-    if [ -z "$(ls "$APEX_DISPOSABLE_ROOT" 2>/dev/null)" ]; then
+    if [ -z "$(ls "$RIME_DISPOSABLE_ROOT" 2>/dev/null)" ]; then
         ok "and that daemon's disposable root is empty, not just missing one entry"
     else
         bad "and that daemon's disposable root is empty, not just missing one entry"
-        ls -la "$APEX_DISPOSABLE_ROOT" 2>&1 | sed 's/^/      /' >&2
+        ls -la "$RIME_DISPOSABLE_ROOT" 2>&1 | sed 's/^/      /' >&2
     fi
 
     for p in $(pgrep -f "$dir" 2>/dev/null); do kill -9 "$p" 2>/dev/null; done
@@ -850,17 +850,17 @@ daemon_death_case kill KILL "SIGKILLed, with no chance to run any code"
 export XDG_RUNTIME_DIR="$MAIN_RUNTIME"
 export XDG_STATE_HOME="$MAIN_STATE"
 export XDG_CONFIG_HOME="$MAIN_CONFIG"
-export APEX_AGENT_SCRATCH_ROOT="$MAIN_SCRATCH"
-export APEX_DISPOSABLE_ROOT="$MAIN_DISP"
+export RIME_AGENT_SCRATCH_ROOT="$MAIN_SCRATCH"
+export RIME_DISPOSABLE_ROOT="$MAIN_DISP"
 export CAPSULE_LOG="$MAIN_CAPLOG"
 
 # ── nothing of the user's was touched ────────────────────────────────────────
 section "the suite stayed inside its own fixture"
-if [ -z "$(ls "$APEX_DISPOSABLE_ROOT" 2>/dev/null)" ]; then
+if [ -z "$(ls "$RIME_DISPOSABLE_ROOT" 2>/dev/null)" ]; then
     ok "the fixture's disposable root is empty — every environment was torn down"
 else
     bad "the fixture's disposable root is empty — every environment was torn down"
-    ls -la "$APEX_DISPOSABLE_ROOT" | sed 's/^/      /' >&2
+    ls -la "$RIME_DISPOSABLE_ROOT" | sed 's/^/      /' >&2
 fi
 POST_REAL="$(ls "$REAL_DISP" 2>/dev/null | sort | tr '\n' ' ')"
 if [ "$PRE_REAL" = "$POST_REAL" ]; then
@@ -872,12 +872,12 @@ else
 fi
 gone=""
 for entry in $PRE_SCRATCH; do
-    [ -e "/tmp/apex-agent/${entry}" ] || gone="${gone}${entry} "
+    [ -e "/tmp/rime-agent/${entry}" ] || gone="${gone}${entry} "
 done
 if [ -z "$gone" ]; then
-    ok "nothing was deleted from the shared /tmp/apex-agent the real daemon uses"
+    ok "nothing was deleted from the shared /tmp/rime-agent the real daemon uses"
 else
-    bad "nothing was deleted from the shared /tmp/apex-agent the real daemon uses"
+    bad "nothing was deleted from the shared /tmp/rime-agent the real daemon uses"
     echo "      gone: ${gone}" >&2
 fi
 
