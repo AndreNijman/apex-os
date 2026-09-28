@@ -86,17 +86,19 @@ The provenance half of the gate checks an SBOM that CI attaches to the image as
 a signed attestation. "SBOM" names two different artefacts and APEX publishes
 the smaller one, so this section spells out what the document covers.
 
-**Tense:** this section describes what the build produces *when the SBOM step
-runs*, and today it does not run. The step is in `build-image.yml` on `main`,
-but it runs only when the repository variable `APEX_ATTEST_SBOM` is `true`, and
-that variable is unset. The first attested image, 9690b65d (the merge of PR #42,
-2026-09-23), was refused by every machine: `apex update` before 0e48a1009 read
-the attestation's signature from a layer annotation that cosign leaves empty on
-a DSSE attestation, and a provenance check that is present and fails refuses
-even under `provenance=warn`. CI has published unattested images since, which
-is why `apex trust` says "none published" and why `provenance` defaults to
-`warn` further down. The workflow keeps the step off until the fleet runs
-0e48a1009 or later.
+**History:** the step is in `build-image.yml` on `main` and runs only when the
+repository variable `APEX_ATTEST_SBOM` is `true`. The first attested image,
+9690b65d (the merge of PR #42, 2026-09-23), was refused by every machine:
+`apex update` before 0e48a1009 read the attestation's signature from a layer
+annotation that cosign leaves empty on a DSSE attestation, and a provenance
+check that is present and fails refuses even under `provenance=warn`. CI then
+published unattested images until the fleet ran 0e48a1009 or later, which is
+why `provenance` defaults to `warn` further down. On 2026-09-28, with the L16
+and katana both on images that carry the fix, the variable was set to `true`,
+and every build since attaches the attestation. A machine still on an image
+older than 0e48a1009 (built before 2026-09-23) refuses these updates; it needs
+`provenance=off` in `/etc/apex/trust.conf` for one update, which brings the
+fixed verifier.
 
 **What is in it.** Every package syft finds in the image (9,830 of them), with
 its name, version, purl and CPEs. That covers the RPM set, the npm trees inside
