@@ -409,8 +409,8 @@ done
 out=$(run_engine run --image "$GUEST" --name run-aaa --copy-in "$WORK/src" \
         --egress report.json --egress log.txt --egress-to "$EGRESS" -- make -j4)
 c=$(calls)
-has "run: the copy-in volume is labelled RIMEIN" "<-n> <RIMEIN>" "$c"
-has "run: the egress volume is labelled RIMEOUT" "<-n> <RIMEOUT>" "$c"
+has "run: the copy-in volume is labelled APEXIN" "<-n> <APEXIN>" "$c"
+has "run: the egress volume is labelled APEXOUT" "<-n> <APEXOUT>" "$c"
 has "run: the task script is staged into the copy-in volume" "<::/task.sh>" "$c"
 has "run: --copy-in lands in the copy-in volume" "<::/src>" "$c"
 # THE assertion. One mcopy per NOMINATION, naming that file — never a wildcard,

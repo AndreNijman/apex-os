@@ -193,8 +193,8 @@ pub struct RunArgs {
     ///
     /// Required, and the engine builds no guest for you: the image must
     /// already carry what the task needs, must mount the filesystem labelled
-    /// RIMEIN and run `task.sh` from it, and must write anything it wants to
-    /// hand back to the filesystem labelled RIMEOUT.
+    /// APEXIN and run `task.sh` from it, and must write anything it wants to
+    /// hand back to the filesystem labelled APEXOUT.
     #[arg(long, value_name = "DISK")]
     pub image: String,
     /// A host path copied into the read-only volume. Repeatable. Nothing is
@@ -216,7 +216,7 @@ pub struct RunArgs {
     ///
     /// A disposable run removes the whole VM on the way out — disks, volumes
     /// and the serial log with them — so without this a guest that never
-    /// mounted RIMEIN produces an empty egress and nothing that says why.
+    /// mounted APEXIN produces an empty egress and nothing that says why.
     ///
     /// Opt-in rather than a default, and that is the argument rather than
     /// caution: the serial log is bytes the guest chose to write, so it leaves

@@ -281,9 +281,9 @@ filesystem.
 
 Two volumes, both plain FAT images rather than shares:
 
-* **`in.img`**, labelled `RIMEIN`, attached **read-only**. Built on the host
+* **`in.img`**, labelled `APEXIN`, attached **read-only**. Built on the host
   from the `--copy-in` paths plus a `task.sh` holding the command.
-* **`out.img`**, labelled `RIMEOUT`, attached read-write and blank. The guest
+* **`out.img`**, labelled `APEXOUT`, attached read-write and blank. The guest
   writes whatever it likes here.
 
 The engine bind-mounts nothing and uses no virtiofs share, because a share is a
@@ -304,7 +304,7 @@ wildcard.
 `--console-to FILE` saves the guest's serial output before teardown deletes it.
 It is opt-in by design: the serial log is bytes the guest chose to write, so it
 leaves only where the caller named a destination, the same rule as for every
-other file. It is also the only diagnostic a guest that never mounted `RIMEIN`
+other file. It is also the only diagnostic a guest that never mounted `APEXIN`
 can leave behind; before it existed, "an empty egress and a timeout warning"
 came with no way to find out why.
 
@@ -326,8 +326,8 @@ interface would make the file-egress boundary decorative.
 `rime vm run` does **not** build a guest image and does not install anything
 into one. `--image` is required and the image must:
 
-* mount the filesystem labelled `RIMEIN` and run `task.sh` from it;
-* write anything it should hand back to the filesystem labelled `RIMEOUT`;
+* mount the filesystem labelled `APEXIN` and run `task.sh` from it;
+* write anything it should hand back to the filesystem labelled `APEXOUT`;
 * power off.
 
 A guest that does none of that produces an empty egress and a timeout warning,

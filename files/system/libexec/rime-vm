@@ -1249,8 +1249,8 @@ cmd_rm() {
 # be inspected AFTER the fact:
 #
 #   in.img   built on the host from --copy-in paths plus the task script,
-#            attached READ-ONLY, labelled RIMEIN.
-#   out.img  blank, attached read-write, labelled RIMEOUT. The guest writes
+#            attached READ-ONLY, labelled APEXIN.
+#   out.img  blank, attached read-write, labelled APEXOUT. The guest writes
 #            whatever it likes here.
 #
 # After the guest powers off, the host reads out.img with `mcopy` — a userspace
@@ -1278,8 +1278,8 @@ cmd_rm() {
 # This engine does not build a guest image and does not install anything into
 # one. It defines the volumes and their labels; the guest must do the rest:
 #
-#   * mount the filesystem labelled RIMEIN and run `task.sh` from it
-#   * write anything it wants to hand back to the filesystem labelled RIMEOUT
+#   * mount the filesystem labelled APEXIN and run `task.sh` from it
+#   * write anything it wants to hand back to the filesystem labelled APEXOUT
 #   * power off
 #
 # A guest that does none of that produces an empty egress and a `timed out`
@@ -1370,7 +1370,7 @@ cmd_run() {
     [[ "$timeout" =~ ^[0-9]+$ ]] || die "--timeout takes seconds as a number"
     [ -n "$image" ] || die "--image names the guest disk to run the task in.
   \`rime vm run\` does not build a guest: the image must already carry whatever
-  the task needs, and must mount the filesystem labelled RIMEIN and run
+  the task needs, and must mount the filesystem labelled APEXIN and run
   task.sh from it. docs/virtualization.md states the contract."
     [ -f "$image" ] || die "--image: no file at $image"
 
@@ -1429,7 +1429,7 @@ cmd_run() {
     # ── the copy-in volume ──────────────────────────────────────────────────
     local in_img="$dir/in.img" out_img="$dir/out.img"
     truncate -s 64M "$in_img" || die "cannot create the copy-in volume"
-    mkfs.vfat -F 32 -n RIMEIN "$in_img" >/dev/null || die "cannot format the copy-in volume"
+    mkfs.vfat -F 32 -n APEXIN "$in_img" >/dev/null || die "cannot format the copy-in volume"  # rime-rename: keep (guest images find these volumes by label)
     # Each argument single-quoted, not "${command[*]}".
     #
     # `[*]` joins with a space and loses every quote the user typed, so
@@ -1454,7 +1454,7 @@ cmd_run() {
 
     # ── the egress volume ───────────────────────────────────────────────────
     truncate -s 256M "$out_img" || die "cannot create the egress volume"
-    mkfs.vfat -F 32 -n RIMEOUT "$out_img" >/dev/null || die "cannot format the egress volume"
+    mkfs.vfat -F 32 -n APEXOUT "$out_img" >/dev/null || die "cannot format the egress volume"  # rime-rename: keep (guest images find these volumes by label)
 
     # ── the domain ──────────────────────────────────────────────────────────
     # Built from the same generator every other VM uses, so a disposable VM is
@@ -1539,7 +1539,7 @@ cmd_run() {
     # — so the documented outcome for a guest that does not satisfy the
     # contract ("an empty egress and a timeout warning") came with no way to
     # find out WHY. The console is the only thing a guest that never mounted
-    # RIMEIN can have said.
+    # APEXIN can have said.
     #
     # It is a nomination like any other rather than a default, because the
     # serial log is bytes the guest chose to write and this verb's whole
@@ -1598,7 +1598,7 @@ create options:
   --usb VENDOR:PRODUCT  pass a host USB device through, as \`lsusb\` prints it
 
 run options:
-  --copy-in PATH        copied into the read-only RIMEIN volume. Repeatable.
+  --copy-in PATH        copied into the read-only APEXIN volume. Repeatable.
   --egress NAME         a filename the task may hand back. Repeatable.
   --egress-to DIR       where those files land. WITHOUT IT, NOTHING LEAVES.
   --console-to FILE     save the guest's serial output there before teardown

@@ -3,8 +3,8 @@
 #  mk-guest — the one guest image every vmlab flow boots.
 #
 #  `rime vm run`'s contract (docs/virtualization.md) is that the caller brings
-#  an image which mounts the filesystem labelled RIMEIN, runs task.sh from it,
-#  writes to RIMEOUT and powers off. `rime vm create` has no contract at all:
+#  an image which mounts the filesystem labelled APEXIN, runs task.sh from it,
+#  writes to APEXOUT and powers off. `rime vm create` has no contract at all:
 #  it makes a machine. One guest satisfies both here, because a lab with two
 #  guests is a lab where "the flow failed" and "the other guest is different"
 #  are indistinguishable.
@@ -23,8 +23,8 @@
 #    * it mounts a virtiofs share if one is attached, reads the host's file out
 #      of it, and tries to write — which is the only way to tell a read-only
 #      share from a read-write one that happens not to have been written to.
-#    * it runs the RIMEIN task.
-#    * everything it says on the serial console it ALSO writes to RIMEOUT as
+#    * it runs the APEXIN task.
+#    * everything it says on the serial console it ALSO writes to APEXOUT as
 #      guest-report.txt. `rime vm run` deletes the whole VM directory on the
 #      way out, console log included, so a claim about what a disposable guest
 #      saw has to leave through the egress boundary like any other file — and
@@ -95,7 +95,7 @@ cat > "$WORK/init" <<'INIT'
 export PATH=/bin
 B=/bin/busybox
 # Every RIME-VMLAB line goes to the serial console AND to /report.txt, which is
-# copied to RIMEOUT once that volume is mounted. `rime vm create` guests are
+# copied to APEXOUT once that volume is mounted. `rime vm create` guests are
 # read through the console; `rime vm run` guests cannot be, because teardown
 # removes the console log with everything else.
 say() { echo "RIME-VMLAB: $*"; echo "RIME-VMLAB: $*" >> /report.txt; }
@@ -191,9 +191,9 @@ for tag in labshare labro; do
     fi
 done
 
-# ── the RIMEIN task ─────────────────────────────────────────────────────────
+# ── the APEXIN task ─────────────────────────────────────────────────────────
 # The guest contract docs/virtualization.md states, and nothing more: mount
-# RIMEIN, run task.sh from it, let it write to RIMEOUT. /dev/vdb and /dev/vdc
+# APEXIN, run task.sh from it, let it write to APEXOUT. /dev/vdb and /dev/vdc
 # are where `rime vm run` attaches them; the labels are checked rather than
 # assumed, so a guest handed the wrong disk says so instead of running a task
 # script that is not there.
@@ -220,10 +220,10 @@ if $B mount -t vfat -o ro,iocharset=ascii /dev/vdb /in 2>/dev/null; then
         say "task-rc=$?"
         $B sync
     else
-        say "task=<no task.sh on RIMEIN>"
+        say "task=<no task.sh on APEXIN>"
     fi
     # The report leaves through the egress boundary like anything else: it is
-    # a file on RIMEOUT and the caller has to nominate it by name.
+    # a file on APEXOUT and the caller has to nominate it by name.
     $B cp /report.txt /out/guest-report.txt 2>/dev/null
     $B sync
     $B umount /out 2>/dev/null
