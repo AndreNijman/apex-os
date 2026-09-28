@@ -2145,6 +2145,34 @@ jobs:
         if: ${{ !cancelled() }}
         run: ./tests/test-rime-pkg.sh
 
+      # The same engine on a machine whose user extension predates the rebrand
+      # (/var/lib/extensions/apex-user.raw): it must be adopted as current, not  (rime-rename: keep)
+      # rebuilt at first boot, and the next real rebuild must replace it rather
+      # than merge a second extension beside it.
+      - name: Run package-engine assertions against a pre-rename extension
+        if: ${{ !cancelled() }}
+        run: ./tests/test-rime-pkg-legacy-ext.sh
+
+      # The rest of the first boot of a Rime OS image on an APEX machine: the (rime-rename: keep)
+      # system-state migration, the session-side one, the boot splash's accent
+      # from the ESP credential APEX wrote, and the apex command, units and (rime-rename: keep)
+      # trees kept as aliases. Each runs against a fixture root, never the host.
+      - name: Run the migration from an APEX machine  # rime-rename: keep
+        if: ${{ !cancelled() }}
+        run: ./tests/test-rime-migrate-from-apex.sh  # rime-rename: keep (the suite's name)
+
+      - name: Run the session-side migration
+        if: ${{ !cancelled() }}
+        run: ./tests/test-rime-session-migrate.sh
+
+      - name: Run the boot splash accent read from a pre-rename credential
+        if: ${{ !cancelled() }}
+        run: ./tests/test-rime-plymouth-accent-legacy.sh
+
+      - name: Run the pre-rename command and unit aliases
+        if: ${{ !cancelled() }}
+        run: ./tests/test-rime-rename-compat.sh
+
       # The .deb route. Anthropic publishes Claude Desktop for Linux as a .deb
       # and nothing else, so this is how it stops being hand-unpacked into
       # /usr/local with a per-app update timer. The suite builds its own .deb
