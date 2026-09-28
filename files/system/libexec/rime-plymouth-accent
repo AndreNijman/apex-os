@@ -15,6 +15,11 @@
 #     the ESP is the per-machine channel docs/boot-v2.md chose; under a UKI,
 #     systemd-stub delivers this same file to the initramfs itself.
 #
+# An ESP written by an APEX-OS image carries the same file as apex.accent.cred.
+# Where that file exists it is kept in step (and removed with the new one), so
+# a rollback to that image still starts in the owner's accent; it is never
+# created where it is absent.  (rime-rename: keep)
+#
 # The ESP is mounted only in a private mount namespace, only for the write, and
 # only when the value actually changes. The file holds two digits and nothing a
 # boot depends on: if it is wrong or missing, the splash is the default colour.
@@ -61,10 +66,14 @@ fi
 
 # ── boot: the credential on each ESP ─────────────────────────────────────────
 write_cred() {  # $1 = a mounted ESP
-    c="$1/loader/credentials/rime.accent.cred"
-    if [ -z "$bucket" ]; then rm -f "$c"; return 0; fi
-    [ "$(head -c 8 "$c" 2>/dev/null)" = "$bucket" ] && return 0
-    mkdir -p "$1/loader/credentials" && printf '%s' "$bucket" > "$c.tmp" && mv -f "$c.tmp" "$c"
+    for n in rime apex; do   # rime-rename: keep (the pre-rename credential name)
+        c="$1/loader/credentials/$n.accent.cred"
+        [ "$n" = rime ] || [ -e "$c" ] || continue
+        if [ -z "$bucket" ]; then rm -f "$c"; continue; fi
+        [ "$(head -c 8 "$c" 2>/dev/null)" = "$bucket" ] && continue
+        mkdir -p "$1/loader/credentials" && printf '%s' "$bucket" > "$c.tmp" && mv -f "$c.tmp" "$c"
+    done
+    return 0
 }
 if [ -n "${RIME_ESP_DIRS:-}" ]; then
     for d in $RIME_ESP_DIRS; do write_cred "$d"; done
@@ -74,11 +83,14 @@ for dev in $(lsblk -rnpo NAME,PARTTYPE 2>/dev/null | awk 'tolower($2) == "c12a73
     unshare -m sh -c '
         m="$(mktemp -d)" || exit 0
         mount -t vfat -o rw,nosuid,nodev,noexec "$1" "$m" 2>/dev/null || { rmdir "$m"; exit 0; }
-        c="$m/loader/credentials/rime.accent.cred"
-        if [ -z "$2" ]; then rm -f "$c"
-        elif [ "$(head -c 8 "$c" 2>/dev/null)" != "$2" ]; then
-            mkdir -p "$m/loader/credentials" && printf "%s" "$2" > "$c.tmp" && mv -f "$c.tmp" "$c" && sync -f "$m"
-        fi
-        umount "$m"; rmdir "$m"' sh "$dev" "$bucket"
+        for n in rime apex; do
+            c="$m/loader/credentials/$n.accent.cred"
+            [ "$n" = rime ] || [ -e "$c" ] || continue
+            if [ -z "$2" ]; then rm -f "$c"
+            elif [ "$(head -c 8 "$c" 2>/dev/null)" != "$2" ]; then
+                mkdir -p "$m/loader/credentials" && printf "%s" "$2" > "$c.tmp" && mv -f "$c.tmp" "$c" && sync -f "$m"
+            fi
+        done
+        umount "$m"; rmdir "$m"' sh "$dev" "$bucket"   # rime-rename: keep (the loop names apex.accent.cred)
 done
 exit 0
