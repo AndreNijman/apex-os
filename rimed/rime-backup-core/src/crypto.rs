@@ -101,16 +101,16 @@ use sha2::{Digest, Sha256};
 use zeroize::{Zeroize, Zeroizing};
 
 /// Domain separator for the one-step KDF over the X25519 output.
-const SNAPSHOT_KEY_DOMAIN: &[u8] = b"rime-backup/v1 snapshot-key\0";
+const SNAPSHOT_KEY_DOMAIN: &[u8] = b"apex-backup/v1 snapshot-key\0";  // rime-rename: keep (KDF domain; existing backups decrypt only under it)
 
 /// Domain separator for a chunk's additional data.
-const CHUNK_AAD_DOMAIN: &[u8] = b"rime-backup/v1 chunk\0";
+const CHUNK_AAD_DOMAIN: &[u8] = b"apex-backup/v1 chunk\0";  // rime-rename: keep (AEAD AAD domain; existing chunks authenticate only under it)
 
 /// Domain separator for a recipient string's checksum.
-const RECIPIENT_CHECKSUM_DOMAIN: &[u8] = b"rime-backup/v1 recipient\0";
+const RECIPIENT_CHECKSUM_DOMAIN: &[u8] = b"apex-backup/v1 recipient\0";  // rime-rename: keep (checksum domain inside every recipient string already written)
 
 /// The human-facing prefix of a recipient string.
-pub const RECIPIENT_PREFIX: &str = "rimebk1";
+pub const RECIPIENT_PREFIX: &str = "apexbk1";  // rime-rename: keep (recipient strings already in project files)
 
 /// Bytes of checksum carried in a recipient string.
 ///

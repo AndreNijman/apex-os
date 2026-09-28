@@ -7,7 +7,7 @@ fn parse(text: &str) -> Result<BackupConfig, ConfigError> {
     BackupConfig::from_project(&config)
 }
 
-const RECIPIENT: &str = "recipient = \"rimebk1AAAA\"\n";
+const RECIPIENT: &str = "recipient = \"apexbk1AAAA\"\n";  // rime-rename: keep (RECIPIENT_PREFIX)
 
 #[test]
 fn a_project_with_no_backup_section_is_told_what_to_do_and_not_told_off() {
@@ -183,8 +183,8 @@ fn the_staging_directory_is_always_excluded_whatever_the_project_says() {
     .expect("parses");
     assert!(config.exclude.is_empty());
     assert!(config.is_excluded(crate::target::bucket::STAGING_DIR));
-    assert!(config.is_excluded("_rime-backup/20260912T014233Z-0badc0de/data.000000"));
-    assert!(config.is_excluded("nested/_rime-backup/x"));
+    assert!(config.is_excluded("_apex-backup/20260912T014233Z-0badc0de/data.000000"));  // rime-rename: keep (STAGING_DIR)
+    assert!(config.is_excluded("nested/_apex-backup/x"));  // rime-rename: keep (STAGING_DIR)
 }
 
 #[test]
@@ -199,9 +199,10 @@ fn a_file_that_is_not_toml_is_a_position_and_never_its_contents() {
 // ── the ssh target, and §36's host group, which is enforced here ────────────
 
 /// A complete `[backup.ssh]`, plus a bound host group that contains the host.
+// rime-rename: keep (the recipient in this raw string carries the kept `apexbk1` prefix)
 const SSH_OK: &str = r#"
 [backup]
-recipient = "rimebk1AAAA"
+recipient = "apexbk1AAAA"
 target = "ssh"
 
 [backup.ssh]
@@ -339,7 +340,7 @@ fn a_host_user_or_path_that_would_not_survive_an_ssh_command_line_is_refused() {
     // be refused as a host outside the group and this would prove nothing.
     fn build(host: &str, user: &str, identity: &str, known_hosts: &str) -> String {
         format!(
-            "[backup]\nrecipient = \"rimebk1AAAA\"\ntarget = \"ssh\"\n\n\
+            "[backup]\n{RECIPIENT}target = \"ssh\"\n\n\
              [backup.ssh]\nhost = '{host}'\nuser = '{user}'\n\
              path = \"/srv/backups\"\nidentity = '{identity}'\n\
              known_hosts = '{known_hosts}'\n"

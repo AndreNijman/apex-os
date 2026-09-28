@@ -143,7 +143,7 @@ fn every_object_key_this_build_produces_is_one_the_framework_will_carry() {
 #[test]
 fn the_staging_directory_is_not_dot_prefixed_because_the_framework_refuses_one() {
     assert!(rime_secret_core::operation::valid_name(STAGING_DIR));
-    assert!(!rime_secret_core::operation::valid_name(".rime-backup"));
+    assert!(!rime_secret_core::operation::valid_name(".apex-backup"));  // rime-rename: keep (the dotted twin of STAGING_DIR)
     assert!(!STAGING_DIR.starts_with('.'));
 }
 
@@ -405,7 +405,7 @@ fn the_upload_names_the_staged_file_by_a_path_relative_to_the_project() {
         call.params,
         vec![(
             "file".to_string(),
-            "_rime-backup/20260912T014233Z-0badc0de/data.000000".to_string()
+            "_apex-backup/20260912T014233Z-0badc0de/data.000000".to_string()  // rime-rename: keep (STAGING_DIR)
         )]
     );
     assert!(

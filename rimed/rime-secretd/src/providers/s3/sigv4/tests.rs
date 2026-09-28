@@ -65,7 +65,7 @@ fn a_bucket_listing_signs_the_way_botocore_signs_it() {
         "GET",
         "127.0.0.1:9000",
         "/example-backups",
-        "list-type=2&prefix=rime-backup%2F",
+        "list-type=2&prefix=apex-backup%2F",  // rime-rename: keep (botocore-produced vector: its signature covers these bytes)
         EMPTY_PAYLOAD_SHA256,
         "us-east-1",
     );
@@ -84,7 +84,7 @@ fn an_object_read_signs_the_way_botocore_signs_it() {
     let req = request(
         "GET",
         "s3.ap-southeast-2.amazonaws.com",
-        "/example-backups/rime-backup/20260912T101112Z-abcd1234/head.json",
+        "/example-backups/apex-backup/20260912T101112Z-abcd1234/head.json",  // rime-rename: keep (botocore-produced vector: its signature covers these bytes)
         "",
         EMPTY_PAYLOAD_SHA256,
         "ap-southeast-2",
@@ -107,7 +107,7 @@ fn an_object_write_signs_its_body_the_way_botocore_signs_it() {
     let req = request(
         "PUT",
         "s3.ap-southeast-2.amazonaws.com",
-        "/example-backups/rime-backup/20260912T101112Z-abcd1234/data.000000",
+        "/example-backups/apex-backup/20260912T101112Z-abcd1234/data.000000",  // rime-rename: keep (botocore-produced vector: its signature covers these bytes)
         "",
         &payload,
         "ap-southeast-2",
@@ -249,7 +249,7 @@ fn the_signature_changes_with_every_part_of_the_scope() {
 
 #[test]
 fn a_path_keeps_its_separators_and_encodes_everything_else() {
-    assert_eq!(encode_path("/bucket/rime-backup/head.json"), "/bucket/rime-backup/head.json");
+    assert_eq!(encode_path("/bucket/apex-backup/head.json"), "/bucket/apex-backup/head.json");  // rime-rename: keep (DEFAULT_PREFIX)
     assert_eq!(encode_path("/b/a b"), "/b/a%20b");
     assert_eq!(encode_path("/b/a+b"), "/b/a%2Bb");
     assert_eq!(encode_path("/b/~._-"), "/b/~._-");
@@ -260,7 +260,7 @@ fn a_path_keeps_its_separators_and_encodes_everything_else() {
 
 #[test]
 fn a_query_component_encodes_its_separators_too() {
-    assert_eq!(encode_query_component("rime-backup/"), "rime-backup%2F");
+    assert_eq!(encode_query_component("apex-backup/"), "apex-backup%2F");  // rime-rename: keep (DEFAULT_PREFIX)
     assert_eq!(encode_query_component("a b"), "a%20b");
     assert_eq!(encode_query_component("x=y&z"), "x%3Dy%26z");
 }

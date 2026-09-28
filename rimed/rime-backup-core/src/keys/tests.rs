@@ -127,7 +127,7 @@ fn a_registered_recipient_that_is_not_a_recipient_is_refused() {
     let dir = work();
     let store = KeyStore::new(dir.path().join("state"));
     store.generate(1000).expect("generates");
-    std::fs::write(store.recipient_path(1000), b"rimebk1nonsense").expect("clobbers");
+    std::fs::write(store.recipient_path(1000), b"apexbk1nonsense").expect("clobbers");  // rime-rename: keep (RECIPIENT_PREFIX)
     let err = store.registered(1000).expect_err("refuses");
     assert!(matches!(err, KeyError::Malformed { .. }), "{err:?}");
 }

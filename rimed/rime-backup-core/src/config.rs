@@ -87,7 +87,7 @@ pub enum Where {
 }
 
 /// The default key prefix, and the default directory under a target root.
-pub const DEFAULT_PREFIX: &str = "rime-backup";
+pub const DEFAULT_PREFIX: &str = "apex-backup";  // rime-rename: keep (remote key prefix existing backups live under)
 
 /// Why a project's `[backup]` section is not usable.
 #[derive(Debug, Clone, PartialEq, Eq)]

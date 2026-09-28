@@ -2095,7 +2095,7 @@ fn an_object_read_answers_with_bytes_and_still_has_the_credential_taken_out() {
 /// Where a backup stages a chunk inside the project. Underscore and not a dot,
 /// because `valid_name` requires the first byte of a path segment to be
 /// alphanumeric or `_` — asserted below, end to end, rather than believed.
-const BACKUP_STAGING: &str = "_rime-backup";
+const BACKUP_STAGING: &str = "_apex-backup";  // rime-rename: keep (mirrors rime_backup_core STAGING_DIR)
 const BACKUP_SNAPSHOT: &str = "20260912T014233Z-0badc0de";
 
 /// A sealed chunk is not text. This is what one looks like after base64, which
@@ -2211,7 +2211,7 @@ fn a_backup_to_a_bucket_this_project_did_not_bind_never_reaches_cloudflare() {
 }
 
 /// The staging directory's name, proven against the framework rather than
-/// argued from its source. `.rime-backup/` is refused; `_rime-backup/` is not.
+/// argued from its source. `.apex-backup/` is refused; `_apex-backup/` is not.  // rime-rename: keep (STAGING_DIR and its dotted twin)
 #[test]
 fn a_dot_prefixed_staging_directory_is_refused_and_the_underscore_one_is_not() {
     let f = Fixture::new(
@@ -2219,7 +2219,7 @@ fn a_dot_prefixed_staging_directory_is_refused_and_the_underscore_one_is_not() {
         Mode::Normal,
         &["cloudflare.r2.object.write"],
     );
-    let dotted = format!(".rime-backup/{BACKUP_SNAPSHOT}/data.000000");
+    let dotted = format!(".apex-backup/{BACKUP_SNAPSHOT}/data.000000");  // rime-rename: keep (the dotted twin of STAGING_DIR)
     let path = f.project.join(&dotted);
     std::fs::create_dir_all(path.parent().expect("a parent")).expect("staging dir");
     std::fs::write(&path, BACKUP_CHUNK_BASE64).expect("the staged chunk");

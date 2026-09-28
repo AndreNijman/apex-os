@@ -89,7 +89,7 @@ use crate::format::SnapshotId;
 /// The directory inside the project that chunks are staged in on their way up.
 ///
 /// Underscore and not a dot; see the module note.
-pub const STAGING_DIR: &str = "_rime-backup";
+pub const STAGING_DIR: &str = "_apex-backup";  // rime-rename: keep (staging dir name inside existing target roots)
 
 /// What this target needs from `rime-secretd`.
 ///

@@ -147,7 +147,7 @@ fn the_head_is_written_last_so_an_interrupted_write_is_absent_and_not_corrupt() 
         format: FORMAT.to_string(),
         snapshot: "20260912T014233Z-0badc0de".to_string(),
         created_ms: 1,
-        recipient: "rimebk1".to_string(),
+        recipient: "apexbk1".to_string(),  // rime-rename: keep (RECIPIENT_PREFIX)
         ephemeral: "AAAA".to_string(),
         chunk_bytes: CHUNK_BYTES as u32,
         manifest_chunks: 1,
@@ -183,7 +183,8 @@ fn every_object_name_is_addressable_as_an_r2_key_segment() {
 
 #[test]
 fn a_head_refuses_a_field_it_does_not_know_rather_than_ignoring_it() {
-    let text = r#"{"format":"rime-backup/1","snapshot":"s","created_ms":1,
+    // rime-rename: keep (the head below carries the kept FORMAT id)
+    let text = r#"{"format":"apex-backup/1","snapshot":"s","created_ms":1,
         "recipient":"r","ephemeral":"AAAA","chunk_bytes":1,"manifest_chunks":1,
         "data_chunks":1,"label":"l","extra":true}"#;
     assert!(serde_json::from_str::<Head>(text).is_err());

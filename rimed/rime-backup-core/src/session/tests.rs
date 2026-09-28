@@ -611,7 +611,7 @@ fn a_snapshot_in_a_format_this_build_does_not_know_is_not_reported_as_damaged() 
     let path = f.object_path(&written.id, HEAD_OBJECT);
     let mut head: Head =
         serde_json::from_slice(&std::fs::read(&path).expect("reads")).expect("parses");
-    head.format = "rime-backup/2".to_string();
+    head.format = "apex-backup/2".to_string();  // rime-rename: keep (the FORMAT family, one version on)
     std::fs::write(&path, serde_json::to_vec(&head).expect("serialises")).expect("writes");
 
     let verification = verify(&f.target(), &written.id, Some(&f.identity));

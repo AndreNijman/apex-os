@@ -43,7 +43,7 @@ use std::fmt;
 use serde::{Deserialize, Serialize};
 
 /// The format this build writes, and the only one it reads.
-pub const FORMAT: &str = "rime-backup/1";
+pub const FORMAT: &str = "apex-backup/1";  // rime-rename: keep (stored format id in every existing snapshot head)
 
 /// Plaintext bytes per chunk. See the module note for where the number is from.
 pub const CHUNK_BYTES: usize = 1024 * 1024;

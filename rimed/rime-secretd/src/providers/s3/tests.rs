@@ -444,7 +444,7 @@ fn an_rime_toml_that_cannot_be_read_refuses_rather_than_binding_nothing() {
 fn a_chunk_reaches_the_bucket_under_the_key_it_chose_and_the_secret_does_not_come_back() {
     let f = Fixture::new("roundtrip", Mode::Normal, &["s3.object.read", "s3.object.write"]);
 
-    let staged = "_rime-backup/20260912T101112Z-abcd1234/data.000000";
+    let staged = "_apex-backup/20260912T101112Z-abcd1234/data.000000";  // rime-rename: keep (STAGING_DIR)
     let path = f.project.join(staged);
     std::fs::create_dir_all(path.parent().expect("parent")).expect("staging");
     // Base64, because a brokered reply is `String::from_utf8_lossy` — the same
