@@ -54,6 +54,11 @@ WF=.github/workflows/kernel-build.yml
 # GHCR repository distinguished by tag (see build-image.yml's `IMAGE`), which is
 # also why publishing the kernel needed no new package and no new permission.
 IMAGE_REPO='ghcr.io/andrenijman/rime-os'
+# Where every kernel published BEFORE the rebrand lives. A pin may still name
+# it: a digest reference names the repository it was pushed to, and
+# build-image.yml's resolve step accepts either (copying a pre-rename kernel
+# across when the pin names the new repository). New pins name IMAGE_REPO.
+OLD_REPO='ghcr.io/andrenijman/apex-os'  # rime-rename: keep (pre-rebrand kernels live here)
 
 # The name a LOCAL kernel build produces. This must keep working: it is how the
 # kernel is developed, and build-local.sh passes it explicitly.
@@ -131,15 +136,16 @@ elif [ "${default#localhost/}" != "$default" ]; then
     hint "every image build in run 35552604603. The default is for CI and for"
     hint "anyone who has not built a kernel; build-local.sh passes the local"
     hint "name explicitly and is unaffected by what this default says."
-elif [[ ! "$default" =~ ^"$IMAGE_REPO"@sha256:[0-9a-f]{64}$ ]]; then
+elif [[ ! "$default" =~ ^"$IMAGE_REPO"@sha256:[0-9a-f]{64}$ ]] \
+     && [[ ! "$default" =~ ^"$OLD_REPO"@sha256:[0-9a-f]{64}$ ]]; then
     err "$CF defaults RIME_KERNEL_IMAGE to '$default', which is not a digest"
-    hint "reference on $IMAGE_REPO. It must be exactly"
+    hint "reference on $IMAGE_REPO (or, for a pre-rebrand kernel, $OLD_REPO). It must be exactly"
     hint "${IMAGE_REPO}@sha256:<64 hex>, so that the kernel core installs is the"
     hint "one whose BTF the kernel tier actually checked — a floating tag can be"
     hint "repointed after that check and core cannot tell."
     hint "kernel-build.yml prints the exact line to paste in its run summary."
 else
-    ok "RIME_KERNEL_IMAGE defaults to a digest on $IMAGE_REPO"
+    ok "RIME_KERNEL_IMAGE defaults to a digest on ${default%@*}"
 fi
 
 # ── 3. the stage is a named FROM, and the RPMs come from it ─────────────────

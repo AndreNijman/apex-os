@@ -4,9 +4,13 @@ name: build-image
 #
 #   core            → ghcr.io/andrenijman/rime-os:core   (heavy, slow-moving)
 #   base            → ghcr.io/andrenijman/rime-os:base   (thin, per-commit)
-#   the image       → ghcr.io/andrenijman/rime-os:rime
-#                     …and :daily, :gaming-mesa, :gaming-nvidia, which are the
-#                     SAME MANIFEST DIGEST under their old names.
+#   the image       → ghcr.io/andrenijman/rime-os:apex (rime-rename: keep)
+#                     …and :rime, :daily, :gaming-mesa, :gaming-nvidia, which
+#                     are the SAME MANIFEST DIGEST under their other names.
+#
+#   Every image build is ALSO published under the pre-rebrand name,
+#   ghcr.io/andrenijman/apex-os, with the same tags: machines that have not (rime-rename: keep)
+#   moved to the new name yet still pull that one. See the last publish step.
 #
 # ═══ ONE IMAGE, AND WHY THE OLD TAGS MUST NEVER STOP RESOLVING ═══
 #
@@ -119,7 +123,9 @@ on:
     - cron: "0 6 * * 1"
 
 concurrency:
-  group: rime-image-publish
+  # The pre-rebrand name, so a run of this file serialises against a run of the
+  # Release A file still in flight on main (and against the other publishers).
+  group: apex-image-publish  # rime-rename: keep (shared with release-shell, promote-channel, pin-netinstall-image)
   cancel-in-progress: false
 
 # Least privilege. id-token:write is required for cosign keyless (OIDC) signing;
@@ -132,12 +138,12 @@ permissions:
 env:
   REGISTRY: ghcr.io
   # ONE repository for every tier, distinguished by tag (core and base used to be
-  # separate repos: rime-os-core / rime-os-base).
+  # separate repos: apex-os-core / apex-os-base, before the rebrand). (rime-rename: keep)
   #
   # HONEST NOTE ON WHY: this was done expecting the registry to skip blobs it
   # already held — a registry dedups only WITHIN a repository, so pushing :daily
   # was re-uploading ~4.7 GB of layers inherited from core while identical blobs
-  # sat in rime-os-core. That expectation was WRONG, and measuring it locally
+  # sat in apex-os-core. That expectation was WRONG, and measuring it locally (rime-rename: keep)
   # against a throwaway registry:2 showed why:
   #
   #   push core (zstd:chunked) ................. 99 blobs copied,  0 skipped
@@ -177,11 +183,14 @@ env:
   # repository is orphaned and can be deleted in the GHCR UI.
   TAG_CORE: core
   TAG_BASE: base
-  # Transitional: where core/base lived before the consolidation. The base job
-  # copies core across on the first run so this does NOT force a core rebuild —
-  # which would have meant 55 minutes of CI and a full ~5 GB download for every
-  # machine, to change a name.
-  LEGACY_CORE: ghcr.io/andrenijman/rime-os-core
+  # Transitional: where core lived before the rebrand (a full reference, tag
+  # included). The first run under the new name finds no $IMAGE:$TAG_CORE; the
+  # gate reads this one's stamp instead and the base job copies it across, so
+  # the rename alone does NOT force a core rebuild — which would mean 55 minutes
+  # of CI and a full ~5 GB download for every machine, to change a name. (It
+  # used to point at apex-os-core:latest, the name before the consolidation; (rime-rename: keep)
+  # that migration ran long ago.)
+  LEGACY_CORE: ghcr.io/andrenijman/apex-os:core  # rime-rename: keep (the published core predates the rename)
   UPSTREAM_BASE: quay.io/fedora/fedora-bootc:43
 
 jobs:
@@ -269,10 +278,14 @@ jobs:
           # trees); the build was comparing this repo's integration branch
           # against the other repo's release branch. Any rime-os branch with no
           # rime-shell counterpart hit this, which is most of them.
+          # The shell repository under its pre-rebrand name: GitHub redirects a
+          # renamed repository's old name, and the new name resolves only once
+          # the rename has happened, so the old one works on both sides of it.
+          SHELL_REPO=https://github.com/AndreNijman/apex-shell  # rime-rename: keep (works before and after the GitHub rename)
           want="${GITHUB_REF_NAME}"
           sha=""; used=""
           for cand in "$want" roadmap/v2.2 main; do
-            sha="$(git ls-remote https://github.com/AndreNijman/rime-shell \
+            sha="$(git ls-remote "$SHELL_REPO" \
                      "refs/heads/${cand}" | awk '{print $1}')"
             if [ -n "$sha" ]; then
               if [ "$cand" = "$want" ]; then used="$cand"
@@ -367,7 +380,12 @@ jobs:
           # core job's upstream read is: this answer now gates EVERY push, and a
           # single transient registry error must not cost an hour of build and a
           # fleet-wide download. After five failures it is treated as absent.
-          fmt='{{ index .Labels "org.opencontainers.image.revision" }}|{{ index .Labels "org.rimeos.fedora-bootc.digest" }}'
+          #
+          # The fedora-bootc stamp is read under BOTH spellings: a core built
+          # before the rebrand carries org.apexos.fedora-bootc.digest, one built (rime-rename: keep)
+          # after it org.rimeos.…, and reading only the new one would make the
+          # weekly cron rebuild the pre-rename core for want of a label.
+          fmt='{{ index .Labels "org.opencontainers.image.revision" }}|{{ index .Labels "org.rimeos.fedora-bootc.digest" }}|{{ index .Labels "org.apexos.fedora-bootc.digest" }}'  # rime-rename: keep (read both label spellings)
           inspect() {
             # stderr kept apart: a warning on a SUCCESSFUL inspect must not
             # end up inside the revision it returns.
@@ -382,23 +400,28 @@ jobs:
             return 1
           }
 
-          # Transitional fallback: before the repo consolidation core lived at
-          # $LEGACY_CORE:latest, and the base job still migrates it from there
-          # when $IMAGE:$TAG_CORE is absent -- so that is the core base would
-          # build FROM, and the one whose revision counts. Without this the
-          # first run after the rename would see "no published core", rebuild
-          # it for 55 minutes, and hand every machine a full ~5 GB download --
-          # to change a name.
+          # Transitional fallback: before the rebrand core lived at
+          # $LEGACY_CORE (ghcr.io/andrenijman/apex-os:core), and the base job (rime-rename: keep)
+          # still migrates it from there when $IMAGE:$TAG_CORE is absent -- so
+          # that is the core base would build FROM, and the one whose revision
+          # counts. Without this the first run after the rename would see "no
+          # published core", rebuild it for 55 minutes, and hand every machine
+          # a full ~5 GB download -- to change a name.
           if META="$(inspect "$IMAGE:$TAG_CORE")"; then
             echo "published core: $IMAGE:$TAG_CORE"
-          elif META="$(inspect "$LEGACY_CORE:latest")"; then
-            echo "published core: $LEGACY_CORE:latest (resolved from the legacy name)"
+          elif META="$(inspect "$LEGACY_CORE")"; then
+            echo "published core: $LEGACY_CORE (resolved from the legacy name)"
           else
             decide true "no published core could be read"
           fi
           REV="${META%%|*}"
-          HAVE="${META#*|}"
+          REST="${META#*|}"
+          HAVE="${REST%%|*}"
+          HAVE_OLD="${REST#*|}"
+          case "$REST" in *"|"*) ;; *) HAVE_OLD="" ;; esac
           [ "$HAVE" = "<no value>" ] && HAVE=""
+          [ "$HAVE_OLD" = "<no value>" ] && HAVE_OLD=""
+          [ -n "$HAVE" ] || HAVE="$HAVE_OLD"
           [ "$REV" = "<no value>" ] && REV=""
           echo "published core was built from revision ${REV:-<none>}, fedora-bootc ${HAVE:-<none>}"
 
@@ -628,10 +651,13 @@ jobs:
           set -euo pipefail
           command -v skopeo >/dev/null || { sudo apt-get update -qq && sudo apt-get install -y -qq skopeo; }
 
-          ref="$(sed -nE 's|^ARG RIME_KERNEL_IMAGE=(ghcr\.io/andrenijman/rime-os@sha256:[0-9a-f]{64})$|\1|p' Containerfile.core | head -1)"
+          # Either repository name. Every kernel published before the rebrand
+          # lives under apex-os, and a digest pin names the repository it was (rime-rename: keep)
+          # pushed to; the next kernel-build.yml run publishes under rime-os.
+          ref="$(sed -nE 's#^ARG RIME_KERNEL_IMAGE=(ghcr\.io/andrenijman/(apex|rime)-os@sha256:[0-9a-f]{64})$#\1#p' Containerfile.core | head -1)"  # rime-rename: keep (accepts the pre-rename repository)
           if [ -z "$ref" ]; then
             echo "::error::Containerfile.core's ARG RIME_KERNEL_IMAGE default is not a"
-            echo "::error::ghcr.io/andrenijman/rime-os@sha256:<64 hex> digest reference."
+            echo "::error::ghcr.io/andrenijman/{rime,apex}-os@sha256:<64 hex> digest reference."  # rime-rename: keep
             grep -n '^ARG RIME_KERNEL_IMAGE=' Containerfile.core || true
             exit 1
           fi
@@ -655,6 +681,25 @@ jobs:
               got=""
               [ "$_try" -lt 5 ] && sleep $(( _try * 10 ))
           done
+          # The rebrand. A pin that names rime-os but was published before the
+          # rename exists only under apex-os, and GHCR shares nothing between (rime-rename: keep)
+          # two repositories. Copy that exact manifest across ONCE
+          # (--preserve-digests, or the copy fails rather than changing the
+          # digest the pin was checked at), then read it back under the new
+          # name. Idempotent: the second run finds it and skips all of this.
+          old_ref="ghcr.io/andrenijman/apex-os@${ref#*@}"  # rime-rename: keep (where every pre-rename kernel lives)
+          if [ -z "$got" ] && [ "$ref" != "$old_ref" ] \
+             && skopeo inspect --creds "$creds" --format '{{.Digest}}' "docker://$old_ref" >/dev/null 2>&1; then
+            digest="${ref#*@}"
+            echo "the kernel tier is not under ${ref%@*} yet; copying it from $old_ref"
+            export REGISTRY_AUTH_FILE="$RUNNER_TEMP/skopeo-auth.json"
+            [ -f "$REGISTRY_AUTH_FILE" ] || echo '{}' > "$REGISTRY_AUTH_FILE"
+            skopeo copy --retry-times 3 --preserve-digests --src-creds "$creds" --dest-creds "$creds" \
+              "docker://$old_ref" "docker://${ref%@*}:kernel-${digest#sha256:}" \
+              || { echo "::error::could not copy the kernel tier from $old_ref"; exit 1; }
+            got="$(skopeo inspect --creds "$creds" --format '{{.Digest}}' "docker://$ref" 2>&1)" || got=""
+            [ "$got" = "$digest" ] || { echo "::error::$ref resolves to '$got' after the copy, not $digest"; exit 1; }
+          fi
           if [ -z "$got" ]; then
             echo "::error::the kernel tier $ref cannot be pulled."
             echo "::error::core installs its kernel from that image and has NO fallback —"
@@ -733,7 +778,7 @@ jobs:
           # and podman dies with "determining starting point for build: no FROM
           # statement found".
           case "${RIME_KERNEL_IMAGE:-}" in
-            ghcr.io/andrenijman/rime-os@sha256:*) : ;;
+            ghcr.io/andrenijman/rime-os@sha256:*|ghcr.io/andrenijman/apex-os@sha256:*) : ;;  # rime-rename: keep (a pre-rename kernel pin)
             *) echo "::error::RIME_KERNEL_IMAGE is '${RIME_KERNEL_IMAGE:-}' — the resolve step did not produce a digest"; exit 1 ;;
           esac
 
@@ -937,8 +982,8 @@ jobs:
 
       # Resolve the core digest to build FROM. If the core job ran in this
       # workflow use its output; otherwise resolve the last-good published core.
-      # Failing here is FATAL and says so: on the very first run after this
-      # split there is no rime-os-core:latest yet, and silently falling through
+      # Failing here is FATAL and says so: on the very first run after a
+      # rename there is no $IMAGE:$TAG_CORE yet, and silently falling through
       # to an unpinned tag (or to fedora-bootc) would produce a wrong image.
       - name: Resolve core digest
         id: core
@@ -951,16 +996,19 @@ jobs:
             export REGISTRY_AUTH_FILE="$RUNNER_TEMP/skopeo-auth.json"
             [ -f "$REGISTRY_AUTH_FILE" ] || echo '{}' > "$REGISTRY_AUTH_FILE"
 
-            # ONE-TIME MIGRATION. core used to live at $LEGACY_CORE:latest. Copy
+            # ONE-TIME MIGRATION. core used to live at $LEGACY_CORE. Copy
             # it to $IMAGE:$TAG_CORE rather than rebuilding: a rebuild is 55
             # minutes of CI and a full ~5 GB download for every machine, to change
             # a name. Both refs are on the same registry, so this is a blob mount,
             # not a transfer.
             if ! skopeo inspect --creds "$creds" --format '{{.Digest}}' \
                    "docker://$IMAGE:$TAG_CORE" >/dev/null 2>&1; then
-              echo "$IMAGE:$TAG_CORE absent — migrating from $LEGACY_CORE:latest"
-              skopeo copy --retry-times 3 --src-creds "$creds" --dest-creds "$creds" \
-                "docker://$LEGACY_CORE:latest" "docker://$IMAGE:$TAG_CORE" \
+              echo "$IMAGE:$TAG_CORE absent — migrating from $LEGACY_CORE"
+              # --preserve-digests: base is built FROM core BY DIGEST, and the
+              # whole point of copying rather than rebuilding is that every
+              # machine already holds these exact layers.
+              skopeo copy --retry-times 3 --preserve-digests --src-creds "$creds" --dest-creds "$creds" \
+                "docker://$LEGACY_CORE" "docker://$IMAGE:$TAG_CORE" \
                 || { echo "::error::No core image at $IMAGE:$TAG_CORE and none to migrate from."
                      echo "::error::Re-run this workflow with force_core=true to build one."
                      exit 1; }
@@ -2078,7 +2126,12 @@ jobs:
 
       # EVERY published name, all pointing at the one digest.
       #
-      #   rime / rime-<sha>              the canonical name going forward
+      #   apex / apex-<sha>              the name every machine installed before  (rime-rename: keep)
+      #       the rebrand tracks (and what new installs still record, see the
+      #       installer). KEPT: machines follow it by name, and GHCR has no
+      #       redirect.
+      #   rime / rime-<sha>              the same digest under the new name, an
+      #       alias only: nothing is required to track it.
       #   daily / gaming-mesa / gaming-nvidia   MIGRATION. Machines in the field
       #       have bootc pointed at these. If one stops moving, `bootc upgrade`
       #       reports "no update" forever and that machine silently stops getting
@@ -2100,26 +2153,29 @@ jobs:
             skopeo copy --retry-times 3 --src-creds "$creds" --dest-creds "$creds" \
               "docker://$IMAGE@$digest" "docker://$IMAGE:$1"
           }
+          # `apex` is the tag machines installed before the rebrand track, and (rime-rename: keep)
+          # `rime` an alias for the same digest. Both, always.
+          FLAVORS="apex rime daily gaming-mesa gaming-nvidia"  # rime-rename: keep (apex is a tag machines track)
           # Per-SHA names first. Nothing tracks these, so they are written from
           # any ref: they are what makes a non-main build a real, complete,
           # inspectable build rather than a dry run.
-          for f in rime daily gaming-mesa gaming-nvidia; do
+          for f in $FLAVORS; do
             promote "$f-${{ github.sha }}"
           done
           if [ "${PUBLISH:-false}" != "true" ]; then
             echo "not publishing from ${GITHUB_REF:-unknown}: per-SHA tags written;"
-            echo "  :rime :daily :gaming-mesa :gaming-nvidia :platform-* :edge NOT moved."
+            echo "  :apex :rime :daily :gaming-mesa :gaming-nvidia :platform-* :edge NOT moved."  # rime-rename: keep
             echo "  This build is complete; it is simply not a release."
             exit 0
           fi
           # The floating names, and the ones installed machines actually track
           # are moved LAST, so any earlier registry failure leaves the fleet on
           # the previous signed release rather than half-migrated.
-          for f in rime daily gaming-mesa gaming-nvidia; do
+          for f in $FLAVORS; do
             promote "platform-$f-${{ github.sha }}"
             promote "platform-$f"
           done
-          for f in rime daily gaming-mesa gaming-nvidia; do
+          for f in $FLAVORS; do
             promote "$f"
           done
           # §26. `edge` is a NAME for what those four already are: every
@@ -2155,11 +2211,11 @@ jobs:
           # redness means nothing is worse than no run. It checks what it did
           # write instead, so the step still proves something on every ref.
           if [ "${PUBLISH:-false}" = "true" ]; then
-            TAGS="rime daily gaming-mesa gaming-nvidia edge
-                  platform-rime platform-daily platform-gaming-mesa platform-gaming-nvidia
-                  daily-${{ github.sha }}"
+            FLAVORS="apex rime daily gaming-mesa gaming-nvidia"  # rime-rename: keep (apex is a tag machines track)
+            TAGS="$FLAVORS edge daily-${{ github.sha }}"
+            for f in $FLAVORS; do TAGS="$TAGS platform-$f"; done
           else
-            TAGS="rime-${{ github.sha }} daily-${{ github.sha }}"
+            TAGS="apex-${{ github.sha }} rime-${{ github.sha }} daily-${{ github.sha }}"  # rime-rename: keep
           fi
           for t in $TAGS; do
             got="$(skopeo inspect --creds "$creds" --format '{{.Digest}}' "docker://$IMAGE:$t" 2>/dev/null || echo MISSING)"
@@ -2172,26 +2228,25 @@ jobs:
           done
           [ "$fail" = 0 ] || exit 1
 
-      # The rebrand, Rime to Rime OS (2026-09-28). GHCR does not redirect a
-      # renamed package, so an installed machine keeps pulling
-      # ghcr.io/andrenijman/rime-os until `rime update` moves it
-      # (`rename_target` in rimed/rime/src/ops.rs), and it moves a machine only
-      # once the new name serves that machine's tag. So every published build
-      # is ALSO published as ghcr.io/andrenijman/rime-os: the same digest, a
-      # signature and an SBOM attestation made under the new name (a cosign
-      # signature names its repository, so the old name's cannot be reused),
-      # and the same tags. It runs LAST, after the old name is published and
-      # asserted, so a failure here leaves every machine updating under the old
-      # name exactly as before.
-      #
-      # The first push creates the package, and a new GHCR package is private
-      # until someone makes it public in its settings (there is no API for
-      # that). Until then an anonymous pull fails, `rime update`'s probe sees
-      # nothing, and no machine moves. That is the intended failure mode.
-      - name: Publish under the new name too (rime-os)
+      # The rebrand, APEX to Rime OS (2026-09-28), the second half. Release A (rime-rename: keep)
+      # published every build under BOTH names while machines still tracked
+      # the old one; this build's own name is now ghcr.io/andrenijman/rime-os,
+      # and it is the OLD name that is published in addition. GHCR does not
+      # redirect a renamed package, so a machine keeps pulling
+      # ghcr.io/andrenijman/apex-os until `rime update` (Release A's (rime-rename: keep)
+      # `rename_target`) moves it, and a machine running something older than
+      # Release A never moves at all. So every published build is ALSO
+      # published as ghcr.io/andrenijman/apex-os: the same digest, a signature (rime-rename: keep)
+      # and an SBOM attestation made under the old name (a cosign signature
+      # names its repository, so the new name's cannot be reused), the same
+      # tags, and read back. It runs LAST, after the new name is published and
+      # asserted, so a failure here leaves every machine that has moved
+      # updating exactly as before, and every machine that has not on its
+      # previous signed release, and the run red.
+      - name: Publish under the old name too (apex-os)  # rime-rename: keep
         if: ${{ steps.push.outputs.digest != '' && env.PUBLISH == 'true' }}
         env:
-          NEW_IMAGE: ghcr.io/andrenijman/rime-os
+          OLD_IMAGE: ghcr.io/andrenijman/apex-os  # rime-rename: keep (machines that have not moved pull this)
         run: |
           set -euo pipefail
           command -v skopeo >/dev/null || { sudo apt-get update -qq && sudo apt-get install -y -qq skopeo; }
@@ -2203,10 +2258,10 @@ jobs:
           copy_to() {
             skopeo copy --retry-times 3 --preserve-digests \
               --src-creds "$creds" --dest-creds "$creds" \
-              "docker://$IMAGE@$digest" "docker://$NEW_IMAGE:$1"
+              "docker://$IMAGE@$digest" "docker://$OLD_IMAGE:$1"
           }
           resolves() {
-            skopeo inspect --creds "$creds" --format '{{.Digest}}' "docker://$NEW_IMAGE:$1" 2>/dev/null || echo MISSING
+            skopeo inspect --creds "$creds" --format '{{.Digest}}' "docker://$OLD_IMAGE:$1" 2>/dev/null || echo MISSING
           }
 
           # The bytes first, under a name nothing tracks, and proven to be the
@@ -2214,61 +2269,65 @@ jobs:
           copy_to "rime-${{ github.sha }}"
           got="$(resolves "rime-${{ github.sha }}")"
           if [ "$got" != "$digest" ]; then
-            echo "::error::$NEW_IMAGE:rime-${{ github.sha }} is '$got', not $digest: the copy changed the manifest"
+            echo "::error::$OLD_IMAGE:rime-${{ github.sha }} is '$got', not $digest: the copy changed the manifest"
             exit 1
           fi
 
-          # Signed and (when attestation is on) attested under the new name.
-          cosign sign --yes "$NEW_IMAGE@$digest"
+          # Signed and (when attestation is on) attested under the old name.
+          cosign sign --yes "$OLD_IMAGE@$digest"
           if [ "${{ vars.RIME_ATTEST_SBOM }}" = "true" ]; then
             if [ ! -s /tmp/sbom.min.json ]; then
-              echo "::error::attestation is on but the SBOM step left no /tmp/sbom.min.json to attest under $NEW_IMAGE"
+              echo "::error::attestation is on but the SBOM step left no /tmp/sbom.min.json to attest under $OLD_IMAGE"
               exit 1
             fi
             if ! cosign attest --yes --predicate /tmp/sbom.min.json \
-                 --type spdxjson "$NEW_IMAGE@$digest" > /tmp/attest-new.log 2>&1; then
-              cat /tmp/attest-new.log
-              echo "::error::cosign attest failed for $NEW_IMAGE@$digest"
+                 --type spdxjson "$OLD_IMAGE@$digest" > /tmp/attest-old.log 2>&1; then
+              cat /tmp/attest-old.log
+              echo "::error::cosign attest failed for $OLD_IMAGE@$digest"
               exit 1
             fi
           fi
-          cosign verify "$NEW_IMAGE@$digest" \
+          cosign verify "$OLD_IMAGE@$digest" \
             --certificate-identity "$IDENTITY" \
             --certificate-oidc-issuer https://token.actions.githubusercontent.com > /dev/null
           if [ "${{ vars.RIME_ATTEST_SBOM }}" = "true" ]; then
-            cosign verify-attestation "$NEW_IMAGE@$digest" --type spdxjson \
+            cosign verify-attestation "$OLD_IMAGE@$digest" --type spdxjson \
               --certificate-identity "$IDENTITY" \
               --certificate-oidc-issuer https://token.actions.githubusercontent.com > /dev/null
           fi
 
-          # The same names the old image carries, the tracked ones last.
-          for f in rime daily gaming-mesa gaming-nvidia; do
+          # The same names the new image carries, the tracked ones last.
+          FLAVORS="apex rime daily gaming-mesa gaming-nvidia"  # rime-rename: keep (apex is a tag machines track)
+          for f in $FLAVORS; do
             copy_to "$f-${{ github.sha }}"
             copy_to "platform-$f-${{ github.sha }}"
             copy_to "platform-$f"
           done
-          for f in rime daily gaming-mesa gaming-nvidia edge; do
+          for f in $FLAVORS edge; do
             copy_to "$f"
           done
 
           fail=0
-          for t in rime daily gaming-mesa gaming-nvidia edge \
-                   platform-rime platform-daily platform-gaming-mesa platform-gaming-nvidia; do
+          TAGS="$FLAVORS edge"
+          for f in $FLAVORS; do TAGS="$TAGS platform-$f"; done
+          for t in $TAGS; do
             got="$(resolves "$t")"
             if [ "$got" = "$digest" ]; then
-              echo "  ok   $NEW_IMAGE:$t -> $got"
+              echo "  ok   $OLD_IMAGE:$t -> $got"
             else
-              echo "::error::$NEW_IMAGE:$t resolves to '$got', expected '$digest'"
+              echo "::error::$OLD_IMAGE:$t resolves to '$got', expected '$digest' — machines still on the old name would stop updating"
               fail=1
             fi
           done
           [ "$fail" = 0 ] || exit 1
-          # Whether a machine can see it yet. Informational: a private package
-          # is the expected state after the very first push.
-          if skopeo inspect --no-creds --raw --no-tags "docker://$NEW_IMAGE:daily" > /dev/null 2>&1; then
-            echo "$NEW_IMAGE is public: machines move to it on their next rime update"
+          # The old name is public already (every installed machine pulls it
+          # anonymously). The NEW one starts private: a new GHCR package stays
+          # private until someone makes it public in its settings, and until
+          # then no machine can move to it. Said here, where it will be seen.
+          if skopeo inspect --no-creds --raw --no-tags "docker://$IMAGE:daily" > /dev/null 2>&1; then
+            echo "$IMAGE is public: machines move to it on their next update"
           else
-            echo "::notice::$NEW_IMAGE is not publicly pullable yet (a new package starts private); no machine will move until it is made public"
+            echo "::notice::$IMAGE is not publicly pullable yet (a new package starts private); machines keep updating from $OLD_IMAGE until it is made public"
           fi
 
       # How much this push actually costs the fleet. The point of the core tier
