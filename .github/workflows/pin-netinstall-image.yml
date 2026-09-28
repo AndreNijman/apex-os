@@ -82,7 +82,7 @@ jobs:
         run: |
           set -euo pipefail
           # This repository under either name: a build signed before the GitHub
-          # rename names apex-os, one signed after it rime-os. Anchored both
+          # rename names apex-os, one signed after it rime-os. Anchored both  (rime-rename: keep)
           # ends, so no other repository, workflow or ref matches.
           IDENTITY_RE='^https://github\.com/AndreNijman/(apex|rime)-os/\.github/workflows/build-image\.yml@refs/heads/main$'  # rime-rename: keep (accepts the pre-rename repository)
           cosign verify \
