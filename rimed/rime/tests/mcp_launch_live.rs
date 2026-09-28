@@ -41,7 +41,7 @@ use rime_agent_core::policy::ConnectorPolicy;
 use serde_json::Value;
 
 /// The `rime` this test drives. The build under test, not whatever is on PATH.
-const Rime: &str = env!("CARGO_BIN_EXE_rime");
+const RIME: &str = env!("CARGO_BIN_EXE_rime");
 
 /// Where `bwrap` is: the fixed path the sandbox module uses, for the reason it
 /// gives — a `PATH` lookup would let a shadowing binary decide what this
@@ -152,7 +152,7 @@ impl Machine {
     fn curated(&self, policy: ConnectorPolicy, allow: &[String]) -> Curated {
         let defs = mcpconf::read(&self.home, Some(&self.proj));
         let approval = mcpconf::approvals(&self.home, Some(&self.proj));
-        mcpconf::curate(&defs, &approval, policy, allow, Some(Path::new(Rime)))
+        mcpconf::curate(&defs, &approval, policy, allow, Some(Path::new(RIME)))
     }
 
     /// The command and arguments the curated document gives one server.
@@ -271,7 +271,7 @@ fn a_plugins_server_launched_through_the_curated_config_cannot_read_the_users_ho
     // to start it.
     let curated = m.curated(ConnectorPolicy::AsConfigured, &[]);
     let (command, args) = m.launch(&curated.document, "plugin:probe:probe");
-    assert_eq!(command, Rime, "the wrapper is not this build's rime");
+    assert_eq!(command, RIME, "the wrapper is not this build's rime");
     assert_eq!(
         args.first().map(String::as_str),
         Some("mcp"),

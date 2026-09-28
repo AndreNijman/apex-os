@@ -62,7 +62,7 @@ use rime_agent_core::pluginconf;
 use rime_agent_core::policy::PluginPolicy;
 
 /// The `rime` this test drives: the build under test, not whatever is on PATH.
-const Rime: &str = env!("CARGO_BIN_EXE_rime");
+const RIME: &str = env!("CARGO_BIN_EXE_rime");
 
 /// The plugin's key, in the `name@marketplace` spelling `enabledPlugins` uses.
 const PLUGIN: &str = "sentinel@rime-test-market";
@@ -262,7 +262,7 @@ fn settings_for(root: &Path, home: &Path, policy: PluginPolicy, allow: &[String]
     );
 
     let curated = pluginconf::curate(&installed, policy, allow);
-    let document = hook::settings_json(Path::new(Rime), None, curated.as_ref());
+    let document = hook::settings_json(Path::new(RIME), None, curated.as_ref());
     let path = root.join(format!("settings-{}.json", policy.as_str()));
     write(&path, &document.to_string());
     Some(path)

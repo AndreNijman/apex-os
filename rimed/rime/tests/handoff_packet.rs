@@ -50,7 +50,7 @@ use rime_agent_core::handoff::FIELDS;
 use rime_agent_core::policy::AgentPolicy;
 use rime_agent_core::protocol::{Request, RunRequest, SandboxPolicy};
 
-const Rime: &str = env!("CARGO_BIN_EXE_rime");
+const RIME: &str = env!("CARGO_BIN_EXE_rime");
 
 /// The daemon binary, beside the `rime` this test was built with.
 ///
@@ -106,7 +106,7 @@ fn assert_hermetic(what: &str, cmd: &Command) {
 }
 
 fn daemon_bin() -> PathBuf {
-    let p = Path::new(Rime)
+    let p = Path::new(RIME)
         .parent()
         .expect("a built test binary has a directory")
         .join("rime-agentd");
@@ -320,7 +320,7 @@ impl Harness {
 
     /// Run the CLI under test against this fixture's daemon.
     fn rime(&self, args: &[&str]) -> Output {
-        let mut cmd = Command::new(Rime);
+        let mut cmd = Command::new(RIME);
         cmd.args(args)
             .current_dir(&self.repo)
             .env("XDG_RUNTIME_DIR", self.root.join("run"))
