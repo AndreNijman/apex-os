@@ -125,7 +125,7 @@ RECIPIENT="$(printf '%s' "$init_out" | sed -n 's/^recipient = "\(.*\)"$/\1/p')"
 [ -n "$RECIPIENT" ] && ok "it prints the line to paste into rime.toml" \
                     || { bad "it prints the line to paste into rime.toml"; printf '%s\n' "$init_out"; finish; }
 case "$RECIPIENT" in
-    rimebk1*) ok "the recipient has the documented prefix" ;;
+    apexbk1*) ok "the recipient has the documented prefix" ;;  # rime-rename: keep (RECIPIENT_PREFIX)
     *) bad "the recipient has the documented prefix (is '${RECIPIENT}')" ;;
 esac
 [ "$("$Rime" backup key show 2>/dev/null)" = "$RECIPIENT" ] \
@@ -189,7 +189,7 @@ run_out="$("$Rime" backup run --project "$PROJ" --label nightly 2>&1)"
 SNAP="$(printf '%s' "$run_out" | sed -n 's/^snapshot \([0-9A-Za-z-]*\) .*/\1/p')"
 [ -n "$SNAP" ] && ok "it names the snapshot it made (${SNAP})" || bad "it names the snapshot it made"
 
-SNAPDIR="${TARGET}/rime-backup/${SNAP}"
+SNAPDIR="${TARGET}/apex-backup/${SNAP}"  # rime-rename: keep (DEFAULT_PREFIX)
 [ -f "${SNAPDIR}/head.json" ] && ok "the snapshot has a head" || bad "the snapshot has a head"
 [ -f "${SNAPDIR}/data.000000" ] && ok "it has a data chunk" || bad "it has a data chunk"
 [ -f "${SNAPDIR}/manifest.000000" ] && ok "it has a manifest chunk" || bad "it has a manifest chunk"
@@ -351,10 +351,10 @@ if [ "$(id -u)" -eq 0 ]; then
     printf '      kernel refuses is reported as could-not-run rather than as a\n'
     printf '      target with no snapshots in it.\n'
 else
-    chmod 000 "${TARGET}/rime-backup"
+    chmod 000 "${TARGET}/apex-backup"  # rime-rename: keep (DEFAULT_PREFIX)
     denied="$("$Rime" backup list --project "$PROJ" 2>&1)"
     rc=$?
-    chmod 700 "${TARGET}/rime-backup"
+    chmod 700 "${TARGET}/apex-backup"  # rime-rename: keep (DEFAULT_PREFIX)
     [ "$rc" -ne 0 ] && ok "listing an unreadable target fails rather than printing nothing" \
                     || { bad "listing an unreadable target fails rather than printing nothing"
                          printf '      %s\n' "$denied"; }

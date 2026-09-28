@@ -234,7 +234,8 @@ grep -q "REFUSED" "${WORK}/double.log" \
     && { bad "every request verified against the double's own signature"
          grep "REFUSED" "${WORK}/double.log" | sed 's/^/      /'; } \
     || ok "every request verified against the double's own signature"
-grep -q "stored ${BUCKET}/rime-backup/" "${WORK}/double.log" \
+PREFIX=apex-backup  # rime-rename: keep (DEFAULT_PREFIX: existing backups live under it)
+grep -q "stored ${BUCKET}/${PREFIX}/" "${WORK}/double.log" \
     && ok "the objects arrived under the prefix the project chose" \
     || bad "the objects arrived under the prefix the project chose"
 

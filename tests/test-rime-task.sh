@@ -486,7 +486,7 @@ fi
 
 # Prune it the way `rime agent undo`'s housekeeping would, and the task must
 # say so rather than resuming as though the safety net were there.
-git -C "$WT" update-ref -d "refs/rime/checkpoints/$CPID" >/dev/null 2>&1
+git -C "$WT" update-ref -d "refs/apex/checkpoints/$CPID" >/dev/null 2>&1  # rime-rename: keep (REF_PREFIX)
 out=$(cd "$PROJ" && rime task resume installer-bug); rc=$?
 if [ "$rc" -ne 0 ] && printf '%s' "$out" | grep -q "the recorded checkpoint is no longer"; then
     ok "a pruned checkpoint refuses the resume and says what happened"
