@@ -80,12 +80,12 @@ fatal() { echo "FATAL: $*" >&2; exit 1; }
 if [ -z "$marketing" ]; then
     gradle_file="$android/app/build.gradle.kts"
     [ -f "$gradle_file" ] || fatal "$gradle_file is missing, so the version cannot be read"
-    marketing=$(sed -n 's/^val APEX_MARKETING_VERSION = "\([^"]*\)".*/\1/p' "$gradle_file" | head -1)
+    marketing=$(sed -n 's/^val RIME_MARKETING_VERSION = "\([^"]*\)".*/\1/p' "$gradle_file" | head -1)
     [ -n "$marketing" ] \
-        || fatal "no APEX_MARKETING_VERSION line in $gradle_file; it was renamed or removed"
+        || fatal "no RIME_MARKETING_VERSION line in $gradle_file; it was renamed or removed"
 fi
 case "$marketing" in
-    *[!0-9.]*|"") fatal "APEX_MARKETING_VERSION '$marketing' is not a dotted number" ;;
+    *[!0-9.]*|"") fatal "RIME_MARKETING_VERSION '$marketing' is not a dotted number" ;;
 esac
 
 # ── The release commit ───────────────────────────────────────────────────────

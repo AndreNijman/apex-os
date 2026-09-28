@@ -1,6 +1,6 @@
 #!/usr/bin/env bash
 # ─────────────────────────────────────────────────────────────────────────────
-#  End-to-end assertions for the APEX secret broker (roadmap §3.2, §11).
+#  End-to-end assertions for the Rime secret broker (roadmap §3.2, §11).
 #
 #  The claim is one sentence: agents use credentials without receiving them.
 #  Everything else is plumbing. So the central test here stores a SENTINEL
@@ -15,8 +15,8 @@
 #  ...in none of them. If it appears anywhere, the service has failed at the
 #  only thing it exists for.
 #
-#  TWO DAEMONS, and which one answers is the point. apex-secretd owns the store
-#  and performs the operation; apex-agentd owns the session, its secret policy
+#  TWO DAEMONS, and which one answers is the point. rime-secretd owns the store
+#  and performs the operation; rime-agentd owns the session, its secret policy
 #  and its project, and forwards a capability record. Neither alone can do what
 #  P0-002 asks: the agent runtime runs as the user, so a store it owned would be
 #  a store the agent owned.
@@ -24,11 +24,11 @@
 #  NO NETWORK IS USED. The fixture remote points at https://127.0.0.1:1/, which
 #  refuses instantly, so git fails fast and the credential is sent nowhere. The
 #  point is not that the fetch succeeds — that is proven hermetically by the
-#  Rust suite in apexd/apex-secretd/tests/end_to_end.rs, against a real
+#  Rust suite in rimed/rime-secretd/tests/end_to_end.rs, against a real
 #  credential-checking server — it is that the credential stayed on the
 #  service's side while the attempt was made.
 #
-#  NO ROOT. apex-secretd is started with --store and --socket and runs as the
+#  NO ROOT. rime-secretd is started with --store and --socket and runs as the
 #  invoking user, so it reports `protected: false`. That costs this suite the
 #  at-rest half of the boundary, which needs a uid it does not have; the API
 #  half is the same code either way.
@@ -49,7 +49,7 @@ ROOT="$(cd "$(dirname "${BASH_SOURCE[0]}")/.." && pwd)"
 
 # Before the temp tree, the daemon or the build: this suite needs an
 # environment the daemon will observe as LOCAL, and that has to be arranged
-# from outside the suite. `apex-agentd` places a peer from its cgroup, and a
+# from outside the suite. `rime-agentd` places a peer from its cgroup, and a
 # process started by systemd — a CI job, a timer-dispatched agent — is in
 # neither a login session nor a user service, so §7 refuses it before the
 # behaviour under test is reached. Here it stops the suite starting the
@@ -58,7 +58,7 @@ ROOT="$(cd "$(dirname "${BASH_SOURCE[0]}")/.." && pwd)"
 # session it created or — saying why, out loud — in place; either way the
 # suite runs exactly once, so this is `exec` and not a call. Same block, and
 # the same reason, as tests/test-privilege-requests.sh.
-if [ -z "${APEX_LOGIN_SESSION_WRAPPED:-}" ] && [ -x "${ROOT}/tests/in-login-session.sh" ]; then
+if [ -z "${RIME_LOGIN_SESSION_WRAPPED:-}" ] && [ -x "${ROOT}/tests/in-login-session.sh" ]; then
     exec "${ROOT}/tests/in-login-session.sh" "${BASH_SOURCE[0]}" "$@"
 fi
 WORK="$(mktemp -d)"
@@ -71,7 +71,7 @@ section() { printf '\n── %s ──\n' "$1"; }
 DAEMON_PID=""
 SECRETD_PID=""
 # Only ever this script's own children, by recorded pid. Never by name: the
-# developer's own apex-agentd is usually running, and a previous version of a
+# developer's own rime-agentd is usually running, and a previous version of a
 # suite like this one killed it.
 cleanup() {
     for pid in "$DAEMON_PID" "$SECRETD_PID"; do
@@ -104,7 +104,7 @@ trap cleanup EXIT
 # The one legitimate skip in this file is the sandbox section further down: a
 # confined session needs bubblewrap, and where bwrap is genuinely absent the
 # boundary cannot be tested at all. That skip is loud, names bubblewrap, and is
-# refused outright when APEX_REQUIRE_SANDBOX is set — which CI sets, so the job
+# refused outright when RIME_REQUIRE_SANDBOX is set — which CI sets, so the job
 # cannot go green having skipped it.
 for tool in cargo git python3; do
     command -v "$tool" >/dev/null 2>&1 || {
@@ -114,16 +114,16 @@ for tool in cargo git python3; do
 done
 
 section "the binaries"
-cargo build --manifest-path "${ROOT}/apexd/Cargo.toml" \
-    --bin apex-agentd --bin apex-secretd --bin apex >/dev/null 2>&1 || {
-    bad "apex-agentd, apex-secretd and apex build"
+cargo build --manifest-path "${ROOT}/rimed/Cargo.toml" \
+    --bin rime-agentd --bin rime-secretd --bin rime >/dev/null 2>&1 || {
+    bad "rime-agentd, rime-secretd and rime build"
     printf '\nsecret-broker: %d passed, %d failed\n' "$pass" "$fail"; exit 1; }
-ok "apex-agentd, apex-secretd and apex build"
+ok "rime-agentd, rime-secretd and rime build"
 
-BIN="${CARGO_TARGET_DIR:-${ROOT}/apexd/target}/debug"
-AGENTD="${BIN}/apex-agentd"
-SECRETD="${BIN}/apex-secretd"
-APEX="${BIN}/apex"
+BIN="${CARGO_TARGET_DIR:-${ROOT}/rimed/target}/debug"
+AGENTD="${BIN}/rime-agentd"
+SECRETD="${BIN}/rime-secretd"
+Rime="${BIN}/rime"
 
 # ── an isolated runtime ──────────────────────────────────────────────────────
 export XDG_RUNTIME_DIR="${WORK}/run"
@@ -133,33 +133,33 @@ mkdir -p "$XDG_RUNTIME_DIR" "$XDG_STATE_HOME" "$XDG_CONFIG_HOME"
 chmod 0700 "$XDG_RUNTIME_DIR"
 
 # THE sentinel. Distinctive enough that a grep for it cannot match by accident.
-SENTINEL="apex-sentinel-7f3a91c4-do-not-leak"
+SENTINEL="rime-sentinel-7f3a91c4-do-not-leak"
 
 section "the secret service"
 # Its own socket and its own store, both under $WORK. The variable is what the
-# CLI and apex-agentd both read, and apex-agentd is started afterwards so it
+# CLI and rime-agentd both read, and rime-agentd is started afterwards so it
 # inherits it.
-export APEX_SECRETD_SOCKET="${WORK}/secretd.sock"
+export RIME_SECRETD_SOCKET="${WORK}/secretd.sock"
 SECRET_STORE="${WORK}/secretd-store"
-"$SECRETD" --socket "$APEX_SECRETD_SOCKET" --store "$SECRET_STORE" \
+"$SECRETD" --socket "$RIME_SECRETD_SOCKET" --store "$SECRET_STORE" \
     > "${WORK}/secretd.log" 2>&1 &
 SECRETD_PID=$!
-for _ in $(seq 1 50); do [ -S "$APEX_SECRETD_SOCKET" ] && break; sleep 0.1; done
-[ -S "$APEX_SECRETD_SOCKET" ] && ok "the secret service came up" || {
+for _ in $(seq 1 50); do [ -S "$RIME_SECRETD_SOCKET" ] && break; sleep 0.1; done
+[ -S "$RIME_SECRETD_SOCKET" ] && ok "the secret service came up" || {
     bad "the secret service came up"
     sed 's/^/      /' "${WORK}/secretd.log"
     printf '\nsecret-broker: %d passed, %d failed\n' "$pass" "$fail"; exit 1; }
 
 # Every local account must be able to reach it; who they are is decided from
 # SO_PEERCRED, not from a mode bit.
-sockmode="$(stat -c '%a' "$APEX_SECRETD_SOCKET" 2>/dev/null)"
+sockmode="$(stat -c '%a' "$RIME_SECRETD_SOCKET" 2>/dev/null)"
 [ "$sockmode" = "666" ] && ok "the socket is reachable by any local account (is ${sockmode})" \
                         || bad "the socket is reachable by any local account (is ${sockmode})"
 
 section "the agent runtime"
 "$AGENTD" > "${WORK}/agentd.log" 2>&1 &
 DAEMON_PID=$!
-SOCK="${XDG_RUNTIME_DIR}/apex-agentd/control.sock"
+SOCK="${XDG_RUNTIME_DIR}/rime-agentd/control.sock"
 for _ in $(seq 1 50); do [ -S "$SOCK" ] && break; sleep 0.1; done
 [ -S "$SOCK" ] && ok "the daemon came up on an isolated socket" || {
     bad "the daemon came up on an isolated socket"
@@ -179,8 +179,8 @@ git -C "$PROJ" remote add viassh "git@127.0.0.1:demo.git"
 
 # ── storing ──────────────────────────────────────────────────────────────────
 section "storing a credential"
-printf %s "$SENTINEL" | "$APEX" secret add demo --host 127.0.0.1 >/dev/null 2>&1
-out="$("$APEX" secret list 2>&1)"
+printf %s "$SENTINEL" | "$Rime" secret add demo --host 127.0.0.1 >/dev/null 2>&1
+out="$("$Rime" secret list 2>&1)"
 printf '%s' "$out" | grep -q "demo" \
     && ok "the service is listed" || { bad "the service is listed"; printf '      %s\n' "$out"; }
 printf '%s' "$out" | grep -q "$SENTINEL" \
@@ -207,15 +207,15 @@ dirmode="$(stat -c '%a' "$(dirname "$STORE")" 2>/dev/null)"
 [ "$dirmode" = "700" ] && ok "its directory is 0700 (is ${dirmode})" \
                        || bad "its directory is 0700 (is ${dirmode})"
 
-printf '%s' "$("$APEX" secret list --json 2>/dev/null)" | grep -q "$SENTINEL" \
+printf '%s' "$("$Rime" secret list --json 2>/dev/null)" | grep -q "$SENTINEL" \
     && bad "--json does not include the credential" || ok "--json does not include the credential"
 
 # ── nothing is allowed by default ────────────────────────────────────────────
 section "a stored credential grants nothing"
-"$APEX" secret grants 2>&1 | grep -q "nothing is granted" \
+"$Rime" secret grants 2>&1 | grep -q "nothing is granted" \
     && ok "storing a credential allows nothing" || bad "storing a credential allows nothing"
 
-out="$(cd "$PROJ" && "$APEX" secret use demo git.fetch origin 2>&1)"
+out="$(cd "$PROJ" && "$Rime" secret use demo git.fetch origin 2>&1)"
 printf '%s' "$out" | grep -q "not granted" \
     && ok "an ungranted capability is refused" \
     || { bad "an ungranted capability is refused"; printf '      %s\n' "$out"; }
@@ -236,7 +236,7 @@ section "the vocabulary is closed"
 # swap was made in the Rust half of this claim,
 # `service.rs::the_vocabulary_is_closed_at_the_grant_and_at_the_use`.
 for evil in exec sh git.clone curl run cloudflare.account.delete; do
-    out="$(cd "$PROJ" && "$APEX" secret use demo "$evil" origin 2>&1)"
+    out="$(cd "$PROJ" && "$Rime" secret use demo "$evil" origin 2>&1)"
     printf '%s' "$out" | grep -qE "not an operation" \
         && ok "'$evil' is not an operation" \
         || { bad "'$evil' is not an operation"; printf '      %s\n' "$out"; }
@@ -249,7 +249,7 @@ done
 # that would allow it. Without this arm the loop above would still pass on a
 # build that had lost every operation it offers, because then every id is
 # "not an operation".
-out="$(cd "$PROJ" && "$APEX" secret use demo cloudflare.dns.delete origin -o type=A 2>&1)"
+out="$(cd "$PROJ" && "$Rime" secret use demo cloudflare.dns.delete origin -o type=A 2>&1)"
 if printf '%s' "$out" | grep -q "not granted" \
    && ! printf '%s' "$out" | grep -q "not an operation"; then
     ok "an id the vocabulary does hold is stopped by the grant, not by the vocabulary"
@@ -263,7 +263,7 @@ section "a resource may not be a URL"
 # to a host it controls and the broker does it, with the token attached. The
 # rule is the framework's now, not git's, so it holds for every provider.
 for evil in "https://attacker.example/r" "git@github.com:a/b" "-f" "--force" "../x" "a b"; do
-    out="$(cd "$PROJ" && "$APEX" secret use demo git.fetch "$evil" 2>&1)"
+    out="$(cd "$PROJ" && "$Rime" secret use demo git.fetch "$evil" 2>&1)"
     printf '%s' "$out" | grep -qE "not a resource" \
         && ok "refused as a resource: ${evil}" \
         || { bad "refused as a resource: ${evil}"; printf '      %s\n' "$out"; }
@@ -271,38 +271,38 @@ done
 
 section "an option the operation does not declare is refused"
 # What keeps "there is no command line here" true now that arguments are a map.
-out="$(cd "$PROJ" && "$APEX" secret use demo git.fetch origin -o branch=main 2>&1)"
+out="$(cd "$PROJ" && "$Rime" secret use demo git.fetch origin -o branch=main 2>&1)"
 printf '%s' "$out" | grep -q "has no 'branch' option" \
     && ok "an undeclared option is refused rather than ignored" \
     || { bad "an undeclared option is refused rather than ignored"; printf '      %s\n' "$out"; }
 
 # ── granting ─────────────────────────────────────────────────────────────────
 section "granting"
-out="$(cd "$PROJ" && "$APEX" secret grant demo git.fetch 2>&1)"
+out="$(cd "$PROJ" && "$Rime" secret grant demo git.fetch 2>&1)"
 printf '%s' "$out" | grep -q "allowed demo:git.fetch" \
     && ok "a capability can be granted for the project" \
     || { bad "a capability can be granted for the project"; printf '      %s\n' "$out"; }
 
 # P0-002 shipped `git-fetch`; a machine that granted the old name must not be
 # told the capability it granted is not granted.
-out="$(cd "$PROJ" && "$APEX" secret grants 2>&1)"
+out="$(cd "$PROJ" && "$Rime" secret grants 2>&1)"
 printf '%s' "$out" | grep -q "demo:git.fetch" \
     && ok "a grant is stored under the canonical operation id" \
     || { bad "a grant is stored under the canonical operation id"; printf '      %s\n' "$out"; }
 
-out="$(cd "$PROJ" && "$APEX" secret grant nosuchservice git.fetch 2>&1)"
+out="$(cd "$PROJ" && "$Rime" secret grant nosuchservice git.fetch 2>&1)"
 printf '%s' "$out" | grep -q "no credential stored" \
     && ok "a grant for an unknown service is refused, not silently stored" \
     || bad "a grant for an unknown service is refused, not silently stored"
 
 # A grant is per capability: git.fetch does not imply git.push.
-out="$(cd "$PROJ" && "$APEX" secret use demo git.push origin 2>&1)"
+out="$(cd "$PROJ" && "$Rime" secret use demo git.push origin 2>&1)"
 printf '%s' "$out" | grep -q "not granted" \
     && ok "granting git.fetch does not allow git.push" \
     || { bad "granting git.fetch does not allow git.push"; printf '      %s\n' "$out"; }
 
 section "a remote must point where the credential is for"
-out="$(cd "$PROJ" && "$APEX" secret use demo git-fetch elsewhere 2>&1)"  # old spelling, still accepted
+out="$(cd "$PROJ" && "$Rime" secret use demo git-fetch elsewhere 2>&1)"  # old spelling, still accepted
 printf '%s' "$out" | grep -q "example.invalid" \
     && ok "a remote on another host is refused" \
     || { bad "a remote on another host is refused"; printf '      %s\n' "$out"; }
@@ -310,12 +310,12 @@ printf '%s' "$out" | grep -q "$SENTINEL" \
     && bad "the host mismatch does not leak the credential" \
     || ok "the host mismatch does not leak the credential"
 
-out="$(cd "$PROJ" && "$APEX" secret use demo git.fetch viassh 2>&1)"
+out="$(cd "$PROJ" && "$Rime" secret use demo git.fetch viassh 2>&1)"
 printf '%s' "$out" | grep -q "not an http remote" \
     && ok "an ssh remote is refused with an explanation" \
     || { bad "an ssh remote is refused with an explanation"; printf '      %s\n' "$out"; }
 
-out="$(cd "$PROJ" && "$APEX" secret use demo git.fetch nosuchremote 2>&1)"
+out="$(cd "$PROJ" && "$Rime" secret use demo git.fetch nosuchremote 2>&1)"
 printf '%s' "$out" | grep -q "no remote called" \
     && ok "an unconfigured remote is refused" || bad "an unconfigured remote is refused"
 
@@ -324,7 +324,7 @@ section "the credential never reaches the caller"
 # A granted capability, actually attempted. git will fail — 127.0.0.1:1 refuses
 # — and that is fine: what is asserted is that the credential stayed on the
 # daemon's side while the attempt was made.
-out="$(cd "$PROJ" && "$APEX" secret use demo git.fetch origin 2>"${WORK}/use.err")"
+out="$(cd "$PROJ" && "$Rime" secret use demo git.fetch origin 2>"${WORK}/use.err")"
 err="$(cat "${WORK}/use.err")"
 printf '%s\n%s\n' "$out" "$err" | sed 's/^/      /' | head -8
 
@@ -366,12 +366,12 @@ for line in open(sys.argv[1]):
         missing = want - set(o)
         assert not missing, (missing, o)
 PYEOF
-    "$APEX" secret audit 2>&1 | grep -q "git fetch origin" \
-        && ok "\`apex secret audit\` reads the trail back" \
-        || bad "\`apex secret audit\` reads the trail back"
-    "$APEX" secret audit 2>&1 | grep -q "$SENTINEL" \
-        && bad "\`apex secret audit\` does not print the credential" \
-        || ok "\`apex secret audit\` does not print the credential"
+    "$Rime" secret audit 2>&1 | grep -q "git fetch origin" \
+        && ok "\`rime secret audit\` reads the trail back" \
+        || bad "\`rime secret audit\` reads the trail back"
+    "$Rime" secret audit 2>&1 | grep -q "$SENTINEL" \
+        && bad "\`rime secret audit\` does not print the credential" \
+        || ok "\`rime secret audit\` does not print the credential"
 
     # P0-013's provenance has to survive the store moving. A trail that says
     # WHERE a request came from but not whether the daemon observed that or
@@ -386,20 +386,20 @@ for line in open(sys.argv[1]):
     if not line.strip():
         continue
     o = json.loads(line)
-    if o['request_origin'] in ('local-terminal', 'apex-shell'):
+    if o['request_origin'] in ('local-terminal', 'rime-shell'):
         assert o['origin_source'] == 'observed', o
 PYEOF2
 fi
 
 # ── from inside a confined session ───────────────────────────────────────────
 section "a confined session cannot read the credential, and cannot grant itself"
-# The dev binary lives in the apex-os checkout, which a `project` sandbox for a
+# The dev binary lives in the rime-os checkout, which a `project` sandbox for a
 # DIFFERENT project does not bind — so the session cannot reach it, which is the
-# sandbox working correctly. In a real image `apex` is at /usr/bin/apex and is
+# sandbox working correctly. In a real image `rime` is at /usr/bin/rime and is
 # covered by the read-only root bind. Copying it into the project reproduces
 # that reachability without weakening the policy under test.
-cp "$APEX" "${PROJ}/apex"
-SESSION_APEX="${PROJ}/apex"
+cp "$Rime" "${PROJ}/rime"
+SESSION_RIME="${PROJ}/rime"
 
 # INSIDE the project, not in /tmp: a `project` sandbox replaces /tmp with a
 # fresh tmpfs, so a script there is simply not visible and the session dies with
@@ -413,17 +413,17 @@ cd "${PROJ}" || exit 1
 echo "--- can the session read the credential file directly? ---"
 cat "${STORE}" 2>&1 | head -3
 echo "--- can it reach the secret service directly? ---"
-"${SESSION_APEX}" secret list 2>&1 | head -3
+"${SESSION_RIME}" secret list 2>&1 | head -3
 echo "--- can it grant itself a capability? ---"
-"${SESSION_APEX}" secret grant demo git.push 2>&1
+"${SESSION_RIME}" secret grant demo git.push 2>&1
 echo "--- can it use the granted one? ---"
-"${SESSION_APEX}" secret use demo git.fetch origin 2>&1 | head -4
+"${SESSION_RIME}" secret use demo git.fetch origin 2>&1 | head -4
 echo "--- which git does the session find first? ---"
 command -v git
 echo "--- does the shim pass anything else through? ---"
 git --version 2>&1 | head -1
 echo "--- does a plain git fetch reach the broker? ---"
-APEX_GIT_SERVICE=demo git fetch origin 2>&1 | head -3
+RIME_GIT_SERVICE=demo git fetch origin 2>&1 | head -3
 echo "DONE"
 EOF
 chmod +x "${PROJ}/inside.sh"
@@ -435,13 +435,13 @@ chmod +x "${PROJ}/inside.sh"
 # about what was checked. CI installs bwrap precisely so this does not skip
 # there; a skip in CI is itself a signal that the install step was lost.
 if [ ! -x /usr/bin/bwrap ]; then
-    # APEX_REQUIRE_SANDBOX turns the one legitimate skip in this file into a
+    # RIME_REQUIRE_SANDBOX turns the one legitimate skip in this file into a
     # failure, and CI sets it. Without it the `engine` job could go green on a
     # runner where the bubblewrap install step was removed or silently failed,
     # having never run the assertion §4 exists for — the same "a skipped check
     # counts as success" shape the rest of this suite no longer has.
-    if [ -n "${APEX_REQUIRE_SANDBOX:-}" ]; then
-        bad "bubblewrap is present (APEX_REQUIRE_SANDBOX is set)"
+    if [ -n "${RIME_REQUIRE_SANDBOX:-}" ]; then
+        bad "bubblewrap is present (RIME_REQUIRE_SANDBOX is set)"
         printf '      /usr/bin/bwrap is missing, so the sandbox boundary — the\n'
         printf '      one thing §4 claims — cannot be tested. Refusing to skip.\n'
         printf '\nsecret-broker: %d passed, %d failed\n' "$pass" "$fail"
@@ -453,7 +453,7 @@ if [ ! -x /usr/bin/bwrap ]; then
     SKIPPED_SANDBOX=1
 else
     SKIPPED_SANDBOX=0
-    sid="$("$APEX" agent run --agent generic --sandbox project --cwd "$PROJ" -d \
+    sid="$("$Rime" agent run --agent generic --sandbox project --cwd "$PROJ" -d \
             -- /bin/sh "${PROJ}/inside.sh" 2>"${WORK}/run.err" \
             | sed -n 's/^session \([0-9]\+\) .*/\1/p' | head -1)"
 fi
@@ -481,7 +481,7 @@ else
     # sandbox coming up was not it.
     #
     # Those two runs are the only reds in eight, on a byte-identical
-    # tests/test-secret-broker.sh and a byte-identical apexd/ tree, and both
+    # tests/test-secret-broker.sh and a byte-identical rimed/ tree, and both
     # stopped at exactly one transcript line. The runtime writes transcripts
     # through an unbuffered File (`Session::write_log`), so that one line is
     # all the session ever produced. The one state that fits — and that the old
@@ -501,14 +501,14 @@ else
     sb_deadline="$((sb_started + 90))"
     sb_why="deadline: still alive and still producing nothing"
     while :; do
-        logs="$("$APEX" agent logs "$sid" 2>/dev/null)"
+        logs="$("$Rime" agent logs "$sid" 2>/dev/null)"
         case "$logs" in *DONE*) sb_why="done"; break ;; esac
-        sb_outcome="$("$APEX" agent status "$sid" 2>/dev/null | sed -n 's/^outcome  *//p')"
+        sb_outcome="$("$Rime" agent status "$sid" 2>/dev/null | sed -n 's/^outcome  *//p')"
         if [ -n "$sb_outcome" ]; then
             sb_why="the session left before printing DONE (${sb_outcome})"
             # One more read: the transcript may have gained its last bytes
             # between the read above and the process being reaped.
-            logs="$("$APEX" agent logs "$sid" 2>/dev/null)"
+            logs="$("$Rime" agent logs "$sid" 2>/dev/null)"
             break
         fi
         [ "$(date +%s)" -ge "$sb_deadline" ] && break
@@ -535,9 +535,9 @@ else
         printf '      waited %ss; the transcript is %s bytes and stops at:\n' \
             "$sb_waited" "$(printf '%s' "$logs" | wc -c)"
         printf '%s\n' "$logs" | tail -3 | sed 's/^/        | /'
-        printf '      apex agent status %s:\n' "$sid"
-        "$APEX" agent status "$sid" 2>&1 | sed 's/^/        /'
-        printf '      stderr of `apex agent run`:\n'
+        printf '      rime agent status %s:\n' "$sid"
+        "$Rime" agent status "$sid" 2>&1 | sed 's/^/        /'
+        printf '      stderr of `rime agent run`:\n'
         sed 's/^/        /' "${WORK}/run.err"
         printf '      the agent runtime'"'"'s own log, last 20 lines:\n'
         tail -20 "${WORK}/agentd.log" 2>/dev/null | sed 's/^/        /'
@@ -571,7 +571,7 @@ else
             || bad "the session cannot grant itself a capability"
 
         # And the grant it attempted was not recorded.
-        "$APEX" secret grants 2>/dev/null | grep -q "git.push" \
+        "$Rime" secret grants 2>/dev/null | grep -q "git.push" \
             && bad "the session's self-grant was not recorded" \
             || ok "the session's self-grant was not recorded"
 
@@ -597,15 +597,15 @@ fi
 
 # ── revoke ───────────────────────────────────────────────────────────────────
 section "revoking"
-out="$(cd "$PROJ" && "$APEX" secret revoke demo git.fetch 2>&1)"
+out="$(cd "$PROJ" && "$Rime" secret revoke demo git.fetch 2>&1)"
 printf '%s' "$out" | grep -q "withdrew" \
     && ok "a capability can be withdrawn" || bad "a capability can be withdrawn"
-out="$(cd "$PROJ" && "$APEX" secret use demo git.fetch origin 2>&1)"
+out="$(cd "$PROJ" && "$Rime" secret use demo git.fetch origin 2>&1)"
 printf '%s' "$out" | grep -q "not granted" \
     && ok "a withdrawn capability is refused again" || bad "a withdrawn capability is refused again"
 
 section "removing"
-"$APEX" secret remove demo >/dev/null 2>&1
+"$Rime" secret remove demo >/dev/null 2>&1
 [ ! -f "$STORE" ] && ok "removing deletes the stored credential" \
                   || bad "removing deletes the stored credential"
 
@@ -621,30 +621,30 @@ fi
 
 # ── an online account's two credentials ──────────────────────────────────────
 #
-# `apex account rm` has to delete BOTH halves of an OAuth account, and the
+# `rime account rm` has to delete BOTH halves of an OAuth account, and the
 # second one cannot be reached any other way: a refresh credential is filed as
 # `account.<provider>.<name>.refresh`, `.` is illegal in an account name, so it
-# does not parse as an account — `apex account list` never shows it and
-# `apex account rm` refuses to be pointed at it directly. Deriving the name
+# does not parse as an account — `rime account list` never shows it and
+# `rime account rm` refuses to be pointed at it directly. Deriving the name
 # from the account is the only way in.
 #
 # This is an end-to-end test rather than a unit one on purpose. The unit test
 # beside `names_to_remove` pins the derivation; nothing in the Rust suite can
 # reach the removal itself, because removing needs a daemon and a store. Here
-# there is one of each. The two credentials are stored with `apex secret add`
+# there is one of each. The two credentials are stored with `rime secret add`
 # rather than by signing in, because signing in needs Google.
 section "an online account's two credentials"
-ACCESS_SENTINEL="apex-access-sentinel-91b4c2ef-do-not-leak"
-REFRESH_SENTINEL="apex-refresh-sentinel-2d7e60aa-do-not-leak"
-printf %s "$ACCESS_SENTINEL" | "$APEX" secret add account.google.work \
+ACCESS_SENTINEL="rime-access-sentinel-91b4c2ef-do-not-leak"
+REFRESH_SENTINEL="rime-refresh-sentinel-2d7e60aa-do-not-leak"
+printf %s "$ACCESS_SENTINEL" | "$Rime" secret add account.google.work \
     --host www.googleapis.com --auth bearer >/dev/null 2>&1
-# The refresh half as `apex account add --client-id` files it: a separate name,
+# The refresh half as `rime account add --client-id` files it: a separate name,
 # the AUTHORISATION host rather than the API host, and the OAuth client in the
 # non-secret username field where the daemon's refresher reads it.
-printf %s "$REFRESH_SENTINEL" | "$APEX" secret add account.google.work.refresh \
+printf %s "$REFRESH_SENTINEL" | "$Rime" secret add account.google.work.refresh \
     --host oauth2.googleapis.com --auth bearer --username my-client >/dev/null 2>&1
 
-out="$("$APEX" account list 2>&1)"
+out="$("$Rime" account list 2>&1)"
 printf '%s' "$out" | grep -q 'google.work' \
     && ok "the account is listed" || bad "the account is listed"
 printf '%s' "$out" | grep -q 'refresh' \
@@ -653,12 +653,12 @@ printf '%s' "$out" | grep -q 'refresh' \
 
 # Pointed at directly it is refused, which is what makes the derivation the
 # only way in and this test worth having.
-"$APEX" account rm google.work.refresh >/dev/null 2>&1 \
+"$Rime" account rm google.work.refresh >/dev/null 2>&1 \
     && bad "the refresh credential cannot be removed by naming it" \
     || ok "the refresh credential cannot be removed by naming it"
 
-"$APEX" account rm google.work >/dev/null 2>&1
-out="$("$APEX" secret list 2>&1)"
+"$Rime" account rm google.work >/dev/null 2>&1
+out="$("$Rime" secret list 2>&1)"
 printf '%s' "$out" | grep -q 'account.google.work.refresh' \
     && bad "removing the account removed its refresh token too" \
     || ok "removing the account removed its refresh token too"
@@ -691,16 +691,16 @@ fi
 # missing service with exactly `NoSuchService`; anything else and EVERY
 # non-OAuth removal would exit non-zero claiming a credential is still stored
 # that never existed.
-PLAIN_SENTINEL="apex-plain-sentinel-5c8d13bb-do-not-leak"
-printf %s "$PLAIN_SENTINEL" | "$APEX" secret add account.nextcloud.home \
+PLAIN_SENTINEL="rime-plain-sentinel-5c8d13bb-do-not-leak"
+printf %s "$PLAIN_SENTINEL" | "$Rime" secret add account.nextcloud.home \
     --host cloud.example --auth raw --username me >/dev/null 2>&1
-out="$("$APEX" account rm nextcloud.home 2>&1)"; rc=$?
+out="$("$Rime" account rm nextcloud.home 2>&1)"; rc=$?
 [ "$rc" -eq 0 ] && ok "removing an account that has no refresh token succeeds" \
                 || bad "removing an account that has no refresh token succeeds (rc=${rc})"
 printf '%s' "$out" | grep -q 'still stored' \
     && bad "and says nothing about a refresh token that never existed" \
     || ok "and says nothing about a refresh token that never existed"
-printf '%s' "$("$APEX" secret list 2>&1)" | grep -q 'account.nextcloud.home' \
+printf '%s' "$("$Rime" secret list 2>&1)" | grep -q 'account.nextcloud.home' \
     && bad "and the credential is gone" || ok "and the credential is gone"
 
 # ── a Google account's one grantable scope, through the real daemon ──────────
@@ -709,7 +709,7 @@ printf '%s' "$("$APEX" secret list 2>&1)" | grep -q 'account.nextcloud.home' \
 # Rust test can make.
 #
 # The FIRST half is that the vapour-scope refusal is gone in the only honest
-# direction. `apex account grant google.<name> files.read` was accepted before
+# direction. `rime account grant google.<name> files.read` was accepted before
 # round 3 and recorded a grant for `gdrive.file.read`, an operation nothing
 # offered; round 3 emptied the table so it was refused; round 30 built the
 # provider, so it is accepted again — and this time the grant that lands is one
@@ -732,16 +732,16 @@ printf '%s' "$("$APEX" secret list 2>&1)" | grep -q 'account.nextcloud.home' \
 # matches can return 141 when the writer is killed by SIGPIPE, which has
 # mis-seeded suites in this repository before. A herestring is not a pipeline.
 section "a Google account's grantable scope"
-DRIVE_SENTINEL="apex-drive-sentinel-7f3a19dc-do-not-leak"
-printf %s "$DRIVE_SENTINEL" | "$APEX" secret add account.google.drive \
+DRIVE_SENTINEL="rime-drive-sentinel-7f3a19dc-do-not-leak"
+printf %s "$DRIVE_SENTINEL" | "$Rime" secret add account.google.drive \
     --host www.googleapis.com --auth bearer --path /drive/v3 >/dev/null 2>&1
 
-out="$("$APEX" account scopes google 2>&1)"
+out="$("$Rime" account scopes google 2>&1)"
 grep -q 'files.read' <<<"$out" && grep -q 'gdrive.file.read' <<<"$out" \
-    && ok "apex account scopes google lists the scope and the operation it names" \
-    || bad "apex account scopes google lists the scope and the operation it names"
+    && ok "rime account scopes google lists the scope and the operation it names" \
+    || bad "rime account scopes google lists the scope and the operation it names"
 # WEAKENED, DELIBERATELY, AND SAID OUT LOUD. Until round 31 this negative had a
-# witness: `apex account scopes microsoft` printed exactly this string, asserted
+# witness: `rime account scopes microsoft` printed exactly this string, asserted
 # twenty lines below, so a build that had stopped printing it anywhere would
 # have been caught. `msgraph` landed and no provider says it any more, so this
 # assertion now passes on any build and the POSITIVE one above it carries the
@@ -753,15 +753,15 @@ grep -q 'no grantable scopes' <<<"$out" \
     && bad "and no longer says a Google account has nothing grantable" \
     || ok "and no longer says a Google account has nothing grantable"
 
-out="$(cd "$PROJ" && "$APEX" account grant google.drive files.read 2>&1)"; rc=$?
+out="$(cd "$PROJ" && "$Rime" account grant google.drive files.read 2>&1)"; rc=$?
 [ "$rc" -eq 0 ] \
-    && ok "apex account grant google.drive files.read is accepted" \
-    || bad "apex account grant google.drive files.read is accepted (rc=${rc}): ${out}"
+    && ok "rime account grant google.drive files.read is accepted" \
+    || bad "rime account grant google.drive files.read is accepted (rc=${rc}): ${out}"
 
 # The grant is stored CANONICALLY. A scope recorded under its own name would
 # be a grant the daemon never matches — the defect the scope table's routing
 # rule exists to prevent, here as an end-to-end fact rather than a unit one.
-out="$(cd "$PROJ" && "$APEX" secret grants 2>&1)"
+out="$(cd "$PROJ" && "$Rime" secret grants 2>&1)"
 grep -q 'gdrive.file.read' <<<"$out" \
     && ok "and the grant is recorded under the canonical operation id" \
     || bad "and the grant is recorded under the canonical operation id: ${out}"
@@ -776,10 +776,10 @@ grep -q 'gdrive.file.read' <<<"$out" \
 # grants under the scope's own name, or that routed both into one transport —
 # which is exactly what a copied table entry does — fails one of the two.
 section "a Microsoft account's grantable scope"
-out="$("$APEX" account scopes microsoft 2>&1)"
+out="$("$Rime" account scopes microsoft 2>&1)"
 grep -q 'files.read' <<<"$out" && grep -q 'msgraph.file.read' <<<"$out" \
-    && ok "apex account scopes microsoft lists the scope and the operation it names" \
-    || bad "apex account scopes microsoft lists the scope and the operation it names: ${out}"
+    && ok "rime account scopes microsoft lists the scope and the operation it names" \
+    || bad "rime account scopes microsoft lists the scope and the operation it names: ${out}"
 grep -q 'gdrive' <<<"$out" \
     && bad "and does not list Google's transport under Microsoft" \
     || ok "and does not list Google's transport under Microsoft"
@@ -791,25 +791,25 @@ grep -q 'no grantable scopes' <<<"$out" \
 # sends the reader to the list rather than away from it. Without this, the
 # assertions above would pass on a build that accepted every scope name it was
 # handed.
-GRAPH_SENTINEL="apex-graph-sentinel-2b6e4401-do-not-leak"
-printf %s "$GRAPH_SENTINEL" | "$APEX" secret add account.microsoft.work \
+GRAPH_SENTINEL="rime-graph-sentinel-2b6e4401-do-not-leak"
+printf %s "$GRAPH_SENTINEL" | "$Rime" secret add account.microsoft.work \
     --host graph.microsoft.com --auth bearer --path /v1.0/me >/dev/null 2>&1
 
-out="$(cd "$PROJ" && "$APEX" account grant microsoft.work nosuchscope 2>&1)"; rc=$?
+out="$(cd "$PROJ" && "$Rime" account grant microsoft.work nosuchscope 2>&1)"; rc=$?
 [ "$rc" -ne 0 ] \
-    && ok "apex account grant microsoft.work nosuchscope is refused" \
-    || bad "apex account grant microsoft.work nosuchscope is refused (rc=${rc}): ${out}"
+    && ok "rime account grant microsoft.work nosuchscope is refused" \
+    || bad "rime account grant microsoft.work nosuchscope is refused (rc=${rc}): ${out}"
 grep -q 'no scope' <<<"$out" \
     && ok "and the refusal is 'no such scope', not 'nothing to grant'" \
     || bad "and the refusal is 'no such scope', not 'nothing to grant': ${out}"
 
-out="$(cd "$PROJ" && "$APEX" account grant microsoft.work files.read 2>&1)"; rc=$?
+out="$(cd "$PROJ" && "$Rime" account grant microsoft.work files.read 2>&1)"; rc=$?
 [ "$rc" -eq 0 ] \
-    && ok "apex account grant microsoft.work files.read is accepted" \
-    || bad "apex account grant microsoft.work files.read is accepted (rc=${rc}): ${out}"
+    && ok "rime account grant microsoft.work files.read is accepted" \
+    || bad "rime account grant microsoft.work files.read is accepted (rc=${rc}): ${out}"
 
 # Canonical, and into msgraph rather than gdrive. This is the routing control.
-out="$(cd "$PROJ" && "$APEX" secret grants 2>&1)"
+out="$(cd "$PROJ" && "$Rime" secret grants 2>&1)"
 grep -q 'msgraph.file.read' <<<"$out" \
     && ok "and the Microsoft grant is recorded as msgraph.file.read" \
     || bad "and the Microsoft grant is recorded as msgraph.file.read: ${out}"
@@ -819,11 +819,11 @@ grep -q 'msgraph.file.read' <<<"$out" \
 # refused. NO NETWORK: the credential that is used is pinned to loopback and
 # dies at `bind`, and the graph.microsoft.com one above is granted and never
 # used.
-printf %s "$GRAPH_SENTINEL" | "$APEX" secret add account.microsoft.local \
+printf %s "$GRAPH_SENTINEL" | "$Rime" secret add account.microsoft.local \
     --host 127.0.0.1 --scheme http --port 9 --auth bearer --path /v1.0/me \
     >/dev/null 2>&1
-(cd "$PROJ" && "$APEX" secret grant account.microsoft.local msgraph.file.read >/dev/null 2>&1)
-out="$(cd "$PROJ" && "$APEX" secret use account.microsoft.local msgraph.file.read \
+(cd "$PROJ" && "$Rime" secret grant account.microsoft.local msgraph.file.read >/dev/null 2>&1)
+out="$(cd "$PROJ" && "$Rime" secret use account.microsoft.local msgraph.file.read \
     01BYE5RZ6QN3ZWBTUFOFD3GSPGOHDJD36K 2>&1)"
 grep -q '127.0.0.1' <<<"$out" && grep -q 'graph.microsoft.com' <<<"$out" \
     && ok "the shipped daemon refuses a Graph credential pinned off Microsoft" \
@@ -847,15 +847,15 @@ grep -q "$GRAPH_SENTINEL" <<<"$out" \
 # through `OperationSpec::check`, and `the_url_is_the_stored_endpoint_with_the_
 # item_id_under_it` through `graph_url` itself.
 
-"$APEX" account rm microsoft.work >/dev/null 2>&1
-"$APEX" secret remove account.microsoft.local >/dev/null 2>&1
+"$Rime" account rm microsoft.work >/dev/null 2>&1
+"$Rime" secret remove account.microsoft.local >/dev/null 2>&1
 
 # The shipped binary has no loopback route into the Drive transport.
-printf %s "$DRIVE_SENTINEL" | "$APEX" secret add account.google.local \
+printf %s "$DRIVE_SENTINEL" | "$Rime" secret add account.google.local \
     --host 127.0.0.1 --scheme http --port 9 --auth bearer --path /drive/v3 \
     >/dev/null 2>&1
-(cd "$PROJ" && "$APEX" secret grant account.google.local gdrive.file.read >/dev/null 2>&1)
-out="$(cd "$PROJ" && "$APEX" secret use account.google.local gdrive.file.read \
+(cd "$PROJ" && "$Rime" secret grant account.google.local gdrive.file.read >/dev/null 2>&1)
+out="$(cd "$PROJ" && "$Rime" secret use account.google.local gdrive.file.read \
     1BxiMVs0XRA5nFMdKvBdBZjgmUUqptlbs74OgvE2upms 2>&1)"
 grep -q '127.0.0.1' <<<"$out" && grep -q 'www.googleapis.com' <<<"$out" \
     && ok "the shipped daemon refuses a Drive credential pinned off Google" \
@@ -864,8 +864,8 @@ grep -q "$DRIVE_SENTINEL" <<<"$out" \
     && bad "and the refusal carries no credential" \
     || ok "and the refusal carries no credential"
 
-"$APEX" account rm google.drive >/dev/null 2>&1
-"$APEX" secret remove account.google.local >/dev/null 2>&1
+"$Rime" account rm google.drive >/dev/null 2>&1
+"$Rime" secret remove account.google.local >/dev/null 2>&1
 # Both device-code tokens, each with its own sentinel: a single one shared
 # between them could be removed by either `rm` and read as both being gone.
 for pair in "Drive:$DRIVE_SENTINEL" "Graph:$GRAPH_SENTINEL"; do

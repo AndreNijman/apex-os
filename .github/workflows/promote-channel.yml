@@ -2,7 +2,7 @@
 #  Promote a digest onto stable, candidate or beta, and move the staged-rollout
 #  ramp. Roadmap §26.
 #
-#  `edge` is not promoted here. It is moved by build-image.yml with `apex`,
+#  `edge` is not promoted here. It is moved by build-image.yml with `rime`,
 #  `daily`, `gaming-mesa` and `gaming-nvidia`, because edge IS every successful
 #  build of main and a channel that lagged its own definition would be a lie the
 #  first time somebody switched onto it. It CAN be halted here — see `mode`.
@@ -18,7 +18,7 @@
 #      release-shell.yml already refuses to build on an unverified platform for
 #      the same reason.
 #
-#   2. The digest must ALREADY be on the channel above the target. `apex channel
+#   2. The digest must ALREADY be on the channel above the target. `rime channel
 #      list` promises stable is "only builds that have run on the other channels
 #      first"; without this check that sentence is a hope, and the first
 #      violation of it is a stable user taking a build nobody ran. edge is above
@@ -51,7 +51,7 @@
 #  NOT VERIFIED: no run of this workflow has ever published a rollout document.
 #  It has been reviewed and never executed. The client half — fetch, verify,
 #  decide, hold — is exercised end to end against real cryptography by
-#  tests/test-apex-rollout.sh, and the shape this workflow writes is asserted
+#  tests/test-rime-rollout.sh, and the shape this workflow writes is asserted
 #  against the client's parser by the same suite.
 # ──────────────────────────────────────────────────────────────────────────────
 name: Promote a channel
@@ -89,7 +89,7 @@ on:
         default: ""
 
 concurrency:
-  group: apex-image-publish
+  group: rime-image-publish
   cancel-in-progress: false
 
 permissions:
@@ -99,7 +99,7 @@ permissions:
 
 env:
   REGISTRY: ghcr.io
-  IMAGE: ghcr.io/andrenijman/apex-os
+  IMAGE: ghcr.io/andrenijman/rime-os
 
 jobs:
   promote:
@@ -248,7 +248,7 @@ jobs:
         run: |
           set -euo pipefail
           creds="$GHCR_USER:$GHCR_TOKEN"
-          # Redirectable, and defaulted to what a runner has. tests/test-apex-
+          # Redirectable, and defaulted to what a runner has. tests/test-rime-
           # rollout.sh lifts the python below out of this file and RUNS it, so
           # that the document a machine parses is the document this workflow
           # writes rather than a copy of it that drifts.
@@ -260,7 +260,7 @@ jobs:
           import json, os, shutil, sys
           D = os.environ.get("ROLLOUT_DIR", "/tmp")
           m = json.load(open(f"{D}/rollout-old/manifest.json"))
-          want = "application/vnd.apexos.rollout.v1+json"
+          want = "application/vnd.rimeos.rollout.v1+json"
           # The layer the manifest NAMES, never "the first file in the
           # directory": `skopeo copy … dir:` writes the config blob beside it,
           # and taking the wrong one would reset the serial to zero — the one
@@ -351,7 +351,7 @@ jobs:
           # An OCI image manifest with one layer, assembled by hand. `oras` would
           # do this and is one more tool to install and pin; skopeo is already
           # here for the tag move above, and `dir:` is the transport the client's
-          # own fetch path reads — `apexd/apex/src/verify.rs::fetch` copies to
+          # own fetch path reads — `rimed/rime/src/verify.rs::fetch` copies to
           # `dir:` and parses exactly this manifest.
           python3 - <<'PY'
           import hashlib, json, os, shutil
@@ -366,14 +366,14 @@ jobs:
           json.dump({
               "schemaVersion": 2,
               "mediaType": "application/vnd.oci.image.manifest.v1+json",
-              "artifactType": "application/vnd.apexos.rollout.v1+json",
+              "artifactType": "application/vnd.rimeos.rollout.v1+json",
               "config": {
                   "mediaType": "application/vnd.oci.empty.v1+json",
                   "digest": "sha256:" + ch,
                   "size": len(cfg),
               },
               "layers": [{
-                  "mediaType": "application/vnd.apexos.rollout.v1+json",
+                  "mediaType": "application/vnd.rimeos.rollout.v1+json",
                   "digest": "sha256:" + bh,
                   "size": len(body),
               }],
@@ -395,7 +395,7 @@ jobs:
             cat "$D/rollout.json"
             echo '```'
             echo ""
-            echo "\`$IMAGE:rollout\` is \`$got\`. Machines read it on their next \`apex update\`."
+            echo "\`$IMAGE:rollout\` is \`$got\`. Machines read it on their next \`rime update\`."
           } >> "$GITHUB_STEP_SUMMARY"
 
       - name: Say what happened
@@ -414,6 +414,6 @@ jobs:
               echo "No tag was moved. \`$IMAGE:$TARGET\` was already \`$DIGEST\`."
             fi
             echo ""
-            echo "Machines following it take it on their next \`apex update\`, subject to the"
+            echo "Machines following it take it on their next \`rime update\`, subject to the"
             echo "rollout document above."
           } >> "$GITHUB_STEP_SUMMARY"

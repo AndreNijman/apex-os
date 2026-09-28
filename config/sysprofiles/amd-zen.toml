@@ -1,4 +1,4 @@
-# APEX-OS system profile: amd-zen
+# Rime OS system profile: amd-zen
 #
 # CPU-class profile for AMD Zen parts driven by amd-pstate-epp (EPP active
 # mode). Selected when the CPU vendor is AMD, unless a device profile overrides

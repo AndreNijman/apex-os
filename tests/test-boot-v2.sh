@@ -8,11 +8,11 @@
 #                      the health gate's actual exit codes, the build-time
 #                      scripts' refusals, the tripwire against a script that
 #                      touches a real boot path, and the schema parity between
-#                      what apex-boot-health WRITES and what apex boot status
+#                      what rime-boot-health WRITES and what rime boot status
 #                      READS. Wired into pr-validation.yml's `static` job,
 #                      which has no path filter.
 #
-#    --with-binary     Adds the cases that drive the built `apex` binary
+#    --with-binary     Adds the cases that drive the built `rime` binary
 #                      against fixture roots. Wired into the `rust` job, the
 #                      only one with a toolchain. It DIES if the binary is
 #                      absent rather than skipping: a skipped check counts as
@@ -20,7 +20,7 @@
 #                      records twice.
 #
 #  Why the split is not "put it all in `rust`": that job fires on
-#  ^(apexd/|config/sysprofiles/|tests/). A PR touching only files/system/units
+#  ^(rimed/|config/sysprofiles/|tests/). A PR touching only files/system/units
 #  would skip it, and a skipped job passes. The units and the tripwire are
 #  exactly what such a PR changes.
 # ─────────────────────────────────────────────────────────────────────────────
@@ -39,10 +39,10 @@ eq()  { [[ "$1" == "$2" ]] && ok "$3 == $1" || bad "$3: want '$1', got '$2'"; }
 TMP="$(mktemp -d)"
 trap 'rm -rf "$TMP"' EXIT
 
-HEALTH="$REPO/files/system/libexec/apex-boot-health"
-UNIT_HEALTH="$REPO/files/system/units/apex-boot-health.service"
-UNIT_NOTICE="$REPO/files/system/units/apex-boot-notice.service"
-BOOTRS="$REPO/apexd/apex/src/boot.rs"
+HEALTH="$REPO/files/system/libexec/rime-boot-health"
+UNIT_HEALTH="$REPO/files/system/units/rime-boot-health.service"
+UNIT_NOTICE="$REPO/files/system/units/rime-boot-notice.service"
+BOOTRS="$REPO/rimed/rime/src/boot.rs"
 BASECF="$REPO/Containerfile.base"
 LOADER_GUID=4a67b082-0a4c-41cf-b6c7-440b29bb8c4f
 
@@ -75,20 +75,20 @@ done
 # RequiredBy vs WantedBy is the difference between "a failed health check
 # blocks the blessing" and "a failed health check is a warning".
 grep -qx 'RequiredBy=boot-complete.target' "$UNIT_HEALTH" \
-    && ok "apex-boot-health is RequiredBy=boot-complete.target" \
-    || bad "apex-boot-health must be RequiredBy=boot-complete.target, or a failed health check blesses anyway"
+    && ok "rime-boot-health is RequiredBy=boot-complete.target" \
+    || bad "rime-boot-health must be RequiredBy=boot-complete.target, or a failed health check blesses anyway"
 grep -qx 'Before=boot-complete.target' "$UNIT_HEALTH" \
-    && ok "apex-boot-health is ordered Before=boot-complete.target" \
-    || bad "apex-boot-health must be Before=boot-complete.target"
+    && ok "rime-boot-health is ordered Before=boot-complete.target" \
+    || bad "rime-boot-health must be Before=boot-complete.target"
 grep -qx 'WantedBy=boot-complete.target' "$UNIT_NOTICE" \
-    && ok "apex-boot-notice is WantedBy (reporting must not fail a healthy boot)" \
-    || bad "apex-boot-notice must be WantedBy=boot-complete.target, not RequiredBy"
+    && ok "rime-boot-notice is WantedBy (reporting must not fail a healthy boot)" \
+    || bad "rime-boot-notice must be WantedBy=boot-complete.target, not RequiredBy"
 
 # Containerfile.base must enable both, and must itself assert the condition.
-grep -q 'systemctl enable apex-boot-health.service' "$BASECF" \
-    && ok "Containerfile.base enables apex-boot-health.service" \
-    || bad "Containerfile.base does not enable apex-boot-health.service"
-grep -q 'boot-complete.target.requires/apex-boot-health.service' "$BASECF" \
+grep -q 'systemctl enable rime-boot-health.service' "$BASECF" \
+    && ok "Containerfile.base enables rime-boot-health.service" \
+    || bad "Containerfile.base does not enable rime-boot-health.service"
+grep -q 'boot-complete.target.requires/rime-boot-health.service' "$BASECF" \
     && ok "Containerfile.base checks the RequiredBy symlink systemctl created" \
     || bad "Containerfile.base does not verify the enablement it performed"
 
@@ -97,7 +97,7 @@ grep -q 'boot-complete.target.requires/apex-boot-health.service' "$BASECF" \
 sec "EFI variable payloads are read off a file that cannot be seeked"
 # efivarfs files are not seekable. `tail -c +5` seeks, so on a real machine it
 # printed nothing and said "cannot seek to relative offset 4: Illegal seek" —
-# and apex-boot-health reported `entry unknown` on every systemd-boot boot.
+# and rime-boot-health reported `entry unknown` on every systemd-boot boot.
 # Seen in the lab serial logs and reproduced on the L16, whose LoaderInfo is
 # present and reads "GRUB 2.12". The regression is invisible against a regular
 # fixture file, so the control here is a FIFO: unseekable, like efivarfs.
@@ -107,23 +107,23 @@ mkdir -p "$EFIT"
 # so this cannot drift into testing a copy.
 sed -n '/^efivar_str() {/,/^}/p' "$HEALTH" > "$TMP/efivar_str.sh"
 [[ -s "$TMP/efivar_str.sh" ]] \
-    || bad "could not lift efivar_str out of apex-boot-health — the two checks below are vacuous"
+    || bad "could not lift efivar_str out of rime-boot-health — the two checks below are vacuous"
 
 # The 4-byte attribute prefix must really be four bytes: a bash variable
 # cannot hold the three NULs, so printf writes them directly.
-printf '\x07\x00\x00\x00apex-good.efi' > "$EFIT/LoaderEntrySelected-$LOADER_GUID"
+printf '\x07\x00\x00\x00rime-good.efi' > "$EFIT/LoaderEntrySelected-$LOADER_GUID"
 got="$(
     set +u
     # shellcheck disable=SC1090
     . "$TMP/efivar_str.sh"
     EFIVARS_DIR="$EFIT" LOADER_GUID="$LOADER_GUID" efivar_str LoaderEntrySelected
 )"
-eq 'apex-good.efi' "$got" "an EFI string is read out of a regular fixture file"
+eq 'rime-good.efi' "$got" "an EFI string is read out of a regular fixture file"
 
 # ── and the same read against something that cannot be seeked ──
 FIFO="$TMP/LoaderEntrySelected-$LOADER_GUID"
 mkfifo "$FIFO"
-( printf '\x07\x00\x00\x00apex-new.efi' > "$FIFO" 2>/dev/null ) &
+( printf '\x07\x00\x00\x00rime-new.efi' > "$FIFO" 2>/dev/null ) &
 wpid=$!
 gotfifo="$(
     set +u
@@ -132,7 +132,7 @@ gotfifo="$(
     EFIVARS_DIR="$TMP" LOADER_GUID="$LOADER_GUID" efivar_str LoaderEntrySelected
 )"
 wait "$wpid" 2>/dev/null || true
-eq 'apex-new.efi' "$gotfifo" "the byte-wise read works on an UNSEEKABLE file (the efivarfs case)"
+eq 'rime-new.efi' "$gotfifo" "the byte-wise read works on an UNSEEKABLE file (the efivarfs case)"
 
 # The inverse control has to be a REAL efivarfs file, and it is worth saying
 # why rather than quietly using a weaker one. A FIFO does not reproduce the
@@ -168,8 +168,8 @@ fi
 # explain why it is broken, and a tripwire a comment can trip is a tripwire
 # nobody can keep green — the same rule as the boot-path scan below.
 grep -nE '^[^#]*tail -c \+' "$HEALTH" >/dev/null 2>&1 \
-    && bad "apex-boot-health still reads efivars with a seeking command" \
-    || ok "apex-boot-health does not seek an efivarfs file"
+    && bad "rime-boot-health still reads efivars with a seeking command" \
+    || ok "rime-boot-health does not seek an efivarfs file"
 
 # ── and a real UTF-16LE payload, which is what sd-boot actually writes ──
 printf '\x07\x00\x00\x00' > "$EFIT/LoaderInfo-$LOADER_GUID"
@@ -183,7 +183,7 @@ gotu16="$(
 eq 'systemd-boot 258.10' "$gotu16" "a UTF-16LE payload reads back as the string sd-boot wrote"
 
 # ═════════════════════════════════════════════════════════════════════════════
-sec "the boot counter APEX writes, because bootc writes none"
+sec "the boot counter Rime writes, because bootc writes none"
 # bootc produces entry filenames with no +N-M suffix and a loader.conf whose
 # timeout is commented out, so on a machine installed exactly as bootc leaves
 # it LoaderBootCountPath never appears and everything above is inert. The
@@ -191,10 +191,10 @@ sec "the boot counter APEX writes, because bootc writes none"
 # replaces the whole entries/ directory at shutdown, discarding anything
 # written into a live filename. Measured, eleven guest boots, evidence in
 # ROADMAP/evidence/sdboot-image-20260920-lab.md.
-COUNT="$REPO/files/system/libexec/apex-boot-count"
-UNIT_COUNT="$REPO/files/system/units/apex-boot-count.service"
-BLESS_DROPIN="$REPO/files/system/units/10-apex-bless-boot-esp.conf"
-SEPOL="$REPO/files/system/selinux/apex_sdboot.te"
+COUNT="$REPO/files/system/libexec/rime-boot-count"
+UNIT_COUNT="$REPO/files/system/units/rime-boot-count.service"
+BLESS_DROPIN="$REPO/files/system/units/10-rime-bless-boot-esp.conf"
+SEPOL="$REPO/files/system/selinux/rime_sdboot.te"
 for f in "$COUNT" "$UNIT_COUNT" "$BLESS_DROPIN" "$SEPOL"; do
     [[ -f "$f" ]] || { echo "FATAL: missing $f" >&2; exit 1; }
 done
@@ -210,7 +210,7 @@ mk_esp() {           # mk_esp <dir> <srel-contents> <staged entry name...>
     mkdir -p "$d/loader/entries" "$d/loader/entries.staged"
     [[ "$srel" == none ]] || printf '%s\n' "$srel" > "$d/loader/entries.srel"
     printf 'title live\noptions rw composefs=%s\n' "$BOOTED" \
-        > "$d/loader/entries/bootc_apex-43-1.conf"
+        > "$d/loader/entries/bootc_rime-43-1.conf"
     local e
     for e in "$@"; do
         local digest="${e##*:}" name="${e%%:*}"
@@ -223,59 +223,59 @@ live_ls()   { ( cd "$1/loader/entries" && ls -1 | sort | tr '\n' ' ' ); }
 run_count() {        # run_count <esp> <cmdline>
     local esp="$1" cl="$2"
     printf '%s\n' "$cl" > "$TMP/cmdline"
-    APEX_BOOT_ESP="$esp" APEX_BOOT_CMDLINE="$TMP/cmdline" "$COUNT" stage 2>>"$TMP/count.log"
+    RIME_BOOT_ESP="$esp" RIME_BOOT_CMDLINE="$TMP/cmdline" "$COUNT" stage 2>>"$TMP/count.log"
 }
 
 # ── the ordinary case: two staged entries, one of them new ──
 E="$TMP/esp-normal"
-mk_esp "$E" type1 "bootc_apex-43-0.conf:$BOOTED" "bootc_apex-43-1.conf:$FRESH"
+mk_esp "$E" type1 "bootc_rime-43-0.conf:$BOOTED" "bootc_rime-43-1.conf:$FRESH"
 live_before="$(live_ls "$E")"
 run_count "$E" "rw quiet composefs=$BOOTED" && rc=0 || rc=$?
-eq 0 "$rc" "apex-boot-count exits 0 on the ordinary case"
-eq 'bootc_apex-43-0.conf bootc_apex-43-1+3-0.conf ' "$(staged_ls "$E")" \
+eq 0 "$rc" "rime-boot-count exits 0 on the ordinary case"
+eq 'bootc_rime-43-0.conf bootc_rime-43-1+3-0.conf ' "$(staged_ls "$E")" \
    "the entry whose composefs digest is NOT the booted one gets the counter"
 eq "$live_before" "$(live_ls "$E")" "the LIVE entries directory is untouched"
 
 # ── idempotence: a second run must not reset a counter sd-boot has decremented ──
 E2="$TMP/esp-counted"
-mk_esp "$E2" type1 "bootc_apex-43-0.conf:$BOOTED" "bootc_apex-43-1+1-2.conf:$FRESH"
+mk_esp "$E2" type1 "bootc_rime-43-0.conf:$BOOTED" "bootc_rime-43-1+1-2.conf:$FRESH"
 run_count "$E2" "rw composefs=$BOOTED" || true
-eq 'bootc_apex-43-0.conf bootc_apex-43-1+1-2.conf ' "$(staged_ls "$E2")" \
+eq 'bootc_rime-43-0.conf bootc_rime-43-1+1-2.conf ' "$(staged_ls "$E2")" \
    "an already-counted staged set is left exactly as it was"
 
 # ── nothing new staged (the bootc-rollback-to-current and no-op cases) ──
 E3="$TMP/esp-nothing-new"
-mk_esp "$E3" type1 "bootc_apex-43-0.conf:$BOOTED"
+mk_esp "$E3" type1 "bootc_rime-43-0.conf:$BOOTED"
 run_count "$E3" "rw composefs=$BOOTED" || true
-eq 'bootc_apex-43-0.conf ' "$(staged_ls "$E3")" \
+eq 'bootc_rime-43-0.conf ' "$(staged_ls "$E3")" \
    "a staged set that is all the booted deployment is left alone"
 
 # ── ambiguity is refused, never guessed ──
 E4="$TMP/esp-ambiguous"
-mk_esp "$E4" type1 "bootc_apex-43-0.conf:cccc3333" "bootc_apex-43-1.conf:$FRESH"
+mk_esp "$E4" type1 "bootc_rime-43-0.conf:cccc3333" "bootc_rime-43-1.conf:$FRESH"
 run_count "$E4" "rw composefs=$BOOTED" || true
-eq 'bootc_apex-43-0.conf bootc_apex-43-1.conf ' "$(staged_ls "$E4")" \
+eq 'bootc_rime-43-0.conf bootc_rime-43-1.conf ' "$(staged_ls "$E4")" \
    "two entries differing from the booted one are refused, not guessed between"
 
 # ── a GRUB machine: no entries.srel, so nothing happens even if a dir exists ──
 E5="$TMP/esp-grub"
-mk_esp "$E5" none "bootc_apex-43-1.conf:$FRESH"
+mk_esp "$E5" none "bootc_rime-43-1.conf:$FRESH"
 run_count "$E5" "rw composefs=$BOOTED" || true
-eq 'bootc_apex-43-1.conf ' "$(staged_ls "$E5")" \
+eq 'bootc_rime-43-1.conf ' "$(staged_ls "$E5")" \
    "without entries.srel nothing is renamed (the GRUB case)"
 
 # ── a loader directory that is not Type #1 ──
 E6="$TMP/esp-type2"
-mk_esp "$E6" type2 "bootc_apex-43-1.conf:$FRESH"
+mk_esp "$E6" type2 "bootc_rime-43-1.conf:$FRESH"
 run_count "$E6" "rw composefs=$BOOTED" || true
-eq 'bootc_apex-43-1.conf ' "$(staged_ls "$E6")" \
+eq 'bootc_rime-43-1.conf ' "$(staged_ls "$E6")" \
    "entries.srel saying anything but type1 is refused"
 
 # ── no composefs= on the command line: it cannot tell which entry is new ──
 E7="$TMP/esp-nocfs"
-mk_esp "$E7" type1 "bootc_apex-43-0.conf:$BOOTED" "bootc_apex-43-1.conf:$FRESH"
+mk_esp "$E7" type1 "bootc_rime-43-0.conf:$BOOTED" "bootc_rime-43-1.conf:$FRESH"
 run_count "$E7" "rw quiet" || true
-eq 'bootc_apex-43-0.conf bootc_apex-43-1.conf ' "$(staged_ls "$E7")" \
+eq 'bootc_rime-43-0.conf bootc_rime-43-1.conf ' "$(staged_ls "$E7")" \
    "with no composefs= on the cmdline it refuses rather than guessing"
 
 # ── and the fixture itself must be capable of showing a rename ──
@@ -284,9 +284,9 @@ eq 'bootc_apex-43-0.conf bootc_apex-43-1.conf ' "$(staged_ls "$E7")" \
 # one rename happened; this proves the two are the same helper and the same
 # fixture shape.
 E8="$TMP/esp-control"
-mk_esp "$E8" type1 "bootc_apex-43-0.conf:$BOOTED" "bootc_apex-43-7.conf:$FRESH"
+mk_esp "$E8" type1 "bootc_rime-43-0.conf:$BOOTED" "bootc_rime-43-7.conf:$FRESH"
 run_count "$E8" "rw composefs=$BOOTED" || true
-if [[ "$(staged_ls "$E8")" == *'bootc_apex-43-7+3-0.conf'* ]]; then
+if [[ "$(staged_ls "$E8")" == *'bootc_rime-43-7+3-0.conf'* ]]; then
     ok "positive control: the same helper does rename when the case is unambiguous"
 else
     bad "positive control failed — the refusals above may be vacuous: $(staged_ls "$E8")"
@@ -297,29 +297,29 @@ fi
 # already in effect, and this unit is what starts it. Worse, it works in
 # ExecStop, and a unit whose START condition failed is never stopped.
 grep -qx 'ConditionPathExists=/boot/loader/entries.srel' "$UNIT_COUNT" \
-    && ok "apex-boot-count is conditioned on entries.srel (absent on a GRUB machine)" \
-    || bad "apex-boot-count has no entries.srel condition — it would run on a GRUB machine"
+    && ok "rime-boot-count is conditioned on entries.srel (absent on a GRUB machine)" \
+    || bad "rime-boot-count has no entries.srel condition — it would run on a GRUB machine"
 grep -qx 'After=bootc-finalize-staged.service' "$UNIT_COUNT" \
-    && ok "apex-boot-count starts After bootc-finalize-staged, so it STOPS before it" \
-    || bad "apex-boot-count must be After=bootc-finalize-staged.service, or its ExecStop runs after the swap"
-grep -q '^ExecStop=/usr/libexec/apex-boot-count stage' "$UNIT_COUNT" \
-    && ok "apex-boot-count does its work in ExecStop" \
-    || bad "apex-boot-count must work in ExecStop — the staged dir exists only at shutdown"
+    && ok "rime-boot-count starts After bootc-finalize-staged, so it STOPS before it" \
+    || bad "rime-boot-count must be After=bootc-finalize-staged.service, or its ExecStop runs after the swap"
+grep -q '^ExecStop=/usr/libexec/rime-boot-count stage' "$UNIT_COUNT" \
+    && ok "rime-boot-count does its work in ExecStop" \
+    || bad "rime-boot-count must work in ExecStop — the staged dir exists only at shutdown"
 grep -qx 'WantedBy=multi-user.target' "$UNIT_COUNT" \
-    && ok "apex-boot-count is WantedBy (a missing counter must not fail a boot)" \
-    || bad "apex-boot-count must be WantedBy=multi-user.target, not RequiredBy"
-grep -q 'systemctl enable apex-boot-count.service' "$BASECF" \
-    && ok "Containerfile.base enables apex-boot-count.service" \
-    || bad "Containerfile.base does not enable apex-boot-count.service"
+    && ok "rime-boot-count is WantedBy (a missing counter must not fail a boot)" \
+    || bad "rime-boot-count must be WantedBy=multi-user.target, not RequiredBy"
+grep -q 'systemctl enable rime-boot-count.service' "$BASECF" \
+    && ok "Containerfile.base enables rime-boot-count.service" \
+    || bad "Containerfile.base does not enable rime-boot-count.service"
 # It renames a .conf on the same FAT ESP the blessing does, which makes the
 # same drop-in look obvious. It is wrong: /usr/libexec is bin_t and the policy
 # has `type_transition init_t bin_t:process unconfined_service_t`, so the
 # helper is already unconfined, while bootupd_t cannot even read /proc/cmdline.
 grep -q '^SELinuxContext=' "$UNIT_COUNT" \
-    && bad "apex-boot-count must NOT set SELinuxContext — bootupd_t cannot read /proc/cmdline" \
-    || ok "apex-boot-count stays unconfined_service_t, like every /usr/libexec helper"
+    && bad "rime-boot-count must NOT set SELinuxContext — bootupd_t cannot read /proc/cmdline" \
+    || ok "rime-boot-count stays unconfined_service_t, like every /usr/libexec helper"
 grep -q 'allow bootupd_t bin_t:file' "$SEPOL" \
-    && bad "apex_sdboot.te grants a bin_t entrypoint nothing needs" \
+    && bad "rime_sdboot.te grants a bin_t entrypoint nothing needs" \
     || ok "the policy module stays one rule wide — only init_exec_t needs it"
 
 # ═════════════════════════════════════════════════════════════════════════════
@@ -327,7 +327,7 @@ sec "the blessing can write a FAT ESP, or none of the above matters"
 # On the composefs path the ESP IS /boot, so the entries systemd-bless-boot
 # renames are dosfs_t. PID 1 running /usr/lib/systemd/systemd-bless-boot
 # (init_exec_t) stays in init_t, which Fedora 43 allows no rename on dosfs_t —
-# measured on the APEX image, with the AVC, in
+# measured on the Rime image, with the AVC, in
 # ROADMAP/evidence/sdboot-image-20260920-decision.md. Unrepaired, the counter
 # above turns into a machine that rolls itself back on every fourth boot.
 grep -qx 'SELinuxContext=-system_u:system_r:bootupd_t:s0' "$BLESS_DROPIN" \
@@ -342,18 +342,18 @@ grep -q 'SELinuxContext=-' "$BLESS_DROPIN" \
     || bad "SELinuxContext has no leading dash — a permissive or SELinux-less machine would fail the unit"
 grep -q 'allow bootupd_t init_exec_t:file' "$SEPOL" \
     && ok "the policy module grants the entrypoint the transition needs" \
-    || bad "apex_sdboot.te does not grant bootupd_t an entrypoint on init_exec_t"
+    || bad "rime_sdboot.te does not grant bootupd_t an entrypoint on init_exec_t"
 grep -q 'entrypoint' "$SEPOL" \
     && ok "…and specifically the entrypoint permission" \
-    || bad "apex_sdboot.te never mentions entrypoint"
+    || bad "rime_sdboot.te never mentions entrypoint"
 # The module NAME must equal the .pp basename or checkmodule refuses outright.
-grep -qx 'module apex_sdboot 1.0.0;' "$SEPOL" \
+grep -qx 'module rime_sdboot 1.0.0;' "$SEPOL" \
     && ok "the module name matches the filename checkmodule will write" \
-    || bad "apex_sdboot.te's module name must be apex_sdboot to match the .pp basename"
-grep -q 'semodule -N -i apex_sdboot.pp' "$REPO/Containerfile.core" \
+    || bad "rime_sdboot.te's module name must be rime_sdboot to match the .pp basename"
+grep -q 'semodule -N -i rime_sdboot.pp' "$REPO/Containerfile.core" \
     && ok "Containerfile.core installs the policy module" \
-    || bad "Containerfile.core does not install apex_sdboot.pp"
-grep -q 'semodule -l | grep -qx apex_sdboot' "$BASECF" \
+    || bad "Containerfile.core does not install rime_sdboot.pp"
+grep -q 'semodule -l | grep -qx rime_sdboot' "$BASECF" \
     && ok "Containerfile.base asserts across the tier boundary that it is there" \
     || bad "Containerfile.base does not check the core tier still ships the policy module"
 
@@ -395,7 +395,7 @@ fi
 
 # ═════════════════════════════════════════════════════════════════════════════
 sec "the health gate's exit codes are the rollback mechanism"
-# apex-boot-health calls `systemctl` unqualified, so a fake earlier in PATH is
+# rime-boot-health calls `systemctl` unqualified, so a fake earlier in PATH is
 # enough to drive every branch. This tests the shipped script, not a copy of
 # its logic.
 mkfake() {  # mkfake DIR ACTIVE_UNITS...
@@ -409,7 +409,7 @@ mkfake() {  # mkfake DIR ACTIVE_UNITS...
         # `cat` decides which units EXIST. dbus-broker exists so the script
         # picks a real bus name; greetd exists so the display-manager branch is
         # actually exercised rather than skipped.
-        printf '  cat) case "$2" in dbus-broker.service|greetd.service|apexd.service|systemd-logind.service) echo "[Unit]";; *) exit 1;; esac;;\n'
+        printf '  cat) case "$2" in dbus-broker.service|greetd.service|rimed.service|systemd-logind.service) echo "[Unit]";; *) exit 1;; esac;;\n'
         printf '  is-active) for u in $ACTIVE; do [[ "$u" == "$2" ]] && { echo active; exit 0; }; done; echo inactive; exit 3;;\n'
         printf '  *) exit 1;;\n'
         printf 'esac\n'
@@ -417,13 +417,13 @@ mkfake() {  # mkfake DIR ACTIVE_UNITS...
     chmod +x "$dir/systemctl"
 }
 
-ALL_GOOD="graphical.target apexd.service systemd-logind.service dbus-broker.service greetd.service"
+ALL_GOOD="graphical.target rimed.service systemd-logind.service dbus-broker.service greetd.service"
 
 # (a) No LoaderBootCountPath: a GRUB machine. Must succeed and do nothing.
 mkdir -p "$TMP/efivars-grub" "$TMP/state-grub"
 mkfake "$TMP/bin-a" "$ALL_GOOD"
 rc=0
-PATH="$TMP/bin-a:$PATH" APEX_BOOT_EFIVARS="$TMP/efivars-grub" APEX_BOOT_STATE="$TMP/state-grub" \
+PATH="$TMP/bin-a:$PATH" RIME_BOOT_EFIVARS="$TMP/efivars-grub" RIME_BOOT_STATE="$TMP/state-grub" \
     "$HEALTH" check >"$TMP/out-a" 2>&1 || rc=$?
 eq 0 "$rc" "check on a GRUB machine exits"
 grep -q 'boot counting is not in effect' "$TMP/out-a" \
@@ -439,25 +439,25 @@ printf '\x07\x00\x00\x00a\0p\0e\0x\0-\0n\0e\0w\0.\0e\0f\0i\0' \
     > "$TMP/efivars-sd/LoaderEntrySelected-$LOADER_GUID"
 mkfake "$TMP/bin-b" "$ALL_GOOD"
 rc=0
-PATH="$TMP/bin-b:$PATH" APEX_BOOT_EFIVARS="$TMP/efivars-sd" APEX_BOOT_STATE="$TMP/state-good" \
+PATH="$TMP/bin-b:$PATH" RIME_BOOT_EFIVARS="$TMP/efivars-sd" RIME_BOOT_STATE="$TMP/state-good" \
     "$HEALTH" check >"$TMP/out-b" 2>&1 || rc=$?
 eq 0 "$rc" "check with a healthy system exits"
 eq good "$(python3 -c 'import json,sys;print(json.load(open(sys.argv[1]))["verdict"])' \
            "$TMP/state-good/last-health.json" 2>/dev/null || echo MISSING)" \
    "the recorded verdict"
-eq 'apex-new.efi' "$(python3 -c 'import json,sys;print(json.load(open(sys.argv[1]))["entry"])' \
+eq 'rime-new.efi' "$(python3 -c 'import json,sys;print(json.load(open(sys.argv[1]))["entry"])' \
                      "$TMP/state-good/last-health.json" 2>/dev/null || echo MISSING)" \
    "the recorded entry, decoded from the UTF-16 EFI variable"
 
 # (c) Each critical unit, dropped one at a time. A gate that only notices when
 # everything is down is not a gate. `-ge`-style leniency here would mean a
-# machine with no desktop and no apexd getting blessed.
-for down in graphical.target apexd.service systemd-logind.service dbus-broker.service greetd.service; do
+# machine with no desktop and no rimed getting blessed.
+for down in graphical.target rimed.service systemd-logind.service dbus-broker.service greetd.service; do
     active="${ALL_GOOD/$down/}"
     mkfake "$TMP/bin-c" "$active"
     mkdir -p "$TMP/state-c"
     rc=0
-    PATH="$TMP/bin-c:$PATH" APEX_BOOT_EFIVARS="$TMP/efivars-sd" APEX_BOOT_STATE="$TMP/state-c" \
+    PATH="$TMP/bin-c:$PATH" RIME_BOOT_EFIVARS="$TMP/efivars-sd" RIME_BOOT_STATE="$TMP/state-c" \
         "$HEALTH" check >"$TMP/out-c" 2>&1 || rc=$?
     # Exactly 1, not merely non-zero. An early version of this suite passed
     # here with rc=126 — "cannot execute", because the script was not
@@ -484,26 +484,26 @@ sec "the rollback notice, and the missing-key trap it would otherwise hit"
 # `bootctl list --json` run against an ESP a VM had actually booted.
 cat > "$TMP/entries-rolledback.json" <<'JSON'
 [
-  {"type":"type2","id":"apex-good.efi","path":"/boot/EFI/Linux/apex-good.efi",
-   "title":"APEX-OS","isDefault":true},
-  {"type":"type2","id":"apex-new.efi","path":"/boot/EFI/Linux/apex-new+0-3.efi",
-   "title":"APEX-OS","triesLeft":0,"triesDone":3,"isDefault":false}
+  {"type":"type2","id":"rime-good.efi","path":"/boot/EFI/Linux/apex-good.efi",
+   "title":"Rime OS","isDefault":true},
+  {"type":"type2","id":"rime-new.efi","path":"/boot/EFI/Linux/apex-new+0-3.efi",
+   "title":"Rime OS","triesLeft":0,"triesDone":3,"isDefault":false}
 ]
 JSON
 cat > "$TMP/entries-allgood.json" <<'JSON'
 [
-  {"type":"type2","id":"apex-good.efi","path":"/boot/EFI/Linux/apex-good.efi",
-   "title":"APEX-OS","isDefault":true},
-  {"type":"type2","id":"apex-new.efi","path":"/boot/EFI/Linux/apex-new.efi",
-   "title":"APEX-OS","isDefault":false}
+  {"type":"type2","id":"rime-good.efi","path":"/boot/EFI/Linux/apex-good.efi",
+   "title":"Rime OS","isDefault":true},
+  {"type":"type2","id":"rime-new.efi","path":"/boot/EFI/Linux/apex-new.efi",
+   "title":"Rime OS","isDefault":false}
 ]
 JSON
 cat > "$TMP/entries-ontrial.json" <<'JSON'
 [
-  {"type":"type2","id":"apex-good.efi","path":"/boot/EFI/Linux/apex-good.efi",
-   "title":"APEX-OS","isDefault":true},
-  {"type":"type2","id":"apex-new.efi","path":"/boot/EFI/Linux/apex-new+2-1.efi",
-   "title":"APEX-OS","triesLeft":2,"triesDone":1,"isDefault":false}
+  {"type":"type2","id":"rime-good.efi","path":"/boot/EFI/Linux/apex-good.efi",
+   "title":"Rime OS","isDefault":true},
+  {"type":"type2","id":"rime-new.efi","path":"/boot/EFI/Linux/apex-new+2-1.efi",
+   "title":"Rime OS","triesLeft":2,"triesDone":1,"isDefault":false}
 ]
 JSON
 
@@ -513,20 +513,20 @@ printf '\x07\x00\x00\x00a\0p\0e\0x\0-\0g\0o\0o\0d\0.\0e\0f\0i\0' \
     > "$TMP/efivars-good/LoaderEntrySelected-$LOADER_GUID"
 
 run_notice() {
-    APEX_BOOT_EFIVARS="$TMP/efivars-good" APEX_BOOT_STATE="$TMP/state-n" \
-    APEX_BOOT_BOOTCTL_JSON="$1" "$HEALTH" notice >"$TMP/out-n" 2>&1
+    RIME_BOOT_EFIVARS="$TMP/efivars-good" RIME_BOOT_STATE="$TMP/state-n" \
+    RIME_BOOT_BOOTCTL_JSON="$1" "$HEALTH" notice >"$TMP/out-n" 2>&1
 }
 
 rc=0; run_notice "$TMP/entries-rolledback.json" || rc=$?
 eq 0 "$rc" "notice with an exhausted entry exits"
 if [[ -f "$TMP/state-n/rollback-notice.json" ]]; then
     ok "wrote a rollback notice"
-    eq 'apex-new.efi' \
+    eq 'rime-new.efi' \
        "$(python3 -c 'import json,sys;d=json.load(open(sys.argv[1]));print(d["failedEntries"][0]["id"])' \
           "$TMP/state-n/rollback-notice.json")" "the failed entry it names"
     eq 1 "$(python3 -c 'import json,sys;print(len(json.load(open(sys.argv[1]))["failedEntries"]))' \
             "$TMP/state-n/rollback-notice.json")" "the exact number of failed entries"
-    eq 'apex-good.efi' \
+    eq 'rime-good.efi' \
        "$(python3 -c 'import json,sys;print(json.load(open(sys.argv[1]))["runningEntry"])' \
           "$TMP/state-n/rollback-notice.json")" "the entry it says is running"
 else
@@ -551,8 +551,8 @@ eq 0 "$rc" "notice with an entry still on trial exits"
 # indistinguishable from "nothing failed", which is the answer that hides a
 # rollback from the user.
 rc=0
-APEX_BOOT_EFIVARS="$TMP/efivars-good" APEX_BOOT_STATE="$TMP/state-n" \
-APEX_BOOT_BOOTCTL_JSON="$TMP/does-not-exist.json" "$HEALTH" notice >"$TMP/out-n2" 2>&1 || rc=$?
+RIME_BOOT_EFIVARS="$TMP/efivars-good" RIME_BOOT_STATE="$TMP/state-n" \
+RIME_BOOT_BOOTCTL_JSON="$TMP/does-not-exist.json" "$HEALTH" notice >"$TMP/out-n2" 2>&1 || rc=$?
 if (( rc == 1 )); then
     ok "notice fails closed with rc=1 when the boot entries cannot be read"
 else
@@ -561,21 +561,21 @@ fi
 
 # ═════════════════════════════════════════════════════════════════════════════
 sec "the state files have one schema, written in one place and read in another"
-# apex-boot-health WRITES these files and apexd/apex/src/boot.rs READS them.
+# rime-boot-health WRITES these files and rimed/rime/src/boot.rs READS them.
 # They are in different languages in different directories, so nothing but a
-# parity check couples them; a renamed key would leave `apex boot status`
+# parity check couples them; a renamed key would leave `rime boot status`
 # silently reporting "no verdict recorded" on a machine that had one.
 for key in verdict entry target checkedAt failures; do
     grep -q "\"$key\"" "$HEALTH" \
         && grep -q "\"$key\"" "$BOOTRS" \
         && ok "last-health.json key '$key' is written and read" \
-        || bad "last-health.json key '$key' is not in both apex-boot-health and boot.rs"
+        || bad "last-health.json key '$key' is not in both rime-boot-health and boot.rs"
 done
 for key in rolledBack runningEntry failedEntries noticedAt; do
     grep -q "\"$key\"" "$HEALTH" \
         && grep -q "\"$key\"" "$BOOTRS" \
         && ok "rollback-notice.json key '$key' is written and read" \
-        || bad "rollback-notice.json key '$key' is not in both apex-boot-health and boot.rs"
+        || bad "rollback-notice.json key '$key' is not in both rime-boot-health and boot.rs"
 done
 # triesDone is read out of the notice by boot.rs and copied into it by the
 # health script from bootctl's own field name.
@@ -589,35 +589,35 @@ sec "the build-time scripts refuse to write a real boot path"
 # the host's. These refusals run before anything is created, so the assertion
 # is safe on the machine executing it — which is the whole point.
 B="$REPO/files/scripts/boot-v2"
-for target in /boot/apex-test.img /boot/efi/apex-test.img /efi/apex-test.img /usr/apex-test.img; do
+for target in /boot/rime-test.img /boot/efi/rime-test.img /efi/rime-test.img /usr/rime-test.img; do
     rc=0
-    "$B/apex-mkesp" --disk "$target" --uki "x:0:$B/lib.sh" >"$TMP/out-esp" 2>&1 || rc=$?
+    "$B/rime-mkesp" --disk "$target" --uki "x:0:$B/lib.sh" >"$TMP/out-esp" 2>&1 || rc=$?
     if (( rc == 0 )); then
-        bad "apex-mkesp accepted --disk $target"
+        bad "rime-mkesp accepted --disk $target"
     else
         grep -q 'refusing to author an ESP' "$TMP/out-esp" \
-            && ok "apex-mkesp refuses --disk $target" \
-            || bad "apex-mkesp failed for --disk $target but not because it refused: $(cat "$TMP/out-esp")"
+            && ok "rime-mkesp refuses --disk $target" \
+            || bad "rime-mkesp failed for --disk $target but not because it refused: $(cat "$TMP/out-esp")"
     fi
-    [[ -e "$target" ]] && bad "apex-mkesp created $target" || true
+    [[ -e "$target" ]] && bad "rime-mkesp created $target" || true
 done
 rc=0
-"$B/apex-sb-keys" /boot/keys >"$TMP/out-keys" 2>&1 || rc=$?
+"$B/rime-sb-keys" /boot/keys >"$TMP/out-keys" 2>&1 || rc=$?
 (( rc != 0 )) && grep -q 'refusing to write key material' "$TMP/out-keys" \
-    && ok "apex-sb-keys refuses an output directory under /boot" \
-    || bad "apex-sb-keys did not refuse /boot: $(cat "$TMP/out-keys")"
+    && ok "rime-sb-keys refuses an output directory under /boot" \
+    || bad "rime-sb-keys did not refuse /boot: $(cat "$TMP/out-keys")"
 
 # ═════════════════════════════════════════════════════════════════════════════
-sec "apex-mkuki fails closed on the inputs a UKI cannot be guessed from"
+sec "rime-mkuki fails closed on the inputs a UKI cannot be guessed from"
 # A synthetic bzImage: the x86 boot protocol's HdrS magic at 0x202 and a
-# kernel_version pointer at 0x20e. Enough for apex-mkuki's version read, and
-# hermetic — a runner has no APEX kernel and pulling apex-os-core to get one
+# kernel_version pointer at 0x20e. Enough for rime-mkuki's version read, and
+# hermetic — a runner has no Rime kernel and pulling rime-os-core to get one
 # would be a multi-gigabyte download for a refusal test.
 python3 - "$TMP/fake-vmlinuz" <<'PY'
 import sys
 buf = bytearray(0x2000)
 buf[0x202:0x206] = b'HdrS'
-ver = b'6.99.0-apex-test (fake) #1 SMP\x00'
+ver = b'6.99.0-rime-test (fake) #1 SMP\x00'
 off = 0x1000
 buf[off:off + len(ver)] = ver
 buf[0x20e:0x210] = (off - 0x200).to_bytes(2, 'little')
@@ -628,13 +628,13 @@ printf 'not-a-real-initramfs' | gzip > "$TMP/fake-initrd.img"
 mkuki_fails() {  # mkuki_fails DESCRIPTION EXPECTED_SUBSTRING ARGS...
     local what="$1" expect="$2"; shift 2
     local rc=0
-    "$B/apex-mkuki" "$@" >"$TMP/out-uki" 2>&1 || rc=$?
+    "$B/rime-mkuki" "$@" >"$TMP/out-uki" 2>&1 || rc=$?
     if (( rc == 0 )); then
-        bad "apex-mkuki accepted $what"
+        bad "rime-mkuki accepted $what"
     elif grep -qF -- "$expect" "$TMP/out-uki"; then
-        ok "apex-mkuki refuses $what"
+        ok "rime-mkuki refuses $what"
     else
-        bad "apex-mkuki failed on $what for the wrong reason: $(tail -3 "$TMP/out-uki")"
+        bad "rime-mkuki failed on $what for the wrong reason: $(tail -3 "$TMP/out-uki")"
     fi
 }
 
@@ -894,9 +894,9 @@ cp "$TMP/fw-a.fd" "$TMP/same-name-a"; cp "$TMP/fw-b.fd" "$TMP/same-name-b"
 
 altrc() { bash -c '
     . "$1" >/dev/null 2>&1
-    if [[ "$2" == UNSET ]]; then unset APEX_BOOTLAB_FW_ALT; else export APEX_BOOTLAB_FW_ALT="$3"; fi
+    if [[ "$2" == UNSET ]]; then unset RIME_BOOTLAB_FW_ALT; else export RIME_BOOTLAB_FW_ALT="$3"; fi
     ovmf_code_alt >/dev/null 2>&1; printf "%s" "$?"' _ "$BOOTV2_LIB" "${1:+SET}${1-UNSET}" "${1-}"; }
-altout() { bash -c '. "$1" >/dev/null 2>&1; APEX_BOOTLAB_FW_ALT="$2" ovmf_code_alt' _ "$BOOTV2_LIB" "$1"; }
+altout() { bash -c '. "$1" >/dev/null 2>&1; RIME_BOOTLAB_FW_ALT="$2" ovmf_code_alt' _ "$BOOTV2_LIB" "$1"; }
 # Three ways to not have a second firmware, and the scenario turns each into a
 # different could-not-run. One shared failure code would make "nobody asked for
 # this experiment" and "the path is wrong" the same sentence in the log.
@@ -936,20 +936,20 @@ grep -q 'plaintext-marker=written' "$TMP/notpm.sh" \
 
 sec "L-003: the shipped enrolment path cannot bind what this program has ruled out"
 # These run on EVERY pull request, with no lab, no swtpm and no qemu. The boot
-# lab proves the BEHAVIOUR of files/system/libexec/apex-luks-enroll; this proves
+# lab proves the BEHAVIOUR of files/system/libexec/rime-luks-enroll; this proves
 # the properties that must hold in the source whether the lab ran or not — and
 # the lab is path-filtered, so a PR that edits only this script would otherwise
 # be gated by nothing at all.
-ENROLL="$REPO/files/system/libexec/apex-luks-enroll"
+ENROLL="$REPO/files/system/libexec/rime-luks-enroll"
 [[ -f "$ENROLL" ]] \
     && ok "the shipped enrolment script exists" \
     || bad "no script at $ENROLL — every check below is vacuous"
 [[ -x "$ENROLL" ]] \
     && ok "the shipped enrolment script is executable in the repo" \
     || bad "$ENROLL is not executable in the repo"
-grep -q 'COPY --chmod=0755 files/system/libexec/apex-luks-enroll' "$BASECF" \
+grep -q 'COPY --chmod=0755 files/system/libexec/rime-luks-enroll' "$BASECF" \
     && ok "Containerfile.base copies it into the image" \
-    || bad "Containerfile.base does not ship apex-luks-enroll, so nothing on a machine can call it"
+    || bad "Containerfile.base does not ship rime-luks-enroll, so nothing on a machine can call it"
 
 # ── the defect this whole item exists to prevent ───────────────────────────
 # `systemd-cryptenroll --tpm2-device=auto` with no PCR selection exits 0 and
@@ -1012,7 +1012,7 @@ fi
 # On real Intel PTT, MAX_AUTH_FAIL is 32, lockout 7200 s, recovery 86400 s, and
 # a successful authorisation does NOT clear the counter. A default PIN risks
 # locking a user out of their own TPM for a day, and on a dual-boot machine
-# another OS holds lockoutAuth so APEX cannot clear it.
+# another OS holds lockoutAuth so Rime cannot clear it.
 grep -qE '^WITH_PIN=0|WITH_PIN=0 ' "$ENROLL" \
     && ok "the PIN is off unless asked for" \
     || bad "the enrolment script does not default WITH_PIN to 0"
@@ -1046,26 +1046,26 @@ done
 # filter that does not name this file means the four scenarios never run on the
 # PR that breaks them.
 WF="$REPO/.github/workflows/boot-v2.yml"
-grep -q 'files/system/libexec/apex-luks-enroll' "$WF" \
+grep -q 'files/system/libexec/rime-luks-enroll' "$WF" \
     && ok "boot-v2.yml runs the lab when the enrolment script changes" \
-    || bad "boot-v2.yml has no path filter for apex-luks-enroll: the lab would be skipped, and a skipped job passes"
+    || bad "boot-v2.yml has no path filter for rime-luks-enroll: the lab would be skipped, and a skipped job passes"
 
 # ═════════════════════════════════════════════════════════════════════════════
 if (( WITH_BINARY )); then
-sec "apex boot status reports the state, and does not invent the parts it cannot see"
-APEX_BIN="${APEX_BIN:-$REPO/apexd/target/debug/apex}"
+sec "rime boot status reports the state, and does not invent the parts it cannot see"
+RIME_BIN="${RIME_BIN:-$REPO/rimed/target/debug/rime}"
 # Dies rather than skipping. A skipped check counts as success.
-[[ -x "$APEX_BIN" ]] || { echo "FATAL: no apex binary at $APEX_BIN (build it first)" >&2; exit 1; }
+[[ -x "$RIME_BIN" ]] || { echo "FATAL: no rime binary at $RIME_BIN (build it first)" >&2; exit 1; }
 
-# (a) A GRUB machine — the state every published APEX image is in.
+# (a) A GRUB machine — the state every published Rime image is in.
 G="$TMP/fx-grub"
-mkdir -p "$G/proc" "$G/sys/firmware/efi/efivars" "$G/var/lib/apex/boot"
+mkdir -p "$G/proc" "$G/sys/firmware/efi/efivars" "$G/var/lib/rime/boot"
 printf 'BOOT_IMAGE=/ostree/default-abc/vmlinuz ostree=/ostree/boot.1/default/abc/0 root=UUID=x\n' \
     > "$G/proc/cmdline"
 printf '\x06\x00\x00\x00\x01' > "$G/sys/firmware/efi/efivars/SecureBoot-8be4df61-93ca-11d2-aa0d-00e098032b8c"
-out="$(APEX_BOOT_ROOT="$G" "$APEX_BIN" boot status --json)"
+out="$(RIME_BOOT_ROOT="$G" "$RIME_BIN" boot status --json)"
 # A dotted path into the report. Entry ids contain a literal '.' (they are
-# filenames, "apex-good.efi"), so the separator is '/' and never '.' — an
+# filenames, "rime-good.efi"), so the separator is '/' and never '.' — an
 # earlier version split on '.' and every entry-level assertion silently read
 # `null`, which the exact-value checks caught and a truthiness check would not
 # have.
@@ -1090,7 +1090,7 @@ eq 'null'    "$(j bootCounting/entries)"   "GRUB fixture: entries"
 # times, so the field shapes are real rather than invented.
 S="$TMP/fx-sdboot"
 mkdir -p "$S/proc" "$S/sys/firmware/efi/efivars" "$S/sys/class/tpm/tpm0" \
-         "$S/run/systemd" "$S/var/lib/apex/boot"
+         "$S/run/systemd" "$S/var/lib/rime/boot"
 E="$S/sys/firmware/efi/efivars"
 printf 'root=UUID=x rw\n' > "$S/proc/cmdline"
 printf '\x07\x00\x00\x00s\0y\0s\0t\0e\0m\0d\0-\0b\0o\0o\0t\0 \x002\x005\x008\0' \
@@ -1102,58 +1102,58 @@ printf '\x07\x00\x00\x00a\0p\0e\0x\0-\0g\0o\0o\0d\0.\0e\0f\0i\0' \
 printf '\x06\x00\x00\x00\x01' > "$E/SecureBoot-8be4df61-93ca-11d2-aa0d-00e098032b8c"
 : > "$S/run/systemd/tpm2-pcr-signature.json"
 cp "$TMP/entries-rolledback.json" "$S/bootctl-list.json"
-cp "$TMP/state-good/last-health.json" "$S/var/lib/apex/boot/last-health.json"
-APEX_BOOT_EFIVARS="$E" APEX_BOOT_STATE="$S/var/lib/apex/boot" \
-    APEX_BOOT_BOOTCTL_JSON="$TMP/entries-rolledback.json" "$HEALTH" notice >/dev/null 2>&1
+cp "$TMP/state-good/last-health.json" "$S/var/lib/rime/boot/last-health.json"
+RIME_BOOT_EFIVARS="$E" RIME_BOOT_STATE="$S/var/lib/rime/boot" \
+    RIME_BOOT_BOOTCTL_JSON="$TMP/entries-rolledback.json" "$HEALTH" notice >/dev/null 2>&1
 
-out="$(APEX_BOOT_ROOT="$S" "$APEX_BIN" boot status --json)"
+out="$(RIME_BOOT_ROOT="$S" "$RIME_BIN" boot status --json)"
 eq '"systemd-boot"' "$(j bootloader)"            "sd-boot fixture: bootloader"
 eq 'true'           "$(j bootCounting/inEffect)" "sd-boot fixture: boot counting"
 eq 'true'           "$(j bootedFromUki)"         "sd-boot fixture: booted from a UKI"
 eq 'true'           "$(j measuredBoot/tpmPresent)"   "sd-boot fixture: TPM"
 eq 'true'           "$(j measuredBoot/pcrSignature)" "sd-boot fixture: signed PCR policy"
-eq '"apex-good.efi"' "$(j bootCounting/selectedEntry)" "sd-boot fixture: selected entry"
+eq '"rime-good.efi"' "$(j bootCounting/selectedEntry)" "sd-boot fixture: selected entry"
 eq 'null' "$(j bootCounting/entriesUnavailable)" "sd-boot fixture: no unavailability reason"
 eq 2 "$(python3 -c 'import json,sys;print(len(json.load(sys.stdin)["bootCounting"]["entries"]))' <<<"$out")" \
    "sd-boot fixture: the exact number of entries"
-eq 'true'  "$(j bootCounting/entries/apex-good.efi/blessed)" "sd-boot fixture: apex-good is blessed"
-eq 'false' "$(j bootCounting/entries/apex-good.efi/exhausted)" "sd-boot fixture: apex-good is not exhausted"
-eq 'true'  "$(j bootCounting/entries/apex-new.efi/exhausted)" "sd-boot fixture: apex-new is exhausted"
-eq 'false' "$(j bootCounting/entries/apex-new.efi/blessed)"   "sd-boot fixture: apex-new is not blessed"
+eq 'true'  "$(j bootCounting/entries/rime-good.efi/blessed)" "sd-boot fixture: rime-good is blessed"
+eq 'false' "$(j bootCounting/entries/rime-good.efi/exhausted)" "sd-boot fixture: rime-good is not exhausted"
+eq 'true'  "$(j bootCounting/entries/rime-new.efi/exhausted)" "sd-boot fixture: rime-new is exhausted"
+eq 'false' "$(j bootCounting/entries/rime-new.efi/blessed)"   "sd-boot fixture: rime-new is not blessed"
 eq '"good"' "$(j health/verdict)" "sd-boot fixture: the health verdict is read back"
 eq 'true'  "$(j rollbackNotice/rolledBack)" "sd-boot fixture: the rollback notice is surfaced"
 
 # And the human report must actually say the words a user needs. A JSON-only
 # assertion would pass with an empty text report.
-text="$(APEX_BOOT_ROOT="$S" "$APEX_BIN" boot status)"
+text="$(RIME_BOOT_ROOT="$S" "$RIME_BIN" boot status)"
 grep -q 'rolled back automatically' <<<"$text" \
     && ok "the human report announces the rollback" \
     || bad "the human report does not mention the rollback: $text"
 grep -q 'OUT OF TRIES' <<<"$text" \
     && ok "the human report marks the exhausted entry" \
     || bad "the human report does not mark the exhausted entry"
-textg="$(APEX_BOOT_ROOT="$G" "$APEX_BIN" boot status)"
+textg="$(RIME_BOOT_ROOT="$G" "$RIME_BIN" boot status)"
 # The wording moved when the in-place migration landed: a machine on GRUB is
 # no longer "the default for every published image", it is a machine that has
 # not migrated yet. Both halves are asserted — that it is not reported as a
 # fault, and that it names the command that migrates it — because a report
 # that says neither leaves the user with nothing to do.
-grep -q 'APEX is moving to systemd-boot' <<<"$textg" \
-    && ok "on a GRUB machine the report says where APEX is going" \
+grep -q 'Rime is moving to systemd-boot' <<<"$textg" \
+    && ok "on a GRUB machine the report says where Rime is going" \
     || bad "the GRUB report does not mention the migration: $textg"
 grep -q 'not a fault' <<<"$textg" \
     && ok "and that being on GRUB today is not a fault" \
     || bad "the GRUB report reads like a fault: $textg"
-grep -q 'apex-boot-migrate precheck' <<<"$textg" \
+grep -q 'rime-boot-migrate precheck' <<<"$textg" \
     && ok "and names the command that says why a machine cannot migrate" \
     || bad "the GRUB report does not say how to find out why: $textg"
 
 # Read-only means read-only. Nothing under the fixture root may change.
 before="$(find "$G" -type f -printf '%p %s\n' | sort | sha256sum)"
-APEX_BOOT_ROOT="$G" "$APEX_BIN" boot status --json >/dev/null
-APEX_BOOT_ROOT="$G" "$APEX_BIN" boot status >/dev/null
+RIME_BOOT_ROOT="$G" "$RIME_BIN" boot status --json >/dev/null
+RIME_BOOT_ROOT="$G" "$RIME_BIN" boot status >/dev/null
 after="$(find "$G" -type f -printf '%p %s\n' | sort | sha256sum)"
-eq "$before" "$after" "apex boot status wrote nothing"
+eq "$before" "$after" "rime boot status wrote nothing"
 fi
 
 printf '\n== test-boot-v2: %d passed, %d failed ==\n' "$PASS" "$FAIL"

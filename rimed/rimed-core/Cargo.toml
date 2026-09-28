@@ -1,0 +1,15 @@
+[package]
+name = "rimed-core"
+description = "Rime OS power daemon core: fingerprint, profile selection, tier engine, SysWriter"
+version.workspace = true
+edition.workspace = true
+license.workspace = true
+authors.workspace = true
+repository.workspace = true
+rust-version.workspace = true
+
+[dependencies]
+anyhow.workspace = true
+serde.workspace = true
+toml.workspace = true
+serde_json.workspace = true

@@ -81,7 +81,7 @@ int main(int argc, char *argv[])
 	struct pw_registry *registry;
 	struct spa_hook registry_listener = { 0 };
 	struct spa_hook core_listener = { 0 };
-	const char *app_id = argc > 1 ? argv[1] : "com.example.apextest";
+	const char *app_id = argc > 1 ? argv[1] : "com.example.rimetest";
 	const char *remote = argc > 2 ? argv[2] : "pipewire-0";
 
 	pw_init(&argc, &argv);
@@ -105,7 +105,7 @@ int main(int argc, char *argv[])
 	 * on the plain socket rather than the manager one. */
 	struct pw_properties *props = pw_properties_new(
 		PW_KEY_REMOTE_NAME, remote,
-		PW_KEY_APP_NAME, "apex-portal-client",
+		PW_KEY_APP_NAME, "rime-portal-client",
 		"pipewire.client.access", "portal",
 		"pipewire.access.portal.app_id", app_id,
 		"pipewire.access.portal.media_roles", "Camera",

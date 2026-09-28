@@ -23,9 +23,9 @@
 
           It lives in `src/debug` and NOT in `src/androidTest`, which is where
           it was first written: an `androidTest` manifest merges into
-          `com.apexos.remote.test`, and an activity there launches in the test
-          process — "Intent in process com.apexos.remote resolved to different
-          process com.apexos.remote.test". A Compose host has to be in the app
+          `com.rimeos.remote.test`, and an activity there launches in the test
+          process — "Intent in process com.rimeos.remote resolved to different
+          process com.rimeos.remote.test". A Compose host has to be in the app
           under test. `debug` keeps it out of every release artefact, which is
           the same place `ui-test-manifest` puts its own.
 
@@ -36,12 +36,12 @@
           result "rotation works".
         -->
         <activity
-            android:name="com.apexos.remote.device.ComposeHostActivity"
+            android:name="com.rimeos.remote.device.ComposeHostActivity"
             android:exported="false"
             android:showWhenLocked="true"
             android:turnScreenOn="true"
             android:configChanges="orientation|screenSize|screenLayout|keyboardHidden|uiMode"
-            android:theme="@style/Theme.ApexRemote" />
+            android:theme="@style/Theme.RimeRemote" />
 
     </application>
 </manifest>

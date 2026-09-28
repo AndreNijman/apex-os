@@ -69,15 +69,15 @@ build_fixture() {
     mkdir -p "$dir/upstream"
     git init --quiet --bare "$dir/upstream"
     mkdir -p "$dir/repo/android/tools" "$dir/repo/android/app" \
-             "$dir/repo/android/core/src/main/kotlin/com/apexos/remote/core"
+             "$dir/repo/android/core/src/main/kotlin/com/rimeos/remote/core"
     cp "$VERSION_SH" "$dir/repo/android/tools/release-version.sh"
     cp "$ARTIFACTS_SH" "$dir/repo/android/tools/release-artifacts.sh"
     cp "$NOTES_SH" "$dir/repo/android/tools/release-notes.sh"
-    printf 'val APEX_MARKETING_VERSION = "0.1.0"\n' > "$dir/repo/android/app/build.gradle.kts"
+    printf 'val RIME_MARKETING_VERSION = "0.1.0"\n' > "$dir/repo/android/app/build.gradle.kts"
     {
         printf 'const val REMOTE_PROTOCOL_VERSION: Int = 1\n'
         printf 'val SUPPORTED_REMOTE_PROTOCOL_VERSIONS: List<Int> = listOf(1)\n'
-    } > "$dir/repo/android/core/src/main/kotlin/com/apexos/remote/core/Client.kt"
+    } > "$dir/repo/android/core/src/main/kotlin/com/rimeos/remote/core/Client.kt"
     (
         cd "$dir/repo" || exit 1
         git init --quiet -b main .
@@ -206,7 +206,7 @@ build_fixture "$FIX" 3
 printf '// nothing here any more\n' > "$FIX/repo/android/app/build.gradle.kts"
 out=$("$FIX/repo/android/tools/release-version.sh" --main-ref origin/main 2>&1)
 rc=$?
-if [ "$rc" -ne 0 ] && said "$out" "APEX_MARKETING_VERSION"; then
+if [ "$rc" -ne 0 ] && said "$out" "RIME_MARKETING_VERSION"; then
     ok "a renamed marketing version is a refusal, not a made-up default"
 else
     bad "a missing marketing version did not refuse (rc=$rc): $out"
@@ -217,17 +217,17 @@ section "the artefact build refuses to produce something nobody can install"
 # Unlike pr-validation.yml, where an absent key is a notice and the unsigned
 # artefacts are built on purpose, this script's output is what a person
 # installs. Absent means stop.
-out=$(env -u APEX_KEYSTORE -u APEX_KEYSTORE_PASSWORD -u APEX_KEY_ALIAS -u APEX_KEY_PASSWORD \
+out=$(env -u RIME_KEYSTORE -u RIME_KEYSTORE_PASSWORD -u RIME_KEY_ALIAS -u RIME_KEY_PASSWORD \
       "$ARTIFACTS_SH" --out "$WORK/out" --code 5 --name 0.1.0+5.gdeadbeef 2>&1)
 rc=$?
-if [ "$rc" -ne 0 ] && said "$out" "APEX_KEYSTORE is not set"; then
+if [ "$rc" -ne 0 ] && said "$out" "RIME_KEYSTORE is not set"; then
     ok "a release build with no signing key is refused, and names the variable"
 else
     bad "an unsigned release build was not refused (rc=$rc): $out"
 fi
 
-out=$(APEX_KEYSTORE="$WORK/no-such-keystore.jks" APEX_KEYSTORE_PASSWORD=x \
-      APEX_KEY_ALIAS=y APEX_KEY_PASSWORD=z \
+out=$(RIME_KEYSTORE="$WORK/no-such-keystore.jks" RIME_KEYSTORE_PASSWORD=x \
+      RIME_KEY_ALIAS=y RIME_KEY_PASSWORD=z \
       "$ARTIFACTS_SH" --out "$WORK/out" --code 5 --name 0.1.0+5.gdeadbeef 2>&1)
 rc=$?
 if [ "$rc" -ne 0 ] && said "$out" "which is not a file"; then
@@ -248,12 +248,12 @@ section "the release page describes the artefact that was actually built"
 notes_dir="$WORK/notes"
 mkdir -p "$notes_dir"
 name="0.1.0+7.gcafef00d"
-printf 'not really an apk, but a real file with a real digest\n' > "$notes_dir/apex-remote-$name.apk"
-digest=$(sha256sum "$notes_dir/apex-remote-$name.apk")
+printf 'not really an apk, but a real file with a real digest\n' > "$notes_dir/rime-remote-$name.apk"
+digest=$(sha256sum "$notes_dir/rime-remote-$name.apk")
 digest="${digest%% *}"
-printf '%s  apex-remote-%s.apk\n' "$digest" "$name" > "$notes_dir/apex-remote-$name.apk.sha256"
+printf '%s  rime-remote-%s.apk\n' "$digest" "$name" > "$notes_dir/rime-remote-$name.apk.sha256"
 printf '{"remoteProtocolPreferred": 4, "remoteProtocolSupported": [4, 3]}\n' \
-    > "$notes_dir/apex-remote-$name.json"
+    > "$notes_dir/rime-remote-$name.json"
 
 out=$("$NOTES_SH" --code 7 --name "$name" --dir "$notes_dir" 2>&1)
 rc=$?
@@ -266,7 +266,7 @@ fi
 # page saying "v3 to v4" can only have derived it, and a page saying v1 would
 # be reciting a constant. Both halves are checked — the range in the prose and
 # the preferred revision in the table, which is the number somebody compares
-# against `apex remote status`.
+# against `rime remote status`.
 if said "$out" "v3 to v4"; then
     ok "the page states the protocol window this build speaks, read from the build"
 else
@@ -348,7 +348,7 @@ section "the protocol window reaches the metadata, or the release stops"
 
 FIXW="$WORK/fixw"
 build_fixture "$FIXW" 3
-CLIENT="$FIXW/repo/android/core/src/main/kotlin/com/apexos/remote/core/Client.kt"
+CLIENT="$FIXW/repo/android/core/src/main/kotlin/com/rimeos/remote/core/Client.kt"
 ART="$FIXW/repo/android/tools/release-artifacts.sh"
 
 # 1. A window that is no longer a literal list. `listOf(REMOTE_PROTOCOL_VERSION)`
@@ -358,7 +358,7 @@ ART="$FIXW/repo/android/tools/release-artifacts.sh"
     printf 'const val REMOTE_PROTOCOL_VERSION: Int = 1\n'
     printf 'val SUPPORTED_REMOTE_PROTOCOL_VERSIONS: List<Int> = listOf(REMOTE_PROTOCOL_VERSION)\n'
 } > "$CLIENT"
-out=$(APEX_KEYSTORE=/dev/null APEX_KEYSTORE_PASSWORD=x APEX_KEY_ALIAS=y APEX_KEY_PASSWORD=z \
+out=$(RIME_KEYSTORE=/dev/null RIME_KEYSTORE_PASSWORD=x RIME_KEY_ALIAS=y RIME_KEY_PASSWORD=z \
       "$ART" --out "$WORK/outw" --code 5 --name 0.1.0+5.gdeadbeef 2>&1)
 rc=$?
 if [ "$rc" -ne 0 ] && said "$out" "not a plain list of integers"; then
@@ -369,7 +369,7 @@ fi
 
 # 2. The window renamed out of the file entirely.
 printf 'const val REMOTE_PROTOCOL_VERSION: Int = 1\n' > "$CLIENT"
-out=$(APEX_KEYSTORE=/dev/null APEX_KEYSTORE_PASSWORD=x APEX_KEY_ALIAS=y APEX_KEY_PASSWORD=z \
+out=$(RIME_KEYSTORE=/dev/null RIME_KEYSTORE_PASSWORD=x RIME_KEY_ALIAS=y RIME_KEY_PASSWORD=z \
       "$ART" --out "$WORK/outw" --code 5 --name 0.1.0+5.gdeadbeef 2>&1)
 rc=$?
 if [ "$rc" -ne 0 ] && said "$out" "SUPPORTED_REMOTE_PROTOCOL_VERSIONS"; then
@@ -385,7 +385,7 @@ fi
     printf 'const val REMOTE_PROTOCOL_VERSION: Int = 3\n'
     printf 'val SUPPORTED_REMOTE_PROTOCOL_VERSIONS: List<Int> = listOf(2, 1)\n'
 } > "$CLIENT"
-out=$(APEX_KEYSTORE=/dev/null APEX_KEYSTORE_PASSWORD=x APEX_KEY_ALIAS=y APEX_KEY_PASSWORD=z \
+out=$(RIME_KEYSTORE=/dev/null RIME_KEYSTORE_PASSWORD=x RIME_KEY_ALIAS=y RIME_KEY_PASSWORD=z \
       "$ART" --out "$WORK/outw" --code 5 --name 0.1.0+5.gdeadbeef 2>&1)
 rc=$?
 if [ "$rc" -ne 0 ] && said "$out" "cannot prefer a revision it does not list"; then
@@ -401,10 +401,10 @@ fi
     printf 'const val REMOTE_PROTOCOL_VERSION: Int = 1\n'
     printf 'val SUPPORTED_REMOTE_PROTOCOL_VERSIONS: List<Int> = listOf(1)\n'
 } > "$CLIENT"
-out=$(env -u APEX_KEYSTORE -u APEX_KEYSTORE_PASSWORD -u APEX_KEY_ALIAS -u APEX_KEY_PASSWORD \
+out=$(env -u RIME_KEYSTORE -u RIME_KEYSTORE_PASSWORD -u RIME_KEY_ALIAS -u RIME_KEY_PASSWORD \
       "$ART" --out "$WORK/outw" --code 5 --name 0.1.0+5.gdeadbeef 2>&1)
 rc=$?
-if [ "$rc" -ne 0 ] && said "$out" "APEX_KEYSTORE is not set"; then
+if [ "$rc" -ne 0 ] && said "$out" "RIME_KEYSTORE is not set"; then
     ok "a readable window is not refused; the run proceeds to the next gate"
 else
     bad "a valid protocol window was refused, so the check fires for everything (rc=$rc): $out"
@@ -418,11 +418,11 @@ section "the page states the compatibility promise this build can keep"
 onew="$WORK/notes-one"
 mkdir -p "$onew"
 namew="0.1.0+9.gaaaaaaaa"
-printf 'apk\n' > "$onew/apex-remote-$namew.apk"
-dw=$(sha256sum "$onew/apex-remote-$namew.apk"); dw="${dw%% *}"
-printf '%s  apex-remote-%s.apk\n' "$dw" "$namew" > "$onew/apex-remote-$namew.apk.sha256"
+printf 'apk\n' > "$onew/rime-remote-$namew.apk"
+dw=$(sha256sum "$onew/rime-remote-$namew.apk"); dw="${dw%% *}"
+printf '%s  rime-remote-%s.apk\n' "$dw" "$namew" > "$onew/rime-remote-$namew.apk.sha256"
 printf '{"remoteProtocolPreferred": 1, "remoteProtocolSupported": [1]}\n' \
-    > "$onew/apex-remote-$namew.json"
+    > "$onew/rime-remote-$namew.json"
 out=$("$NOTES_SH" --code 9 --name "$namew" --dir "$onew" 2>&1)
 rc=$?
 if [ "$rc" -eq 0 ] && said "$out" "exactly one revision"; then
@@ -439,7 +439,7 @@ fi
 # And the other arm. Both branches of a conditional sentence have to be
 # exercised, or half of it is prose nobody has read.
 printf '{"remoteProtocolPreferred": 3, "remoteProtocolSupported": [3, 2, 1]}\n' \
-    > "$onew/apex-remote-$namew.json"
+    > "$onew/rime-remote-$namew.json"
 out=$("$NOTES_SH" --code 9 --name "$namew" --dir "$onew" 2>&1)
 rc=$?
 if [ "$rc" -eq 0 ] && said "$out" "v1 to v3"; then
@@ -451,7 +451,7 @@ fi
 # A metadata file with no window at all. Older than the field, or written by
 # something that is not release-artifacts.sh; either way the page must not
 # guess.
-printf '{"remoteProtocolPreferred": 1}\n' > "$onew/apex-remote-$namew.json"
+printf '{"remoteProtocolPreferred": 1}\n' > "$onew/rime-remote-$namew.json"
 out=$("$NOTES_SH" --code 9 --name "$namew" --dir "$onew" 2>&1)
 rc=$?
 if [ "$rc" -ne 0 ] && said "$out" "remoteProtocolSupported"; then
@@ -466,7 +466,7 @@ section "the workflow and the app agree about where updates come from"
 # workflow writes to it. A metadata file the updater cannot parse would leave
 # every installed phone quietly stuck, so the contract is asserted on both
 # sides rather than kept in step by memory.
-UPDATER="$ROOT/android/core/src/main/kotlin/com/apexos/remote/core/update/Updates.kt"
+UPDATER="$ROOT/android/core/src/main/kotlin/com/rimeos/remote/core/update/Updates.kt"
 [ -f "$UPDATER" ] || { echo "FATAL: $UPDATER is missing; the updater this section is about does not exist" >&2; exit 2; }
 updater_src=$(cat "$UPDATER")
 artifacts_src=$(cat "$ARTIFACTS_SH")

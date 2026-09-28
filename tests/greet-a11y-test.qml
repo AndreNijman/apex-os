@@ -6,8 +6,8 @@ import QtTest
 //  get from the login screen (roadmap P2-003 "accessible login", and the
 //  greeter half of P2-004's "keyboard layout before password").
 //
-//  Run via tests/test-apex-greet-a11y.sh, which stages the SHIPPED
-//  files/desktop/apex-greet/GreetSurface.qml next to theme and ctx stubs and
+//  Run via tests/test-rime-greet-a11y.sh, which stages the SHIPPED
+//  files/desktop/rime-greet/GreetSurface.qml next to theme and ctx stubs and
 //  hands this file to qmltestrunner on the offscreen platform. The surface
 //  under test is the shipped file byte for byte; only the palette it paints
 //  with and the auth backend it talks to are fakes, and no assertion here looks
@@ -78,8 +78,8 @@ Item {
         // is TRUE, and test_041 went red with the line rendering undefined.
         property string recoveryNotice: ""
 
-        property var    sessions:    [ { id: "apex-labwc", name: "APEX Desktop", exec: "x" },
-                                       { id: "apex-gaming", name: "APEX Gaming", exec: "y" } ]
+        property var    sessions:    [ { id: "rime-labwc", name: "Rime Desktop", exec: "x" },
+                                       { id: "rime-gaming", name: "Rime Gaming", exec: "y" } ]
         property int    sessionIndex: 0
         readonly property string sessionName: sessions[sessionIndex].name
 
@@ -484,8 +484,8 @@ Item {
         function test_042_recovery_notice_is_announced() {
             var st = fixture.named("greetStatusLine")
             verify(st !== null, "no item named greetStatusLine")
-            stubCtx.recoveryNotice = "Your desktop did not start — APEX Safe Graphics selected"
-            verify(st.Accessible.name.indexOf("APEX Safe Graphics") >= 0,
+            stubCtx.recoveryNotice = "Your desktop did not start — Rime Safe Graphics selected"
+            verify(st.Accessible.name.indexOf("Rime Safe Graphics") >= 0,
                    "a recovery session was preselected and the status line announces '" +
                    st.Accessible.name + "'")
             verify(st.Accessible.name.indexOf("\uf0026") < 0,

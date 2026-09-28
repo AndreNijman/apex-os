@@ -1,4 +1,4 @@
-# APEX-OS M1 notes (production images + CI)
+# Rime OS M1 notes (production images + CI)
 
 M1 turns the proven M0 spike Containerfiles into three production images
 (shared **base** → **daily** / **gaming**) plus a GitHub Actions pipeline that
@@ -33,7 +33,7 @@ Built kmod RPM: kmod-nvidia-7.1.3-cachyos1.fc43.x86_64-580.173.02-1.fc43.x86_64.
 modinfo nvidia (kver 7.1.3-cachyos1.fc43.x86_64):
   filename: /lib/modules/7.1.3-cachyos1.fc43.x86_64/extra/nvidia/nvidia.ko.xz
   version:  580.173.02
-=> /usr/lib/apex-nvidia-akmod-status: "PASS driver=580.173.02 kver=7.1.3-cachyos1.fc43.x86_64"
+=> /usr/lib/rime-nvidia-akmod-status: "PASS driver=580.173.02 kver=7.1.3-cachyos1.fc43.x86_64"
 ```
 
 Unlike the M0 spike (capture-and-continue), production **hard-fails** if the
@@ -106,8 +106,8 @@ stays enabled in the gaming image on purpose, for later userspace layering).
 M0 spike A found that `cage` 0.2.0 does not expose `wlr-layer-shell` to
 quickshell 0.3.0, so the greeter never paints. M1 installs **sway 1.11 + labwc
 0.9.6** (both stock fc43, both layer-shell v4) in the base and switches the
-greeter host: `files/desktop/apex-greet/greetd-config.toml` now launches
-`sway --config /usr/share/apex-greet/sway-greet.conf` (new file), which runs
+greeter host: `files/desktop/rime-greet/greetd-config.toml` now launches
+`sway --config /usr/share/rime-greet/sway-greet.conf` (new file), which runs
 quickshell as sway's only client; cage remains only as a commented fallback.
 
 **Still open:** live pixel rendering is NOT verified. Headless QEMU (local) and
@@ -122,7 +122,7 @@ Build-time `flatpak remote-add --system flathub` returns rc=0, but it writes to
 `/var` once and never updates it on upgrade, which makes a build-time remote
 fragile. The base therefore ships:
 - `/etc/flatpak/flathub.flatpakrepo` (canonical Flathub repo file + GPG key), and
-- `apex-flathub-setup.service`, an idempotent first-boot oneshot
+- `rime-flathub-setup.service`, an idempotent first-boot oneshot
   (`flatpak remote-add --if-not-exists`, stamped, `After=network-online.target`).
 
 The image cannot preinstall Flatseal (flatpak install needs a running system);
@@ -137,27 +137,27 @@ the docs list it as a first-run install from Flathub.
 - **Job `base`** (ubuntu-latest): rootful `sudo podman build` of
   `Containerfile.base` (rootful because the kernel `%posttrans`/dracut and the
   akmod need device access the runner's rootless podman denies), tags
-  `apex-os-base:latest` + `:<sha>`, pushes, captures the pushed **digest** via
+  `rime-os-base:latest` + `:<sha>`, pushes, captures the pushed **digest** via
   `--digestfile`, cosign-signs the digest, and exposes the digest as a job output.
-> **Superseded.** This section records M1, when APEX published three images. It
+> **Superseded.** This section records M1, when Rime published three images. It
 > stays as a dated build record and does not describe current behaviour: there
 > is one image now, the `flavors` matrix is a single `image` job, and the
 > NVIDIA akmod is built and MOK-signed in `core`, not in a flavor. See
-> `docs/ci-release-tiers.md` and `Containerfile.apex`.
+> `docs/ci-release-tiers.md` and `Containerfile.rime`.
 
 - **Job `flavors`** (needs base): matrix `[daily, gaming-mesa, gaming-nvidia]`.
   Each builds the right Containerfile with
-  `--build-arg BASE=apex-os-base@<digest>` (which pins every flavor to the
+  `--build-arg BASE=rime-os-base@<digest>` (which pins every flavor to the
   exact base image the base job signed) + the GPU arg for gaming, tags
-  `apex-os:<flavor>` + `:<flavor>-<sha>`, pushes, cosign-signs its digest.
+  `rime-os:<flavor>` + `:<flavor>-<sha>`, pushes, cosign-signs its digest.
 - **Job `qcow2`** (needs flavors, `workflow_dispatch` + `build_qcow2` only,
   `continue-on-error`): runs bootc-image-builder to produce a **daily** qcow2 and
   uploads it as an artifact. GitHub runners have **no `/dev/kvm`**, so the job
   produces the disk but does NOT boot it: producing it is the check. It is
   non-blocking, so bib flakiness never fails the image pipeline.
 - **OCI labels** on every image incl. `org.opencontainers.image.revision=<sha>`
-  (set via `--build-arg APEX_REVISION`), satisfying the "image carries git
-  SHA" rule. Gaming also carries `org.apex-os.gpu`.
+  (set via `--build-arg RIME_REVISION`), satisfying the "image carries git
+  SHA" rule. Gaming also carries `org.rime-os.gpu`.
 - **No stored secrets:** GHCR uses the automatic `GITHUB_TOKEN`; cosign uses
   keyless Sigstore/Fulcio via the runner's ambient OIDC, so no private key
   exists anywhere.

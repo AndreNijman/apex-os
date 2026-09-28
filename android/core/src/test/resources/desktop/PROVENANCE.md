@@ -1,4 +1,4 @@
-# Vendored from apex-shell
+# Vendored from rime-shell
 
 `agentstate.js` is a **verbatim copy**. It is the desktop's single source of
 the agent state -> colour-token mapping, and `AgentStateAgreementTest` parses
@@ -6,7 +6,7 @@ this copy and asserts the Kotlin table agrees with it in both directions.
 
 | | |
 |---|---|
-| source repo | apex-shell |
+| source repo | rime-shell |
 | path | `src/services/agentstate.js` |
 | branch | `roadmap/v2.2` |
 | commit | `6e74101` |
@@ -16,12 +16,12 @@ this copy and asserts the Kotlin table agrees with it in both directions.
 ## What this does and does not prove
 
 It proves the Kotlin agrees with **this snapshot**. It cannot prove the Kotlin
-agrees with apex-shell's current file, because the two live in different
+agrees with rime-shell's current file, because the two live in different
 repositories and neither CI checks out the other.
 
 `android/tools/check-agent-state.sh` closes that gap when a checkout is
 available: it diffs both copies against their live counterparts under
-`${APEX_SHELL_DIR:-/var/tmp/apex-work/int-shell}` and fails on a difference.
+`${RIME_SHELL_DIR:-/var/tmp/rime-work/int-shell}` and fails on a difference.
 With no checkout it prints **NOT CHECKED** and exits 0. A script that reported
 success because it could not look would repeat the "permission denied is not
 absence" mistake in shell.
@@ -35,7 +35,7 @@ foregrounds and the same `darkSurface` threshold.
 
 | | |
 |---|---|
-| source repo | apex-shell |
+| source repo | rime-shell |
 | path | `src/theme/Colors.qml` |
 | branch | `roadmap/v2.2` |
 | commit | `6e74101` |

@@ -1,0 +1,5 @@
+[D-BUS Service]
+Name=org.rimeos.Rimed1
+Exec=/usr/bin/rimed
+User=root
+SystemdService=rimed.service

@@ -10,7 +10,7 @@ import uuid
 import zlib
 
 ROOT = pathlib.Path(__file__).resolve().parents[1]
-EXE = ROOT / 'target/debug/apex-windows-installer'
+EXE = ROOT / 'target/debug/rime-windows-installer'
 PART = uuid.UUID('c6ce1374-7634-4cc2-9aab-4215e596c020')
 LINUX = uuid.UUID('0fc63daf-8483-4772-8e79-3d69d8477de4')
 DISK = uuid.UUID('aa2edb7f-b016-40f5-bc6a-52d8a677854e')
@@ -30,7 +30,7 @@ def fixture(kind=LINUX, attributes=0, overlap=False, stale=False,
     entries[:16] = kind.bytes_le
     entries[16:32] = PART.bytes_le
     struct.pack_into('<QQQ', entries, 32, START, END, attributes)
-    name = 'APEX test target'.encode('utf-16-le')
+    name = 'Rime test target'.encode('utf-16-le')
     entries[56:56+len(name)] = name
     if overlap:
         entries[128:256] = entries[:128]
@@ -55,7 +55,7 @@ def fixture(kind=LINUX, attributes=0, overlap=False, stale=False,
 
 class ImageTests(unittest.TestCase):
     def check_image(self, data, expected, selection=str(PART), success=False):
-        with tempfile.TemporaryDirectory(prefix='apex-image-test-') as directory:
+        with tempfile.TemporaryDirectory(prefix='rime-image-test-') as directory:
             path = pathlib.Path(directory) / 'disk.img'
             path.write_bytes(data)
             result = subprocess.run([str(EXE), 'lab', str(path)],
@@ -118,7 +118,7 @@ class ImageTests(unittest.TestCase):
 
     @unittest.skipUnless(shutil.which('mkfs.ext4'), 'mkfs.ext4 unavailable')
     def test_formatted_filesystem_without_user_files(self):
-        with tempfile.TemporaryDirectory(prefix='apex-ext4-test-') as directory:
+        with tempfile.TemporaryDirectory(prefix='rime-ext4-test-') as directory:
             partition = pathlib.Path(directory) / 'partition.img'
             partition.write_bytes(bytes((END-START+1)*512))
             subprocess.run(['mkfs.ext4', '-q', '-F', str(partition)],
@@ -159,7 +159,7 @@ class ImageTests(unittest.TestCase):
         self.check_image(b, 'ALL-ZERO CONTENT', success=True)
 
     def test_symlink_refused(self):
-        with tempfile.TemporaryDirectory(prefix='apex-image-test-') as directory:
+        with tempfile.TemporaryDirectory(prefix='rime-image-test-') as directory:
             path = pathlib.Path(directory)
             (path/'real.img').write_bytes(fixture())
             (path/'link.img').symlink_to(path/'real.img')

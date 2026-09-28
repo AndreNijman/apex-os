@@ -6,7 +6,7 @@
 #
 #  ── The defect ──────────────────────────────────────────────────────────────
 #
-#  Every APEX install lands on `us` / `en_US.UTF-8` / `Australia/Perth`.
+#  Every Rime install lands on `us` / `en_US.UTF-8` / `Australia/Perth`.
 #
 #  Not by choice — there was nowhere to make one. The GUI's ten pages
 #  (welcome → wifi → disk → mode → part → account → secureboot → confirm → run
@@ -15,7 +15,7 @@
 #  The live ISO's values come from a kickstart that hardcodes exactly those
 #  three (`installer/bib-config.toml`).
 #
-#  So a user in Germany installs APEX, is asked to create a password, types it
+#  So a user in Germany installs Rime, is asked to create a password, types it
 #  on a keyboard the installer has decided is American, and then cannot log in
 #  to the machine they just installed — the same lockout the greeter's keymap
 #  generator, sway-greet.conf and labwc-greet/environment each carry a note
@@ -50,8 +50,8 @@ set -uo pipefail
 set +e
 
 cd "$(dirname "$0")" || exit 2
-ENGINE="$PWD/apex-install"
-GUI="$PWD/apex-installer-gui"
+ENGINE="$PWD/rime-install"
+GUI="$PWD/rime-installer-gui"
 for f in "$ENGINE" "$GUI"; do
     [ -f "$f" ] || { echo "FATAL: cannot find $f" >&2; exit 2; }
 done
@@ -71,7 +71,7 @@ finish() {
     [ "$fail" -eq 0 ]
 }
 
-W="$(mktemp -d "${TMPDIR:-/tmp}/apex-inst-locale.XXXXXX")" || exit 2
+W="$(mktemp -d "${TMPDIR:-/tmp}/rime-inst-locale.XXXXXX")" || exit 2
 cleanup() { rm -rf "$W"; }
 trap cleanup EXIT INT TERM
 
@@ -165,8 +165,8 @@ import re, sys
 src = open(sys.argv[1]).read()
 m = re.search(r'\n    def p_welcome\(self\).*?(?=\n    def |\Z)', src, re.S)
 body = m.group(0) if m else ""
-# The primary action is the apex-go button; "Back"/"Quit" are apex-ghost.
-g = re.search(r'self\.btn\(\s*"[^"]*"\s*,\s*"apex-go"\s*,\s*lambda[^)]*self\.go\(\s*"(\w+)"', body)
+# The primary action is the rime-go button; "Back"/"Quit" are rime-ghost.
+g = re.search(r'self\.btn\(\s*"[^"]*"\s*,\s*"rime-go"\s*,\s*lambda[^)]*self\.go\(\s*"(\w+)"', body)
 print(g.group(1) if g else "")
 PY2
 )"
@@ -405,27 +405,27 @@ done
 #
 # ── Getting the engine as far as its own validation ─────────────────────────
 #
-# apex-install:353 refuses to go on unless the APEX-OS image is in ROOT podman
+# rime-install:353 refuses to go on unless the Rime OS image is in ROOT podman
 # storage, and that check sits BEFORE argument parsing. So on any box that is
 # not the ISO build box the engine dies at preflight and never reaches a single
 # answers-file guard. (This is not hypothetical: test-installer.sh's whole
 # engine half has been dead for exactly this reason since the cases were added
 # five days after the check — including in CI, on a bare ubuntu runner.)
 #
-# apex-install:56 is `IMAGE="${APEX_IMAGE:-localhost/apex-os:${EDITION}}"`, with
-# the comment "override with APEX_IMAGE=... for testing". So point it at an
+# rime-install:56 is `IMAGE="${RIME_IMAGE:-localhost/rime-os:${EDITION}}"`, with
+# the comment "override with RIME_IMAGE=... for testing". So point it at an
 # image that does exist. An empty tar imported by podman is a valid image with
 # no layers, costs nothing, needs no network, and is removed again on exit — so
 # the suite does not depend on whatever happens to be in the ambient store.
 #
 # Checked before use rather than assumed safe: the only `bootc install to-disk
 # --wipe` reachable before the validation block is inside `if [ "$UNATTENDED" =
-# 1 ]`, whose two gates (`apex.unattended` on /proc/cmdline, and
-# /usr/share/apex-installer/allow-unattended) are both shut on a developer box.
+# 1 ]`, whose two gates (`rime.unattended` on /proc/cmdline, and
+# /usr/share/rime-installer/allow-unattended) are both shut on a developer box.
 # Everything else between preflight and validation is function definitions. The
 # disk named below cannot exist, so a value that PASSES validation stops at the
 # block-device check with nothing touched.
-SCRATCH_IMAGE="localhost/apex-locale-probe:test"
+SCRATCH_IMAGE="localhost/rime-locale-probe:test"
 ENGINE_IMAGE=""
 scratch_made=0
 drop_scratch() {
@@ -438,11 +438,11 @@ ensure_engine_image() {
     command -v sudo   >/dev/null 2>&1 || return 1
     command -v podman >/dev/null 2>&1 || return 1
     sudo -n true 2>/dev/null || return 1
-    # Note: sudo's env_reset strips APEX_* from the caller's environment, so the
-    # override has to be passed as `sudo -n APEX_IMAGE=... ` and cannot be
+    # Note: sudo's env_reset strips RIME_* from the caller's environment, so the
+    # override has to be passed as `sudo -n RIME_IMAGE=... ` and cannot be
     # exported here.
-    if sudo -n podman image exists localhost/apex-os:daily 2>/dev/null; then
-        ENGINE_IMAGE="localhost/apex-os:daily"; return 0
+    if sudo -n podman image exists localhost/rime-os:daily 2>/dev/null; then
+        ENGINE_IMAGE="localhost/rime-os:daily"; return 0
     fi
     tar -cf "$W/empty.tar" -T /dev/null 2>/dev/null || return 1
     sudo -n podman import -q "$W/empty.tar" "$SCRATCH_IMAGE" >/dev/null 2>&1 || return 1
@@ -452,7 +452,7 @@ ensure_engine_image() {
 }
 
 engine() {   # engine <answers-file> -> the engine's combined output
-    sudo -n APEX_DRY_RUN=1 APEX_IMAGE="$ENGINE_IMAGE" "$ENGINE" --headless "$1" 2>&1 </dev/null
+    sudo -n RIME_DRY_RUN=1 RIME_IMAGE="$ENGINE_IMAGE" "$ENGINE" --headless "$1" 2>&1 </dev/null
 }
 
 section "a bad layout is refused before anything is erased"
@@ -461,9 +461,9 @@ if ! ensure_engine_image; then
         "needs passwordless sudo + podman to put an image where preflight can find one"
     skp "a real layout gets past validation" "same"
 else
-    ok "the engine can reach its own validation (APEX_IMAGE=$ENGINE_IMAGE)"
+    ok "the engine can reach its own validation (RIME_IMAGE=$ENGINE_IMAGE)"
     ANS="$W/answers"
-    printf 'mode=disk\ndisk=/dev/zzz-does-not-exist\nusername=u\npassword=pw\nhostname=apex\nencrypt=no\nkeymap=NOT_A_LAYOUT\n' > "$ANS"
+    printf 'mode=disk\ndisk=/dev/zzz-does-not-exist\nusername=u\npassword=pw\nhostname=rime\nencrypt=no\nkeymap=NOT_A_LAYOUT\n' > "$ANS"
     out="$(engine "$ANS")"
     if grep -q 'Unexpected error on line' <<<"$out"; then
         bad "a nonsense layout is refused" "the ERR trap fired instead of a clean refusal"
@@ -476,7 +476,7 @@ else
     # And a real one must NOT be refused for being a layout — it has to get past
     # this check and fail later on the absent disk, or the validator is simply
     # rejecting everything and assertion (1) above proves nothing.
-    printf 'mode=disk\ndisk=/dev/zzz-does-not-exist\nusername=u\npassword=pw\nhostname=apex\nencrypt=no\nkeymap=de\n' > "$ANS"
+    printf 'mode=disk\ndisk=/dev/zzz-does-not-exist\nusername=u\npassword=pw\nhostname=rime\nencrypt=no\nkeymap=de\n' > "$ANS"
     out="$(engine "$ANS")"
     if grep -qiF "is not a keyboard layout" <<<"$out"; then
         bad "a real layout is not refused" "the validator rejects valid layouts too"
@@ -487,7 +487,7 @@ else
         ok "a real layout gets past validation and stops at the absent disk"
     else
         bad "a real layout gets past validation and stops at the absent disk" \
-            "got: $(grep -m1 APEX-INSTALL-FAILED <<<"$out" || echo '<no sentinel>')"
+            "got: $(grep -m1 RIME-INSTALL-FAILED <<<"$out" || echo '<no sentinel>')"
     fi
 fi
 

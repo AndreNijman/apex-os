@@ -1,14 +1,14 @@
-# APEX Safe Graphics — labwc environment.
+# Rime Safe Graphics — labwc environment.
 #
 # labwc reads this file at startup and exports each KEY=value into the
 # compositor's and its clients' environment.
 #
-# These are a MIRROR of what /usr/libexec/apex-safe-graphics exports before it
+# These are a MIRROR of what /usr/libexec/rime-safe-graphics exports before it
 # execs labwc, and the duplication is deliberate rather than an oversight: the
 # compositor picks its renderer from the environment it was STARTED with, so
 # the script's copy is the one that decides, and this copy is what reaches a
 # client started by the autostart — and what applies if somebody runs
-# `labwc -C /usr/share/apex/safe-graphics` by hand.
+# `labwc -C /usr/share/rime/safe-graphics` by hand.
 #
 # WLR_BACKENDS is deliberately absent. Unset, wlroots picks DRM on a real
 # machine; set here, a test could not ask for a headless one and this session

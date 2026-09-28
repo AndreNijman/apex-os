@@ -1,0 +1,164 @@
+#!/usr/bin/env bash
+# ─────────────────────────────────────────────────────────────────────────────
+#  Rime OS — race-safe launcher for the Rime Shell session components
+#  Installed to /usr/libexec/rime-shell-autostart; referenced from the seeded
+#  Hyprland config (files/desktop/hypr/hyprland.conf) and the niri config that
+#  rime-shell-firstrun writes.
+#
+#  WHAT THIS DOES
+#  Starts the two session components that make up the Rime desktop:
+#    * hypridle  — dim / lock / DPMS / suspend timers (this is the LOCK SCREEN)
+#    * quickshell — the bar, popups, launcher and IPC target
+#
+#  HISTORY, because it explains the shape of this file
+#  The shell used to be `git clone`d into ~/.local/src/rime-shell on first login,
+#  and greetd execs the compositor in PARALLEL with that provisioner. Measured on
+#  a first login (p6-class, ThinkPad L16 Gen 2):
+#
+#     13:10:55  greetd execs Hyprland; it parses the just-seeded config and fires
+#               ALL exec-once lines — while ~/.local/src/rime-shell did not exist
+#     13:10:57  the provisioner STARTS the shallow clone
+#     13:11:00  the clone finishes
+#
+#  The two autostarts pointing into the checkout ran 2-5s early and died instantly:
+#  a bare compositor, no bar, no idle management, no lock timeout. Every OTHER
+#  exec-once survived, because none of them referenced the clone — that asymmetry
+#  is the fingerprint (rime-logs 51).
+#
+#  Since rime-logs 56 the shell ships in the image at /usr/share/rime-shell, so
+#  that race is now STRUCTURALLY IMPOSSIBLE: the shell exists before the compositor
+#  is ever exec'd. The wait loop below is retained only as a cheap sanity bound on
+#  a broken image or a bad RIME_SHELL_DIR override — it normally passes instantly.
+#
+#  What this file still genuinely owns:
+#    * hypridle config resolution — image copy by default, $HOME as an explicit
+#      opt-out override (see the hypridle block below; it is the lock screen, and
+#      getting this backwards is how lock behaviour got pinned per-user before);
+#    * idempotency — it refuses to start a second copy of either process, which is
+#      what lets rime-shell-firstrun safely invoke it to repair a live session, and
+#      what makes it safe to run by hand.
+#
+#  See rime-logs 51 and 56.
+# ─────────────────────────────────────────────────────────────────────────────
+# NOTE: deliberately NOT `set -e`. This is a session-critical launcher; a
+# non-zero from any probe below must never stop us from getting to the point
+# where quickshell is started.
+set -uo pipefail
+
+# The shell ships in the image now (rime-logs 56), so this is a constant path that
+# is guaranteed to exist before the compositor is ever exec'd. An override is kept
+# for developers running their own checkout:
+#     RIME_SHELL_DIR=~/src/rime-shell /usr/libexec/rime-shell-autostart
+SHELL_DIR="${RIME_SHELL_DIR:-/usr/share/rime-shell}"
+ENTRY="${SHELL_DIR}/shell.qml"
+# Was 120s to cover a cold `git clone` over slow DSL. Nothing is downloaded any
+# more, so this is now only a sanity bound on a broken image or a bad override.
+TIMEOUT="${RIME_SHELL_WAIT_TIMEOUT:-15}"
+
+log() { printf '[rime-shell-autostart] %s\n' "$*" >&2; }
+
+# ── Sanity-check the shell tree is really there ──────────────────────────────
+# Normally passes on the first iteration: /usr/share/rime-shell ships in the image.
+# Gate on shell.qml rather than the directory — a directory test passes against a
+# half-populated tree (which is how this failed when it WAS a clone) and quickshell
+# would then die on a missing import instead of a missing path. shell.qml is the
+# entrypoint quickshell actually loads, so it is the only honest signal.
+waited=0
+while [ ! -f "${ENTRY}" ]; do
+    if [ "${waited}" -ge "${TIMEOUT}" ]; then
+        log "timed out after ${TIMEOUT}s waiting for ${ENTRY}."
+        log "the provisioner is probably failing — check:"
+        log "  systemctl --user status rime-shell-firstrun.service"
+        log "  journalctl --user -u rime-shell-firstrun.service -b"
+        exit 1
+    fi
+    [ $(( waited % 10 )) -eq 0 ] && log "waiting for ${ENTRY} (${waited}/${TIMEOUT}s)..."
+    sleep 1
+    waited=$(( waited + 1 ))
+done
+[ "${waited}" -gt 0 ] && log "checkout appeared after ${waited}s"
+
+# ── Publish this user's wallpaper to the greeter ────────────────────────────
+# Rime Shell's WallpaperService publishes on every wallpaper change, but that
+# only helps someone who changes it AFTER this feature shipped. Everyone already
+# running Rime has a wallpaper they picked long ago and no reason to re-pick it,
+# and their login screen would keep showing the factory default until they did.
+# Publishing once per session closes that gap and costs nothing: the helper
+# exits immediately when there is nothing new to copy.
+#
+# Backgrounded and fully guarded — a missing helper or a missing sudoers rule
+# must never delay, let alone block, getting to quickshell.
+if [ -x /usr/libexec/rime-greet-wallpaper ]; then
+    ( sudo -n /usr/libexec/rime-greet-wallpaper >/dev/null 2>&1 \
+        || log "greeter wallpaper not published (helper or sudoers rule missing)" ) &
+fi
+
+# ── hypridle — the lock screen's timers ─────────────────────────────────────
+if pgrep -x hypridle >/dev/null 2>&1; then
+    log "hypridle already running — skipping"
+else
+    # IMAGE copy is the default; ~/.config/hypr/hypridle.conf is an explicit,
+    # user-created override. This ordering is deliberate and it is the LOCK SCREEN:
+    # hypridle is what runs `loginctl lock-session` at 5.5min. Previously the
+    # provisioner cp -n'd its config into $HOME and this launcher preferred that
+    # copy, so lock/idle behaviour was pinned to whatever shipped on the day the
+    # user first logged in and no image update could ever change it. Defaulting to
+    # the image keeps the lock screen on the single update channel; a user who
+    # creates the $HOME file is knowingly opting out. See rime-logs 56.
+    IDLE_CONF="${SHELL_DIR}/src/config/hypridle.conf"
+    [ -f "${HOME}/.config/hypr/hypridle.conf" ] \
+        && IDLE_CONF="${HOME}/.config/hypr/hypridle.conf"
+    if [ -f "${IDLE_CONF}" ]; then
+        log "starting hypridle -c ${IDLE_CONF}"
+        hypridle -c "${IDLE_CONF}" &
+    else
+        log "no hypridle config found — skipping hypridle"
+    fi
+fi
+
+# ── quickshell (the Rime Shell bar / popups / IPC target) ────────────────────
+# Match on the CONFIG PATH, not just the process name: `qs` and `quickshell` are
+# the same binary under two names, and the generated keybinds shell out to
+# `qs ipc -c <dir> call ...` on every popup, so a bare `pgrep -x quickshell`
+# would both miss a running copy started as `qs` and risk matching a transient
+# IPC invocation.
+if pgrep -f "quickshell -c ${SHELL_DIR}" >/dev/null 2>&1 \
+   || pgrep -f "qs -p ${SHELL_DIR}" >/dev/null 2>&1; then
+    log "Rime Shell already running — skipping"
+    exit 0
+fi
+
+# ── The translated shell (P2-004) ───────────────────────────────────────────
+# quickshell constructs a bare QQmlEngine and installs no QTranslator, so every
+# qsTr() in the shell returns its argument unchanged and a German user reads
+# English. The route Rime ships for that is a QML module, Rime.I18n, whose C++
+# plugin installs one while the import is being resolved — measured inside this
+# exact binary by rime-shell's tests/run-i18n-host-test.sh.
+#
+# A bare QQmlEngine still searches QML_IMPORT_PATH, which is the whole reason
+# the route works without patching quickshell. Set here rather than in the
+# compositor `environment` files because it belongs to quickshell and to
+# nothing else on the system: every compositor session reaches the shell
+# through this launcher.
+#
+# APPENDED, never assigned. Clobbering it would silently break a developer
+# running the shell against their own module tree, and a variable that is
+# quietly overwritten is the kind of absence this project keeps paying for.
+#
+# Nothing here fails if the module is missing: the shell loads it through
+# Qt.createComponent() and reports a missing module by name, so an OS older
+# than the shell gives an English desktop rather than no desktop.
+RIME_QML_DIR=/usr/lib64/rime-shell/qml
+if [ -d "${RIME_QML_DIR}" ]; then
+    export QML_IMPORT_PATH="${RIME_QML_DIR}${QML_IMPORT_PATH:+:${QML_IMPORT_PATH}}"
+    export QML2_IMPORT_PATH="${RIME_QML_DIR}${QML2_IMPORT_PATH:+:${QML2_IMPORT_PATH}}"
+else
+    log "no ${RIME_QML_DIR} in this image — the shell will run untranslated"
+fi
+
+log "starting quickshell -c ${SHELL_DIR}"
+# No LD_PRELOAD: the argc shim existed only because Chromium treats Quickshell's
+# argc=0 as fatal, and the shell no longer loads Qt WebEngine. The library is
+# still in the image (removing it rebuilds the core tier and costs the fleet a
+# full-size update) but nothing loads it any more.
+exec quickshell -c "${SHELL_DIR}"

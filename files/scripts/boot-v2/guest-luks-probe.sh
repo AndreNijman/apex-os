@@ -1,6 +1,6 @@
 #!/bin/sh
 # ─────────────────────────────────────────────────────────────────────────────
-#  guest-luks-probe.sh — runs INSIDE the real APEX initramfs, at dracut's
+#  guest-luks-probe.sh — runs INSIDE the real Rime initramfs, at dracut's
 #  pre-mount hook point, and reports what the TPM did or refused to do.
 #
 #  It is a repository file rather than a heredoc inside run-scenarios so that
@@ -8,7 +8,7 @@
 #  implementation: they differ only in the UKI's signed command line and in
 #  which key signed the UKI's PCR policy.
 #
-#  Everything it needs is already in the APEX initramfs — measured, not
+#  Everything it needs is already in the Rime initramfs — measured, not
 #  assumed: the dracut module list contains systemd-cryptsetup and
 #  systemd-pcrphase, and the image carries /usr/bin/cryptsetup,
 #  /usr/lib/systemd/systemd-cryptsetup, libcryptsetup and the libtss2 stack.
@@ -22,15 +22,15 @@
 # about to power off; and an unprefixed kmsg write is KERN_WARNING, which
 # Fedora's CONFIG_CONSOLE_LOGLEVEL_DEFAULT=4 filters off the console.
 say() {
-    printf 'APEX-BOOTLAB: %s\n' "$*" > /dev/console 2>/dev/null || true
-    printf '<0>APEX-BOOTLAB: %s\n' "$*" > /dev/kmsg 2>/dev/null || true
+    printf 'RIME-BOOTLAB: %s\n' "$*" > /dev/console 2>/dev/null || true
+    printf '<0>RIME-BOOTLAB: %s\n' "$*" > /dev/kmsg 2>/dev/null || true
 }
 
 # The plaintext marker string. Defined here, once, rather than inside the
 # successful-unlock branch where it used to live: the recovery branch reads it
 # back too, and a variable that is only set on the path that is NOT taken
 # expands to the empty string, which `case` matches against everything.
-MARKER="APEX-BOOTLAB-PLAINTEXT-MARKER"
+MARKER="RIME-BOOTLAB-PLAINTEXT-MARKER"
 
 MODE=unknown
 # Two opt-in behaviours, each off unless the UKI's SIGNED command line asks for
@@ -41,17 +41,17 @@ CONTROL=0     # also probe a second, by-value-bound volume on /dev/vdc
 DO_S3=0       # suspend to RAM with the volume open, and report what came back
 for w in $(cat /proc/cmdline); do
     case "$w" in
-        apex.bootlab.luks=*)    MODE="${w#apex.bootlab.luks=}" ;;
-        apex.bootlab.control=1) CONTROL=1 ;;
-        apex.bootlab.s3=1)      DO_S3=1 ;;
+        rime.bootlab.luks=*)    MODE="${w#rime.bootlab.luks=}" ;;
+        rime.bootlab.control=1) CONTROL=1 ;;
+        rime.bootlab.s3=1)      DO_S3=1 ;;
     esac
 done
 
-say "apex-initramfs-reached"
+say "rime-initramfs-reached"
 say "luks-mode=$MODE"
 
-# THE APEX INITRAMFS HAS NO `sync`, measured: every run of this probe printed
-# "50-apex-luks-probe.sh: line NNN: sync: command not found" to the console and
+# THE Rime INITRAMFS HAS NO `sync`, measured: every run of this probe printed
+# "50-rime-luks-probe.sh: line NNN: sync: command not found" to the console and
 # carried on, so the two flushes below this file thought it was doing were not
 # happening. It does not change any result — a dm-crypt mapper's dirty pages
 # are written back when the device is closed, and every path here detaches
@@ -95,7 +95,7 @@ fi
 # firmware-change scenario binds a CONTROL volume to this value, and a control
 # whose value nobody printed cannot be enrolled against the right number. It is
 # also the register that makes the honest limitation legible — PCR 11 is the
-# one APEX's policy binds, and these two moving independently is the property
+# one Rime's policy binds, and these two moving independently is the property
 # under test.
 if [ -r /sys/class/tpm/tpm0/pcr-sha256/7 ]; then
     say "pcr7=$(cat /sys/class/tpm/tpm0/pcr-sha256/7)"
@@ -146,9 +146,9 @@ TPM_OPTS="tpm2-device=auto,headless=1"
 # anyone is meant to recover, and giving it a fallback would hide the refusal.
 if [ "$CONTROL" = 1 ]; then
     if [ -b /dev/vdc ]; then
-        if attach apexctl /dev/vdc - "$TPM_OPTS"; then
+        if attach rimectl /dev/vdc - "$TPM_OPTS"; then
             say "control-unlock=SUCCESS"
-            /usr/lib/systemd/systemd-cryptsetup detach apexctl >/dev/null 2>&1 || true
+            /usr/lib/systemd/systemd-cryptsetup detach rimectl >/dev/null 2>&1 || true
         else
             say "control-unlock=REFUSED"
         fi
@@ -159,7 +159,7 @@ if [ "$CONTROL" = 1 ]; then
     fi
 fi
 
-if attach apexlab /dev/vdb - "$TPM_OPTS"; then
+if attach rimelab /dev/vdb - "$TPM_OPTS"; then
     say "tpm-unlock=SUCCESS"
     # Prove the plaintext is real, and that it is the SAME volume across boots.
     # A marker written on the first successful unlock and read back after the
@@ -167,7 +167,7 @@ if attach apexlab /dev/vdb - "$TPM_OPTS"; then
     # disk decrypted".
     # ── the plaintext marker, with no dd ──
     #
-    # The APEX initramfs has `cat` and `tr` but NOT `dd` — measured the hard
+    # The Rime initramfs has `cat` and `tr` but NOT `dd` — measured the hard
     # way: three attempts at this used dd, and `2>/dev/null` reported the
     # resulting "command not found" as a successful write. So the read and the
     # write are done with shell redirection only.
@@ -178,7 +178,7 @@ if attach apexlab /dev/vdb - "$TPM_OPTS"; then
     # printf, and the trailing newline is what lets `read` stop after one
     # sector instead of scanning 64 MB for a line terminator.
     EXISTING=""
-    read -r EXISTING < /dev/mapper/apexlab 2>/dev/null || true
+    read -r EXISTING < /dev/mapper/rimelab 2>/dev/null || true
     case "$EXISTING" in
         "$MARKER"*)
             say "plaintext-marker=found" ;;
@@ -187,7 +187,7 @@ if attach apexlab /dev/vdb - "$TPM_OPTS"; then
             # which does not flush the page cache. See flush() above: this
             # initramfs has no `sync`, and the detach is what actually writes
             # the sector back.
-            if printf '%-511s\n' "$MARKER" > /dev/mapper/apexlab 2>/dev/null; then
+            if printf '%-511s\n' "$MARKER" > /dev/mapper/rimelab 2>/dev/null; then
                 flush
                 say "plaintext-marker=written"
             else
@@ -284,14 +284,14 @@ if attach apexlab /dev/vdb - "$TPM_OPTS"; then
                 # The same read that proved the volume across a REBOOT, now
                 # across a SLEEP. Same string, same meaning, different event.
                 POST=""
-                read -r POST < /dev/mapper/apexlab 2>/dev/null || true
+                read -r POST < /dev/mapper/rimelab 2>/dev/null || true
                 case "$POST" in
                     "$MARKER"*) say "post-resume-marker=found" ;;
                     *)          say "post-resume-marker=LOST" ;;
                 esac
                 # And now the TPM, from scratch: detach and unseal again.
-                /usr/lib/systemd/systemd-cryptsetup detach apexlab >/dev/null 2>&1 || true
-                if attach apexlab /dev/vdb - "$TPM_OPTS"; then
+                /usr/lib/systemd/systemd-cryptsetup detach rimelab >/dev/null 2>&1 || true
+                if attach rimelab /dev/vdb - "$TPM_OPTS"; then
                     say "post-resume-tpm-unlock=SUCCESS"
                     # The same marker, read a second time through a mapper that
                     # did not exist a moment ago. The read above went through a
@@ -302,7 +302,7 @@ if attach apexlab /dev/vdb - "$TPM_OPTS"; then
                     # come off /dev/vdb through a freshly unsealed key. Two
                     # reads, two different things proved.
                     POST2=""
-                    read -r POST2 < /dev/mapper/apexlab 2>/dev/null || true
+                    read -r POST2 < /dev/mapper/rimelab 2>/dev/null || true
                     case "$POST2" in
                         "$MARKER"*) say "post-resume-reattach-marker=found" ;;
                         *)          say "post-resume-reattach-marker=LOST" ;;
@@ -314,15 +314,15 @@ if attach apexlab /dev/vdb - "$TPM_OPTS"; then
         fi
     fi
 
-    /usr/lib/systemd/systemd-cryptsetup detach apexlab >/dev/null 2>&1 || true
+    /usr/lib/systemd/systemd-cryptsetup detach rimelab >/dev/null 2>&1 || true
     sync
 else
     say "tpm-unlock=REFUSED"
     # The recovery path, exercised in the SAME boot that was refused. "It
     # refuses" and "it is recoverable" as two separate green checks that never
     # met would not be the property a user needs.
-    if [ -r /apex-bootlab-recovery-key ]; then
-        if attach apexlab /dev/vdb /apex-bootlab-recovery-key headless=1; then
+    if [ -r /rime-bootlab-recovery-key ]; then
+        if attach rimelab /dev/vdb /rime-bootlab-recovery-key headless=1; then
             say "recovery-unlock=SUCCESS"
             # AND IT IS THE SAME DATA. A mapper appearing proves the recovery
             # key satisfied a keyslot; it does not by itself say the user got
@@ -331,12 +331,12 @@ else
             # boot, so reading it here joins the two: refused by the TPM, opened
             # with the recovery key, same plaintext.
             RECOV=""
-            read -r RECOV < /dev/mapper/apexlab 2>/dev/null || true
+            read -r RECOV < /dev/mapper/rimelab 2>/dev/null || true
             case "$RECOV" in
                 "$MARKER"*) say "recovery-marker=found" ;;
                 *)          say "recovery-marker=absent" ;;
             esac
-            /usr/lib/systemd/systemd-cryptsetup detach apexlab >/dev/null 2>&1 || true
+            /usr/lib/systemd/systemd-cryptsetup detach rimelab >/dev/null 2>&1 || true
         else
             say "recovery-unlock=FAILED"
         fi

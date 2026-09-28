@@ -1,0 +1,21 @@
+[package]
+name = "rimed"
+description = "Rime OS power daemon: D-Bus service, AC/battery auto-switch, gated RyzenAdj, Prometheus metrics"
+version.workspace = true
+edition.workspace = true
+license.workspace = true
+authors.workspace = true
+repository.workspace = true
+rust-version.workspace = true
+
+[[bin]]
+name = "rimed"
+path = "src/main.rs"
+
+[dependencies]
+rimed-core = { path = "../rimed-core" }
+anyhow.workspace = true
+serde.workspace = true
+zbus.workspace = true
+zvariant.workspace = true
+tokio.workspace = true

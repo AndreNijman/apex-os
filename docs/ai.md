@@ -1,7 +1,7 @@
-# Local inference: `apex ai`
+# Local inference: `rime ai`
 
 §14's model service: one endpoint that every application and agent client on
-this machine can use. APEX owns the model store, the backend choice, how much
+this machine can use. Rime owns the model store, the backend choice, how much
 fits in VRAM, and when an idle model gives its VRAM back.
 
 Seven verbs. Two of them need root, because the store is root-owned; the
@@ -9,7 +9,7 @@ service itself needs none.
 
 ## Per-user service, shared weights
 
-`apex-aid` is a **per-user** unit, like the agent runtime, and for a stronger
+`rime-aid` is a **per-user** unit, like the agent runtime, and for a stronger
 reason: it turns your prompts into generated text. A privileged daemon shared
 between accounts would be one process holding every account's conversations
 with no way to tell them apart. Your sockets live in your own
@@ -17,13 +17,13 @@ with no way to tell them apart. Your sockets live in your own
 identifies the process on the other end from `SO_PEERCRED`.
 
 ```
-systemctl --user enable --now apex-aid
+systemctl --user enable --now rime-aid
 ```
 
 The weights are the expensive part, and all accounts share them:
 
 ```
-/var/lib/apex/ai/
+/var/lib/rime/ai/
   models/blobs/sha256-<64 hex>   0444 root:root   the weights
   models/manifests/<id>.json     0444 root:root   name -> digest, and what it is
   staging/                       0700 root:root   download target
@@ -40,12 +40,12 @@ peer credential (`SO_PEERCRED` works only on a Unix socket), so every account on
 the machine could reach a listener on 127.0.0.1, and so could every sandboxed
 application holding the network permission.
 
-APEX also ships **no inference runtime**. llama.cpp with CUDA is gigabytes, and
+Rime also ships **no inference runtime**. llama.cpp with CUDA is gigabytes, and
 `Containerfile.core` is the tier whose rebuild the whole fleet downloads. You
-install a runtime on demand, and `apex ai status` names the command that
+install a runtime on demand, and `rime ai status` names the command that
 provides one.
 
-## `apex ai models`
+## `rime ai models`
 
 Lists what is in the store. It reads the store itself rather than asking the
 daemon, so it answers with the service stopped. Finding out what you have must
@@ -63,14 +63,14 @@ place as the weights would make the digest check prove nothing.
 If it cannot read the store, it reports installed models as **unknown**. A
 failed read is not evidence of an empty store.
 
-## `apex ai pull`
+## `rime ai pull`
 
 Downloads a model into the shared store and verifies it. Needs root, because
 root owns the store.
 
 ```
-sudo apex ai pull qwen25-coder
-sudo apex ai pull qwen25-coder@sha256:cc324af0…
+sudo rime ai pull qwen25-coder
+sudo rime ai pull qwen25-coder@sha256:cc324af0…
 ```
 
 Three provenance cases, and only three:
@@ -102,7 +102,7 @@ is already present, `pull` records the manifest and skips the transfer.
 `--dry-run` prints the URL, digest, size and the three paths it would write, and
 performs no network access and no writes.
 
-## `apex ai rm`
+## `rime ai rm`
 
 Removes a model. Needs root, for the same reason `pull` does.
 
@@ -111,13 +111,13 @@ follows from content addressing, and it comes up in practice, because people
 pin one digest under two names. When `rm` removes a manifest but cannot remove
 its blob, it says so instead of claiming the space back.
 
-## `apex ai run`
+## `rime ai run`
 
 Generates, streaming tokens as they arrive.
 
 ```
-apex ai run "explain this backtrace"
-git diff | apex ai run "review this"
+rime ai run "explain this backtrace"
+git diff | rime ai run "review this"
 ```
 
 The prompt is the rest of the command line after the verb. `run` appends
@@ -141,7 +141,7 @@ service at all.
   answer comes back. The weights stay on the machine that has them, and the
   credential is your own ssh identity.
 
-## `apex ai status`
+## `rime ai status`
 
 Shows what the service decided, and what it would decide: backend, device, fit,
 store, and the idle timeout in force.
@@ -151,12 +151,12 @@ is not**, and the two answers agree. The daemon and the CLI share one resolver
 for the backend choice, the device and the VRAM arithmetic. It only reads, so
 it needs no root.
 
-## `apex ai unload`
+## `rime ai unload`
 
 Stops the resident model and releases its VRAM now.
 
 The service already unloads on its own timer: 300 seconds on AC, 60 on battery.
-The shorter battery figure is the part of §14's "power use" that APEX can
+The shorter battery figure is the part of §14's "power use" that Rime can
 back with a mechanism. A process holding VRAM keeps a discrete GPU out of its deepest idle
 state, so a loaded model nobody is using costs power for nothing. This verb
 covers the case the timer cannot: you want the memory back *before* you start a
@@ -166,10 +166,10 @@ It refuses while a client is attached, so it never cuts a generation off
 mid-answer. The model reloads on the next request.
 
 It does **not** stop the service. A stopped daemon would also stop answering
-`apex ai status`, and then you could not ask why no model is loaded. To stop
-the service, run `systemctl --user stop apex-aid`.
+`rime ai status`, and then you could not ask why no model is loaded. To stop
+the service, run `systemctl --user stop rime-aid`.
 
-## `apex ai serve`
+## `rime ai serve`
 
 Prints where applications should connect and a request that works. A local
 inference API is only usable if a program can find it. The endpoint speaks the
@@ -177,7 +177,7 @@ runtime's own OpenAI-compatible HTTP API over a Unix socket, so the reference
 form is:
 
 ```
-curl --unix-socket "$XDG_RUNTIME_DIR/apex-ai/api.sock" \
+curl --unix-socket "$XDG_RUNTIME_DIR/rime-ai/api.sock" \
   -H 'Content-Type: application/json' \
   -d '{"messages":[{"role":"user","content":"hello"}]}' \
   http://localhost/v1/chat/completions
@@ -190,14 +190,14 @@ debugging. `--listen` exists only to be refused, and the refusal explains why.
 
 A client whose entire configuration surface is `base_url = "http://host:port"`
 has nowhere to put a socket path, so it cannot reach the endpoint.
-`apex ai serve` prints that gap, the `socat` one-liner that closes it, and the
+`rime ai serve` prints that gap, the `socat` one-liner that closes it, and the
 cost of the one-liner: while that bridge is up, every account on the machine and every
 sandboxed application with network access can send prompts through your model
 and read the answers. A TCP connection carries nothing that tells them apart
 from you.
 
-APEX ships no such bridge under a verb of its own. Putting it behind `apex`
-would suggest APEX had judged the trade safe. It is a trade, so APEX prints the
-command and its cost in the same place and you decide. The bridge APEX *does*
-provide is `apex ai run --on <device>`, where the credential is your ssh
+Rime ships no such bridge under a verb of its own. Putting it behind `rime`
+would suggest Rime had judged the trade safe. It is a trade, so Rime prints the
+command and its cost in the same place and you decide. The bridge Rime *does*
+provide is `rime ai run --on <device>`, where the credential is your ssh
 identity.

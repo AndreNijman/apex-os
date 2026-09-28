@@ -136,7 +136,7 @@ done < <(grep -oE '(^|[[:space:];&|(])[A-Z][A-Z0-9_]*=' "$CF" \
          | grep -oE '[A-Z][A-Z0-9_]*' | sort -u)
 
 # These come from outside the shell entirely: a Docker ARG, or /etc/os-release.
-NOT_FROM_PIN="APEX_KERNEL_IMAGE|VERSION_ID"
+NOT_FROM_PIN="RIME_KERNEL_IMAGE|VERSION_ID"
 
 for u in "${used[@]}"; do
     [[ "$u" =~ ^($NOT_FROM_PIN)$ ]] && continue

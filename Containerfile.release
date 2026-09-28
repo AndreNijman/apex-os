@@ -1,26 +1,26 @@
 # Fast final composition layer. Slow package, driver, akmod, Mesa and initramfs
 # work lives in the platform image and is reused byte-for-byte.
-ARG PLATFORM=ghcr.io/andrenijman/apex-os:platform-daily
+ARG PLATFORM=ghcr.io/andrenijman/rime-os:platform-daily
 FROM ${PLATFORM}
 
-ARG APEX_SHELL_REF
-ARG APEX_SHELL_STRICT=0
+ARG RIME_SHELL_REF
+ARG RIME_SHELL_STRICT=0
 
-COPY --chmod=0644 files/scripts/vendor-apex-shell /tmp/vendor-apex-shell
+COPY --chmod=0644 files/scripts/vendor-rime-shell /tmp/vendor-rime-shell
 RUN set -eux; \
-    bash /tmp/vendor-apex-shell \
-        "${APEX_SHELL_REF}" /usr/share/apex-shell "${APEX_SHELL_STRICT}"; \
-    rm -f /tmp/vendor-apex-shell
+    bash /tmp/vendor-rime-shell \
+        "${RIME_SHELL_REF}" /usr/share/rime-shell "${RIME_SHELL_STRICT}"; \
+    rm -f /tmp/vendor-rime-shell
 
 RUN set -eux; \
-    test -s /usr/share/apex-shell/shell.qml; \
-    test "$(cat /usr/share/apex-shell/.apex-shell-commit)" = "${APEX_SHELL_REF}"; \
+    test -s /usr/share/rime-shell/shell.qml; \
+    test "$(cat /usr/share/rime-shell/.rime-shell-commit)" = "${RIME_SHELL_REF}"; \
     grep -q '^VARIANT_ID=' /usr/lib/os-release; \
-    test -s "/usr/lib/modules/$(cat /usr/lib/apex-kver)/initramfs.img"; \
-    test "$(cat /usr/share/apex-os/secureboot/kernel-signed)" = signed; \
+    test -s "/usr/lib/modules/$(cat /usr/lib/rime-kver)/initramfs.img"; \
+    test "$(cat /usr/share/rime-os/secureboot/kernel-signed)" = signed; \
     bootc container lint || true
 
-ARG APEX_REVISION=dev
-LABEL org.opencontainers.image.revision="${APEX_REVISION}" \
-      org.apexos.apex-shell.ref="${APEX_SHELL_REF}" \
-      org.apexos.release.kind="shell"
+ARG RIME_REVISION=dev
+LABEL org.opencontainers.image.revision="${RIME_REVISION}" \
+      org.rimeos.rime-shell.ref="${RIME_SHELL_REF}" \
+      org.rimeos.release.kind="shell"

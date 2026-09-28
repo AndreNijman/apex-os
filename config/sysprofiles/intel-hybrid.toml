@@ -1,4 +1,4 @@
-# APEX-OS system profile: intel-hybrid
+# Rime OS system profile: intel-hybrid
 #
 # CPU-class profile for Intel hybrid (P-core / E-core) parts driven by
 # intel_pstate in active/HWP mode. Selected when the CPU vendor is Intel and a

@@ -13,7 +13,7 @@
 #
 # Check a new entry against the RUNNER's shellcheck, not only your own. They
 # disagree: ubuntu-24.04 ships 0.9.0 and a Fedora 43 workstation has 0.11.0,
-# and files/system/libexec/apex-pkg passed on 0.11.0 while 0.9.0 reported
+# and files/system/libexec/rime-pkg passed on 0.11.0 while 0.9.0 reported
 # SC2120 on it. The gate runs on the runner, so 0.9.0 is the one that decides.
 #
 #   podman run --rm -v "$PWD":/m:ro,Z -w /m \

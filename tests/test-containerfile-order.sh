@@ -6,7 +6,7 @@
 #  ── Why this file exists ────────────────────────────────────────────────────
 #  That checker is the gate on a class of defect that has cost this project
 #  five days of image builds: a Containerfile assertion that cannot possibly
-#  pass, discovered hours into a build. `tests/test-apex-greet-sessions.sh`
+#  pass, discovered hours into a build. `tests/test-rime-greet-sessions.sh`
 #  runs it against the real Containerfiles, which asserts that THE IMAGE is in
 #  order; nothing anywhere asserted that THE CHECKER still works. A checker
 #  that answers "layer order OK" to everything is this repository's dominant CI
@@ -15,10 +15,10 @@
 #
 #  The occasion was a false positive. On run 34727364060 the checker read
 #
-#      grep -q '^ExecStart=/usr/bin/apex lid watch$' \
-#          /usr/lib/systemd/system/apex-lid.service
+#      grep -q '^ExecStart=/usr/bin/rime lid watch$' \
+#          /usr/lib/systemd/system/rime-lid.service
 #
-#  as "RUN reads /usr/bin/apex", which the COPY at the bottom of the file
+#  as "RUN reads /usr/bin/rime", which the COPY at the bottom of the file
 #  provides, and failed the build's static job — taking the twenty static gates
 #  below it off every run, because a failed step skips everything under it.
 #  The fix strips a quoted PATTERN operand and keeps FILE operands. Both halves
@@ -45,7 +45,7 @@ CHECKER=../files/scripts/check-containerfile-order
 CHECKER=$(cd "$(dirname "$CHECKER")" && pwd)/$(basename "$CHECKER")
 REPO=$(cd .. && pwd)
 
-WORK=$(mktemp -d /tmp/apex-cf-order.XXXXXX)
+WORK=$(mktemp -d /tmp/rime-cf-order.XXXXXX)
 trap 'rm -rf "${WORK:?}"' EXIT
 
 pass=0; fail=0
@@ -86,11 +86,11 @@ echo "── the defect the checker exists to catch, still caught ──"
 # rc.xml about 240 lines above the COPY that provides it.
 run_case read-before-copy <<'CF'
 FROM fedora:43
-RUN set -eux; test -s /usr/share/apex/labwc/rc.xml
-COPY files/desktop/labwc/ /usr/share/apex/labwc/
+RUN set -eux; test -s /usr/share/rime/labwc/rc.xml
+COPY files/desktop/labwc/ /usr/share/rime/labwc/
 CF
 expect_rc   "a RUN that reads a path above its COPY is refused" 1
-expect_says "and it names the path and both line numbers" "RUN reads /usr/share/apex/labwc/rc.xml"
+expect_says "and it names the path and both line numbers" "RUN reads /usr/share/rime/labwc/rc.xml"
 
 # THE CONTROL FOR THE FIX. `grep` now has its pattern stripped; its FILE
 # operands must still be read. Without this case the fix could have been
@@ -98,58 +98,58 @@ expect_says "and it names the path and both line numbers" "RUN reads /usr/share/
 # the defect while still passing every other case in this file.
 run_case grep-file-operand <<'CF'
 FROM fedora:43
-RUN set -eux; grep -q '<labwc_config' /usr/share/apex/labwc/rc.xml
-COPY files/desktop/labwc/ /usr/share/apex/labwc/
+RUN set -eux; grep -q '<labwc_config' /usr/share/rime/labwc/rc.xml
+COPY files/desktop/labwc/ /usr/share/rime/labwc/
 CF
 expect_rc   "grep's FILE operand is still a read" 1
-expect_says "and it names the file, not the pattern" "RUN reads /usr/share/apex/labwc/rc.xml"
+expect_says "and it names the file, not the pattern" "RUN reads /usr/share/rime/labwc/rc.xml"
 
 # Two operands, one provided above and one below: the checker must not stop at
 # the first path it clears.
 run_case second-operand <<'CF'
 FROM fedora:43
-COPY files/desktop/labwc/menu.xml /usr/share/apex/labwc/menu.xml
-RUN set -eux; grep -q 'menu' /usr/share/apex/labwc/menu.xml; test -s /usr/share/apex/labwc/rc.xml
-COPY files/desktop/labwc/rc.xml /usr/share/apex/labwc/rc.xml
+COPY files/desktop/labwc/menu.xml /usr/share/rime/labwc/menu.xml
+RUN set -eux; grep -q 'menu' /usr/share/rime/labwc/menu.xml; test -s /usr/share/rime/labwc/rc.xml
+COPY files/desktop/labwc/rc.xml /usr/share/rime/labwc/rc.xml
 CF
 expect_rc   "a later operand on the same RUN is still checked" 1
-expect_says "and the message is about rc.xml" "RUN reads /usr/share/apex/labwc/rc.xml"
+expect_says "and the message is about rc.xml" "RUN reads /usr/share/rime/labwc/rc.xml"
 
 echo
 echo "── a pattern is matched text, not a file that was opened ──"
 
 # The live false positive, reduced. The unit file IS read and IS provided
-# above; /usr/share/apex/labwc/rc.xml appears only inside the quoted pattern.
+# above; /usr/share/rime/labwc/rc.xml appears only inside the quoted pattern.
 run_case pattern-operand <<'CF'
 FROM fedora:43
-COPY files/desktop/labwc/menu.xml /usr/lib/systemd/system/apex-lid.service
-RUN set -eux; grep -q '^ExecStart=/usr/share/apex/labwc/rc.xml watch$' /usr/lib/systemd/system/apex-lid.service
-COPY files/desktop/labwc/ /usr/share/apex/labwc/
+COPY files/desktop/labwc/menu.xml /usr/lib/systemd/system/rime-lid.service
+RUN set -eux; grep -q '^ExecStart=/usr/share/rime/labwc/rc.xml watch$' /usr/lib/systemd/system/rime-lid.service
+COPY files/desktop/labwc/ /usr/share/rime/labwc/
 CF
 expect_rc     "a path that only appears in a grep pattern is not a read" 0
 expect_silent "and nothing is reported against it" "ordering problem"
 
 run_case pattern-double-quoted <<'CF'
 FROM fedora:43
-COPY files/desktop/labwc/menu.xml /usr/lib/systemd/system/apex-lid.service
-RUN set -eux; grep -qF "/usr/share/apex/labwc/rc.xml" /usr/lib/systemd/system/apex-lid.service
-COPY files/desktop/labwc/ /usr/share/apex/labwc/
+COPY files/desktop/labwc/menu.xml /usr/lib/systemd/system/rime-lid.service
+RUN set -eux; grep -qF "/usr/share/rime/labwc/rc.xml" /usr/lib/systemd/system/rime-lid.service
+COPY files/desktop/labwc/ /usr/share/rime/labwc/
 CF
 expect_rc "a double-quoted pattern is a pattern too" 0
 
 run_case pattern-dash-e <<'CF'
 FROM fedora:43
-COPY files/desktop/labwc/menu.xml /usr/lib/systemd/system/apex-lid.service
-RUN set -eux; grep -q -e '/usr/share/apex/labwc/rc.xml' /usr/lib/systemd/system/apex-lid.service
-COPY files/desktop/labwc/ /usr/share/apex/labwc/
+COPY files/desktop/labwc/menu.xml /usr/lib/systemd/system/rime-lid.service
+RUN set -eux; grep -q -e '/usr/share/rime/labwc/rc.xml' /usr/lib/systemd/system/rime-lid.service
+COPY files/desktop/labwc/ /usr/share/rime/labwc/
 CF
 expect_rc "flags between the command and the pattern are skipped" 0
 
 run_case pattern-sed <<'CF'
 FROM fedora:43
-COPY files/desktop/labwc/menu.xml /usr/lib/systemd/system/apex-lid.service
-RUN set -eux; sed -i 's|/usr/share/apex/labwc/rc.xml|x|' /usr/lib/systemd/system/apex-lid.service
-COPY files/desktop/labwc/ /usr/share/apex/labwc/
+COPY files/desktop/labwc/menu.xml /usr/lib/systemd/system/rime-lid.service
+RUN set -eux; sed -i 's|/usr/share/rime/labwc/rc.xml|x|' /usr/lib/systemd/system/rime-lid.service
+COPY files/desktop/labwc/ /usr/share/rime/labwc/
 CF
 expect_rc "sed's script is a pattern as well" 0
 
@@ -157,8 +157,8 @@ expect_rc "sed's script is a pattern as well" 0
 # cannot uncover each other.
 run_case prose <<'CF'
 FROM fedora:43
-RUN set -eux; : 'this stanza must NOT touch /usr/share/apex/labwc/rc.xml yet'; true
-COPY files/desktop/labwc/ /usr/share/apex/labwc/
+RUN set -eux; : 'this stanza must NOT touch /usr/share/rime/labwc/rc.xml yet'; true
+COPY files/desktop/labwc/ /usr/share/rime/labwc/
 CF
 expect_rc 'a path named only in the : prose idiom is not a read' 0
 
@@ -168,38 +168,38 @@ echo "── the cross-stage shape the live file actually has ──"
 # An earlier stage says what it produces with `install -D`, a COPY --from maps
 # it, and a RUN above that COPY uses the binary. This is the only way the
 # checker can see across a stage boundary, and it is exactly the arrangement
-# Containerfile.base uses for /usr/bin/apex.
+# Containerfile.base uses for /usr/bin/rime.
 run_case cross-stage-read <<'CF'
-FROM fedora:43 AS apex-builder
-RUN set -eux; install -Dm0755 /bin/true /out/usr/bin/apex
+FROM fedora:43 AS rime-builder
+RUN set -eux; install -Dm0755 /bin/true /out/usr/bin/rime
 FROM fedora:43
-RUN set -eux; /usr/bin/apex lid --help
-COPY --from=apex-builder /out/usr/bin/ /usr/bin/
+RUN set -eux; /usr/bin/rime lid --help
+COPY --from=rime-builder /out/usr/bin/ /usr/bin/
 CF
 expect_rc   "a cross-stage binary used above its COPY is refused" 1
-expect_says "and it names the binary" "RUN reads /usr/bin/apex"
+expect_says "and it names the binary" "RUN reads /usr/bin/rime"
 
 # The same file, with the only mention of the binary inside a grep pattern.
 # This IS Containerfile.base:1644, and it must pass.
 run_case cross-stage-pattern <<'CF'
-FROM fedora:43 AS apex-builder
-RUN set -eux; install -Dm0755 /bin/true /out/usr/bin/apex
+FROM fedora:43 AS rime-builder
+RUN set -eux; install -Dm0755 /bin/true /out/usr/bin/rime
 FROM fedora:43
-COPY files/desktop/labwc/menu.xml /usr/lib/systemd/system/apex-lid.service
-RUN set -eux; grep -q '^ExecStart=/usr/bin/apex lid watch$' /usr/lib/systemd/system/apex-lid.service
-COPY --from=apex-builder /out/usr/bin/ /usr/bin/
+COPY files/desktop/labwc/menu.xml /usr/lib/systemd/system/rime-lid.service
+RUN set -eux; grep -q '^ExecStart=/usr/bin/rime lid watch$' /usr/lib/systemd/system/rime-lid.service
+COPY --from=rime-builder /out/usr/bin/ /usr/bin/
 CF
 expect_rc     "the live Containerfile.base:1644 shape passes" 0
-expect_silent "and /usr/bin/apex is not reported" "/usr/bin/apex"
+expect_silent "and /usr/bin/rime is not reported" "/usr/bin/rime"
 
 echo
 echo "── the other half of the checker, unchanged and still armed ──"
 
 run_case volatile-early <<'CF'
-FROM fedora:43 AS apex-builder
-RUN set -eux; install -Dm0755 /bin/true /out/usr/bin/apex
+FROM fedora:43 AS rime-builder
+RUN set -eux; install -Dm0755 /bin/true /out/usr/bin/rime
 FROM fedora:43
-COPY --from=apex-builder /out/usr/bin/ /usr/bin/
+COPY --from=rime-builder /out/usr/bin/ /usr/bin/
 RUN set -eux; true
 RUN set -eux; true
 RUN set -eux; true
@@ -222,9 +222,9 @@ expect_says "and it says so" "MISSING"
 echo
 echo "── and the three real ones, which must be in order ──"
 
-OUT=$(cd "$REPO" && python3 "$CHECKER" Containerfile.base Containerfile.core Containerfile.apex 2>&1); RC=$?
+OUT=$(cd "$REPO" && python3 "$CHECKER" Containerfile.base Containerfile.core Containerfile.rime 2>&1); RC=$?
 expect_rc   "the shipped Containerfiles pass" 0
-for f in Containerfile.base Containerfile.core Containerfile.apex; do
+for f in Containerfile.base Containerfile.core Containerfile.rime; do
     expect_says "$f reports a layer count, so it was really read" "$f: layer order OK ["
 done
 

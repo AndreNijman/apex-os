@@ -33,7 +33,7 @@ from the PowerShell side of the lab only.
 Three of these are facts about **Windows and about bootc**, not about this
 installer, and they stay true whether or not anyone writes another line here.
 Two of them contradict things that were believed. Full text in
-`docs/apex-owns-its-esp.md`.
+`docs/rime-owns-its-esp.md`.
 
 1. **"Windows will not let you" is not a safety property for the partition
    table.** Measured: Windows permits a raw write to LBA 2-33 of the disk it
@@ -43,14 +43,14 @@ Two of them contradict things that were believed. Full text in
    to LBA 2016 and leaves the stale array at LBA 2, so two disagreeing tables
    sit in the primary area and the stale one is where hardcoded GPT readers
    look. Scoped to disks with a 1 MiB reserve, which is Linux tooling's default
-   and APEX's own.
+   and Rime's own.
 3. **Windows' ESP content is not byte-identical across a boot**: 42,481 bytes
    changed, all of it Windows writing its own BCD, two files before `bcdboot`
-   even ran. "APEX never writes Windows' ESP" is a rule about APEX's behaviour,
+   even ran. "Rime never writes Windows' ESP" is a rule about Rime's behaviour,
    never a claim that the partition sits still. Any future integrity check that
    asserts otherwise will fail for an innocent reason.
 4. **PCR 5 is the GPT**, and where a BitLocker profile binds it, *any* GPT
-   change (including merely creating APEX's own ESP) forces a 48-digit
+   change (including merely creating Rime's own ESP) forces a 48-digit
    recovery prompt on the next Windows boot. The `bitlocker-discover` job reads
    the profile three ways, because no single way exists on every machine.
 
@@ -59,11 +59,11 @@ Two of them contradict things that were believed. Full text in
 - The second-ESP result was measured with the new ESP **later in partition
   order**. Position-dependence (the case that would bite, since bootc takes
   `find_first_colocated_esp()`) is **untested**.
-- `payload-write` is a synthetic payload. It is not an APEX install.
+- `payload-write` is a synthetic payload. It is not a Rime install.
 
 ## The three product decisions stand
 
-They are settled and recorded in `docs/apex-owns-its-esp.md`: APEX owns its own
+They are settled and recorded in `docs/rime-owns-its-esp.md`: Rime owns its own
 ESP, the tool edits GPT entries itself under stated invariants, and firmware
 writes follow the `BootNext` discipline. They were decided on their merits and
 are not withdrawn by this pause: they also govern the **Linux** migration path,

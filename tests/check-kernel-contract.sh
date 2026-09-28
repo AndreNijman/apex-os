@@ -3,7 +3,7 @@
 #  check-kernel-contract.sh — does the kernel we built satisfy what
 #  Containerfile.core assumes about it? Answered WITHOUT a 50-minute core build.
 #
-#  APEX builds its own kernel now (Containerfile.kernel). Every assumption core
+#  Rime builds its own kernel now (Containerfile.kernel). Every assumption core
 #  makes about a kernel package was true of the COPR's by luck rather than by
 #  agreement, and each one fails late and expensively: core's `rpm -q` gate is
 #  ~45 minutes into a build, and its `ls -d /usr/lib/modules/*cachyos*` kver
@@ -22,7 +22,7 @@
 #  or extract them from the kernel image first (`FROM scratch` has no shell, so
 #  `podman create` + `podman cp`, not `podman run`):
 #
-#      cid=$(podman create localhost/apex-kernel:local /x)
+#      cid=$(podman create localhost/rime-kernel:local /x)
 #      podman cp "$cid:/rpms" /var/lab-scratch/kernel-rpms && podman rm "$cid"
 # ─────────────────────────────────────────────────────────────────────────────
 set -uo pipefail

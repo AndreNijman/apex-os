@@ -37,7 +37,7 @@ cd "$(dirname "$0")/.." || exit 2
 
 CORE=Containerfile.core
 BASE=Containerfile.base
-NMCONF=files/system/NetworkManager/21-apex-connectivity.conf
+NMCONF=files/system/NetworkManager/21-rime-connectivity.conf
 for f in "$CORE" "$BASE"; do
     [ -f "$f" ] || { echo "cannot find $f"; exit 2; }
 done
@@ -47,7 +47,7 @@ pass=0; fail=0
 ok()  { printf 'PASS  %-60s\n' "$1"; pass=$((pass+1)); }
 bad() { printf 'FAIL  %-60s %s\n' "$1" "$2"; fail=$((fail+1)); }
 
-WORK=$(mktemp -d /tmp/apex-devimg.XXXXXX) || exit 2
+WORK=$(mktemp -d /tmp/rime-devimg.XXXXXX) || exit 2
 trap 'rm -rf "$WORK"' EXIT
 
 # ── join instructions the way the builder does ──────────────────────────────
@@ -151,7 +151,7 @@ asserts 'systemctl enable cups.socket' \
         "cups.socket is not enabled, so nothing starts cupsd when a print job appears"
 asserts 'systemctl enable avahi-daemon.service' \
         "avahi is enabled, so a driverless printer can be found" \
-        "avahi is not enabled — DNS-SD discovery, .local resolution and \`apex host\` all depend on it"
+        "avahi is not enabled — DNS-SD discovery, .local resolution and \`rime host\` all depend on it"
 asserts 'FATAL: avahi is not enabled' \
         "the build fails if the avahi enable did not take" \
         "Fedora's preset does the enable, so nothing here would notice the preset changing"
@@ -169,7 +169,7 @@ echo "── the SANE backend list is left as the packages ship it ────�
 # machine running the same image with avahi up, the same command with the same
 # backend list returns in twelve seconds and finds the same scanner. So the
 # defect is avahi's, and disabling hpaio would have removed HP's USB scanner
-# path to work around it. The condition is reported by `apex devices scan`
+# path to work around it. The condition is reported by `rime devices scan`
 # instead.
 if present '/etc/sane.d/dll.d/hpaio'; then
     bad "the shipped SANE backend list is left alone" \
@@ -214,7 +214,7 @@ if present 'systemctl enable dnsmasq'; then
 else
     ok "dnsmasq is NOT enabled as a system service"
 fi
-asserts 'files/system/NetworkManager/21-apex-connectivity.conf' \
+asserts 'files/system/NetworkManager/21-rime-connectivity.conf' \
         "the connectivity check is shipped" \
         "NM has no \`portal\` state, so a captive portal reads as a working connection"
 for key in enabled=true uri= response=; do
@@ -236,7 +236,7 @@ asserts 'test -x /usr/libexec/boltd' \
         "the package is requested and the daemon never checked"
 asserts 'SUBSYSTEM=="thunderbolt"' \
         "the udev rule that wakes boltd is asserted" \
-        "boltd ships D-Bus activated, and APEX runs no desktop that would call it — the udev rule is what starts it"
+        "boltd ships D-Bus activated, and Rime runs no desktop that would call it — the udev rule is what starts it"
 asserts 'libspa-codec-bluez5-aptx.so' \
         "the aptX codec is asserted on the built image" \
         "RPM Fusion could be skipped and the codec silently absent"

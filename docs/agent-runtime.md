@@ -1,20 +1,20 @@
-# The APEX agent runtime
+# The Rime agent runtime
 
 Coding agents as a first-class OS workload, without replacing them.
 
 `claude`, `opencode`, `codex`, `gemini` and anything else you run keep working
-as they do today. APEX adds what sits underneath: the terminal they run on, the
+as they do today. Rime adds what sits underneath: the terminal they run on, the
 confinement they run inside, and the project state around them.
 
-The runtime daemon, `apex-agentd`, is not enabled on its own. APEX Remote
-(`apex-remoted`, on by default for every person's account since 2026-09-23)
-pulls it in through `Wants=apex-agentd.service`, so on a stock install the
-runtime runs for every account that APEX Remote runs for; `docs/remote.md` has
+The runtime daemon, `rime-agentd`, is not enabled on its own. Rime Remote
+(`rime-remoted`, on by default for every person's account since 2026-09-23)
+pulls it in through `Wants=rime-agentd.service`, so on a stock install the
+runtime runs for every account that Rime Remote runs for; `docs/remote.md` has
 the details. To enable the runtime directly, for example on an account where
-APEX Remote is off:
+Rime Remote is off:
 
 ```
-apex agent enable
+rime agent enable
 ```
 
 That works for any user, root included. As root it first gives root a lingering
@@ -31,19 +31,19 @@ Four pieces:
 
 | piece | what it is | privilege |
 |---|---|---|
-| `apex-agentd` | per-user daemon owning PTYs, sandboxes and session state | none |
-| `apex-secretd` | system daemon owning brokered credentials | root |
-| `apex agent` / `apex project` | CLI client over its control socket | none |
+| `rime-agentd` | per-user daemon owning PTYs, sandboxes and session state | none |
+| `rime-secretd` | system daemon owning brokered credentials | root |
+| `rime agent` / `rime project` | CLI client over its control socket | none |
 | `a`, `aa`, `al`, `ad`, `aw`, `ap` | shell shortcuts | none |
 
-`apex-agentd` is **unprivileged and never talks to `apexd`**. Agent
+`rime-agentd` is **unprivileged and never talks to `rimed`**. Agent
 orchestration handles untrusted model output and spawns arbitrary user
 programs; putting that in the privileged daemon would make the worst case a
 system compromise instead of a user-session one. When a session needs a system
-change, your own `apex` invocation makes the narrow request over
-`org.apexos.Apexd1`. This daemon holds no such right.
+change, your own `rime` invocation makes the narrow request over
+`org.rimeos.Rimed1`. This daemon holds no such right.
 
-`apex-secretd` is the one privileged piece, and it is a separate daemon for
+`rime-secretd` is the one privileged piece, and it is a separate daemon for
 that reason. It holds credentials and nothing else, it has no verb that returns
 one, and the agent runtime is one of its clients, not its owner. See
 *The secret service* below.
@@ -52,20 +52,20 @@ one, and the agent runtime is one of its clients, not its owner. See
 claude / opencode / codex / gemini / any binary
         │  the real upstream process, unmodified, in a real PTY
         ▼
-apex-agentd  ── unprivileged, per-user, systemd --user
+rime-agentd  ── unprivileged, per-user, systemd --user
         ├─ PTY + session lifecycle
         ├─ bubblewrap sandbox
         ├─ adapters
         ├─ projects + git worktrees
         ├─ checkpoints
         └─ capability requests ──┐
-        ▲                        │  newline-delimited JSON on /run/apex-secretd
+        ▲                        │  newline-delimited JSON on /run/rime-secretd
         │                        ▼
-        │              apex-secretd  ── root, system service
-        │                        ├─ the store, /var/lib/apex-secretd, 0700
+        │              rime-secretd  ── root, system service
+        │                        ├─ the store, /var/lib/rime-secretd, 0700
         │                        └─ git, run as the owner with the credential
         │  newline-delimited JSON on a 0600 Unix socket
-apex agent … / APEX Shell
+rime agent … / Rime Shell
 ```
 
 ---
@@ -83,33 +83,33 @@ ad                             # what it changed
 The long forms:
 
 ```
-apex agent run "upgrade to Qt 7" --checkpoint --worktree qt7
-apex agent list --all
-apex agent attach 4
-apex agent pause 4 / resume 4 / kill 4
-apex agent input 4 "run the tests"            # types it, leaves it unsent
-apex agent input 4 "run the tests" --submit   # and presses Enter
-apex agent handoff 4 --to codex               # writes the packet, starts codex on it
-apex agent handoff 4 --to codex --no-start    # writes the packet and stops
-apex agent logs 4
-apex agent diff 4
-apex agent undo 4
-apex agent allow api.example.com
-apex agent default opencode
-apex project info / worktrees / checkpoints
+rime agent run "upgrade to Qt 7" --checkpoint --worktree qt7
+rime agent list --all
+rime agent attach 4
+rime agent pause 4 / resume 4 / kill 4
+rime agent input 4 "run the tests"            # types it, leaves it unsent
+rime agent input 4 "run the tests" --submit   # and presses Enter
+rime agent handoff 4 --to codex               # writes the packet, starts codex on it
+rime agent handoff 4 --to codex --no-start    # writes the packet and stops
+rime agent logs 4
+rime agent diff 4
+rime agent undo 4
+rime agent allow api.example.com
+rime agent default opencode
+rime project info / worktrees / checkpoints
 ```
 
 Pick the agent `a` runs once:
 
 ```
-apex agent default claude
+rime agent default claude
 ```
 
-`apex agent adapters` lists what is known and what is installed.
+`rime agent adapters` lists what is known and what is installed.
 
 ### The PTY is the point
 
-APEX creates the terminal, then execs the ordinary agent binary inside it. The
+Rime creates the terminal, then execs the ordinary agent binary inside it. The
 agent sees a normal terminal, so nothing about it has to change. Because the
 *daemon* owns the terminal and your shell does not, closing the window does not
 kill the work. Detach with **ctrl-]** and reattach later from anywhere.
@@ -127,18 +127,18 @@ separate flag with a separate default:
 | # | dimension | flag | values | default |
 |---|---|---|---|---|
 | 1 | the agent's own permission mode | `--native` | `inherit` `ask` `bypass` | `inherit` |
-| 2 | APEX filesystem/process sandbox | `--sandbox` | `unrestricted` `project` `strict` | `project` |
-| 3 | APEX system/root capability | `--system-access` | `none` `session` `unsafe` | `none` |
-| 4 | APEX secret capability | `--secrets` | `brokered` `none` `export` | `brokered` |
+| 2 | Rime filesystem/process sandbox | `--sandbox` | `unrestricted` `project` `strict` | `project` |
+| 3 | Rime system/root capability | `--system-access` | `none` `session` `unsafe` | `none` |
+| 4 | Rime secret capability | `--secrets` | `brokered` `none` `export` | `brokered` |
 | 5 | network policy | `--network` | `open` `allowlist` `brokered` `offline` | `open` |
 | 6 | remote-origin policy | `--origin-policy` | `local` `remote` | `local` |
 
-`apex agent status <id>` prints all six for a session, and `apex agent status`
+`rime agent status <id>` prints all six for a session, and `rime agent status`
 with no id prints the configured defaults: six sibling keys in `agent.json`.
 
 ### The named modes are presets over the six
 
-§4's modes are points in that space, not a seventh setting. `apex agent run`
+§4's modes are points in that space, not a seventh setting. `rime agent run`
 applies the preset first and your own flags on top, so you can still reach a
 combination none of the five names, such as break-glass with the broker
 switched off.
@@ -156,10 +156,10 @@ are still not conveniently dumped into the agent environment."*
 
 ### The three invariants
 
-`apex-agent-core/tests/policy_invariants.rs` turns these sentences into tests,
+`rime-agent-core/tests/policy_invariants.rs` turns these sentences into tests,
 each asserted over the whole value set of the dimension that drives it:
 
-- **`bypassPermissions` does not disable the APEX sandbox.** Dimension 1 is a
+- **`bypassPermissions` does not disable the Rime sandbox.** Dimension 1 is a
   flag handed to `claude`. It cannot reach the mount namespace the sandbox is
   built out of, and the test asserts that twice: once on the policy, once on the
   `bwrap` argv the policy produces.
@@ -188,7 +188,7 @@ a network while reporting none.
 
 One value parses and is then refused: `--secrets export`, because §7's table
 denies raw secret reads from every origin, the local one included. A flag that
-parsed and then did nothing would read as a protection in `apex agent status`
+parsed and then did nothing would read as a protection in `rime agent status`
 and in a script, with nothing behind it.
 
 `--origin-policy remote` used to be the second, and is not any more. §7 allows
@@ -216,8 +216,8 @@ system-access or break-glass grant outright, whatever it sends. With it, the
 runtime refuses that caller unless **all** of the following hold:
 
 1. it presents an assertion from a credential enrolled with
-   `apex agent key add`;
-2. the assertion is over a challenge this daemon issued (`apex agent` asks for
+   `rime agent key add`;
+2. the assertion is over a challenge this daemon issued (`rime agent` asks for
    one, the key signs it, the answer comes back on the same request);
 3. the challenge names *this* elevation: the session, the grant kind and the
    time limit are inside the signed bytes, so a touch collected to start a
@@ -231,7 +231,7 @@ runtime refuses that caller unless **all** of the following hold:
 ### polkit is not asked on this path, by design
 
 For the local column nothing changed: the password dialog still authorises a
-grant, and `org.apexos.agent.policy` is still the action it satisfies.
+grant, and `org.rimeos.agent.policy` is still the action it satisfies.
 
 For the remote column the key **replaces** polkit and is not added to it. The
 reason is in the policy file itself. Both actions are `allow_any: no` and
@@ -244,16 +244,16 @@ a setting that could never work.
 
 A security key is a possession factor, not a password, so no remote caller is
 talking its way past a local check. The polkit defaults are correct and
-unchanged; what changed is that apex-agentd no longer asks polkit about a caller
+unchanged; what changed is that rime-agentd no longer asks polkit about a caller
 polkit has already said it has no answer for.
 
 ### The audit trail says which
 
 `SystemGrant.authenticated_by` records the polkit action id for a password and
-`security-key:<label>` for a touch, so `apex agent grants` has an
-`AUTHORISED BY` column and `journalctl APEX_GRANT_AUTH=...` can tell them
+`security-key:<label>` for a touch, so `rime agent grants` has an
+`AUTHORISED BY` column and `journalctl RIME_GRANT_AUTH=...` can tell them
 apart. The prefix stops a key enrolled under the label
-`org.apexos.agent.break-glass` from producing a line that reads as a password.
+`org.rimeos.agent.break-glass` from producing a line that reads as a password.
 
 ---
 
@@ -265,11 +265,11 @@ grant has to be: "explicit, scoped, time-limited, auditable, and bound to a
 concrete agent session".
 
 ```bash
-apex agent run --system-access session --ttl 2h
-apex agent run --unsafe-everything --ttl 15m
-apex agent grants                 # what has been granted, and how each ended
-apex agent revoke-grant 3         # immediate, and asks for nothing
-apex agent renew-grant 3 --ttl 15m
+rime agent run --system-access session --ttl 2h
+rime agent run --unsafe-everything --ttl 15m
+rime agent grants                 # what has been granted, and how each ended
+rime agent revoke-grant 3         # immediate, and asks for nothing
+rime agent renew-grant 3 --ttl 15m
 ```
 
 ### The two are different on purpose
@@ -298,7 +298,7 @@ bounded window that only pre-approved the exact operations the user had already
 approved one by one would buy nothing. It is still a whitelist, so a verb added
 to the vocabulary tomorrow is not covered by a grant issued today. The grant
 pre-decides; it does not pre-execute. An approved request still runs through
-`apex request approve`, under the approving human's own root, and nothing in
+`rime request approve`, under the approving human's own root, and nothing in
 this module runs anything.
 
 The runtime records the two authorities apart. It files a request a per-project
@@ -308,18 +308,18 @@ in that project will find. It files a request a session grant covered as
 revoked or run out before the next request. Filing it as a standing project
 grant would put a permission in the audit trail that no human ever gave and
 that nothing on disk backs. The id also joins this trail to the
-`APEX_GRANT_ID` line journald holds for the same window.
+`RIME_GRANT_ID` line journald holds for the same window.
 
 ### Where the authority lives, and why not on disk
 
-`apex-agentd` runs as the user. A `--sandbox unrestricted` session runs as the
+`rime-agentd` runs as the user. A `--sandbox unrestricted` session runs as the
 user. A break-glass session is unrestricted by definition. So a granted session
 can rewrite every file this daemon can write, the grant record and the JSONL
 audit trail included.
 
 So a grant holds only while **the daemon process that minted it, after a
 successful authentication, still has it in memory**. The store under
-`$XDG_STATE_HOME` is history: `apex agent grants` reads it and the next boot
+`$XDG_STATE_HOME` is history: `rime agent grants` reads it and the next boot
 explains it, and nothing reads it back as permission. A daemon restart drops
 every grant instead of adopting one, and says so.
 
@@ -328,8 +328,8 @@ each grant event also goes to the journal, which `journald` owns as root and
 which no unprivileged process can alter afterwards:
 
 ```bash
-journalctl --user -t apex-agentd APEX_GRANT_EVENT=issued
-journalctl --user APEX_GRANT_ID=3        # the whole life of one grant
+journalctl --user -t rime-agentd RIME_GRANT_EVENT=issued
+journalctl --user RIME_GRANT_ID=3        # the whole life of one grant
 ```
 
 ### Reboot is answered, not forgotten
@@ -347,10 +347,10 @@ On the next start the daemon says which of four things happened, with
 |---|---|
 | `expired` | the TTL ran out, before the reboot or since |
 | `ended-at-reboot` | it was still live when the machine went down |
-| `ended-with-the-runtime` | `apex-agentd` restarted while it was live |
+| `ended-with-the-runtime` | `rime-agentd` restarted while it was live |
 | `revoked` | a human took it back |
 
-The daemon writes each once, to both trails, and `apex agent grants` prints
+The daemon writes each once, to both trails, and `rime agent grants` prints
 the sentence under the table.
 
 ### Who may ask, and where the password appears
@@ -377,7 +377,7 @@ Step 4's choice of subject carries all of §4.4's "the user authenticates
 outside the agent PTY". polkit sends the challenge to the authentication agent
 of the *subject's* login session, and steps 1–3 have already shown that the
 subject sits outside every agent sandbox. The two actions are
-`org.apexos.agent.system-access` and `org.apexos.agent.break-glass`, both
+`org.rimeos.agent.system-access` and `org.rimeos.agent.break-glass`, both
 `auth_admin`, neither `_keep`. A renewal raises a fresh prompt, because the
 prompt is worth having only while there is no standing yes to inherit.
 
@@ -387,7 +387,7 @@ Revoking asks for nothing. Giving up privilege is free.
 
 Dimension 3 cannot be a default in `agent.json`. §3.4 allows no "remember
 forever", and a file saying `"system": "unsafe"` would make later
-`apex agent run` invocations arrive already asking for break-glass. Loading
+`rime agent run` invocations arrive already asking for break-glass. Loading
 resets that one key to `none`, leaves the other five alone, and reports the
 correction.
 
@@ -400,15 +400,15 @@ Control may continue if configured, short-lived root grants default to
 revocation, and the owner may override any of it.
 
 ```bash
-apex agent lock                          # what the screen is doing, and what will happen
-apex agent lock --remote continue        # Remote Control keeps working while you are away
-apex agent lock --agents hold            # nothing runs unattended
-apex agent lock --root-grants keep       # a grant survives the lock
+rime agent lock                          # what the screen is doing, and what will happen
+rime agent lock --remote continue        # Remote Control keeps working while you are away
+rime agent lock --agents hold            # nothing runs unattended
+rime agent lock --root-grants keep       # a grant survives the lock
 ```
 
 The runtime notices within a few seconds. It stops a held session with the
 same `SIGSTOP` and reports it with the same `paused` flag as
-`apex agent pause`, and unlocking resumes exactly the sessions the lock
+`rime agent pause`, and unlocking resumes exactly the sessions the lock
 stopped. A session you paused by hand stays paused.
 
 Revoking a break-glass grant on lock ends its session, for the reason expiry
@@ -418,7 +418,7 @@ map would still have root while the record said it did not.
 
 ### Where the lock state comes from
 
-logind's `LockedHint`, on the graphical session. APEX Shell sets it from
+logind's `LockedHint`, on the graphical session. Rime Shell sets it from
 `WlSessionLock.secure`, the state the compositor has acknowledged and not the
 request to lock, so a lock that fails to engage is never reported as engaged.
 
@@ -429,7 +429,7 @@ no reader behind it until the shell could answer.
 
 There are three states, not two. A machine with no graphical session has no
 screen to lock, and every rule here passes it over; the runtime treats a screen
-whose state it could not read as locked, and `apex agent lock` prints the
+whose state it could not read as locked, and `rime agent lock` prints the
 reason. An absent `LockedHint` counts as unreadable, not as `no`:
 `loginctl -p <property> --value` prints nothing and exits 0 for a property it
 does not know, so a logind without the property would otherwise look exactly
@@ -444,7 +444,7 @@ two "may continue" rules, because it could be either.
 
 Four, and three of them rest on the same kernel fact. `bwrap --unshare-net`
 gives the session a namespace with nothing in it but loopback: no route, no
-resolver, no addresses. The modes differ in what `apex-agentd` offers on the
+resolver, no addresses. The modes differ in what `rime-agentd` offers on the
 far side of a Unix socket afterwards. `AF_UNIX` is a filesystem object, and a
 network namespace does not touch it.
 
@@ -452,7 +452,7 @@ network namespace does not touch it.
 |---|---|---|---|
 | `open` | everything | the session itself | `curl https://example.com` → 200 |
 | `allowlist` | none | the egress proxy, for named destinations | allowed host → 200, other host → 403 |
-| `brokered` | none | the capability broker, for named operations | `apex secret grants` answers, `curl` cannot resolve |
+| `brokered` | none | the capability broker, for named operations | `rime secret grants` answers, `curl` cannot resolve |
 | `offline` | none | nothing | `curl` cannot resolve |
 
 ### `brokered`
@@ -461,7 +461,7 @@ network namespace does not touch it.
 namespace and returns its result; the credential never enters the session.
 This is how `git push` already works from a `strict` session, and it is the
 mode a cloud provider's operations are meant to be used from. `Capability` in
-`apex-agent-core/src/secret.rs` is the slot a provider adds to.
+`rime-agent-core/src/secret.rs` is the slot a provider adds to.
 
 `--network brokered --secrets none` is refused. The broker is the session's
 only way out and `--secrets none` is what shuts it, so the pair is an offline
@@ -474,11 +474,11 @@ session under another name.
 ```text
 inside the namespace                      outside it
 
-  agent  ──HTTP CONNECT──▶  bridge  ──▶  socket  ──▶  apex-agentd  ──▶  internet
+  agent  ──HTTP CONNECT──▶  bridge  ──▶  socket  ──▶  rime-agentd  ──▶  internet
          127.0.0.1:3128    (no policy)   AF_UNIX      (decides)
 ```
 
-The bridge is `apex-agentd` re-executed with `--net-bridge`, running as the
+The bridge is `rime-agentd` re-executed with `--net-bridge`, running as the
 session's parent process. It has to be inside the sandbox because the loopback
 an HTTP client can reach is the session's own. It carries bytes and holds no
 policy, so replacing it gains an agent nothing: the far end is still the daemon.
@@ -488,17 +488,17 @@ bridge, but they do not enforce anything. A session that unsets all six does
 not get a direct connection; it gets `Could not resolve host`, measured.
 
 **Destinations** live in `agent.json` as `network_allow`, managed with
-`apex agent allow`. One `host` or `host:port` per entry; no port means 443 and
+`rime agent allow`. One `host` or `host:port` per entry; no port means 443 and
 nothing else; `*.example.com` covers subdomains and not `example.com`. `*.com`
 and `*` are refused. One unreadable entry empties the whole list and says
 which, so the mode then refuses to start instead of running one line shorter
 than it looks. An empty list is refused for the same reason.
 
-`apex agent run --allow <destination>` (repeatable, protocol 9) narrows one
+`rime agent run --allow <destination>` (repeatable, protocol 9) narrows one
 session to part of that list. It can only subtract: the daemon refuses a line
-the list does not cover and prints the `apex agent allow` that would permit
+the list does not cover and prints the `rime agent allow` that would permit
 it. The browser capsule is built on this flag, and on two more that
-`apex agent run` accepts for a session's browser, `--trust-ca` and `--present`;
+`rime agent run` accepts for a session's browser, `--trust-ca` and `--present`;
 `docs/browser-capsule.md` covers all three.
 
 The daemon checks the name, resolves it, checks every address that came back,
@@ -516,7 +516,7 @@ loss. A name on the list is only as trustworthy as its DNS. The local-address
 guard covers the case that matters here, and the client's own TLS validation
 covers the rest.
 
-Both decisions are pure functions in `apex-agent-core/src/destination.rs`, so
+Both decisions are pure functions in `rime-agent-core/src/destination.rs`, so
 the whole table is asserted without a network.
 
 ---
@@ -539,7 +539,7 @@ The sandbox does not own the network row: `strict` is `project` with the
 network dimension forced to `offline`, and a `project` session gets whatever
 `--network` says. See **Network modes** above.
 
-Measured on APEX-OS 43, kernel 7.1.5, bubblewrap 0.11.0:
+Measured on Rime OS 43, kernel 7.1.5, bubblewrap 0.11.0:
 
 | property | outside | inside `project` |
 |---|---|---|
@@ -563,7 +563,7 @@ unreachable because *nothing bound them*; no list names them. A blocklist would
 be a hole every time a tool invented a new credential store.
 
 `/run` is masked for a specific reason. `--ro-bind / /` made
-`/run/dbus/system_bus_socket` visible, and it is mode `0666`. `apexd` lives on
+`/run/dbus/system_bus_socket` visible, and it is mode `0666`. `rimed` lives on
 that bus, and polkit actions that ship `allow_active = yes` (passwordless for
 the logged-in local user) gate its mutating methods. A confined session *is*
 that user, so `SetTier`, `SetChargeThresholds`, `Fan.SetPwm` and
@@ -593,7 +593,7 @@ confined session **does not start**. The runtime never silently downgrades it
 to a weaker policy than you asked for. The error names the escape hatch:
 
 ```
-apex agent run --sandbox unrestricted …
+rime agent run --sandbox unrestricted …
 ```
 
 ### Known limits
@@ -606,8 +606,8 @@ apex agent run --sandbox unrestricted …
   the runtime manages and to nothing else.
 - Wayland and D-Bus session sockets are masked with the rest of
   `$XDG_RUNTIME_DIR`, so a confined agent cannot open GUI applications. The
-  *system* bus is masked with `/run`, so it cannot reach `apexd` either: a
-  system change has to go through `apex request` (below).
+  *system* bus is masked with `/run`, so it cannot reach `rimed` either: a
+  system change has to go through `rime request` (below).
 
 ---
 
@@ -619,11 +619,11 @@ and MCP definitions that decides what the executable does, which is why two
 machines on the same version behave differently.
 
 ```bash
-apex agent profile list
-apex agent profile inspect claude
-apex agent profile doctor claude
-apex agent profile export claude --to ~/claude-profile
-apex agent profile sync claude --from ~/claude-profile
+rime agent profile list
+rime agent profile inspect claude
+rime agent profile doctor claude
+rime agent profile export claude --to ~/claude-profile
+rime agent profile sync claude --from ~/claude-profile
 ```
 
 ### Reusable, machine-local, mixed, secret
@@ -660,7 +660,7 @@ delete the token on the machine that had one.
 
 ### What an export refuses
 
-`apex agent profile export` walks the reusable entries and nothing else, then
+`rime agent profile export` walks the reusable entries and nothing else, then
 re-derives the class of every file it is about to write and refuses the whole
 bundle if any of them is not exportable. Nothing is half-written: the check runs
 before the directory is created.
@@ -715,7 +715,7 @@ mount.
 
 ### The doctor
 
-`apex agent profile doctor` reads and reports and repairs nothing, so you can
+`rime agent profile doctor` reads and reports and repairs nothing, so you can
 use it to find out what state you are in. It covers config, the status line,
 hooks, commands, skills, subagents, plugins, marketplaces, MCP servers and
 credentials, and exits non-zero when something is wrong: a skill directory with
@@ -735,7 +735,7 @@ that the export does not carry them.
 ### Only Claude, so far
 
 `codex`, `gemini`, `kimi` and `opencode` have no profile description, and
-`apex agent profile doctor codex` says so instead of reporting an empty one.
+`rime agent profile doctor codex` says so instead of reporting an empty one.
 Their sandbox keeps the whole-directory behaviour: `~/.codex` goes in writable.
 Guessing which half of a directory is a session store, without reading a real
 installation, would produce exactly the failure this exists to prevent.
@@ -744,17 +744,17 @@ installation, would produce exactly the failure this exists to prevent.
 
 ## Projects, worktrees and checkpoints
 
-A project is a git working tree the runtime has seen. `apex project list` shows
-them by recency; `apex project info` describes the current one.
+A project is a git working tree the runtime has seen. `rime project list` shows
+them by recency; `rime project info` describes the current one.
 
 ### Parallel work
 
 ```
-apex agent run "fix issue 217" --worktree issue-217
-apex agent run "fix issue 221" --worktree issue-221
+rime agent run "fix issue 217" --worktree issue-217
+rime agent run "fix issue 221" --worktree issue-221
 ```
 
-Each gets its own git worktree under `.apex/worktrees/` on branch
+Each gets its own git worktree under `.rime/worktrees/` on branch
 `agent/<name>`, so two agents never fight over one checkout. The runtime
 ignores the directory through `.git/info/exclude` and not `.gitignore`: it is
 this machine's runtime state, not something to commit and push to your
@@ -765,8 +765,8 @@ Re-running with the same name reattaches to the same worktree.
 ### What each worktree is up to
 
 ```
-apex agent worktrees
-apex agent worktrees --project my-repo --json
+rime agent worktrees
+rime agent worktrees --project my-repo --json
 ```
 
 ```
@@ -806,7 +806,7 @@ every answer here is against that one instead.
 **Tests are observed, never run.** The runtime does not run your suite to
 answer a status query: that has a build directory, a CPU cost, and for a suite
 that touches a daemon or a port a real chance of breaking the session that is
-mid-task. So the column is the last test run APEX *saw go past* in that tree,
+mid-task. So the column is the last test run Rime *saw go past* in that tree,
 through the hook stream it already receives, and its default is `unobserved`,
 which records an absence and not a failure.
 
@@ -818,7 +818,7 @@ What each word means:
   "nobody told us how it ended" is not a pass.
 - `passed`: a completion event arrived for that run and it was not a failure
   event. Whether the agent upstream distinguishes those for a non-zero exit is
-  upstream's behaviour, and APEX cannot compel it; if the agent ever reports a
+  upstream's behaviour, and Rime cannot compel it; if the agent ever reports a
   failed suite as an ordinary completion, this says `passed`.
 - `failed`: a failure event arrived. This blocks readiness.
 
@@ -835,7 +835,7 @@ GitHub: has an upstream, in sync with it, ahead of base, clean tree, no
 conflicts, no observed test failure. It answers "is this worth a human's
 attention yet", not "what does the pull request say".
 
-`--project` takes a project **slug**, the kind `apex project list` prints, and
+`--project` takes a project **slug**, the kind `rime project list` prints, and
 never a path. Answering this request makes the daemon run git in the project's
 root, so the set of directories it can reach is exactly the set you have
 already chosen to remember.
@@ -843,8 +843,8 @@ already chosen to remember.
 ### Undo
 
 ```
-apex agent run "upgrade to Qt 7" --checkpoint
-apex agent undo
+rime agent run "upgrade to Qt 7" --checkpoint
+rime agent undo
 ```
 
 A checkpoint captures tracked **and untracked** files as a real git tree, plus
@@ -856,7 +856,7 @@ In detail:
 - Capture runs entirely through plumbing against a temporary index, so your
   staged changes, your stash and your branch are untouched.
 - Undo takes a safety checkpoint **first**, so the undo is itself undoable.
-- Checkpoints live under `refs/apex/checkpoints/`, not `refs/heads/`, so they
+- Checkpoints live under `refs/rime/checkpoints/`, not `refs/heads/`, so they
   never show up as branches and a plain `git push` never sends them.
 
 Two boundaries, both on purpose:
@@ -865,18 +865,18 @@ Two boundaries, both on purpose:
   and local secrets; sweeping a 4 GB `target/` and your `.env` into a git object
   is not an undo feature.
 - **Packages are recorded, not removed.** Undo reports what was installed since
-  the checkpoint and prints the `apex remove` line. A privileged, system-wide
+  the checkpoint and prints the `rime remove` line. A privileged, system-wide
   removal because you undid a working tree is a call you make yourself.
 
 ### A session you throw away
 
 ```
-apex agent run "see if this PR is worth reviewing" --disposable
-apex agent run "build it and keep the artefacts" --disposable --copy-out ~/out
+rime agent run "see if this PR is worth reviewing" --disposable
+rime agent run "build it and keep the artefacts" --disposable --copy-out ~/out
 ```
 
 The session runs inside a disposable capsule, and the engine deletes that
-capsule at the end of the session. APEX **copies** your working directory in
+capsule at the end of the session. Rime **copies** your working directory in
 and does not share it, so what the agent does to that copy goes with the
 environment. Your own tree stays byte-identical afterwards, index included.
 
@@ -885,41 +885,41 @@ Nothing comes back unless you say where. `--copy-out DIR` copies the capsule's
 before the teardown. Leave it out and the agent's work goes with the capsule,
 which is the point.
 
-`apex agent status` names the capsule and says both of those things. A session
+`rime agent status` names the capsule and says both of those things. A session
 whose edits are about to vanish should not read like an ordinary one.
 
 The capsule engine performs the teardown, and the daemon holds no teardown code
 of its own. The engine is the session's own process, and its `trap` fires when
-the agent finishes, when `apex agent kill` arrives, and when the daemon goes
-away. If the machine loses power mid-session, `apex disposable list` and
-`apex disposable purge` clear up what is left. Each environment carries the id
+the agent finishes, when `rime agent kill` arrives, and when the daemon goes
+away. If the machine loses power mid-session, `rime disposable list` and
+`rime disposable purge` clear up what is left. Each environment carries the id
 of the session that owned it, so a leftover says where it came from.
 
 **It is a throwaway environment and not a security boundary.** distrobox
 mounts the host's root filesystem at `/run/host` inside each capsule, no flag
 removes it, and the process runs as your own uid. A program in there can read
-and write your files. `apex disposable plan` prints the whole boundary, and
+and write your files. `rime disposable plan` prints the whole boundary, and
 [recovery.md](recovery.md) states it in full. `--sandbox` is the mechanism for
 confinement: it masks `$HOME`, puts `~/.ssh` out of reach, and rebuilds the
 environment from an allowlist.
 
-APEX **refuses these pairs instead of combining them**:
+Rime **refuses these pairs instead of combining them**:
 
 - `--sandbox` with a confining policy. bwrap would wrap the container client
   and not the agent inside the capsule, so the pair would read as "confined
   and disposable" while delivering neither.
-- `--worktree`. APEX would create the branch on your machine and leave it
+- `--worktree`. Rime would create the branch on your machine and leave it
   empty, because the agent commits to the copy and the capsule takes those
   commits with it. A linked worktree is worse: its `.git` is a file pointing
   at an absolute host path the capsule cannot reach, so the copy is not a
   working checkout at all.
 - `--checkpoint`. It would snapshot a tree this session cannot change, and
-  `apex agent undo` would then offer to roll back work this agent did not do.
+  `rime agent undo` would then offer to roll back work this agent did not do.
 
 Each refusal lands before the daemon creates anything: no environment, no
 worktree, no branch.
 
-One interaction to know: `apex agent worktrees` lists a disposable session under
+One interaction to know: `rime agent worktrees` lists a disposable session under
 the tree you started it in, which is the tree the capsule copied. That session
 cannot change it.
 
@@ -928,36 +928,36 @@ cannot change it.
 ## Handing work to another agent
 
 An agent runs out of context, or out of quota, and the work has to carry on
-somewhere else. `apex agent handoff` writes down what the runtime knows about
+somewhere else. `rime agent handoff` writes down what the runtime knows about
 a session and starts a different agent pointed at it:
 
 ```
-apex agent handoff 4 --to codex
-apex agent handoff 4 --to codex --no-start   # write it, launch nothing
+rime agent handoff 4 --to codex
+rime agent handoff 4 --to codex --no-start   # write it, launch nothing
 ```
 
 If the work is bound to a task, hand the task over and let it find the session:
 
 ```
-apex task handoff installer-bug codex
-apex task handoff installer-bug codex --no-start
+rime task handoff installer-bug codex
+rime task handoff installer-bug codex --no-start
 ```
 
-That is the same packet, written by the same command: `apex task handoff`
+That is the same packet, written by the same command: `rime task handoff`
 resolves the task to the agent session running in its root and calls
-`apex agent handoff`. A packet is the record of a **session**: its transcript,
+`rime agent handoff`. A packet is the record of a **session**: its transcript,
 the files it changed, the worktree the runtime attributes to it, the grants it
 holds. None of those can be read off a task, which is a binding. So the task
 form refuses instead of guessing when the task has no session running in it,
 or when it has more than one. When it refuses for that second reason it names
-the ids, because the next thing to type is `apex agent handoff <id>`.
+the ids, because the next thing to type is `rime agent handoff <id>`.
 
 The packet is a Markdown file in the project, at
-`.apex/handoff/session-4-to-codex.md`. It has to live inside the project and
+`.rime/handoff/session-4-to-codex.md`. It has to live inside the project and
 not under `$XDG_STATE_HOME`: the receiving session is sandboxed, and under
 `--sandbox project` the rest of `$HOME` is absent, not only hidden, so a packet
 in the runtime's own state directory would go to an agent that could not open
-it. `.apex/` is added to `.git/info/exclude`, not to your `.gitignore`.
+it. `.rime/` is added to `.git/info/exclude`, not to your `.gitignore`.
 
 `stdout` is the path and nothing else, so the command composes. Everything a
 person reads goes to `stderr`. If the receiving agent fails to start, the exit
@@ -978,7 +978,7 @@ absent **with the reason**:
 `test state` used to be a fourth, and is not any more: the runtime keeps a
 per-worktree test record, so the packet asks the daemon for the row that owns
 the outgoing session and writes down what it says. When nobody has run a suite
-there, the packet reports that as the observation it is ("APEX has not observed
+there, the packet reports that as the observation it is ("Rime has not observed
 a test run in this worktree"), not as a field this build cannot answer. A
 recorded pass names the commit it passed AT, and says **STALE** when the
 worktree has moved on since, because a pass against code that is no longer
@@ -1005,7 +1005,7 @@ Read this before you assume what the new agent can do.
   no expiry, and a handoff starts the incoming agent in the same project. So
   every privilege verb pre-approved here already applies to it. Nothing is
   re-requested and nobody is asked again. Withdraw one with
-  `apex request revoke`.
+  `rime request revoke`.
 - **System-access grants do not.** Those are bound to a concrete session
   (§3.3), and that is the session being handed off. The packet lists them so
   the next agent knows what the work needed, and says that the agent does not
@@ -1019,13 +1019,13 @@ statement about the other.
 
 Everything in the packet was already on this machine, and the packet stays on
 this machine: it is a file in your project that the next agent reads. Deleting
-it loses nothing, and `apex agent handoff` will write it again.
+it loses nothing, and `rime agent handoff` will write it again.
 
 ---
 
 ## Status, and the open event protocol
 
-`apex agent list` shows each session as `working`, `waiting_for_user`,
+`rime agent list` shows each session as `working`, `waiting_for_user`,
 `permission_request`, `complete` or `failed`.
 
 The runtime infers most of that from the terminal: a bell, an OSC 9 / OSC 777
@@ -1041,12 +1041,12 @@ a published event ever sets it.
 Any process inside a session can publish its own state:
 
 ```
-apex agent event working
-apex agent event permission_request --detail "wants to push a branch"
-apex agent event complete
+rime agent event working
+rime agent event permission_request --detail "wants to push a branch"
+rime agent event complete
 ```
 
-The session id comes from `$APEX_AGENT_SESSION`, which the runtime sets in every
+The session id comes from `$RIME_AGENT_SESSION`, which the runtime sets in every
 session, so a hook script needs no arguments. That is the whole protocol: an
 agent with hooks can wire them straight to it, and one without still gets the
 inferred states.
@@ -1059,8 +1059,8 @@ A screenshot, a log, a crash dump: something in front of you that the agent
 already running should look at.
 
 ```
-apex agent send 3 ~/Downloads/backtrace.txt
-apex agent send 3 --last-screenshot
+rime agent send 3 ~/Downloads/backtrace.txt
+rime agent send 3 --last-screenshot
 ```
 
 The runtime copies the file into the session's own scratch directory, then
@@ -1068,7 +1068,7 @@ types that path into the session's terminal. The sandbox already binds that
 directory read-write, and the session takes it with it when it ends.
 
 `--last-screenshot` takes no picture and opens no selection overlay. It reads
-the newest file in `~/Pictures/Screenshots`, which is where APEX Shell's Print
+the newest file in `~/Pictures/Screenshots`, which is where Rime Shell's Print
 keybind writes. Press Print, then run it.
 
 ### It does not press Enter
@@ -1099,7 +1099,7 @@ matter:
   which also holds the mirror of every system-access grant.
 
   ```
-  journalctl --user -t apex-agentd APEX_INJECT_SESSION=3
+  journalctl --user -t rime-agentd RIME_INJECT_SESSION=3
   ```
 
 Two costs. The bytes land wherever that terminal's foreground process is
@@ -1124,21 +1124,21 @@ across the boundary for it. The daemon resolves the caller from `SO_PEERCRED`
 and `/proc` ancestry, the same way it resolves a privilege request's, and
 refuses anything that lands on a managed session.
 
-`apex agent status <id>` counts the files a session has taken.
+`rime agent status <id>` counts the files a session has taken.
 
 ---
 
 ## Project layouts
 
-§6 asks APEX to remember the windows and terminals of a project and restore
+§6 asks Rime to remember the windows and terminals of a project and restore
 them after a reboot.
 
 ```
-apex project layout save              # capture what is open in this project
-apex project layout show              # what would come back
-apex project layout restore           # reopen it
-apex project layout restore --dry-run # print, start nothing
-apex project layout forget
+rime project layout save              # capture what is open in this project
+rime project layout show              # what would come back
+rime project layout restore           # reopen it
+rime project layout restore --dry-run # print, start nothing
+rime project layout forget
 ```
 
 ### What is remembered
@@ -1187,8 +1187,8 @@ fourteen windows nobody asked for is worse than one that reopens none.
 ### Switching by project
 
 ```
-apex project switch            # this project
-apex project switch apex-os    # by name, from anywhere
+rime project switch            # this project
+rime project switch rime-os    # by name, from anywhere
 ```
 
 §6's "allow switching by project, not only by numeric workspace". It needs a
@@ -1206,7 +1206,7 @@ not hold the terminal open for seconds guessing at startup times.
 
 ### It runs stored command lines
 
-The layout file is a list of argv vectors that `apex project layout restore`
+The layout file is a list of argv vectors that `rime project layout restore`
 executes. It lives under `$XDG_STATE_HOME` at `0700`, and only your own runtime
 writes it. `restore` executes each entry as an argv **vector**, never through a
 shell, so nothing in a stored entry can be interpreted as a shell
@@ -1220,23 +1220,23 @@ An agent has no sudo, no root shell, and a sandbox that cannot reach the system
 bus. When it needs a system change, it asks:
 
 ```
-apex request ask install clang --reason "Required to compile the project"
+rime request ask install clang --reason "Required to compile the project"
 ```
 
 and blocks. You see it, and decide:
 
 ```
-apex request pending
-sudo apex request approve 3                 # allow once, and run it
-sudo apex request approve 3 --for-project   # …and stop asking for this one
-apex request deny 3
+rime request pending
+sudo rime request approve 3                 # allow once, and run it
+sudo rime request approve 3 --for-project   # …and stop asking for this one
+rime request deny 3
 ```
 
 ### The vocabulary is closed
 
-`apex request verbs` lists everything askable: `install`, `remove`,
+`rime request verbs` lists everything askable: `install`, `remove`,
 `pkg-upgrade`, `pkg-rebuild`, `pkg-rollback`, `pin`, `rollback`, `update`. Each
-maps to an `apex` subcommand that already declares itself root-only.
+maps to an `rime` subcommand that already declares itself root-only.
 
 There is **no verb for running a command**, on purpose. An `exec` variant would
 be sudo with a confirmation dialog: nobody can meaningfully review an arbitrary
@@ -1255,8 +1255,8 @@ The daemon resolves the asking session from the connection's **peer
 credentials** (`SO_PEERCRED`), then walks that pid's `/proc` parent chain until
 it meets a pid the daemon itself recorded when it forked a session.
 
-It never reads `$APEX_AGENT_SESSION`. The runtime sets that variable inside
-each session, and it is fine for `apex agent event`, where the worst a lying
+It never reads `$RIME_AGENT_SESSION`. The runtime sets that variable inside
+each session, and it is fine for `rime agent event`, where the worst a lying
 client achieves is a wrong status label. But anything *authorised* by a
 client-supplied id is authorised by the agent itself. The walk follows ancestry
 and not the process group, because a process may `setpgid` itself and cannot
@@ -1265,15 +1265,15 @@ choose its parent.
 A session therefore cannot approve its own request, cannot deny it, and
 cannot alter its own grants. `tests/test-privilege-requests.sh` asserts all
 three against a real daemon, and its negative control is a session that files a
-request while claiming `APEX_AGENT_SESSION=99999` and is still attributed
+request while claiming `RIME_AGENT_SESSION=99999` and is still attributed
 correctly.
 
 ### Where the privilege comes from
 
-`apex-agentd` is unprivileged and stays that way: §2's rule is that agent
+`rime-agentd` is unprivileged and stays that way: §2's rule is that agent
 orchestration must not live inside the privileged daemon. The daemon records,
 validates and remembers; it never executes. The operation runs inside
-`apex request approve`, under the same root gate as `apex install` itself, so
+`rime request approve`, under the same root gate as `rime install` itself, so
 the privilege exercised is **yours**.
 
 That is why a grant does not yet mean unattended execution: with nobody
@@ -1287,7 +1287,7 @@ Every filing, decision and execution appends one JSON line to
 `privilege-audit.jsonl`, which is never rewritten:
 
 ```
-apex request audit
+rime request audit
 ```
 
 The runtime rebuilds the recorded `argv` from the typed verb and does not store
@@ -1299,17 +1299,17 @@ in between the approval and the execution.
 ## The secret service
 
 §3.2: *"Normal managed agents should not receive raw long-lived secrets where
-APEX can broker the operation instead."* §11 asks for that brokering to live in
-a dedicated service. That service is `apex-secretd`.
+Rime can broker the operation instead."* §11 asks for that brokering to live in
+a dedicated service. That service is `rime-secretd`.
 
 ```
-printf %s "$TOKEN" | apex secret add github --host github.com
-apex secret capabilities                 # what the service offers
-apex secret grant github git.push        # per project
-apex secret grant claude-memory mcp.request --everywhere
-apex secret use github git.push origin   # run by the agent
-apex secret migrate                      # move what is already in plaintext
-apex secret audit
+printf %s "$TOKEN" | rime secret add github --host github.com
+rime secret capabilities                 # what the service offers
+rime secret grant github git.push        # per project
+rime secret grant claude-memory mcp.request --everywhere
+rime secret use github git.push origin   # run by the agent
+rime secret migrate                      # move what is already in plaintext
+rime secret audit
 ```
 
 `--everywhere` is the only line there that widens a grant past the project it
@@ -1317,7 +1317,7 @@ was made in, and two shipped operations qualify for it. *A grant held in every
 project* below says which, and why the operation that looks like the obvious
 next candidate is refused.
 
-You rarely type `apex secret use`. A managed session finds a `git` on its PATH
+You rarely type `rime secret use`. A managed session finds a `git` on its PATH
 that sends `push`, `fetch` and `ls-remote` here and execs `/usr/bin/git` for
 everything else, so a skill keeps running `git push` and nobody rewrote
 anything, as §12 requires. That shim holds no credential and enforces nothing:
@@ -1326,14 +1326,14 @@ all, which is exactly what happens if an agent goes round it.
 
 ### Why it is a separate daemon, and why it is root
 
-`apex-agentd` runs as you, because it launches your own programs. Anything it
+`rime-agentd` runs as you, because it launches your own programs. Anything it
 can read, a managed agent with your uid can read too: an `unrestricted` session
 has your whole home. The first version of this broker kept credentials in a
 `0600` file under `$XDG_STATE_HOME`, which keeps out another *account* and
 nothing else.
 
-So the store moved to `/var/lib/apex-secretd`, `0700`, owned by root, and the
-agent runtime lost the ability to read a credential at all. `apex-secretd` runs
+So the store moved to `/var/lib/rime-secretd`, `0700`, owned by root, and the
+agent runtime lost the ability to read a credential at all. `rime-secretd` runs
 as root for two requirements that nothing unprivileged satisfies together:
 
 1. the store must be unreadable by your uid, or the credential is still in
@@ -1354,8 +1354,8 @@ prints is on git's stdin, inside the agent's own namespace, readable by the
 agent. A credential helper hands over the credential by construction.
 
 So the service performs the operation instead. The agent asks for
-`git.push origin`; `apex-agentd` says which session is asking and what it is
-allowed; `apex-secretd` runs the push and returns git's output.
+`git.push origin`; `rime-agentd` says which session is asking and what it is
+allowed; `rime-secretd` runs the push and returns git's output.
 
 ### Where a provider plugs in
 
@@ -1369,7 +1369,7 @@ the credential would reach), how a credential is presented (`perform`: a git
 credential helper, a bearer header, a signed request), and how to mint a
 short-lived credential if it can (`mint`, §13.4; by default it cannot).
 
-The **framework** fixes everything else, in `apex-secretd`, and a provider
+The **framework** fixes everything else, in `rime-secretd`, and a provider
 cannot get any of it wrong by omission: the caller's account from
 `SO_PEERCRED`, that the operation exists, that its arguments are the ones the
 provider declared, expiry, the project, §7's origin, the grant, **the host
@@ -1381,9 +1381,9 @@ provider both resolved and acted, you would have to trust it to check where it
 was sending your credential. With the two split, the framework checks that, for
 every provider anyone writes from now on.
 
-Adding a provider is a module and one `register` call in `apex-secretd`. It
-needs no change to `apex-agent-core`, `apex-agentd` or the `apex` CLI: the wire
-carries an operation id, a resource and an option map, and `apex secret
+Adding a provider is a module and one `register` call in `rime-secretd`. It
+needs no change to `rime-agent-core`, `rime-agentd` or the `rime` CLI: the wire
+carries an operation id, a resource and an option map, and `rime secret
 capabilities` prints the service's own registry, not a list the CLI keeps in
 step by hand.
 
@@ -1397,13 +1397,13 @@ agent could read the bearer token, and the store's whole argument fell with it.
 The `mcp.request` operation closes that. It declares no resource and no
 options at all, on purpose: the endpoint comes entirely from the stored
 record's own host, port and path, so a session has nowhere to put a
-destination of its own. `apex mcp bridge <service>` is an MCP server on stdin
+destination of its own. `rime mcp bridge <service>` is an MCP server on stdin
 and stdout that an agent spawns and talks to normally. Each message goes through
-`apex-agentd`, which stamps the session and checks its secret dimension, to
-`apex-secretd`, which attaches the credential and makes the request.
+`rime-agentd`, which stamps the session and checks its secret dimension, to
+`rime-secretd`, which attaches the credential and makes the request.
 
 ```json
-"claude-memory": {"type": "stdio", "command": "apex",
+"claude-memory": {"type": "stdio", "command": "rime",
                   "args": ["mcp", "bridge", "claude-memory"]}
 ```
 
@@ -1420,7 +1420,7 @@ share that server's idea of the conversation.
 
 Nothing above says which servers a machine has, and a definition can live in
 four places: your own `~/.claude.json`, its per-directory block, a repository's
-`.mcp.json`, and every enabled plugin's. `apex mcp list` reads all four and
+`.mcp.json`, and every enabled plugin's. `rime mcp list` reads all four and
 answers, per server, the two questions that matter here: where the definition
 is, and whether the agent can read the credential.
 
@@ -1429,12 +1429,12 @@ claude-memory
   transport   http, https://mem.example/mcp
   credential  a value in the definition's Authorization header, which the agent reads
   defined in  ~/.claude.json (every directory)
-  fix         apex mcp connect claude-memory
+  fix         rime mcp connect claude-memory
 
 1 MCP credential is readable by any agent that runs as you
 ```
 
-`apex mcp connect` is that fix, one server at a time and by hand: it reads the
+`rime mcp connect` is that fix, one server at a time and by hand: it reads the
 credential from **stdin**, stores it, proves it against the server itself, and
 only then removes it from the file the agent reads. What is left behind is the
 `stdio` definition above. The order is the one *Moving what a machine already
@@ -1450,7 +1450,7 @@ memory and writes it back on exit.
 
 A grant is per project, which is the right default: the same operation in a
 different directory is usually a different permission. `mcp.request` and
-`browser.present` are the exceptions, and `apex secret grant --everywhere` is
+`browser.present` are the exceptions, and `rime secret grant --everywhere` is
 the exceptions' key: a `*` where the project path would go.
 
 It is safe there for one reason. Both operations spend the credential at the
@@ -1467,12 +1467,12 @@ declared field and not a computed one.** The first version of the gate computed
 the answer: no resource argument and no parameters, therefore nothing
 project-shaped to resolve, therefore the same thing everywhere.
 `cloudflare.account.read` declares no resource and no parameters, so it passes
-that test exactly, and its `bind` still reads the project's own `apex.toml`.
+that test exactly, and its `bind` still reads the project's own `rime.toml`.
 Bound, the request is `GET /accounts/{id}` for that project's account; in a
 directory that binds none it is `GET /accounts`, every account the token can
 see. Two projects, two different requests, one stored token, so a `*` grant
 would let an agent in a project the owner never approved read that project's
-account. It is refused, and `apex cf status` needs a grant in the project it is
+account. It is refused, and `rime cf status` needs a grant in the project it is
 run in.
 
 The correction is about where the fact lives. Naming nothing is a fact about the
@@ -1493,7 +1493,7 @@ contradiction: an operation that takes a resource or a parameter is a different
 permission per directory by construction, so claiming otherwise is not a
 judgement call. Naming nothing is *necessary and not sufficient*, and that
 asymmetry carries the design. Then a test binds every operation carrying the
-claim in two projects, one with an `apex.toml` that binds an account and one
+claim in two projects, one with an `rime.toml` that binds an account and one
 bare, and requires the two results to be identical. It compares the audited
 `detail` sentence and not only the endpoint, because both of
 `cloudflare.account.read`'s answers are on `api.cloudflare.com`: the endpoint
@@ -1511,18 +1511,18 @@ caches, the profile. `npx -y @modelcontextprotocol/server-memory` is third-party
 code fetched from a registry at first run, given the agent's whole reach, to
 store notes in one file.
 
-`apex mcp confine` rewrites the definition so the server starts inside a sandbox
+`rime mcp confine` rewrites the definition so the server starts inside a sandbox
 of its own:
 
 ```json
-"memory": {"command": "apex",
+"memory": {"command": "rime",
            "args": ["mcp", "run", "memory", "--",
                     "npx", "-y", "@modelcontextprotocol/server-memory"]}
 ```
 
 The server's own command stays in the definition and does not move into a
 policy file, so what a server runs is still visible where somebody would look
-for it. `apex mcp run` is the wrapper the agent then spawns, and it builds its
+for it. `rime mcp run` is the wrapper the agent then spawns, and it builds its
 argv with the same function that confines a session. A second bubblewrap
 profile in this codebase would be a second thing to get wrong, and would drift
 from the one that is tested.
@@ -1547,14 +1547,14 @@ from the agent: **per-MCP identity at the broker does not exist**, and a
 credential this server could fetch is one the agent could fetch. What *is*
 enforceable is reachability: both daemons' sockets live under the masked
 directories, so by default the server can open neither. `broker = true` binds
-back the one socket a confined process is ever given, `apex-agentd`'s, and the
-grant table decides from there. `apex-secretd`'s socket is not bound and must
+back the one socket a confined process is ever given, `rime-agentd`'s, and the
+grant table decides from there. `rime-secretd`'s socket is not bound and must
 not be. A session does not get it either, and an MCP server holding a door into
 the secret daemon that the agent starting it lacks would be a sandbox turned
 inside out.
 
-A policy is `<name>.toml` under `$XDG_CONFIG_HOME/apex/mcp`, and then
-`/etc/apex/mcp` for a default an image or an administrator ships. The user's own
+A policy is `<name>.toml` under `$XDG_CONFIG_HOME/rime/mcp`, and then
+`/etc/rime/mcp` for a default an image or an administrator ships. The user's own
 wins, because the person running a server decides what it may reach. Every
 field defaults closed, so a file only ever widens. An unknown key is refused
 and not ignored: a policy carrying `netwrok = true` that started the server with
@@ -1564,20 +1564,20 @@ default is *tighter*, so falling back would break the server and blame the
 server. The directory is bound read-only into a session, for the same reason it
 is worth having.
 
-`apex mcp policy` prints what each server will get, and where that was decided:
+`rime mcp policy` prints what each server will get, and where that was decided:
 
 ```
 memory
   network     none — its own empty namespace
   filesystem  a private home, 0 read-only and 1 writable path(s) it names
-  secrets     cannot reach apex-agentd or apex-secretd at all
-  decided by  ~/.config/apex/mcp/memory.toml
-  started     with everything the agent session has — apex mcp confine memory
+  secrets     cannot reach rime-agentd or rime-secretd at all
+  decided by  ~/.config/rime/mcp/memory.toml
+  started     with everything the agent session has — rime mcp confine memory
 ```
 
 Read the last line first: a policy exists and the definition still does not
 use it. An endpoint server has neither policy nor wrapper. There is no process
-here to confine, because `apex-secretd` makes the request, and `confine`
+here to confine, because `rime-secretd` makes the request, and `confine`
 refuses one with that explanation instead of writing a definition that cannot
 work.
 
@@ -1586,10 +1586,10 @@ hostile agent, and the limit is stated below.
 
 ### Moving what a machine already has
 
-`apex secret migrate` reads each plaintext credential, stores it, proves the
+`rime secret migrate` reads each plaintext credential, stores it, proves the
 stored copy works, and **only then** removes the original. It runs in that
 order and is idempotent, so an interrupted run leaves a machine that still has
-its credentials. It reads the old broker's `$XDG_STATE_HOME/apex/agent/secrets`,
+its credentials. It reads the old broker's `$XDG_STATE_HOME/rime/agent/secrets`,
 Claude's `settings.json` `env` block, and an HTTP MCP server's
 `headers.Authorization`.
 
@@ -1666,14 +1666,14 @@ but some error messages include a `https://user:token@host/…` URL.
 
 ### The audit trail
 
-One JSON line per event in `/var/lib/apex-secretd/audit.jsonl`, root-owned, so
+One JSON line per event in `/var/lib/rime-secretd/audit.jsonl`, root-owned, so
 the audited party cannot rewrite the audit. Each line is §11's capability record
 (provider, operation, resource, project, agent session, request origin,
 approval policy, constraints, audit id) plus what the service established for
 itself: the endpoint the credential was sent to, and the exit code.
 
 ```
-apex secret audit
+rime secret audit
 ```
 
 `origin_source` says whether §7's `request_origin` was `observed` from the
@@ -1683,8 +1683,8 @@ connection, `inherited` from the session, or `declared` by a client, and
 different answers.
 
 You see your own account's lines. `agent_session` and `request_origin` are
-**attribution, not authentication**: `apex-agentd`, which runs as you, forwards
-both, so a process with your uid can forge them. `apex-secretd` checks their
+**attribution, not authentication**: `rime-agentd`, which runs as you, forwards
+both, so a process with your uid can forge them. `rime-secretd` checks their
 shape (the trail is one JSON object per line and somebody greps it) and records
 them as claims. They label the trail; they authorise nothing.
 
@@ -1718,16 +1718,16 @@ no reply the service can send contains one.
 
 ### What ships, and what is not built
 
-Nine providers are registered (`apex-secretd/src/providers/mod.rs`): `git`
+Nine providers are registered (`rime-secretd/src/providers/mod.rs`): `git`
 (`git.push`, `git.fetch`, `git.ls-remote`), `mcp` (`mcp.request`), `browser`
 (`browser.present`), `cloudflare` (P1-002), `gdrive`, `msgraph`, `oauth`, `s3`
-and `webdav`. `apex secret capabilities` prints the whole vocabulary. git is
+and `webdav`. `rime secret capabilities` prints the whole vocabulary. git is
 the framework's reference implementation and the one you can exercise without
 an account.
 
 A session cannot be stopped from *un*-confining one of its own MCP servers,
 because `~/.claude.json` is writable inside a session: it can rewrite a
-definition to drop the `apex mcp run` wrapper, and could have run the same
+definition to drop the `rime mcp run` wrapper, and could have run the same
 program directly in any case. Closing that means starting the agent with
 `--strict-mcp-config` and a configuration file the daemon wrote, which changes
 how sessions are launched; it is named here and not half-built. The per-server
@@ -1755,7 +1755,7 @@ account refused to issue one, or the attempt did not run. The last three carry
 on with the stored credential, because §13.4 says *prefer*. Cloudflare requires
 Super Administrator on an account to create a token, so "refused" is an ordinary
 answer and not an alarming one. A project that will not accept that says so in
-its own `apex.toml`:
+its own `rime.toml`:
 
 ```toml
 [cloudflare]
@@ -1766,10 +1766,10 @@ and then an operation that cannot be given a narrow credential is refused
 instead of carried out with the broad one.
 
 §13.4 also asks for the *tool* over the API where a tool can do the job, and
-that is what a managed session's `wrangler` and `terraform` are. `apex-secretd`
+that is what a managed session's `wrangler` and `terraform` are. `rime-secretd`
 runs four subcommands (`wrangler deploy`, `wrangler versions upload`,
 `terraform plan`, `terraform apply`) with the credential in the child's
-environment and an argv APEX writes. A skill goes on typing `wrangler deploy`;
+environment and an argv Rime writes. A skill goes on typing `wrangler deploy`;
 the shim on the session's own `PATH` routes it. Anything else (`wrangler
 --version`, `terraform fmt`) execs the real tool unchanged and unauthenticated,
 which matches the facts: the agent has no credential. There is no "run
@@ -1787,19 +1787,19 @@ Only you can add a service record, and the host is pinned from then on.
 
 | path | what |
 |---|---|
-| `$XDG_RUNTIME_DIR/apex-agentd/control.sock` | control socket, `0600` |
-| `$XDG_STATE_HOME/apex/agent/sessions/` | session records |
-| `$XDG_STATE_HOME/apex/agent/logs/` | transcripts, `0600`, capped at 32 MiB |
-| `$XDG_STATE_HOME/apex/agent/checkpoints/` | checkpoint metadata |
-| `$XDG_STATE_HOME/apex/agent/requests/` | privilege requests, one JSON file each |
-| `$XDG_STATE_HOME/apex/agent/grants.json` | per-project "allow for project" grants |
-| `$XDG_STATE_HOME/apex/agent/layouts/` | saved project window layouts |
-| `$XDG_STATE_HOME/apex/agent/privilege-audit.jsonl` | append-only privilege audit |
-| `$XDG_CONFIG_HOME/apex/agent.json` | default agent, the six permission dimensions, the network allowlist, detach key |
-| `/tmp/apex-agent-<uid>/<id>/` | per-session scratch, and an allowlisted session’s egress socket; removed with the session. The uid is in the path: with a shared root, the second account on a machine could not start a session (P2-016) |
+| `$XDG_RUNTIME_DIR/rime-agentd/control.sock` | control socket, `0600` |
+| `$XDG_STATE_HOME/rime/agent/sessions/` | session records |
+| `$XDG_STATE_HOME/rime/agent/logs/` | transcripts, `0600`, capped at 32 MiB |
+| `$XDG_STATE_HOME/rime/agent/checkpoints/` | checkpoint metadata |
+| `$XDG_STATE_HOME/rime/agent/requests/` | privilege requests, one JSON file each |
+| `$XDG_STATE_HOME/rime/agent/grants.json` | per-project "allow for project" grants |
+| `$XDG_STATE_HOME/rime/agent/layouts/` | saved project window layouts |
+| `$XDG_STATE_HOME/rime/agent/privilege-audit.jsonl` | append-only privilege audit |
+| `$XDG_CONFIG_HOME/rime/agent.json` | default agent, the six permission dimensions, the network allowlist, detach key |
+| `/tmp/rime-agent-<uid>/<id>/` | per-session scratch, and an allowlisted session’s egress socket; removed with the session. The uid is in the path: with a shared root, the second account on a machine could not start a session (P2-016) |
 
-The agent's own profile is not APEX's to keep, and APEX keeps no copy of it.
-`apex agent profile inspect` prints where every part of it lives.
+The agent's own profile is not Rime's to keep, and Rime keeps no copy of it.
+`rime agent profile inspect` prints where every part of it lives.
 
 Transcripts are a record of your work, and only you can read them.
 
@@ -1807,12 +1807,12 @@ The secret service keeps nothing here, and that is its purpose:
 
 | path | what |
 |---|---|
-| `/run/apex-secretd/control.sock` | control socket, `0666`, authorised by `SO_PEERCRED` |
-| `/var/lib/apex-secretd/` | the store, `0700`, owned by root |
-| `/var/lib/apex-secretd/users/<uid>/<name>.secret` | one credential, `0600` |
-| `/var/lib/apex-secretd/users/<uid>/<name>.json` | its metadata, never the value |
-| `/var/lib/apex-secretd/users/<uid>/grants.json` | per-project capability grants |
-| `/var/lib/apex-secretd/audit.jsonl` | append-only capability audit |
+| `/run/rime-secretd/control.sock` | control socket, `0666`, authorised by `SO_PEERCRED` |
+| `/var/lib/rime-secretd/` | the store, `0700`, owned by root |
+| `/var/lib/rime-secretd/users/<uid>/<name>.secret` | one credential, `0600` |
+| `/var/lib/rime-secretd/users/<uid>/<name>.json` | its metadata, never the value |
+| `/var/lib/rime-secretd/users/<uid>/grants.json` | per-project capability grants |
+| `/var/lib/rime-secretd/audit.jsonl` | append-only capability audit |
 
 ---
 
@@ -1823,9 +1823,9 @@ different:
 
 | | what it does |
 | --- | --- |
-| `apex agent run --host <device>` | forwards the WHOLE invocation to that device's own `apex agent run` |
-| `apex agent list --host <device>` | the sessions over there, not here |
-| `apex agent attach --host <device>` | a view onto a session that keeps running there |
+| `rime agent run --host <device>` | forwards the WHOLE invocation to that device's own `rime agent run` |
+| `rime agent list --host <device>` | the sessions over there, not here |
+| `rime agent attach --host <device>` | a view onto a session that keeps running there |
 
 The run form forwards and does not reimplement. The remote applies its own
 sandbox policy, its own default agent and its own checkpointing, because the
@@ -1842,49 +1842,49 @@ despite uncommitted changes here; they are NOT sent, because the remote works
 from its own checkout.
 
 The id an attach takes is the REMOTE's, which is why the list form exists.
-`apex task resume` passes `host: None` on purpose: a resume attaches to a
+`rime task resume` passes `host: None` on purpose: a resume attaches to a
 session on this machine, and continuing one elsewhere stays explicit.
 
-Devices come from `apex host` (§20's trusted devices), which owns the ssh argv,
+Devices come from `rime host` (§20's trusted devices), which owns the ssh argv,
 including the `--` before the destination and the per-argument quoting.
-`tests/test-apex-dispatch.sh` covers these forms.
+`tests/test-rime-dispatch.sh` covers these forms.
 
 ---
 
 ## Terminal layouts
 
-`apex project layout open` builds a project's terminal work in tmux or zellij:
+`rime project layout open` builds a project's terminal work in tmux or zellij:
 an editor beside an agent beside a terminal, or several agents side by side.
 
 ```
-apex project layout templates              # dev, review, agents
-apex project layout open                   # the one this project last used
-apex project layout open review
-apex project layout open agents --agents 3
-apex project layout open --mux zellij
-apex project layout open --dry-run         # print the panes, open nothing
+rime project layout templates              # dev, review, agents
+rime project layout open                   # the one this project last used
+rime project layout open review
+rime project layout open agents --agents 3
+rime project layout open --mux zellij
+rime project layout open --dry-run         # print the panes, open nothing
 ```
 
 | template | arrangement | panes |
 |---|---|---|
 | `dev` | one large pane left, the rest stacked right | editor, agent, terminal |
-| `review` | the same | editor, agent, `apex agent diff` |
+| `review` | the same | editor, agent, `rime agent diff` |
 | `agents` | tiled | `--agents N` agent panes, up to 8 |
 
 The editor is `$VISUAL`, then `$EDITOR`, then the first of neovim, vim, helix
 or nano that is installed. A `$VISUAL` that is not installed falls through
 and is not trusted, because a pane whose command does not exist opens and dies.
-The multiplexer is `--mux`, then `$APEX_MUX`, then tmux, then zellij; one that
+The multiplexer is `--mux`, then `$RIME_MUX`, then tmux, then zellij; one that
 is named but not installed is refused, not quietly substituted.
 
 ### The multiplexer is a viewport, not a host
 
 Both the daemon and a multiplexer own PTYs, so composing them has two possible
-shapes. APEX picks the one where **a multiplexer pane runs `apex agent
+shapes. Rime picks the one where **a multiplexer pane runs `rime agent
 attach`**. The reasoning is worth stating, because the other way round looks
 symmetrical and is not:
 
-- The daemon's PTY is the durable one. `apex agent attach` is only ever a
+- The daemon's PTY is the durable one. `rime agent attach` is only ever a
   proxy, so killing the multiplexer, closing the terminal or logging out leaves
   every agent running, and reopening the template finds them again.
 - Running a multiplexer *inside* an agent session would put the multiplexer
@@ -1895,19 +1895,19 @@ symmetrical and is not:
   multiplexer a single point of failure for agent state.
 
 Two consequences follow, and they are why this composes with no special cases.
-Resize already works: `apex agent attach` turns SIGWINCH into a `Resize`
+Resize already works: `rime agent attach` turns SIGWINCH into a `Resize`
 control frame, so reattaching a tmux client at a different size reaches the
 daemon's PTY through `TIOCSWINSZ`. The detach key is `ctrl-]`, which collides
 with neither tmux's `C-b` nor zellij's `Ctrl-p`, so you can leave an agent pane
 without leaving the multiplexer.
 
-Detaching does end that pane's `apex agent attach`. The layout builds the pane
+Detaching does end that pane's `rime agent attach`. The layout builds the pane
 with `remain-on-exit`, so the shape does not reflow around the hole: the pane
 stays, dead. In tmux, `C-b : respawn-pane -k` brings the agent back; zellij
 shows its own re-run prompt in the pane. Reopening the template attaches to the
 multiplexer session as it is and does not revive a dead pane, which is why the
 key is worth knowing. The agent itself was never affected: it is still running
-in the daemon, and `apex agent list` still shows it.
+in the daemon, and `rime agent list` still shows it.
 
 ### Attach, and restore
 
@@ -1918,7 +1918,7 @@ halves of "attach and restore cleanly": after a reboot there are no sessions
 and the template starts fresh ones, and while agents are working it puts you
 back with those agents instead of starting duplicates beside them.
 
-The session is named `apex-<project>-<digest>`. The first half is the
+The session is named `rime-<project>-<digest>`. The first half is the
 project's directory name, which is what a status bar shows. The second is six
 hex of its path, because `~/work/api` and `~/oss/api` are two projects, and
 sharing a session name would attach one to the other's panes without saying
@@ -1926,15 +1926,15 @@ so.
 
 ### One layout record, not two
 
-This is the same `apex project layout` that remembers a project's desktop
+This is the same `rime project layout` that remembers a project's desktop
 windows, not a second mechanism beside it. `save` captures the windows somebody
 has open; `open` records the template it used. Both live in the one record, so
-`apex project layout show` reports both halves and `forget` discards both.
+`rime project layout show` reports both halves and `forget` discards both.
 
-`/usr/libexec/apex-mux` drives tmux and zellij, the same adapter shape as
-`apex-project-windows` for compositors. The multiplexer is the only
+`/usr/libexec/rime-mux` drives tmux and zellij, the same adapter shape as
+`rime-project-windows` for compositors. The multiplexer is the only
 per-backend part, so the CLI carries no tmux or zellij knowledge and the tests
-have one program to fake. `apex-mux kdl <arrangement> <plan>` prints the zellij
+have one program to fake. `rime-mux kdl <arrangement> <plan>` prints the zellij
 layout that would be sent; the image build hands that straight back to zellij's
 own parser.
 
@@ -1954,10 +1954,10 @@ degraded experience.
 
 | shell | file | installed to |
 |---|---|---|
-| bash, zsh | `files/desktop/shell/agent.sh` | `/usr/share/apex/shell/`, sourced from `/etc/bashrc` and `/etc/zshrc` |
-| fish | `files/desktop/fish/apex-agent.fish` | `/usr/share/fish/vendor_conf.d/` |
+| bash, zsh | `files/desktop/shell/agent.sh` | `/usr/share/rime/shell/`, sourced from `/etc/bashrc` and `/etc/zshrc` |
+| fish | `files/desktop/fish/rime-agent.fish` | `/usr/share/fish/vendor_conf.d/` |
 | fish (completion) | `files/desktop/fish/completions/*.fish` | `/usr/share/fish/vendor_completions.d/` |
-| nushell | `files/desktop/nushell/apex.nu` | `/usr/share/nushell/vendor/autoload/` |
+| nushell | `files/desktop/nushell/rime.nu` | `/usr/share/nushell/vendor/autoload/` |
 
 Each of those directories is the shell's own, asked of the shell and not
 assumed: `fish -c 'echo $__fish_vendor_confdirs'` and
@@ -1973,7 +1973,7 @@ installed, and refuses to report success if every section skipped.
 
 ### What differs, and why
 
-- **The opt-out.** `APEX_NO_AGENT_ALIASES` works in bash, zsh and fish. It
+- **The opt-out.** `RIME_NO_AGENT_ALIASES` works in bash, zsh and fish. It
   cannot work in nushell: `def`, `alias` and `extern` are parse-time
   declarations, and putting one inside an `if` defines nothing at all instead
   of defining it under a condition. nushell's own opt-out is `hide`, in
@@ -1992,26 +1992,26 @@ installed, and refuses to report success if every section skipped.
   ```fish
   # ~/.config/fish/config.fish
   function fish_prompt
-      apex_agent_prompt
+      rime_agent_prompt
       # …your prompt…
   end
   ```
 
   ```nu
   # ~/.config/nushell/config.nu
-  $env.PROMPT_COMMAND = {|| $"(apex-agent-prompt)(pwd)" }
+  $env.PROMPT_COMMAND = {|| $"(rime-agent-prompt)(pwd)" }
   ```
 
 - **nushell completion is `extern` declarations**, which are signatures for an
   external command, not wrappers. An unknown flag or an extra argument goes
-  straight through to `apex`, so a signature that falls behind the CLI costs a
+  straight through to `rime`, so a signature that falls behind the CLI costs a
   completion and never refuses a command that works. A test asserts that
   property: an `extern` that rejected valid arguments would make a working
   command look unsupported, which is worse than shipping no completion.
 
 - **nushell reads its autoload directory in the REPL only.** `nu -c '…'` and
   `nu script.nu` do not see it, so a script that wants `a` has to
-  `source /usr/share/nushell/vendor/autoload/apex.nu` itself.
+  `source /usr/share/nushell/vendor/autoload/rime.nu` itself.
 
 ---
 
@@ -2020,12 +2020,12 @@ installed, and refuses to report success if every section skipped.
 None of this is compulsory:
 
 - Run `claude`, `opencode`, `codex` or `gemini` directly. Nothing changes.
-- `APEX_NO_AGENT_ALIASES=1` drops the shortcuts and keeps completion.
-- `apex agent default` picks any adapter; `--agent generic` runs any binary.
+- `RIME_NO_AGENT_ALIASES=1` drops the shortcuts and keeps completion.
+- `rime agent default` picks any adapter; `--agent generic` runs any binary.
 - `--sandbox unrestricted` turns confinement off.
-- The daemon is opt-in on its own, but it follows APEX Remote through
-  `Wants=`, so `systemctl --user disable apex-agentd` alone does not keep it
-  off. Turning APEX Remote off (`docs/remote.md`) is what keeps the runtime
+- The daemon is opt-in on its own, but it follows Rime Remote through
+  `Wants=`, so `systemctl --user disable rime-agentd` alone does not keep it
+  off. Turning Rime Remote off (`docs/remote.md`) is what keeps the runtime
   off.
 
 ---
@@ -2045,11 +2045,11 @@ The roadmap asks for these, and this build does not do them:
   runs with nobody present. That would need a privileged executor reachable
   from an agent's request, and a new root surface needs a design of its own.
   See below.
-- **Drag-and-drop into an agent** (§3's clipboard section). `apex agent send`
+- **Drag-and-drop into an agent** (§3's clipboard section). `rime agent send`
   hands a session a file or the newest screenshot (*Handing a file to a
   session*); nothing takes a dropped file.
 - **Test status and merge conflicts per worktree in the Agent Center** (§7).
-  `apex agent worktrees` reports both on the command line (*What each worktree
+  `rime agent worktrees` reports both on the command line (*What each worktree
   is up to*); the Agent Center shows the worktree a session is on and not
   whether its tests pass.
 - **Enforcement for one permission value.** `--secrets export` parses and then
@@ -2059,10 +2059,10 @@ The roadmap asks for these, and this build does not do them:
   now live.
 - **A session grant pre-decides, it does not pre-execute.** The verbs a
   `--system-access session` grant covers arrive already decided, and
-  `apex request approve` still runs them under a human's own root. There is no
+  `rime request approve` still runs them under a human's own root. There is no
   unattended root executor, and building one would be a new boundary, not a
   smaller version of this one.
 - **A per-project network allowlist.** The list is the runtime's, one per user.
-  A session can narrow it (`apex agent run --allow`) and never widen it, so a
+  A session can narrow it (`rime agent run --allow`) and never widen it, so a
   project that needs a destination no other project should reach has to be
   given it globally. §36's per-project identity is where that belongs.

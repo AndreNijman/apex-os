@@ -1,0 +1,8 @@
+[Plymouth Theme]
+Name=Rime OS Chartreuse
+Description=Rime OS boot splash (chartreuse spark)
+ModuleName=script
+
+[script]
+ImageDir=/usr/share/plymouth/themes/rime-os-chartreuse
+ScriptFile=/usr/share/plymouth/themes/rime-os-chartreuse/rime-os.script

@@ -1,6 +1,6 @@
 #!/usr/bin/env bash
 # ─────────────────────────────────────────────────────────────────────────────
-#  The APEX chaos harness — verdicts, diagnostics, and the contract a case
+#  The Rime chaos harness — verdicts, diagnostics, and the contract a case
 #  must satisfy before the harness will believe anything it says.
 #
 #  Roadmap P1-062 criterion 3: "failures produce reproducible diagnostics and
@@ -27,7 +27,7 @@
 #      could-not-inject the fault was not proven present, or the subject could
 #                       not be run at all. Never a pass. Never a failure.
 #
-#  This mirrors `apexd/apex/src/verify.rs`'s `Verdict`, which is the house
+#  This mirrors `rimed/rime/src/verify.rs`'s `Verdict`, which is the house
 #  pattern: `Verified` / `Failed` / `CouldNotRun`, and its rule that "any of
 #  them failing to *run* is not a failure, and is not a pass either". The one
 #  arm dropped here is `Absent`, which has no meaning for an injected fault.
@@ -57,7 +57,7 @@
 #                       `Verdict::to_json`, so one jq expression reads both.
 #      seed             the integer every random choice in the case derived from
 #      env.txt          kernel, uid, userns/netns/tmpfs/kvm availability,
-#                       `apex --version`, the git revision of the tree
+#                       `rime --version`, the git revision of the tree
 #      inject.out/err   the injector's streams
 #      observe.out/err  the subject's streams, which are the diagnostics a
 #                       human reads when a case goes red
@@ -74,11 +74,11 @@
 #  ═══ WHAT THIS HARNESS MAY NOT DO ═══
 #
 #  AGENTS.md's boot-path rule applies to the harness itself, and
-#  tests/test-apex-chaos.sh asserts it rather than trusting this comment: no
+#  tests/test-rime-chaos.sh asserts it rather than trusting this comment: no
 #  file under tests/chaos/ may name `bootctl`, `rpm-ostree`, `ostree admin`,
-#  `efibootmgr`, or run `apex update`, outside a comment. Every case drives the
-#  subject through a FIXTURE ROOT — `APEX_RECOVER_ROOT`, `APEX_TRUST_ROOT` and
-#  friends — and the driver refuses a case that invokes `apex` without one.
+#  `efibootmgr`, or run `rime update`, outside a comment. Every case drives the
+#  subject through a FIXTURE ROOT — `RIME_RECOVER_ROOT`, `RIME_TRUST_ROOT` and
+#  friends — and the driver refuses a case that invokes `rime` without one.
 # ─────────────────────────────────────────────────────────────────────────────
 
 # Callers set -euo pipefail themselves; this file must be safe to source under
@@ -143,22 +143,22 @@ chaos_have_podman() { command -v podman >/dev/null 2>&1 && podman info >/dev/nul
 # Secure-Boot-enforcing OVMF here. Probed by asking podman whether the image
 # EXISTS, not by asking whether podman exists: an absent lab is the normal
 # state of a fresh checkout, and it must read as could-not-inject rather than
-# as anything about APEX.
-CHAOS_BOOTLAB_IMAGE="${CHAOS_BOOTLAB_IMAGE:-localhost/apex-bootlab}"
+# as anything about Rime.
+CHAOS_BOOTLAB_IMAGE="${CHAOS_BOOTLAB_IMAGE:-localhost/rime-bootlab}"
 chaos_have_bootlab() {
     chaos_have_podman || return 1
     podman image exists "$CHAOS_BOOTLAB_IMAGE" >/dev/null 2>&1
 }
 
-chaos_have_apex_bin() { [[ -x "${CHAOS_APEX_REAL:-}" ]]; }
+chaos_have_rime_bin() { [[ -x "${CHAOS_RIME_REAL:-}" ]]; }
 
 # chaos_prereq NAME — 0 if satisfied, 1 otherwise, and it prints the reason a
 # case will carry into its could-not-inject verdict.
 chaos_prereq() {
     case "$1" in
-        apex-binary)
-            chaos_have_apex_bin && return 0
-            echo "the apex binary is not built (looked at ${CHAOS_APEX_REAL:-<unset>})"; return 1 ;;
+        rime-binary)
+            chaos_have_rime_bin && return 0
+            echo "the rime binary is not built (looked at ${CHAOS_RIME_REAL:-<unset>})"; return 1 ;;
         userns)
             chaos_have_userns && return 0
             echo "this kernel refuses an unprivileged user namespace"; return 1 ;;
@@ -201,20 +201,20 @@ chaos_write_env() {
         printf 'kvm: %s\n'      "$(chaos_have_kvm && echo yes || echo no)"
         printf 'podman: %s\n'   "$(chaos_have_podman && echo yes || echo no)"
         printf 'bootlab: %s\n'  "$(chaos_have_bootlab && echo yes || echo no)"
-        printf 'apex-bin: %s\n' "${CHAOS_APEX_REAL:-<unset>}"
-        if chaos_have_apex_bin; then
-            printf 'apex-version: %s\n' "$("$CHAOS_APEX_REAL" --version 2>&1 | head -1)"
+        printf 'rime-bin: %s\n' "${CHAOS_RIME_REAL:-<unset>}"
+        if chaos_have_rime_bin; then
+            printf 'rime-version: %s\n' "$("$CHAOS_RIME_REAL" --version 2>&1 | head -1)"
             # The binary's own digest, not just the tree's revision, and it is
             # here because of a real half-hour: a mutation was reverted in the
             # source, the tree came back clean, `cargo build` was NOT re-run,
             # and a whole suite ran against the mutant binary at a spotless
             # HEAD. `revision` said everything was fine. A replay would have
             # reported "the verdict did not reproduce" and offered no reason.
-            printf 'apex-sha256: %s\n' \
-                "$(sha256sum < "$CHAOS_APEX_REAL" 2>/dev/null | cut -d' ' -f1)"
+            printf 'rime-sha256: %s\n' \
+                "$(sha256sum < "$CHAOS_RIME_REAL" 2>/dev/null | cut -d' ' -f1)"
         else
-            printf 'apex-version: <binary absent>\n'
-            printf 'apex-sha256: <binary absent>\n'
+            printf 'rime-version: <binary absent>\n'
+            printf 'rime-sha256: <binary absent>\n'
         fi
     } > "$out"
 }
@@ -347,7 +347,7 @@ expect_differs_from_baseline() {
 # ── running the subject ─────────────────────────────────────────────────────
 #
 # A case that forgot to redirect the subject at a fixture tree would run
-# `apex` against the developer's live machine. That is not a test failure, it
+# `rime` against the developer's live machine. That is not a test failure, it
 # is a machine-state accident.
 #
 # The first version of this file enforced that with a bash helper every case
@@ -357,8 +357,8 @@ expect_differs_from_baseline() {
 # is "assertions that cannot fail" would be embarrassing.
 #
 # So the enforcement is now in the only place a case cannot route around:
-# `$APEX_BIN` is not the binary. `chaos_write_guard` generates a wrapper, the
-# driver exports THAT as `APEX_BIN`, and the wrapper execs the real binary only
+# `$RIME_BIN` is not the binary. `chaos_write_guard` generates a wrapper, the
+# driver exports THAT as `RIME_BIN`, and the wrapper execs the real binary only
 # if one of the fixture-root variables below is set in its own environment.
 # Otherwise it appends the phase and the argv to a marker file and exits 126,
 # and the driver turns a non-empty marker into a harness failure — exit 2, not
@@ -367,9 +367,9 @@ expect_differs_from_baseline() {
 # It holds through `unshare` and through `env`, because it is the executable
 # that checks rather than the caller.
 CHAOS_FIXTURE_VARS=(
-    APEX_TRUST_ROOT APEX_RECOVER_ROOT APEX_QUALIFY_ROOT APEX_DISPOSABLE_ROOT
-    APEX_STORAGE_ROOT APEX_FIRMWARE_ROOT APEX_HOST_ROOT APEX_BOOT_ROOT
-    APEX_SYS_ROOT APEX_DEVICES_ROOT
+    RIME_TRUST_ROOT RIME_RECOVER_ROOT RIME_QUALIFY_ROOT RIME_DISPOSABLE_ROOT
+    RIME_STORAGE_ROOT RIME_FIRMWARE_ROOT RIME_HOST_ROOT RIME_BOOT_ROOT
+    RIME_SYS_ROOT RIME_DEVICES_ROOT
 )
 
 # chaos_write_guard WRAPPER REAL_BINARY MARKER
@@ -386,7 +386,7 @@ chaos_write_guard() {
         printf '    if [ -n "${!v-}" ]; then exec %q "$@"; fi\n' "$real"
         printf 'done\n'
         printf 'printf "%%s\\t%%s\\n" "${CHAOS_PHASE:-?}" "$*" >> %q\n' "$marker"
-        printf 'printf "apex-guard: refusing to run the subject with no fixture root set\\n" >&2\n'
+        printf 'printf "rime-guard: refusing to run the subject with no fixture root set\\n" >&2\n'
         printf 'exit 126\n'
     } > "$wrapper"
     chmod +x "$wrapper"
@@ -437,8 +437,8 @@ chaos_write_verdict() {
 
 # ── fixture machines ────────────────────────────────────────────────────────
 #
-# Whole machines presented as trees, the same shape tests/test-apex-channel.sh
-# and tests/test-apex-recover.sh already use. They are here rather than copied
+# Whole machines presented as trees, the same shape tests/test-rime-channel.sh
+# and tests/test-rime-recover.sh already use. They are here rather than copied
 # into each case because a case that builds its own fixture is a case that can
 # quietly build one the subject does not recognise, and then "the subject said
 # nothing" means "the subject had nothing to say".
@@ -450,13 +450,13 @@ CHAOS_CSUM=f3f505fc39fb268c59f4458365c96b764a7bd7d30f2f51e98bb6a009666b7852
 CHAOS_BOOTCSUM=1d98b51dd76621b656c50e4f22dc7e5eade9b0f869443a3efa90eee08eb9373e
 CHAOS_DIGEST=sha256:1111111111111111111111111111111111111111111111111111111111111111
 
-# chaos_mk_trust_root ROOT [TAG] — what `apex trust` and `apex channel` read.
+# chaos_mk_trust_root ROOT [TAG] — what `rime trust` and `rime channel` read.
 chaos_mk_trust_root() {
-    local root="$1" tag="${2:-ghcr.io/andrenijman/apex-os:edge}"
+    local root="$1" tag="${2:-ghcr.io/andrenijman/rime-os:edge}"
     mkdir -p "$root/proc" "$root/etc/containers" \
              "$root/ostree/boot.0/default/$CHAOS_BOOTCSUM" \
              "$root/ostree/deploy/default/deploy/$CHAOS_CSUM.0" \
-             "$root/var/lib/apex/channel"
+             "$root/var/lib/rime/channel"
     printf 'root=UUID=x rw ostree=/ostree/boot.0/default/%s/0\n' "$CHAOS_BOOTCSUM" \
         > "$root/proc/cmdline"
     ln -sfn "../../../deploy/default/deploy/$CHAOS_CSUM.0" \
@@ -469,33 +469,33 @@ chaos_mk_trust_root() {
         "$CHAOS_DIGEST" > "$root/rpm-ostree-status.json"
 }
 
-# chaos_write_update_record ROOT FROM_DIGEST — the note `apex update` leaves.
+# chaos_write_update_record ROOT FROM_DIGEST — the note `rime update` leaves.
 #
 # Written the way `channel::record_update` writes it, because the fault this
 # harness injects into it is a torn version of exactly these bytes.
 chaos_write_update_record() {
     local root="$1" from="$2"
-    mkdir -p "$root/var/lib/apex/channel"
+    mkdir -p "$root/var/lib/rime/channel"
     printf '{\n  "schema": 1,\n  "from_digest": "%s",\n  "tag": "edge",\n  "at": 1788700000\n}\n' \
-        "$from" > "$root/var/lib/apex/channel/last-update.json"
+        "$from" > "$root/var/lib/rime/channel/last-update.json"
 }
 
-# chaos_mk_recover_root ROOT — what `apex recover status` reads, healthy.
+# chaos_mk_recover_root ROOT — what `rime recover status` reads, healthy.
 chaos_mk_recover_root() {
     local root="$1"
     local csum=8f14e45fceea167a5a36dedd4bea2543f14e45fceea167a5a36dedd4bea25431
-    mkdir -p "$root/proc/net" "$root/run" "$root/etc" "$root/usr/share/apex-shell" \
+    mkdir -p "$root/proc/net" "$root/run" "$root/etc" "$root/usr/share/rime-shell" \
              "$root/sys/firmware/efi/efivars" "$root/sys/bus/pci/devices/0000:03:00.0" \
-             "$root/ostree/deploy/apex/deploy/${csum}.0" \
-             "$root/ostree/deploy/apex/deploy/aaaa.0" \
-             "$root/usr/lib/systemd/system" "$root/usr/libexec" "$root/var/lib/apex/pkg"
-    printf 'BOOT_IMAGE=/vmlinuz root=UUID=x ostree=/ostree/boot.1/apex/%s/0 rw quiet\n' \
+             "$root/ostree/deploy/rime/deploy/${csum}.0" \
+             "$root/ostree/deploy/rime/deploy/aaaa.0" \
+             "$root/usr/lib/systemd/system" "$root/usr/libexec" "$root/var/lib/rime/pkg"
+    printf 'BOOT_IMAGE=/vmlinuz root=UUID=x ostree=/ostree/boot.1/rime/%s/0 rw quiet\n' \
         "$csum" > "$root/proc/cmdline"
-    printf 'NAME="APEX-OS"\nVERSION_ID=43\nVARIANT_ID=gaming\n' > "$root/etc/os-release"
-    printf 'shell\n' > "$root/usr/share/apex-shell/shell.qml"
+    printf 'NAME="Rime OS"\nVERSION_ID=43\nVARIANT_ID=gaming\n' > "$root/etc/os-release"
+    printf 'shell\n' > "$root/usr/share/rime-shell/shell.qml"
     : > "$root/usr/lib/systemd/system/rescue.target"
-    printf '#!/bin/sh\nexit 0\n' > "$root/usr/libexec/apex-shell-firstrun"
-    chmod +x "$root/usr/libexec/apex-shell-firstrun"
+    printf '#!/bin/sh\nexit 0\n' > "$root/usr/libexec/rime-shell-firstrun"
+    chmod +x "$root/usr/libexec/rime-shell-firstrun"
     printf '0x030000\n' > "$root/sys/bus/pci/devices/0000:03:00.0/class"
     printf '0x1002\n'   > "$root/sys/bus/pci/devices/0000:03:00.0/vendor"
     printf '0x1636\n'   > "$root/sys/bus/pci/devices/0000:03:00.0/device"

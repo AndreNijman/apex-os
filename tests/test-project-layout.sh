@@ -1,14 +1,14 @@
 #!/usr/bin/env bash
 # ─────────────────────────────────────────────────────────────────────────────
-#  End-to-end assertions for `apex project layout` (roadmap §6).
+#  End-to-end assertions for `rime project layout` (roadmap §6).
 #
-#  The unit tests in apex-agent-core cover the capture rule, the descendant cwd
+#  The unit tests in rime-agent-core cover the capture rule, the descendant cwd
 #  walk, the terminal-flag table and the store. What they cannot cover is the
 #  command: that `save` refuses to overwrite a good layout with an empty one,
 #  that `restore` never involves a shell, and that a window belonging to a
 #  DIFFERENT project is not captured.
 #
-#  The compositor adapter is FAKED, through APEX_WINDOW_ADAPTER. That is the
+#  The compositor adapter is FAKED, through RIME_WINDOW_ADAPTER. That is the
 #  whole reason the adapter is a separate program: the window list is the only
 #  compositor-specific input, so replacing it makes every assertion below
 #  deterministic and runnable with no compositor at all.
@@ -60,16 +60,16 @@ for tool in cargo git python3 pgrep; do
 done
 
 section "the binary"
-if ! cargo build --manifest-path "${ROOT}/apexd/Cargo.toml" --bin apex >/dev/null 2>&1; then
-    bad "apex builds"
+if ! cargo build --manifest-path "${ROOT}/rimed/Cargo.toml" --bin rime >/dev/null 2>&1; then
+    bad "rime builds"
     printf '\nproject-layout: %d passed, %d failed\n' "$pass" "$fail"
     exit 1
 fi
-ok "apex builds"
+ok "rime builds"
 # $CARGO_TARGET_DIR, when set, moves the whole target directory — so the
 # hardcoded path was a "No such file or directory" for every assertion, and the
 # suite reported 19 failures that had nothing to do with layouts.
-APEX="${CARGO_TARGET_DIR:-${ROOT}/apexd/target}/debug/apex"
+Rime="${CARGO_TARGET_DIR:-${ROOT}/rimed/target}/debug/rime"
 
 # Isolated state, so the developer's own saved layouts are never touched.
 export XDG_STATE_HOME="${WORK}/state"
@@ -98,7 +98,7 @@ case "\$1" in
 esac
 EOF
 chmod +x "$FAKE"
-export APEX_WINDOW_ADAPTER="$FAKE"
+export RIME_WINDOW_ADAPTER="$FAKE"
 
 # Long-lived processes whose cwd is each project. `sh -c 'cd X; sleep'` is not
 # enough: the capture reads /proc/<pid>/cwd, so the process must genuinely BE
@@ -113,7 +113,7 @@ windows() { printf '%s' "$1" > "${WORK}/windows.json"; }
 # ── nothing to save ──────────────────────────────────────────────────────────
 section "an empty capture does not destroy a good layout"
 windows '[]'
-out="$(cd "$PROJ" && "$APEX" project layout save 2>&1)"
+out="$(cd "$PROJ" && "$Rime" project layout save 2>&1)"
 printf '%s' "$out" | grep -q "nothing saved" \
     && ok "an empty window list saves nothing and says so" \
     || { bad "an empty window list saves nothing and says so"; printf '      %s\n' "$out"; }
@@ -128,14 +128,14 @@ windows "$(cat <<EOF
 ]
 EOF
 )"
-out="$(cd "$PROJ" && "$APEX" project layout save 2>&1)"
+out="$(cd "$PROJ" && "$Rime" project layout save 2>&1)"
 printf '%s' "$out" | grep -q "saved 1 window" \
     && ok "exactly one window is captured" \
     || { bad "exactly one window is captured"; printf '      %s\n' "$out"; }
 printf '%s' "$out" | grep -q "workspace(s) 2" \
     && ok "the workspace is recorded" || bad "the workspace is recorded"
 
-json="$(cd "$PROJ" && "$APEX" project layout show --json 2>/dev/null)"
+json="$(cd "$PROJ" && "$Rime" project layout show --json 2>/dev/null)"
 printf '%s' "$json" | python3 -c "
 import json,sys
 l = json.load(sys.stdin)
@@ -155,10 +155,10 @@ printf '%s' "$json" | grep -q "0xdeadbeef" \
     || ok "no compositor window handle is stored"
 
 section "the other project's layout is its own"
-out="$(cd "$OTHER" && "$APEX" project layout save 2>&1)"
+out="$(cd "$OTHER" && "$Rime" project layout save 2>&1)"
 printf '%s' "$out" | grep -q "saved 1 window" \
     && ok "the other project captures its own window" || bad "the other project captures its own window"
-mine="$(cd "$PROJ" && "$APEX" project layout show --json 2>/dev/null | python3 -c 'import json,sys; print(json.load(sys.stdin)["entries"][0]["cwd"])')"
+mine="$(cd "$PROJ" && "$Rime" project layout show --json 2>/dev/null | python3 -c 'import json,sys; print(json.load(sys.stdin)["entries"][0]["cwd"])')"
 [ "$mine" = "$PROJ" ] \
     && ok "saving one project's layout did not overwrite the other's" \
     || bad "saving one project's layout did not overwrite the other's (got ${mine})"
@@ -169,7 +169,7 @@ section "restore rebuilds a terminal with its directory"
 # classified as one from its app_id, which is exactly the case that matters:
 # a terminal's stored argv does NOT carry its working directory, so replaying
 # it verbatim opens a terminal in the wrong place.
-out="$(cd "$PROJ" && TERMINAL=foot "$APEX" project layout restore --dry-run 2>&1)"
+out="$(cd "$PROJ" && TERMINAL=foot "$Rime" project layout restore --dry-run 2>&1)"
 printf '%s\n' "$out" | sed 's/^/      /'
 
 # Three cases, all real, and the third is the one only CI reaches — a runner
@@ -221,7 +221,7 @@ count_in_project() {
     printf '%s' "$n"
 }
 before="$(count_in_project)"
-(cd "$PROJ" && "$APEX" project layout restore --dry-run >/dev/null 2>&1)
+(cd "$PROJ" && "$Rime" project layout restore --dry-run >/dev/null 2>&1)
 sleep 0.5
 after="$(count_in_project)"
 # The fixture process itself lives in the project, so the count is never zero —
@@ -240,8 +240,8 @@ windows "$(cat <<EOF
 [ { "handle": null, "pid": ${MINE_PID}, "app_id": "firefox", "title": "app", "workspace": "3", "floating": false } ]
 EOF
 )"
-(cd "$PROJ" && "$APEX" project layout save >/dev/null 2>&1)
-out="$(cd "$PROJ" && "$APEX" project layout restore --dry-run 2>&1)"
+(cd "$PROJ" && "$Rime" project layout save >/dev/null 2>&1)
+out="$(cd "$PROJ" && "$Rime" project layout restore --dry-run 2>&1)"
 printf '%s' "$out" | grep -q "would run (ws 3): sleep 600" \
     && ok "an application keeps its own argv" \
     || { bad "an application keeps its own argv"; printf '      %s\n' "$out"; }
@@ -272,8 +272,8 @@ windows "$(cat <<EOF
 ]
 EOF
 )"
-(cd "$PROJ" && "$APEX" project layout save >/dev/null 2>&1)
-out="$(cd "$PROJ" && "$APEX" project switch 2>&1)"
+(cd "$PROJ" && "$Rime" project layout save >/dev/null 2>&1)
+out="$(cd "$PROJ" && "$Rime" project switch 2>&1)"
 printf '%s' "$out" | grep -q "workspace 7" \
     && ok "switch picks the workspace with the most windows" \
     || { bad "switch picks the workspace with the most windows"; printf '      %s\n' "$out"; }
@@ -282,18 +282,18 @@ printf '%s' "$out" | grep -q "workspace 7" \
     || bad "the compositor was actually asked to switch"
 
 # By name, from outside the project — the point of switching BY PROJECT.
-out="$(cd "${WORK}" && "$APEX" project switch mine 2>&1)"
+out="$(cd "${WORK}" && "$Rime" project switch mine 2>&1)"
 printf '%s' "$out" | grep -q "workspace 7" \
     && ok "a project can be switched to by name from anywhere" \
     || { bad "a project can be switched to by name from anywhere"; printf '      %s\n' "$out"; }
 
-out="$(cd "${WORK}" && "$APEX" project switch no-such-project 2>&1)"
+out="$(cd "${WORK}" && "$Rime" project switch no-such-project 2>&1)"
 printf '%s' "$out" | grep -q "no known project" \
     && ok "an unknown project name is refused" || bad "an unknown project name is refused"
 
 # No layout means no recorded workspace, and that is said plainly.
-(cd "$OTHER" && "$APEX" project layout forget >/dev/null 2>&1)
-out="$(cd "$OTHER" && "$APEX" project switch 2>&1)"
+(cd "$OTHER" && "$Rime" project layout forget >/dev/null 2>&1)
+out="$(cd "$OTHER" && "$Rime" project switch 2>&1)"
 printf '%s' "$out" | grep -q "no layout saved" \
     && ok "switching without a layout explains what is missing" \
     || { bad "switching without a layout explains what is missing"; printf '      %s\n' "$out"; }
@@ -304,21 +304,21 @@ section "forget"
 # when grep matched — and every assertion below is about a command that
 # correctly exits non-zero, so piping made two of them fail for a reason that
 # had nothing to do with the behaviour being tested.
-(cd "$PROJ" && "$APEX" project layout forget >/dev/null 2>&1)
-out="$(cd "$PROJ" && "$APEX" project layout show 2>&1)"
+(cd "$PROJ" && "$Rime" project layout forget >/dev/null 2>&1)
+out="$(cd "$PROJ" && "$Rime" project layout show 2>&1)"
 printf '%s' "$out" | grep -q "no layout saved" \
     && ok "a forgotten layout is gone" || bad "a forgotten layout is gone"
 
 # NOT --dry-run: with no layout there is nothing to start, and this asserts
 # that the real command says so rather than doing something odd.
-out="$(cd "$PROJ" && "$APEX" project layout restore 2>&1)"
+out="$(cd "$PROJ" && "$Rime" project layout restore 2>&1)"
 printf '%s' "$out" | grep -q "no layout saved" \
     && ok "restoring nothing says so instead of failing oddly" \
     || { bad "restoring nothing says so instead of failing oddly"; printf '      %s\n' "$out"; }
 
 section "outside a repository"
 mkdir -p "${WORK}/bare"
-out="$(cd "${WORK}/bare" && "$APEX" project layout save 2>&1)"
+out="$(cd "${WORK}/bare" && "$Rime" project layout save 2>&1)"
 printf '%s' "$out" | grep -q "not inside a git repository" \
     && ok "a directory that is not a project is refused clearly" \
     || { bad "a directory that is not a project is refused clearly"; printf '      %s\n' "$out"; }
@@ -327,7 +327,7 @@ section "an adapter that cannot enumerate"
 BROKEN="${WORK}/broken-adapter"
 printf '#!/bin/sh\necho "no window query for labwc" >&2\nexit 1\n' > "$BROKEN"
 chmod +x "$BROKEN"
-out="$(cd "$PROJ" && APEX_WINDOW_ADAPTER="$BROKEN" "$APEX" project layout save 2>&1)"
+out="$(cd "$PROJ" && RIME_WINDOW_ADAPTER="$BROKEN" "$Rime" project layout save 2>&1)"
 printf '%s' "$out" | grep -q "no window query" \
     && ok "a compositor with no window query is reported, not guessed around" \
     || { bad "a compositor with no window query is reported, not guessed around"; printf '      %s\n' "$out"; }

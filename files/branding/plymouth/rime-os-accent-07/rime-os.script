@@ -1,0 +1,375 @@
+# Rime OS boot splash -- "Focus"
+#
+# The spark comes into focus out of a soft glow of its own light, a halo blooms
+# behind it and settles, the wordmark fades in, and the halo breathes while the
+# machine boots. Shutdown and reboot show the settled state from the first frame.
+#
+# WHY IT IS BUILT LIKE THIS, because the "Convergence" animation it replaces
+# was choppy for reasons no amount of easing could fix, all measured in a real
+# plymouthd (x11 renderer, private Xvfb) with an LD_PRELOAD frame probe:
+#
+#   - it moved things fast: comet heads crossed up to 61 px per refresh, and
+#     plymouth truncates every sprite position to a whole pixel, has no vsync
+#     (the DRM renderer writes straight into the scanout buffer) and refreshed
+#     at its default 50 Hz, measured 48.5 Hz, on 60 Hz panels, so about one
+#     scanout in five repeated a frame. Fast motion shows every one of those.
+#   - it counted frames (t++), so its timeline was only as steady as the
+#     refresh, and every refresh re-scaled or re-rotated ~45 images
+#     (Image.Scale/Rotate), up to 10 ms of script time per frame on the L16.
+#   - its idle "breathing" re-scaled the spark every frame to whole-pixel
+#     sizes: measured, the settled spark stepped through 9 widths and its
+#     centre wobbled by half a pixel, during what should have been a hold.
+#   - the radius curve started its spiral with a velocity jump (0 to -26 px
+#     per refresh in one step), and the glow's opacity jumped 0.85 -> 1.0.
+#
+# So here: every image is scaled ONCE, below, before the first frame, and
+# nothing moves: the refresh only changes opacities (plymouth's opacity is
+# continuous; its positions and sizes are not). Every curve is a function of
+# real elapsed time, not a frame count, and starts and ends at rest.
+#
+# The background is plain black: no gradient, no vignette, nothing that can
+# flash against the firmware's black before or the LUKS prompt after. Equal
+# top and bottom colours also take plymouth's plain fill path, not its
+# dithered gradient, whose dither restarts in every redrawn rectangle.
+
+HI_R = 0.706; HI_G = 0.976; HI_B = 0.616;   # hue 105° (rime-os-accent-07)
+
+# Refresh at the panel's usual 60 Hz instead of plymouth's default 50. The
+# renderer cannot sync to vblank, so this only makes a repeated scanout rare;
+# the design keeps motion to fading light so a repeated frame cannot be seen.
+RATE = 60;
+Plymouth.SetRefreshRate(RATE);
+
+Window.SetBackgroundTopColor(0, 0, 0);
+Window.SetBackgroundBottomColor(0, 0, 0);
+
+mode = Plymouth.GetMode();
+# Only a boot plays the intro. "shutdown", "reboot", "updates" ... all show
+# the settled splash from the first frame, as the old theme did for shutdown
+# (it missed "reboot", which is a separate mode and played the intro).
+intro = 0;
+if (mode == "boot") { intro = 1; }
+
+# ── helpers ────────────────────────────────────────────────────────────────
+fun odd (v) {
+  return 2 * Math.Int(v / 2) + 1;
+}
+
+fun clamp01 (x) {
+  if (x < 0) return 0;
+  if (x > 1) return 1;
+  return x;
+}
+
+# smootherstep: 0 -> 1 with zero velocity AND acceleration at both ends
+fun smooth (x) {
+  local.u = clamp01(x);
+  return local.u * local.u * local.u * (local.u * (local.u * 6 - 15) + 10);
+}
+
+# e^-x for x >= 0 (the script library has no exp): (1 - x/1024)^1024
+fun expn (x) {
+  if (x <= 0) return 1;
+  if (x > 40) return 0;
+  local.y = 1 - x / 1024;
+  local.k = 0;
+  while (local.k < 10) { local.y = local.y * local.y; local.k++; }
+  return local.y;
+}
+
+# critically damped spring, 0 -> 1: starts at rest, never overshoots
+fun spring (t, wn) {
+  if (t <= 0) return 0;
+  local.x = wn * t;
+  return 1 - (1 + local.x) * expn(local.x);
+}
+
+# a smooth hump: 0 at rest, peak 1 at t = tp, back toward 0 after
+fun bump (t, tp) {
+  if (t <= 0) return 0;
+  local.u = t / tp;
+  return 7.3890561 * local.u * local.u * expn(2 * local.u);
+}
+
+# ── layout ─────────────────────────────────────────────────────────────────
+w = Window.GetWidth();
+h = Window.GetHeight();
+short = Math.Min(w, h);
+hd = 0;
+if (h > 1500) { hd = 1; }
+
+cx = Math.Int(w / 2);
+cy = Math.Int(h * 0.46);
+
+S = odd(short * 0.18);                 # the spark's box; the star fills 68% of its height
+if (S < 61) { S = 61; }
+B = odd(S * 1.25);                     # the blurred sparks are drawn on a 1.25x canvas
+HALO = odd(S * 2.3);
+
+# ── images, each scaled exactly once ──────────────────────────────────────
+if (S > 300) { spark_src = Image("spark-hd.png"); } else { spark_src = Image("spark.png"); }
+spark_img = spark_src.Scale(S, S);
+blur_img = Image("spark-blur.png").Scale(B, B);
+soft_img = Image("spark-soft.png").Scale(B, B);
+halo_img = Image("halo.png").Scale(HALO, HALO);
+
+# Fixed-size masters are drawn 1:1 on a 1200-line (hd: 2400-line) screen and
+# scaled once to the screen's height otherwise.
+fun fit (img, ref) {
+  local.k = h / ref;
+  local.nw = Math.Int(img.GetWidth() * local.k + 0.5);
+  local.nh = Math.Int(img.GetHeight() * local.k + 0.5);
+  if (local.nw == img.GetWidth() && local.nh == img.GetHeight()) return img;
+  if (local.nw < 1) local.nw = 1;
+  if (local.nh < 1) local.nh = 1;
+  return img.Scale(local.nw, local.nh);
+}
+if (hd) {
+  wm_img = fit(Image("wordmark-hd.png"), 2400);
+  bullet_img = fit(Image("bullet-hd.png"), 2400 * 1.33);
+  prompt_fallback = fit(Image("prompt-hd.png"), 2400);
+} else {
+  wm_img = fit(Image("wordmark.png"), 1200);
+  bullet_img = fit(Image("bullet.png"), 1200 * 1.33);
+  prompt_fallback = fit(Image("prompt.png"), 1200);
+}
+
+# ── sprites (z: halo < blurred sparks < spark < wordmark < prompt) ────────
+halo = Sprite(halo_img);
+halo.SetPosition(cx - (HALO - 1) / 2, cy - (HALO - 1) / 2, 1);
+halo.SetOpacity(0);
+
+blur = Sprite(blur_img);
+blur.SetPosition(cx - (B - 1) / 2, cy - (B - 1) / 2, 2);
+blur.SetOpacity(0);
+
+soft = Sprite(soft_img);
+soft.SetPosition(cx - (B - 1) / 2, cy - (B - 1) / 2, 3);
+soft.SetOpacity(0);
+
+spark = Sprite(spark_img);
+spark.SetPosition(cx - (S - 1) / 2, cy - (S - 1) / 2, 4);
+spark.SetOpacity(0);
+
+# the wordmark sits a fixed distance under the star's lowest point (84% down its box)
+star_bottom = cy - (S - 1) / 2 + Math.Int(S * 0.84);
+wm_y = star_bottom + Math.Int(h * 0.036);
+wordmark = Sprite(wm_img);
+wordmark.SetPosition(cx - Math.Int(wm_img.GetWidth() / 2), wm_y, 5);
+wordmark.SetOpacity(0);
+
+# ── password prompt (LUKS) ────────────────────────────────────────────────
+# The prompt takes the wordmark's place, the bullets sit under it and any
+# message (keyboard layout, "use your recovery key") under them. Nothing the
+# user types is ever drawn: display_password() is only told how many.
+prompt_sprite = Sprite();
+prompt_sprite.SetOpacity(0);
+prompt_text = "";
+prompt_ready = 0;
+BS = bullet_img.GetWidth();            # bullet size
+SP = Math.Int(BS * 1.9);               # bullet pitch
+MAXB = 40;                             # a longer passphrase keeps a full row
+bullets_y = wm_y + Math.Int(h * 0.045);
+msg_y = bullets_y + Math.Int(h * 0.05);
+bullets_n = 0;                         # how many the user has typed
+bullets_made = 0;                      # sprites created so far
+bullet_spr[0] = NULL;                  # declared here so they are global
+bullet_a[0] = 0;
+row_off = 0;                           # animated offset of bullet 0 from cx
+bullet_text = Sprite();                # only if bullet.png failed to load
+bullet_text.SetOpacity(0);
+
+message_sprite = Sprite();
+message_sprite.SetOpacity(0);
+message_text = "";
+
+# Prompt and message text grow with the screen (the label plugin's default is
+# 12 pt on every screen, which a 4K panel shows at half the size of a 1080p
+# one). label-freetype honours only the size in "Family Size".
+tsize = Math.Int(12 * h / 1200 + 0.5);
+if (tsize < 12) { tsize = 12; }
+if (tsize > 28) { tsize = 28; }
+text_font = "Sans " + tsize;
+
+pw_target = 0; pw_p = 0;               # 0 = splash, 1 = password prompt
+msg_target = 0; msg_p = 0;             # progress of each transition, 0..1
+
+# ── the clock ─────────────────────────────────────────────────────────────
+# Animation time advances by 1/RATE per refresh and is steered toward real
+# elapsed time, which plymouth only hands a script through the boot-progress
+# callback (30 times a second). So a slow frame does not stretch the timeline
+# (it catches up), and if progress stops arriving -- `plymouth pause-progress`
+# freezes it -- the animation keeps running on the refresh alone instead of
+# stalling. It never runs backwards.
+clock = 0;
+last_clock = 0;
+prog_new = -1;                         # latest progress time not yet used
+prog_last = -1;
+sync_off = -1;                         # progress time at clock == 0
+
+fun on_progress (duration, progress) {
+  if (duration > global.prog_last) {   # a paused progress repeats itself: ignore it
+    global.prog_last = duration;
+    global.prog_new = duration;
+  }
+}
+
+fun advance_clock () {
+  local.dt = 1 / RATE;
+  global.clock = global.clock + local.dt;
+  if (global.prog_new >= 0) {
+    if (global.sync_off < 0) { global.sync_off = global.prog_new - global.clock; }
+    # the sample was taken on average half a refresh before this one
+    local.err = (global.prog_new - global.sync_off) - global.clock + local.dt / 2;
+    if (local.err < -0.25) {
+      global.sync_off = global.prog_new - global.clock;   # progress was paused: re-align
+    } else if (local.err > 0.25) {
+      global.clock = global.clock + local.err;            # a long stall: jump to real time
+    } else if (local.err > 0) {
+      global.clock = global.clock + local.err * 0.5;      # behind: catch up within ~3 samples
+    } else {
+      global.clock = global.clock + Math.Max(local.err * 0.1, -local.dt / 2);   # ahead: ease off
+    }
+    global.prog_new = -1;
+  }
+}
+
+T0 = 0.12;                             # a beat of black after the firmware hands over
+
+# ── the frame ─────────────────────────────────────────────────────────────
+fun refresh () {
+  advance_clock();
+  local.fdt = global.clock - global.last_clock;
+  global.last_clock = global.clock;
+
+  if (intro) { local.t = global.clock - T0; } else { local.t = global.clock + 10; }
+
+  # focus pull: a wide glow of the spark's light, then a closer one, then the
+  # spark itself, sharp
+  local.a_blur = 0.85 * smooth(local.t / 0.5) * (1 - smooth((local.t - 0.35) / 0.6));
+  local.a_soft = 0.9 * smooth((local.t - 0.15) / 0.45) * (1 - smooth((local.t - 0.75) / 0.5));
+  local.a_spark = smooth((local.t - 0.35) / 0.7);
+
+  # halo (a half-strength image): blooms to a peak at 0.8 s, settles, then
+  # breathes on a 5.2 s period, eased in so the breath starts from rest
+  local.a_halo = 0.34 * spring(local.t, 3.2) + 0.3 * bump(local.t, 0.8);
+  local.a_halo = local.a_halo + 0.07 * Math.Sin(2 * Math.Pi * (local.t - 2.0) / 5.2) * smooth((local.t - 2.0) / 1.6);
+
+  local.a_wm = 0.92 * smooth((local.t - 0.95) / 0.75);
+
+  # password prompt, over 0.4 s either way: the splash dims, the wordmark goes
+  # in the first half and the prompt comes in the second (they share a line)
+  if (global.pw_target) { global.pw_p = Math.Min(global.pw_p + local.fdt / 0.4, 1); }
+  else { global.pw_p = Math.Max(global.pw_p - local.fdt / 0.4, 0); }
+  if (global.msg_target) { global.msg_p = Math.Min(global.msg_p + local.fdt / 0.3, 1); }
+  else { global.msg_p = Math.Max(global.msg_p - local.fdt / 0.3, 0); }
+  local.pw = smooth(global.pw_p);
+  local.g = 1 - 0.3 * local.pw;
+
+  halo.SetOpacity(local.a_halo * (1 - 0.5 * local.pw));
+  blur.SetOpacity(local.a_blur * local.g);
+  soft.SetOpacity(local.a_soft * local.g);
+
+  spark.SetOpacity(local.a_spark * local.g);
+
+  wordmark.SetOpacity(local.a_wm * (1 - smooth(global.pw_p / 0.5)));
+  prompt_sprite.SetOpacity(smooth((global.pw_p - 0.4) / 0.6));
+  message_sprite.SetOpacity(smooth(global.msg_p));
+
+  if (global.pw_p > 0 || global.bullets_made > 0) { draw_bullets(local.fdt, local.pw); }
+}
+
+fun draw_bullets (fdt, pw) {
+  local.n = global.bullets_n;
+  if (local.n > MAXB) local.n = MAXB;
+  if (BS < 1) {                        # no bullet image: text bullets in the accent
+    bullet_text.SetOpacity(pw);
+    return;
+  }
+  while (global.bullets_made < local.n) {
+    bullet_spr[global.bullets_made] = Sprite(bullet_img);
+    bullet_spr[global.bullets_made].SetOpacity(0);
+    bullet_a[global.bullets_made] = 0;
+    global.bullets_made++;
+  }
+  # the row re-centres on a quick spring as bullets come and go
+  local.target = -(local.n - 1) * SP / 2;
+  if (local.n < 1) local.target = global.row_off;
+  global.row_off = global.row_off + (local.target - global.row_off) * (1 - expn(fdt / 0.07));
+  local.kb = 1 - expn(fdt / 0.06);
+  local.i = 0;
+  while (local.i < global.bullets_made) {
+    local.want = 0;
+    if (local.i < local.n) local.want = 1;
+    bullet_a[local.i] = bullet_a[local.i] + (local.want - bullet_a[local.i]) * local.kb;
+    local.x = cx + global.row_off + local.i * SP - (BS - 1) / 2;
+    bullet_spr[local.i].SetPosition(Math.Int(local.x), bullets_y, 21);
+    bullet_spr[local.i].SetOpacity(bullet_a[local.i] * pw);
+    local.i++;
+  }
+}
+
+fun display_password (prompt, bullets) {
+  global.pw_target = 1;
+  if (!global.prompt_ready || prompt != global.prompt_text) {
+    global.prompt_ready = 1;
+    global.prompt_text = prompt;
+    local.pimg = Image.Text(prompt, 0.824, 0.839, 0.871, 1, text_font);
+    # No label plugin draws a 0x0 image; say something rather than nothing.
+    if (!local.pimg || local.pimg.GetWidth() < 1) { local.pimg = prompt_fallback; }
+    prompt_sprite.SetImage(local.pimg);
+    prompt_sprite.SetPosition(cx - Math.Int(local.pimg.GetWidth() / 2), wm_y, 20);
+  }
+  global.bullets_n = bullets;
+  if (BS < 1) {
+    local.btxt = "";
+    local.i = 0;
+    while (local.i < bullets && local.i < MAXB) { local.btxt = local.btxt + "* "; local.i++; }
+    local.bimg = Image.Text(local.btxt, HI_R, HI_G, HI_B);
+    bullet_text.SetImage(local.bimg);
+    bullet_text.SetPosition(cx - Math.Int(local.bimg.GetWidth() / 2), bullets_y, 21);
+  }
+}
+
+fun display_normal () {
+  global.pw_target = 0;
+}
+
+# --- messages ---
+#
+# This used to be an empty function, and an empty message() is not "no
+# decoration": it is plymouth accepting `plymouth message --text=...`, calling
+# this, and DROPPING IT. Everything the boot has to tell the user went nowhere.
+#
+# It matters most at exactly one screen. On an encrypted machine the passphrase
+# prompt is the last thing between the owner and their data, and it is drawn
+# before any filesystem is mounted, so it is the only place that can say which
+# keyboard layout is live or that a recovery key is what is wanted now. A user
+# who cannot be told any of that, at a prompt that accepts nothing else, is the
+# stranding case.
+#
+# Drawn UNDER the bullets, so it never covers the prompt or the characters the
+# user is counting. An empty text clears it, which is how plymouth asks for the
+# message to go away; so does hide-message for the message on screen.
+fun message (text) {
+  if (text == "") {
+    global.msg_target = 0;
+    return;
+  }
+  global.message_text = text;
+  local.mimg = Image.Text(text, 0.62, 0.66, 0.72, 1, text_font);
+  message_sprite.SetImage(local.mimg);
+  message_sprite.SetPosition(cx - Math.Int(local.mimg.GetWidth() / 2), msg_y, 22);
+  global.msg_target = 1;
+}
+
+fun hide_message (text) {
+  if (text == global.message_text) { global.msg_target = 0; }
+}
+
+Plymouth.SetRefreshFunction(refresh);
+Plymouth.SetBootProgressFunction(on_progress);
+Plymouth.SetDisplayPasswordFunction(display_password);
+Plymouth.SetDisplayNormalFunction(display_normal);
+Plymouth.SetMessageFunction(message);
+Plymouth.SetHideMessageFunction(hide_message);

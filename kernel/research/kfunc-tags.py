@@ -1,7 +1,7 @@
 #!/usr/bin/env python3
 """Count scx_bpf_* kfuncs that carry a `bpf_kfunc` DECL_TAG in a raw BTF blob.
 
-This is DELIBERATELY a different reading from apexd's kernelbtf.rs.
+This is DELIBERATELY a different reading from rimed's kernelbtf.rs.
 
 kernelbtf.rs asks the POST-resolve_btfids question: does the published FUNC
 prototype still carry the implicit `struct bpf_prog_aux *`? That is the

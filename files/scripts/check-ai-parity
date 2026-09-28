@@ -2,29 +2,29 @@
 """§14's constants appear in four files. This proves they still agree.
 
 WHY THIS EXISTS AND WHY IT IS NOT A UNIT TEST
-`apexd_core::ai` declares where the model store is, where the catalogue is,
+`rimed_core::ai` declares where the model store is, where the catalogue is,
 and what the sockets are called. Three other files repeat those values in
 forms Rust cannot see:
 
   * Containerfile.base   the tmpfiles.d rules that create the store, and the
                          COPY destination for the catalogue
-  * files/system/units/apex-aid.service
+  * files/system/units/rime-aid.service
                          ExecStart, and ReadOnlyPaths on the store
-  * apexd/apex/src/ai.rs the daemon's path, as the CLI reports it
+  * rimed/rime/src/ai.rs the daemon's path, as the CLI reports it
 
 Every one of those disagreements is silent. A tmpfiles rule for the wrong path
-leaves a store that does not exist and an `apex ai pull` that fails at the
+leaves a store that does not exist and an `rime ai pull` that fails at the
 first mkdir. A `ReadOnlyPaths` for the wrong path leaves the inference process
 able to rewrite every user's weights while the unit still looks hardened. And
 neither side's own tests would notice, because each is internally consistent.
 
 WHY IT RUNS IN THE `static` JOB
-`pr-validation.yml`'s selectors are `^(apexd/|config/sysprofiles/|tests/)` for
+`pr-validation.yml`'s selectors are `^(rimed/|config/sysprofiles/|tests/)` for
 the Rust job and `^(files/|tests/)` for the engine job. A PR that changes only
 the unit file sets engine=true and rust=false; one that changes only the Rust
 const sets the reverse. A check in either specialised job is therefore skipped
 by a PR touching the other side — and a skipped job counts as success. That is
-the exact bug this repository already recorded for test-apex-modes.sh, and the
+the exact bug this repository already recorded for test-rime-modes.sh, and the
 reason the language-parity check lives in `static` too.
 
 It needs no toolchain and no container: it reads four text files.
@@ -49,9 +49,9 @@ import sys
 import tempfile
 from pathlib import Path
 
-AI_RS = "apexd/apexd-core/src/ai.rs"
-CLI_RS = "apexd/apex/src/ai.rs"
-UNIT = "files/system/units/apex-aid.service"
+AI_RS = "rimed/rimed-core/src/ai.rs"
+CLI_RS = "rimed/rime/src/ai.rs"
+UNIT = "files/system/units/rime-aid.service"
 CONTAINERFILE = "Containerfile.base"
 
 FILES = (AI_RS, CLI_RS, UNIT, CONTAINERFILE)
@@ -186,8 +186,8 @@ class Checker:
             f"{CLI_RS} tells the user to run",
         )
         self.require(
-            daemon.endswith("/apex-aid"),
-            f"DAEMON is {daemon!r}; the binary is apex-aid",
+            daemon.endswith("/rime-aid"),
+            f"DAEMON is {daemon!r}; the binary is rime-aid",
         )
         self.require(
             f"{daemon} /out{daemon}" in cf or f"/out{daemon}" in cf,
@@ -205,7 +205,7 @@ class Checker:
             re.search(r"^COPY\s+\S+\s+" + re.escape(catalogue) + r"\s*$", cf, re.M)
             is not None,
             f"{CONTAINERFILE} never COPYs anything to {catalogue}, so "
-            f"`apex ai pull <name>` would find no catalogue on a real machine",
+            f"`rime ai pull <name>` would find no catalogue on a real machine",
         )
 
         # ── the per-user endpoints ──────────────────────────────────────────
@@ -246,24 +246,24 @@ class Checker:
             f"which AGENTS.md forbids for anything handling model output",
         )
         self.require(
-            not (self.root / "files/system/units/apex-aid.service.d").exists()
+            not (self.root / "files/system/units/rime-aid.service.d").exists()
             and not (
-                self.root / "files/system/polkit-1/actions/org.apexos.apex-aid.policy"
+                self.root / "files/system/polkit-1/actions/org.rimeos.rime-aid.policy"
             ).exists(),
-            "apex-aid must have no polkit action: AGENTS.md forbids giving a "
+            "rime-aid must have no polkit action: AGENTS.md forbids giving a "
             "daemon that handles untrusted model output one",
         )
         self.require(
-            "systemctl --global enable apex-aid" not in cf
-            and "systemctl enable apex-aid" not in cf,
-            f"{CONTAINERFILE} enables apex-aid. It is opt-in: a per-user daemon "
+            "systemctl --global enable rime-aid" not in cf
+            and "systemctl enable rime-aid" not in cf,
+            f"{CONTAINERFILE} enables rime-aid. It is opt-in: a per-user daemon "
             f"that will hold gigabytes of VRAM must not start for people who "
             f"never ask for local inference",
         )
         self.require(
-            "test ! -e /usr/lib/systemd/user/default.target.wants/apex-aid.service"
+            "test ! -e /usr/lib/systemd/user/default.target.wants/rime-aid.service"
             in cf,
-            f"{CONTAINERFILE} no longer asserts apex-aid is un-enabled, which is "
+            f"{CONTAINERFILE} no longer asserts rime-aid is un-enabled, which is "
             f"the only thing keeping the opt-in true across an edit",
         )
 
@@ -297,7 +297,7 @@ class Checker:
         )
         self.require(
             "refuse_tcp_endpoint" in cli,
-            f"{CLI_RS} must reach the same refusal, because `apex ai serve "
+            f"{CLI_RS} must reach the same refusal, because `rime ai serve "
             f"--listen` has its own argument parser",
         )
 
@@ -323,26 +323,26 @@ MUTATIONS = [
     # (file, find, replace, why it must be caught)
     (
         UNIT,
-        "ReadOnlyPaths=/var/lib/apex/ai",
-        "ReadOnlyPaths=/var/lib/apex/aj",
+        "ReadOnlyPaths=/var/lib/rime/ai",
+        "ReadOnlyPaths=/var/lib/rime/aj",
         "the store left writable by the inference process",
     ),
     (
         UNIT,
-        "ExecStart=/usr/bin/apex-aid",
-        "ExecStart=/usr/bin/apex-inference",
+        "ExecStart=/usr/bin/rime-aid",
+        "ExecStart=/usr/bin/rime-inference",
         "the unit starting a binary the CLI does not name",
     ),
     (
         CONTAINERFILE,
-        "'d /var/lib/apex/ai/staging 0700 root root -'",
-        "'d /var/lib/apex/ai/staging 0755 root root -'",
+        "'d /var/lib/rime/ai/staging 0700 root root -'",
+        "'d /var/lib/rime/ai/staging 0755 root root -'",
         "an unverified download made world-readable",
     ),
     (
         CONTAINERFILE,
-        "COPY config/ai/catalogue.toml /usr/share/apexos/ai/catalogue.toml",
-        "COPY config/ai/catalogue.toml /usr/share/apexos/catalogue.toml",
+        "COPY config/ai/catalogue.toml /usr/share/rimeos/ai/catalogue.toml",
+        "COPY config/ai/catalogue.toml /usr/share/rimeos/catalogue.toml",
         "the catalogue installed where ai.rs does not look",
     ),
 ]

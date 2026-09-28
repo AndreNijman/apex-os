@@ -1,0 +1,8 @@
+[Plymouth Theme]
+Name=Rime OS accent 01
+Description=Rime OS boot splash, hue 15° (follows the owner's matugen accent)
+ModuleName=script
+
+[script]
+ImageDir=/usr/share/plymouth/themes/rime-os-accent-01
+ScriptFile=/usr/share/plymouth/themes/rime-os-accent-01/rime-os.script

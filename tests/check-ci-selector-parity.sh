@@ -145,14 +145,14 @@ rc=$?
 mkfixture() {
     local d="$1" br="$2"
     git init -q -b main "$d" >/dev/null 2>&1 || return 1
-    git -C "$d" config user.email 'ci@apex.test'
-    git -C "$d" config user.name 'apex ci'
+    git -C "$d" config user.email 'ci@rime.test'
+    git -C "$d" config user.name 'rime ci'
     git -C "$d" config commit.gpgsign false
     echo base > "$d/README-base"
     git -C "$d" add -A && git -C "$d" commit -qm 'base'
     git -C "$d" update-ref refs/remotes/origin/main "$(git -C "$d" rev-parse HEAD)"
     git -C "$d" checkout -q -b "$br"
-    mkdir -p "$d/installer" && echo x > "$d/installer/apex-installer-fixture"
+    mkdir -p "$d/installer" && echo x > "$d/installer/rime-installer-fixture"
     git -C "$d" add -A && git -C "$d" commit -qm 'installer only'
     mkdir -p "$d/docs" && echo y > "$d/docs/fixture.md"
     git -C "$d" add -A && git -C "$d" commit -qm 'docs only'

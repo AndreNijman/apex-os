@@ -23,14 +23,14 @@
 // `working`, `complete` and `exited` — four of the seven states, and the four a
 // person sees nearly all the time — all render as near-white, and the two
 // finished ones are near-white too. That is the bug as it was reported:
-// "APEX agents display only in white."
+// "Rime agents display only in white."
 //
 // It is not a missing colour. It is a mapping that collapses seven states onto
 // three values, two of which are the palette's foreground.
 //
 // ── THE SEVEN, AND THE FIVE ─────────────────────────────────────────────────
 //
-// apex-agent-core publishes seven states (AgentState, apex-agent-core/src/
+// rime-agent-core publishes seven states (AgentState, rime-agent-core/src/
 // protocol.rs). The roadmap names five that must be told apart. They are not
 // the same list, so the mapping is explicit rather than clever:
 //
@@ -42,9 +42,9 @@
 //   failed              non-zero exit                → failed
 //   exited              killed by a signal           → idle
 //
-// `exited` is deliberately NOT failure-toned. apexd maps a signal death to
+// `exited` is deliberately NOT failure-toned. rimed maps a signal death to
 // Exited rather than Failed on the stated grounds that "a user stopping their
-// own agent has not suffered a failure" (apex-agent-core/src/session.rs), and
+// own agent has not suffered a failure" (rime-agent-core/src/session.rs), and
 // painting it red would contradict the runtime in the one place a user looks.
 //
 // `starting` shares the working tone rather than earning a sixth. It lasts
@@ -142,7 +142,7 @@ function needsYou(state) {
 // product's name, and left the six adapters looking inconsistent in a list
 // whose whole job is to be scanned quickly.
 //
-// The ids are apex-agent-core's adapter set; `generic` is any other command run
+// The ids are rime-agent-core's adapter set; `generic` is any other command run
 // under the runtime, and it is titled "Agent" because "Generic" describes our
 // plumbing rather than the thing the user started.
 var AGENT_NAMES = {

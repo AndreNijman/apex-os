@@ -1,7 +1,7 @@
 # ─────────────────────────────────────────────────────────────────────────────
 #  jobs/survey — what the installer sees on a real Windows machine.
 #
-#  Run by the lab agent as SYSTEM, from the APEXLAB transport volume, with the
+#  Run by the lab agent as SYSTEM, from the RIMELAB transport volume, with the
 #  installer .exe sitting next to this file. Everything it prints is captured
 #  into result.txt on the same volume and read back by the host.
 #
@@ -11,7 +11,7 @@
 #  for the swapped-order run to contradict.
 # ─────────────────────────────────────────────────────────────────────────────
 $ErrorActionPreference = 'Continue'
-$exe = Join-Path $PSScriptRoot 'apex-windows-installer.exe'
+$exe = Join-Path $PSScriptRoot 'rime-windows-installer.exe'
 if (-not (Test-Path $exe)) { "FATAL: no installer at $exe"; exit 2 }
 
 '=== WINDOWS OWN VIEW: disks ==='
@@ -46,7 +46,7 @@ if (Test-Path $espLetter) {
 }
 
 # ── The installer's own survey ───────────────────────────────────────────────
-'=== apex-windows-installer survey ==='
+'=== rime-windows-installer survey ==='
 # Through cmd, not `& $exe ... 2>&1`. PowerShell 5.1 turns a native program's
 # stderr into ErrorRecord objects and prints each one with a source-code
 # excerpt and a FullyQualifiedErrorId, which buries the program's actual

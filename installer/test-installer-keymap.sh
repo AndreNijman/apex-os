@@ -25,7 +25,7 @@
 #  org.freedesktop.locale1, localectl or xorg.conf. Both facts are asserted
 #  below rather than left as claims, because the whole design rests on them:
 #  they are why `localectl set-x11-keymap` cannot change a running session, and
-#  therefore why apex-installer-session restarts the compositor at all.
+#  therefore why rime-installer-session restarts the compositor at all.
 #
 #  ── Why it needs Xvfb, and what happens without it ──────────────────────────
 #
@@ -58,8 +58,8 @@ set -uo pipefail
 set +e
 
 cd "$(dirname "$0")" || exit 2
-SESSION="$PWD/apex-installer-session"
-GUI="$PWD/apex-installer-gui"
+SESSION="$PWD/rime-installer-session"
+GUI="$PWD/rime-installer-gui"
 for f in "$SESSION" "$GUI"; do
     [ -f "$f" ] || { echo "FATAL: cannot find $f" >&2; exit 2; }
 done
@@ -75,7 +75,7 @@ is() {
     else bad "$name" "want [$want] got [$got]"; fi
 }
 
-W="$(mktemp -d "${TMPDIR:-/tmp}/apex-keymap.XXXXXX")" || exit 2
+W="$(mktemp -d "${TMPDIR:-/tmp}/rime-keymap.XXXXXX")" || exit 2
 XVFB_PID=""
 cleanup() {
     [ -n "$XVFB_PID" ] && kill "$XVFB_PID" 2>/dev/null
@@ -221,7 +221,7 @@ else
 
     # Set XKB_DEFAULT_LAYOUT=fr inside a process that already compiled `de`, then
     # recompile: the SECOND keymap is French, so the variable is read at compile
-    # time. That is the whole reason apex-installer-session restarts cage
+    # time. That is the whole reason rime-installer-session restarts cage
     # instead of exporting into a running one.
     second="$(XKB_DEFAULT_LAYOUT=de python3 "$W/xkbprobe.py" 2>/dev/null | sed -n 2p)"
     is "the env var is consumed when the keymap is COMPILED, so a restart is required" \
@@ -268,7 +268,7 @@ def on_activate(app):
             dump(d); app.quit(); return False
         return True
     GLib.timeout_add(600, later)
-app = Gtk.Application(application_id='dev.apex.keymapprobe')
+app = Gtk.Application(application_id='dev.rime.keymapprobe')
 app.connect('activate', on_activate)
 sys.exit(app.run([]))
 PY
@@ -375,7 +375,7 @@ else
 fi
 
 # ═════════════════════════════════════════════════════════════════════════════
-section "4. apex-installer-session: the restart loop that applies the choice"
+section "4. rime-installer-session: the restart loop that applies the choice"
 # ═════════════════════════════════════════════════════════════════════════════
 # Driven with a stub cage and a stub GUI, so the loop's behaviour is measured
 # without starting a compositor. The stub cage records the environment it was
@@ -391,7 +391,7 @@ n=$(( $(cat "$STUB_COUNT" 2>/dev/null || echo 0) + 1 ))
 printf '%s' "$n" > "$STUB_COUNT"
 printf '%d layout=%s variant=%s resumed=%s\n' \
     "$n" "${XKB_DEFAULT_LAYOUT:-<unset>}" "${XKB_DEFAULT_VARIANT:-<unset>}" \
-    "${APEX_INSTALLER_RESUMED:-<unset>}" >> "$STUB_LOG"
+    "${RIME_INSTALLER_RESUMED:-<unset>}" >> "$STUB_LOG"
 # Drop the leading `-s --` that the session script passes through.
 while [ $# -gt 0 ]; do case "$1" in -s) shift ;; --) shift; break ;; *) break ;; esac; done
 exec "$@"
@@ -425,11 +425,11 @@ run_session() {   # run_session <restarts-wanted> [layout] [variant] [max]
     STUB_COUNT="$W/stub.count" STUB_LOG="$W/stub.log" STUB_STATE="$W/state" \
     STUB_RESTARTS="$1" STUB_LAYOUT="${2:-de}" STUB_VARIANT="${3:-}" \
     STUB_CYCLE="${5:-}" \
-    APEX_INSTALLER_CAGE="$W/bin/cage" \
-    APEX_INSTALLER_GUI="$W/bin/gui" \
-    APEX_INSTALLER_STATE="$W/state" \
-    APEX_INSTALLER_LOG="$W/session.log" \
-    APEX_INSTALLER_MAX_RESTARTS="${4:-3}" \
+    RIME_INSTALLER_CAGE="$W/bin/cage" \
+    RIME_INSTALLER_GUI="$W/bin/gui" \
+    RIME_INSTALLER_STATE="$W/state" \
+    RIME_INSTALLER_LOG="$W/session.log" \
+    RIME_INSTALLER_MAX_RESTARTS="${4:-3}" \
     bash "$SESSION" >/dev/null 2>&1
     printf '%s' "$?"
 }
@@ -452,7 +452,7 @@ is "a chosen variant reaches the compositor as XKB_DEFAULT_VARIANT" \
    "2 layout=de variant=nodeadkeys resumed=1" "$(sed -n '2p' "$W/stub.log")"
 
 # (4c) The cap. An unbounded restart loop behind a compositor is a black screen
-# with a busy CPU — the exact outcome apex-installer-launch exists to rule out.
+# with a busy CPU — the exact outcome rime-installer-launch exists to rule out.
 rc="$(run_session 99 de "" 2 cycle)"
 is "a GUI that asks forever is capped, and reports a defect rather than looping" "70" "$rc"
 starts="$(wc -l < "$W/stub.log" | tr -d ' ')"
@@ -471,8 +471,8 @@ is "and the compositor is NOT restarted into it" "1" "$(wc -l < "$W/stub.log" | 
 : > "$W/stub.log"; printf '0' > "$W/stub.count"; rm -f "$W/state"
 rc=$(STUB_COUNT="$W/stub.count" STUB_LOG="$W/stub.log" STUB_STATE="$W/state" \
     STUB_RESTARTS=1 STUB_LAYOUT=de STUB_VARIANT="" \
-    APEX_INSTALLER_CAGE="$W/bin/cage" APEX_INSTALLER_GUI="$W/bin/gui" \
-    APEX_INSTALLER_STATE="$W/state" APEX_INSTALLER_LOG="$W/session.log" \
+    RIME_INSTALLER_CAGE="$W/bin/cage" RIME_INSTALLER_GUI="$W/bin/gui" \
+    RIME_INSTALLER_STATE="$W/state" RIME_INSTALLER_LOG="$W/session.log" \
     XKB_DEFAULT_LAYOUT=de \
     bash "$SESSION" >/dev/null 2>&1; printf '%s' "$?")
 is "asking for the layout already in force exits cleanly instead of restarting" "0" "$rc"
@@ -504,8 +504,8 @@ chmod +x "$W/bin/gui-silent"
 : > "$W/stub.log"; printf '0' > "$W/stub.count"
 printf 'layout=ru\nvariant=\n' > "$W/state"
 rc=$(STUB_COUNT="$W/stub.count" STUB_LOG="$W/stub.log" STUB_STATE="$W/state" \
-    APEX_INSTALLER_CAGE="$W/bin/cage" APEX_INSTALLER_GUI="$W/bin/gui-silent" \
-    APEX_INSTALLER_STATE="$W/state" APEX_INSTALLER_LOG="$W/session.log" \
+    RIME_INSTALLER_CAGE="$W/bin/cage" RIME_INSTALLER_GUI="$W/bin/gui-silent" \
+    RIME_INSTALLER_STATE="$W/state" RIME_INSTALLER_LOG="$W/session.log" \
     bash "$SESSION" >/dev/null 2>&1; printf '%s' "$?")
 is "a restart request with no fresh state is refused, not served from a stale file" "70" "$rc"
 is "…and the compositor is never restarted into the stale layout" \
@@ -567,8 +567,8 @@ exit 0
 STUB
     chmod +x "$W/bin/gui-fmt"
     STUB_COUNT="$W/stub.count" STUB_LOG="$W/stub.log" STUB_STATE="$W/state" \
-        APEX_INSTALLER_CAGE="$W/bin/cage" APEX_INSTALLER_GUI="$W/bin/gui-fmt" \
-        APEX_INSTALLER_STATE="$W/state" APEX_INSTALLER_LOG="$W/session.log" \
+        RIME_INSTALLER_CAGE="$W/bin/cage" RIME_INSTALLER_GUI="$W/bin/gui-fmt" \
+        RIME_INSTALLER_STATE="$W/state" RIME_INSTALLER_LOG="$W/session.log" \
         bash "$SESSION" >/dev/null 2>&1
     if printf '%s' "$(sed -n '2p' "$W/stub.log")" | grep -q 'layout=de'; then
         ok "the exact line the GUI writes is the line the session parses"
@@ -593,8 +593,8 @@ fi
 
 # Both halves must agree on WHERE the file lives, or the GUI writes a choice
 # into a path nothing reads.
-gui_path="$(grep -oE '"/run/apex-installer/session-keymap"' "$GUI" | head -1)"
-ses_path="$(grep -oE '/run/apex-installer/session-keymap' "$SESSION" | head -1)"
+gui_path="$(grep -oE '"/run/rime-installer/session-keymap"' "$GUI" | head -1)"
+ses_path="$(grep -oE '/run/rime-installer/session-keymap' "$SESSION" | head -1)"
 if [ -n "$gui_path" ] && [ -n "$ses_path" ]; then
     ok "both halves default to the same state-file path"
 else
@@ -604,22 +604,22 @@ fi
 
 # The launcher must actually run the session script. Wiring the loop and leaving
 # the launcher on bare cage is a feature that exists and never runs.
-if grep -qE '^GUI_CMD=\(/usr/bin/apex-installer-session\)' "$PWD/apex-installer-launch"; then
-    ok "apex-installer-launch runs the session script, not cage directly"
+if grep -qE '^GUI_CMD=\(/usr/bin/rime-installer-session\)' "$PWD/rime-installer-launch"; then
+    ok "rime-installer-launch runs the session script, not cage directly"
 else
-    bad "apex-installer-launch runs the session script, not cage directly"
+    bad "rime-installer-launch runs the session script, not cage directly"
 fi
 
 # …and the thing it execs has to be IN THE IMAGE. This was a real defect, found
 # only because it was looked for: the launcher was repointed at
-# /usr/bin/apex-installer-session and nothing copied that file into the image, so
+# /usr/bin/rime-installer-session and nothing copied that file into the image, so
 # the ISO would have had no installer at all — cage never starts, every boot
 # lands on the diagnostic screen. Every assertion above passed while that was
 # true, because they all read the source tree, where the file plainly exists.
 #
 # The target is resolved out of the launcher rather than hardcoded, so renaming
 # the script cannot quietly slip past this.
-_target="$(grep -oE '^GUI_CMD=\(([^ )]+)' "$PWD/apex-installer-launch" | cut -d'(' -f2)"
+_target="$(grep -oE '^GUI_CMD=\(([^ )]+)' "$PWD/rime-installer-launch" | cut -d'(' -f2)"
 _base="$(basename "${_target:-none}")"
 if [ -z "$_target" ]; then
     bad "the launcher's exec target is installed into the image" "could not read GUI_CMD"
@@ -647,8 +647,8 @@ section "6. the GUI page itself, driven for real"
 # nothing at all. The one path that matters — pick a layout, press Continue,
 # write the state file, exit 75 — had never been executed by anything.
 #
-# So run the SHIPPED apex-installer-gui under cage, on the keyboard page, and
-# press its button. APEX_GUI_PAGE is the test affordance the GUI already carries.
+# So run the SHIPPED rime-installer-gui under cage, on the keyboard page, and
+# press its button. RIME_GUI_PAGE is the test affordance the GUI already carries.
 
 if [ "$have_gtk" -ne 1 ] || ! command -v cage >/dev/null 2>&1; then
     skp "pressing Continue writes the layout and asks for a restart" \
@@ -663,9 +663,9 @@ gi.require_version('Gtk', '4.0'); gi.require_version('Adw', '1')
 from gi.repository import GLib
 
 spec = importlib.util.spec_from_loader(
-    "apexgui", importlib.machinery.SourceFileLoader("apexgui", sys.argv[1]))
+    "rimegui", importlib.machinery.SourceFileLoader("rimegui", sys.argv[1]))
 mod = importlib.util.module_from_spec(spec)
-mod.__name__ = "apexgui"          # so its `if __name__ == "__main__"` stays quiet
+mod.__name__ = "rimegui"          # so its `if __name__ == "__main__"` stays quiet
 spec.loader.exec_module(mod)
 
 app = mod.Installer()
@@ -679,7 +679,7 @@ def drive():
         codes = [c for c, _ in mod.xkb_layouts()]
         idx = codes.index("de")
         app.kb_drop.set_selected(idx)
-        # The action row is the last child of the page; find the apex-go button.
+        # The action row is the last child of the page; find the rime-go button.
         page = app.stack.get_visible_child()
         def walk(w, out):
             c = w.get_first_child()
@@ -690,7 +690,7 @@ def drive():
                 c = c.get_next_sibling()
         btns = []
         walk(page, btns)
-        go = [b for b in btns if b.has_css_class("apex-go")]
+        go = [b for b in btns if b.has_css_class("rime-go")]
         if not go:
             print("DRIVE no-primary-button", flush=True); app.quit(); return False
         go[0].emit("clicked")
@@ -716,7 +716,7 @@ PY2
     rm -f "$W/gui-state"
     drive_out="$(env WLR_BACKENDS=headless WLR_RENDERER=pixman GSK_RENDERER=cairo \
         GDK_BACKEND=wayland LIBGL_ALWAYS_SOFTWARE=1 \
-        APEX_GUI_PAGE=keyboard APEX_INSTALLER_STATE="$W/gui-state" \
+        RIME_GUI_PAGE=keyboard RIME_INSTALLER_STATE="$W/gui-state" \
         XKB_DEFAULT_LAYOUT=us \
         timeout 90 cage -- python3 "$W/drive.py" "$GUI" 2>&1)"
     drive_rc=$?
@@ -766,7 +766,7 @@ fi
 section "6b. the resume path — the branch that stops the restart repeating"
 # ═════════════════════════════════════════════════════════════════════════════
 # After a restart the GUI is a NEW process: self.answers is empty and only
-# XKB_DEFAULT_* and APEX_INSTALLER_RESUMED crossed. Two things depend on that
+# XKB_DEFAULT_* and RIME_INSTALLER_RESUMED crossed. Two things depend on that
 # and neither had a test.
 #
 # The first is a silent data loss. The time zone is not an environment variable,
@@ -791,9 +791,9 @@ gi.require_version('Gtk', '4.0'); gi.require_version('Adw', '1')
 from gi.repository import GLib
 
 spec = importlib.util.spec_from_loader(
-    "apexgui", importlib.machinery.SourceFileLoader("apexgui", sys.argv[1]))
+    "rimegui", importlib.machinery.SourceFileLoader("rimegui", sys.argv[1]))
 mod = importlib.util.module_from_spec(spec)
-mod.__name__ = "apexgui"
+mod.__name__ = "rimegui"
 spec.loader.exec_module(mod)
 
 app = mod.Installer()
@@ -815,7 +815,7 @@ def drive():
                     btns.append(c)
                 walk(c); c = c.get_next_sibling()
         walk(page)
-        go = [b for b in btns if b.has_css_class("apex-go")]
+        go = [b for b in btns if b.has_css_class("rime-go")]
         if not go:
             print("RESUME no-primary-button", flush=True); app.quit(); return False
         go[0].emit("clicked")
@@ -839,7 +839,7 @@ PY2
 
     r_out="$(env WLR_BACKENDS=headless WLR_RENDERER=pixman GSK_RENDERER=cairo \
         GDK_BACKEND=wayland LIBGL_ALWAYS_SOFTWARE=1 \
-        APEX_INSTALLER_RESUMED=1 APEX_INSTALLER_STATE="$W/resume-state" \
+        RIME_INSTALLER_RESUMED=1 RIME_INSTALLER_STATE="$W/resume-state" \
         XKB_DEFAULT_LAYOUT=de \
         timeout 90 cage -- python3 "$W/drive-resume.py" "$GUI" 2>&1)"
     r_rc=$?
@@ -879,7 +879,7 @@ PY2
     if [ -s "$W/gui-state" ]; then
         rt_out="$(env WLR_BACKENDS=headless WLR_RENDERER=pixman GSK_RENDERER=cairo \
             GDK_BACKEND=wayland LIBGL_ALWAYS_SOFTWARE=1 \
-            APEX_INSTALLER_RESUMED=1 APEX_INSTALLER_STATE="$W/gui-state" \
+            RIME_INSTALLER_RESUMED=1 RIME_INSTALLER_STATE="$W/gui-state" \
             XKB_DEFAULT_LAYOUT=de \
             timeout 90 cage -- python3 "$W/drive-resume.py" "$GUI" 2>&1)"
         rt_tz="$(printf '%s' "$rt_out" | sed -n 's/.*RESUME preselect .*timezone=\([^ ]*\).*/\1/p' | head -1)"

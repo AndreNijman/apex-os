@@ -1,16 +1,16 @@
-# APEX-OS Plymouth Themes
+# Rime OS Plymouth Themes
 
-Boot splash for APEX-OS. **`apex-os-chartreuse` is the default** and the source
-of every other theme: `Containerfile.apex` installs it plus the 24
-`apex-os-accent-NN` themes (one per 15° of hue), and the initramfs starts the
+Boot splash for Rime OS. **`rime-os-chartreuse` is the default** and the source
+of every other theme: `Containerfile.rime` installs it plus the 24
+`rime-os-accent-NN` themes (one per 15° of hue), and the initramfs starts the
 splash in the one matching the owner's matugen accent
-(`files/dracut/apex-plymouth-accent`). `apex-os-gold` is source art for the
+(`files/dracut/rime-plymouth-accent`). `rime-os-gold` is source art for the
 other colourway and nothing installs it; it dates from when Gaming was a
 separate edition.
 
 **Animation: "Focus".** On a plain black screen the spark comes into focus
 out of a soft glow of its own light (a wide blur, a closer blur, then the sharp
-logo), a halo blooms behind it and settles, and the tracked-out `APEX OS`
+logo), a halo blooms behind it and settles, and the tracked-out `Rime OS`
 wordmark fades in beneath. While the machine boots, the halo breathes on a
 5.2 s period. Shutdown, reboot and update modes show the settled splash from
 the first frame. At a LUKS prompt the splash dims, the wordmark gives way to
@@ -25,13 +25,13 @@ vsync, truncates sprite positions to whole pixels, re-samples an image on every
 than 0.01. The script therefore scales every image once when it starts, nothing
 moves, and each refresh (60 Hz, set by the script) only changes opacities, on
 curves of real elapsed time that start and end at rest. The header of
-`apex-os.script` has the numbers for the "Convergence" animation this replaces.
+`rime-os.script` has the numbers for the "Convergence" animation this replaces.
 
 ## Files
 
 | file | what |
 |---|---|
-| `apex-os-chartreuse/apex-os.script` | the splash; every other theme's script is this file with its own highlight line |
+| `rime-os-chartreuse/rime-os.script` | the splash; every other theme's script is this file with its own highlight line |
 | `make-splash-art.sh chartreuse\|gold` | draws a colourway's images: the logo as 1x and `-hd` masters, the two blurred sparks, the halo, the bullet, the wordmark and the fallback prompt (ImageMagick 7, JetBrains Mono) |
 | `make-accent-themes.sh` | hue-rotates the chartreuse images into the 24 accent themes and sets each script's highlight |
 | `render-preview.py` | frame-exact offline render of the script on plymouth's arithmetic: 60 fps MP4, contact sheet, per-frame metrics |
@@ -39,7 +39,7 @@ curves of real elapsed time that start and end at rest. The header of
 
 After changing the script or the art, rerun `make-splash-art.sh chartreuse`,
 `make-splash-art.sh gold` (it copies the script too), `make-accent-themes.sh`,
-and the previews; `tests/test-apex-plymouth-accent.sh` fails if the accents
+and the previews; `tests/test-rime-plymouth-accent.sh` fails if the accents
 drift from the chartreuse script, if the preview's port of the curves goes
 stale, or if a per-frame `Image.Scale`/`Rotate`, a frame counter, a gradient or
 a sub-60 Hz refresh comes back.
@@ -53,9 +53,9 @@ under zstd, so keep the image set small (43 KB per theme today).
 full-rate version:
 
 ```sh
-./render-preview.py apex-os-chartreuse /path/to/out --seconds 6              # boot
-./render-preview.py apex-os-chartreuse /path/to/out --seconds 10 --password  # LUKS prompt
-./render-preview.py apex-os-chartreuse /path/to/out --mode shutdown
+./render-preview.py rime-os-chartreuse /path/to/out --seconds 6              # boot
+./render-preview.py rime-os-chartreuse /path/to/out --seconds 10 --password  # LUKS prompt
+./render-preview.py rime-os-chartreuse /path/to/out --mode shutdown
 ```
 
 It needs python3 with numpy and Pillow, and ffmpeg. Never test a splash with
@@ -65,11 +65,11 @@ container with its own Xvfb and no access to `/dev/dri` or the host's display.
 
 ## Install (in the image build)
 
-`Containerfile.apex` copies the themes into `/usr/share/plymouth/themes/`,
-sets `apex-os-chartreuse` as the default and rebuilds the initramfs with
-`--add "plymouth apex-plymouth-accent"`. The splash needs the `quiet splash`
+`Containerfile.rime` copies the themes into `/usr/share/plymouth/themes/`,
+sets `rime-os-chartreuse` as the default and rebuilds the initramfs with
+`--add "plymouth rime-plymouth-accent"`. The splash needs the `quiet splash`
 kernel args, which the same file writes to
-`/usr/lib/bootc/kargs.d/20-apex-plymouth.toml`. Text (the prompt, messages)
+`/usr/lib/bootc/kargs.d/20-rime-plymouth.toml`. Text (the prompt, messages)
 needs `plymouth-plugin-label`; the build asserts `label-freetype.so` and
 `Plymouth.ttf` reach the initramfs, and if they ever do not, the script shows a
 pre-rendered "Enter passphrase to unlock" instead of an invisible prompt.

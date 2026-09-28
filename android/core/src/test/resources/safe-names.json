@@ -5,7 +5,7 @@
     "pure function instead of to a vocabulary.",
     "",
     "The Kotlin half (HandoffTest) asserts `Handoff.Files.preview` produces",
-    "these. The Rust half (apexd/apex-agent-core/tests/android_safe_names.rs)",
+    "these. The Rust half (rimed/rime-agent-core/tests/android_safe_names.rs)",
     "asserts `inject::safe_name` produces them. Neither half alone is worth",
     "anything: a Kotlin mirror of a Rust function, checked by a Kotlin author,",
     "agrees with whatever that author believed - which is exactly how this app",

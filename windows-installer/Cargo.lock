@@ -3,5 +3,5 @@
 version = 4
 
 [[package]]
-name = "apex-windows-installer"
+name = "rime-windows-installer"
 version = "0.1.0"

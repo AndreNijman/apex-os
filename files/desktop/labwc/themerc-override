@@ -1,12 +1,12 @@
-# APEX-OS — labwc window chrome (first-boot default).
+# Rime OS — labwc window chrome (first-boot default).
 #
-# Seeded per-user by apex-shell-firstrun, and replaced by matugen the first
-# time the wallpaper changes: APEX Shell renders the same values from the live
+# Seeded per-user by rime-shell-firstrun, and replaced by matugen the first
+# time the wallpaper changes: Rime Shell renders the same values from the live
 # Material You palette into this exact path, so the floating session, the shell
 # and the Hyprland borders all move together.
 #
 # This file exists so that a FRESH boot already looks right. Without it labwc
-# falls back to its built-in theme, and the first impression of APEX Floating
+# falls back to its built-in theme, and the first impression of Rime Floating
 # would be the grey Openbox-descended chrome that the whole Floating-mode pass
 # exists to get rid of — before the user has changed any wallpaper.
 #

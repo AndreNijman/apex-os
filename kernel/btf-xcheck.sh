@@ -3,8 +3,8 @@
 #
 # WHY A SECOND READER EXISTS AT ALL
 #
-# `apex-kernel-btf-gate` is the authority: it reuses apexd's kernelbtf.rs, the
-# same reader `apex game status` answers from, and it asks the POST-strip
+# `rime-kernel-btf-gate` is the authority: it reuses rimed's kernelbtf.rs, the
+# same reader `rime game status` answers from, and it asks the POST-strip
 # question — does the published FUNC prototype still carry the implicit
 # `struct bpf_prog_aux *`? That is the user-visible symptom.
 #

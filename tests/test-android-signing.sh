@@ -36,7 +36,7 @@ ROOT="$(cd "$(dirname "${BASH_SOURCE[0]}")/.." && pwd)"
 # to write a signing key onto a tmpfs — correctly, since it is RAM and is gone
 # at the next reboot. A suite whose work directory is /tmp would exercise that
 # refusal instead of the thing it means to test.
-WORK="$(mktemp -d "${TMPDIR:-/var/tmp}/apex-android-signing.XXXXXX")"
+WORK="$(mktemp -d "${TMPDIR:-/var/tmp}/rime-android-signing.XXXXXX")"
 # Key material, even throwaway key material, is shredded rather than unlinked —
 # and the suite says so in its own output at the end, so "it was cleaned up" is
 # a fact a reader can check rather than a claim.
@@ -102,8 +102,8 @@ done
 section "the release refuses when there is no key, and says which secret"
 # ─────────────────────────────────────────────────────────────────────────────
 
-ALL_SET=(APEX_KEYSTORE_BASE64=a2V5 APEX_KEYSTORE_PASSWORD=Sup3rSecretValue
-         APEX_KEY_ALIAS=apex-release APEX_KEY_PASSWORD=Sup3rSecretValue)
+ALL_SET=(RIME_KEYSTORE_BASE64=a2V5 RIME_KEYSTORE_PASSWORD=Sup3rSecretValue
+         RIME_KEY_ALIAS=rime-release RIME_KEY_PASSWORD=Sup3rSecretValue)
 
 # `env -i`, so the environment under test is exactly what is listed and not
 # whatever this shell happens to carry — and so the arguments are assignments
@@ -126,7 +126,7 @@ else
     ok "no secret value is printed"
 fi
 
-for missing in APEX_KEYSTORE_BASE64 APEX_KEYSTORE_PASSWORD APEX_KEY_ALIAS APEX_KEY_PASSWORD; do
+for missing in RIME_KEYSTORE_BASE64 RIME_KEYSTORE_PASSWORD RIME_KEY_ALIAS RIME_KEY_PASSWORD; do
     three=()
     for kv in "${ALL_SET[@]}"; do
         case "$kv" in "$missing"=*) continue ;; esac
@@ -161,8 +161,8 @@ fi
 # The classic `gh secret set NAME < file` mistake: the file's trailing newline
 # becomes part of the password, and the keystore then fails to open with a
 # password that looks right everywhere a human can see it.
-out=$(run_require APEX_KEYSTORE_BASE64=a2V5 "APEX_KEYSTORE_PASSWORD=Sup3rSecretValue
-" APEX_KEY_ALIAS=apex-release "APEX_KEY_PASSWORD=Sup3rSecretValue
+out=$(run_require RIME_KEYSTORE_BASE64=a2V5 "RIME_KEYSTORE_PASSWORD=Sup3rSecretValue
+" RIME_KEY_ALIAS=rime-release "RIME_KEY_PASSWORD=Sup3rSecretValue
 "); rc=$?
 if [ "$rc" -ne 0 ] && said "$out" "whitespace"; then
     ok "a password with a trailing newline is refused before the build"
@@ -172,8 +172,8 @@ fi
 
 # Differing passwords are a NOTICE, not a gate: PKCS12 cannot hold two, but an
 # old-style JKS can, and refusing one would be refusing on a guess.
-out=$(run_require APEX_KEYSTORE_BASE64=a2V5 APEX_KEYSTORE_PASSWORD=Sup3rSecretValue \
-      APEX_KEY_ALIAS=apex-release APEX_KEY_PASSWORD=Different123); rc=$?
+out=$(run_require RIME_KEYSTORE_BASE64=a2V5 RIME_KEYSTORE_PASSWORD=Sup3rSecretValue \
+      RIME_KEY_ALIAS=rime-release RIME_KEY_PASSWORD=Different123); rc=$?
 if [ "$rc" -eq 0 ] && said "$out" "PKCS12"; then
     ok "differing store and key passwords warn rather than refuse"
 else
@@ -203,8 +203,8 @@ for i, s in enumerate(steps):
         print("REQUIRE_AT=%d" % i)
         print("REQUIRE_IF=%s" % ("yes" if "if" in s else "no"))
         env = s.get("env") or {}
-        for k in ("APEX_KEYSTORE_BASE64", "APEX_KEYSTORE_PASSWORD",
-                  "APEX_KEY_ALIAS", "APEX_KEY_PASSWORD"):
+        for k in ("RIME_KEYSTORE_BASE64", "RIME_KEYSTORE_PASSWORD",
+                  "RIME_KEY_ALIAS", "RIME_KEY_PASSWORD"):
             if k in env and "secrets." + k in str(env[k]):
                 print("REQUIRE_ENV=%s" % k)
     if "verify-signing-identity.sh --published" in r:
@@ -252,8 +252,8 @@ else
     bad "the secrets gate has an if: — a skipped step counts as success here"
 fi
 envs=$(sed -n 's/^REQUIRE_ENV=//p' "$WORK/wf.txt" | sort | tr '\n' ' ')
-if said "$envs" "APEX_KEYSTORE_BASE64" && said "$envs" "APEX_KEYSTORE_PASSWORD" \
-   && said "$envs" "APEX_KEY_ALIAS" && said "$envs" "APEX_KEY_PASSWORD"; then
+if said "$envs" "RIME_KEYSTORE_BASE64" && said "$envs" "RIME_KEYSTORE_PASSWORD" \
+   && said "$envs" "RIME_KEY_ALIAS" && said "$envs" "RIME_KEY_PASSWORD"; then
     ok "all four secrets reach the gate through env:, where the secrets context works"
 else
     bad "the gate cannot see every secret it checks; it has: $envs"
@@ -361,7 +361,7 @@ fi
 # wrong tool reads as a wrong key.
 upper=$(printf '%s' "$FP_A" | tr 'a-f' 'A-F' | sed 's/\(..\)/\1:/g; s/:$//')
 p=$(pin_file upper "$upper")
-out=$(APEX_KEYSTORE_PASSWORD=throwaway-not-a-release-key \
+out=$(RIME_KEYSTORE_PASSWORD=throwaway-not-a-release-key \
       "$VERIFY" --keystore "$KEYDIR/alpha.jks" --alias alpha --pin "$p" 2>&1); rc=$?
 if [ "$rc" -eq 0 ]; then
     ok "the keytool spelling of a fingerprint is the same value as the apksigner one"
@@ -372,7 +372,7 @@ fi
 section "the keystore is checked against the published certificate"
 
 p=$(pin_file alpha "$FP_A")
-out=$(APEX_KEYSTORE_PASSWORD=throwaway-not-a-release-key \
+out=$(RIME_KEYSTORE_PASSWORD=throwaway-not-a-release-key \
       "$VERIFY" --keystore "$KEYDIR/alpha.jks" --alias alpha --pin "$p" 2>&1); rc=$?
 if [ "$rc" -eq 0 ] && said "$out" "verified"; then
     ok "the published key opens and matches"
@@ -380,7 +380,7 @@ else
     bad "the right keystore was refused (rc=$rc): $out"
 fi
 
-out=$(APEX_KEYSTORE_PASSWORD=throwaway-not-a-release-key \
+out=$(RIME_KEYSTORE_PASSWORD=throwaway-not-a-release-key \
       "$VERIFY" --keystore "$KEYDIR/beta.jks" --alias beta --pin "$p" 2>&1); rc=$?
 if [ "$rc" -ne 0 ] && said "$out" "NOT the published signing certificate"; then
     ok "a DIFFERENT key in the secret is refused before anything is built"
@@ -388,8 +388,8 @@ else
     bad "a keystore holding the wrong key was accepted (rc=$rc): $out"
 fi
 
-out=$(env -u APEX_KEYSTORE_PASSWORD "$VERIFY" --keystore "$KEYDIR/alpha.jks" --alias alpha --pin "$p" 2>&1); rc=$?
-if [ "$rc" -ne 0 ] && said "$out" "APEX_KEYSTORE_PASSWORD"; then
+out=$(env -u RIME_KEYSTORE_PASSWORD "$VERIFY" --keystore "$KEYDIR/alpha.jks" --alias alpha --pin "$p" 2>&1); rc=$?
+if [ "$rc" -ne 0 ] && said "$out" "RIME_KEYSTORE_PASSWORD"; then
     ok "no password is a refusal, and the password is never an argument"
 else
     bad "a missing password did not refuse (rc=$rc): $out"
@@ -403,7 +403,7 @@ APKDIR="$WORK/apk"; mkdir -p "$APKDIR"
 cat > "$APKDIR/AndroidManifest.xml" <<'XML'
 <?xml version="1.0" encoding="utf-8"?>
 <manifest xmlns:android="http://schemas.android.com/apk/res/android"
-    package="com.apexos.signing.fixture">
+    package="com.rimeos.signing.fixture">
     <uses-sdk android:minSdkVersion="28" android:targetSdkVersion="36" />
     <application android:hasCode="false" />
 </manifest>
@@ -497,17 +497,17 @@ fi
 # a single line of Gradle.
 FIX="$WORK/fix"
 mkdir -p "$FIX/android/tools" "$FIX/android/app" \
-         "$FIX/android/core/src/main/kotlin/com/apexos/remote/core"
+         "$FIX/android/core/src/main/kotlin/com/rimeos/remote/core"
 cp "$ARTIFACTS" "$VERIFY" "$FIX/android/tools/"
-printf 'val APEX_MARKETING_VERSION = "0.1.0"\n' > "$FIX/android/app/build.gradle.kts"
+printf 'val RIME_MARKETING_VERSION = "0.1.0"\n' > "$FIX/android/app/build.gradle.kts"
 {
     printf 'const val REMOTE_PROTOCOL_VERSION: Int = 1\n'
     printf 'val SUPPORTED_REMOTE_PROTOCOL_VERSIONS: List<Int> = listOf(1)\n'
-} > "$FIX/android/core/src/main/kotlin/com/apexos/remote/core/Client.kt"
+} > "$FIX/android/core/src/main/kotlin/com/rimeos/remote/core/Client.kt"
 
 printf '%s\n' "$FP_B" > "$FIX/android/signing-certificate.sha256"
-out=$(APEX_KEYSTORE="$KEYDIR/alpha.jks" APEX_KEYSTORE_PASSWORD=throwaway-not-a-release-key \
-      APEX_KEY_ALIAS=alpha APEX_KEY_PASSWORD=throwaway-not-a-release-key \
+out=$(RIME_KEYSTORE="$KEYDIR/alpha.jks" RIME_KEYSTORE_PASSWORD=throwaway-not-a-release-key \
+      RIME_KEY_ALIAS=alpha RIME_KEY_PASSWORD=throwaway-not-a-release-key \
       "$FIX/android/tools/release-artifacts.sh" --out "$WORK/relout" --code 5 \
       --name 0.1.0+5.gdeadbeef 2>&1); rc=$?
 if [ "$rc" -ne 0 ] && said "$out" "NOT the published signing certificate"; then
@@ -525,8 +525,8 @@ fi
 # everything: with the RIGHT key the identity check passes and the run gets as
 # far as the build it cannot do in a fixture.
 printf '%s\n' "$FP_A" > "$FIX/android/signing-certificate.sha256"
-out=$(APEX_KEYSTORE="$KEYDIR/alpha.jks" APEX_KEYSTORE_PASSWORD=throwaway-not-a-release-key \
-      APEX_KEY_ALIAS=alpha APEX_KEY_PASSWORD=throwaway-not-a-release-key \
+out=$(RIME_KEYSTORE="$KEYDIR/alpha.jks" RIME_KEYSTORE_PASSWORD=throwaway-not-a-release-key \
+      RIME_KEY_ALIAS=alpha RIME_KEY_PASSWORD=throwaway-not-a-release-key \
       "$FIX/android/tools/release-artifacts.sh" --out "$WORK/relout" --code 5 \
       --name 0.1.0+5.gdeadbeef 2>&1); rc=$?
 if said "$out" "signing certificate verified: $FP_A"; then
@@ -548,7 +548,7 @@ fi
 [ -e "$WORK/ci-key/release.jks" ] && bad "the CI refusal still wrote a key" \
     || ok "and it wrote no key material on the way out"
 
-out=$(env -u GITHUB_ACTIONS -u CI "$GENERATE" --out /tmp/apex-key-should-not-happen 2>&1); rc=$?
+out=$(env -u GITHUB_ACTIONS -u CI "$GENERATE" --out /tmp/rime-key-should-not-happen 2>&1); rc=$?
 if [ "$rc" -ne 0 ] && said "$out" "tmpfs"; then
     ok "it refuses to put a signing key on a tmpfs, which is RAM and is gone at reboot"
 else
@@ -576,7 +576,7 @@ mkdir -p "$GEN_REPO/android" "$GEN_REPO/docs"
 cp "$PIN" "$GEN_REPO/android/signing-certificate.sha256"
 printf 'phone section\n<!-- fingerprint:begin -->\nUNSET\n<!-- fingerprint:end -->\nafter\n' > "$GEN_REPO/README.md"
 printf 'doc\n<!-- fingerprint:begin -->\nUNSET\n<!-- fingerprint:end -->\nafter\n' > "$GEN_REPO/docs/android-signing.md"
-out=$(env -u GITHUB_ACTIONS -u CI "$GENERATE" --out "$GEN_OUT" --repo "$GEN_REPO" --alias apex-release 2>&1); rc=$?
+out=$(env -u GITHUB_ACTIONS -u CI "$GENERATE" --out "$GEN_OUT" --repo "$GEN_REPO" --alias rime-release 2>&1); rc=$?
 if [ "$rc" -eq 0 ]; then
     ok "the command Andre runs completes"
 else
@@ -617,7 +617,7 @@ if said "$out" "cannot be read back" || said "$out" "CANNOT BE READ BACK"; then
 else
     bad "the generator does not say that a GitHub secret cannot be read back: $out"
 fi
-if said "$out" "gh secret set APEX_KEYSTORE_BASE64"; then
+if said "$out" "gh secret set RIME_KEYSTORE_BASE64"; then
     ok "it prints the exact commands that set the secrets"
 else
     bad "it does not print the gh secret set commands"
@@ -659,8 +659,8 @@ fi
 # The generated keystore is a real one: the same checks the release runs must
 # accept it end to end. This is the whole path Andre is being handed.
 p=$(pin_file gen "$gen_fp")
-out=$(APEX_KEYSTORE_PASSWORD="$genpw" "$VERIFY" --keystore "$GEN_OUT/release.jks" \
-      --alias apex-release --pin "$p" 2>&1); rc=$?
+out=$(RIME_KEYSTORE_PASSWORD="$genpw" "$VERIFY" --keystore "$GEN_OUT/release.jks" \
+      --alias rime-release --pin "$p" 2>&1); rc=$?
 if [ "$rc" -eq 0 ]; then
     ok "the key it generated satisfies the gate the release runs"
 else

@@ -85,8 +85,8 @@ cat > "$ROOTMNT/etc/fstab" <<EOF
 UUID=$INC_UUID   /          ext4  rw,relatime            0 1
 UUID=$ESP_UUID   /boot/efi  vfat  rw,relatime,fmask=0077,dmask=0077  0 2
 EOF
-echo "apex-incumbent" > "$ROOTMNT/etc/hostname"
-echo "root:apex" | chroot "$ROOTMNT" chpasswd
+echo "rime-incumbent" > "$ROOTMNT/etc/hostname"
+echo "root:rime" | chroot "$ROOTMNT" chpasswd
 
 # cgroup v2 unified for podman; disable openrc verbose noise
 sed -i 's/^#\?rc_cgroup_mode=.*/rc_cgroup_mode="unified"/' "$ROOTMNT/etc/rc.conf" || \
@@ -129,7 +129,7 @@ file "$ESPMNT/EFI/alpine/vmlinuz-lts" || true
 log "Writing first-boot UEFI-shell bootstrap (startup.nsh)"
 cat > "$ESPMNT/startup.nsh" <<EOF
 @echo -off
-echo APEX-OS spike-e: first-boot bootstrap, launching Alpine EFISTUB kernel...
+echo Rime OS spike-e: first-boot bootstrap, launching Alpine EFISTUB kernel...
 fs0:
 \\EFI\\alpine\\vmlinuz-lts initrd=\\EFI\\alpine\\initramfs-lts root=UUID=$INC_UUID rw rootfstype=ext4 console=tty0 console=ttyS0,115200
 EOF

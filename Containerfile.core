@@ -1,8 +1,8 @@
 # ─────────────────────────────────────────────────────────────────────────
-# APEX-OS — CORE image (heavy, slow-moving foundation)
+# Rime OS — CORE image (heavy, slow-moving foundation)
 #
 #   fedora-bootc:43
-#     → APEX's own kernel, from Containerfile.kernel + MOK    [own RUNs]
+#     → Rime's own kernel, from Containerfile.kernel + MOK    [own RUNs]
 #       (the COMPILE is its own tier; this installs and signs the RPMs)
 #     → out-of-tree modules (nvidia, xone, xpadneo) + MOK     [own RUNs]
 #       module signing, NVIDIA userspace, nouveau/KMS config
@@ -14,33 +14,33 @@
 #     → third-party Rust tools (awww / matugen / yazi)
 #     → OS branding, locale, timezone, hardening
 #
-# ═══ WHY THIS FILE EXISTS: `apex update` used to download the whole OS ═══
+# ═══ WHY THIS FILE EXISTS: `rime update` used to download the whole OS ═══
 #
 # Everything here used to live in Containerfile.base. That made every published
 # image share ONE fate: the base job's path filter fires on `files/**`,
-# `apexd/**` and `config/**` — i.e. on almost every commit — and a rebuild with
+# `rimed/**` and `config/**` — i.e. on almost every commit — and a rebuild with
 # no layer cache gives every `dnf`/`RUN` layer a brand-new digest even when the
 # installed content is identical. bootc skips a layer only when it already has
 # that exact digest, so a one-line shell tweak invalidated all ~90 of our layers
-# and `apex update` pulled ~4 GiB. Measured on the author's L16: 155 layers,
+# and `rime update` pulled ~4 GiB. Measured on the author's L16: 155 layers,
 # 5.07 GiB compressed, essentially all of it re-fetched every single update.
 #
 # The fix is structural, not a cache trick. The slow-moving ~95% of the image is
 # built HERE, pushed once, and consumed by Containerfile.base as
-# `FROM apex-os-core@sha256:…`. Pinning by digest means those layer descriptors
+# `FROM rime-os-core@sha256:…`. Pinning by digest means those layer descriptors
 # are REUSED VERBATIM in the derived manifest — bootc already has the blobs and
 # fetches none of them. A normal push now rebuilds only the thin base +
-# flavor tiers, so `apex update` moves tens of MiB instead of gigabytes.
+# flavor tiers, so `rime update` moves tens of MiB instead of gigabytes.
 #
 # ── What belongs in core vs base ──
 #   CORE  anything installed by dnf, fetched from the network, or compiled;
 #         OS-level branding/locale/hardening that does not read files/**;
 #         and — since the three published images became one — every out-of-tree
 #         KERNEL MODULE, because a module can only be made loadable under an
-#         enforcing kernel by signing it with the APEX MOK, and that private key
+#         enforcing kernel by signing it with the Rime MOK, and that private key
 #         exists only inside a CI build secret that is mounted here.
-#   BASE  every COPY out of files/** and config/**, the apexd/apex binaries,
-#         the vendored APEX Shell, and any RUN that asserts against them.
+#   BASE  every COPY out of files/** and config/**, the rimed/rime binaries,
+#         the vendored Rime Shell, and any RUN that asserts against them.
 # A RUN that mixes the two must be SPLIT, not moved wholesale. Four in the
 # original file did exactly that (zsh verification, the Windows-boot helper,
 # the Hyprland template guards, the icon-cache/dconf rebuild) and each one is
@@ -50,7 +50,7 @@
 # Core rebuilds when THIS file or kernel/** changes, when forced, or when the
 # weekly cron finds a new fedora-bootc digest. It deliberately does NOT rebuild
 # just because upstream might have moved: the digest of the base it was built
-# from is stamped as org.apexos.fedora-bootc.digest and CI compares it, so a
+# from is stamped as org.rimeos.fedora-bootc.digest and CI compares it, so a
 # quiet week costs users nothing. `force_core=true` bypasses that.
 #
 # ── Layering discipline (M0 spike B finding) ──
@@ -60,33 +60,33 @@
 # OWN `RUN … && dnf5 clean all` layer.
 #
 # ── Base tag: fedora-bootc:43 ──
-# APEX stays on Fedora 43 until the image's kernel, desktop, and installer stack
+# Rime stays on Fedora 43 until the image's kernel, desktop, and installer stack
 # are deliberately migrated and tested together. The original solopasha
 # Hyprland COPR was retired after M0; sdegler's maintained fork follows Fedora
 # branching and currently publishes the complete stack for F43 and F44.
 # ─────────────────────────────────────────────────────────────────────────
 # ═══ Tool builder — third-party Rust programs, toolchain kept out of /usr ═══
-#   • awww + awww-daemon (the swww fork APEX Shell's WallpaperService drives;
+#   • awww + awww-daemon (the swww fork Rime Shell's WallpaperService drives;
 #     not packaged for Fedora). Best-effort: a build failure writes a marker and
 #     does NOT abort the image (the swaybg shim below covers it).
 #   • matugen (crates.io) — the shell's theming engine. Fatal on failure.
 #   • yazi (pinned git workspace) — the TUI file manager. Non-fatal.
 #
-# apexd/apex are NOT built here. They are the one Rust artefact that changes on
+# rimed/rime are NOT built here. They are the one Rust artefact that changes on
 # almost every commit, so they are compiled in Containerfile.base instead —
 # keeping this stage, and everything downstream of it, off the hot path.
 
-# APEX_KERNEL_IMAGE MUST be declared HERE, before the first FROM in the file,
-# not down at its point of use next to `FROM ${APEX_KERNEL_IMAGE} AS
+# RIME_KERNEL_IMAGE MUST be declared HERE, before the first FROM in the file,
+# not down at its point of use next to `FROM ${RIME_KERNEL_IMAGE} AS
 # kernel-rpms`. Buildah/Docker only makes an ARG visible to a *stage's FROM
 # line* if it was declared before the FIRST FROM in the whole file — an ARG
 # declared inside an earlier stage (as this one originally was, right above
 # the kernel-rpms FROM) is scoped to that stage and invisible to any FROM,
 # including its own. Measured, not theoretical: with the ARG in its old spot,
-# `FROM ${APEX_KERNEL_IMAGE} AS kernel-rpms` evaluated to an empty image name
+# `FROM ${RIME_KERNEL_IMAGE} AS kernel-rpms` evaluated to an empty image name
 # and podman failed the whole build with "determining starting point for
 # build: no FROM statement found" — even when build-local.sh passed the
-# correct value with `--build-arg APEX_KERNEL_IMAGE=…`, because the override
+# correct value with `--build-arg RIME_KERNEL_IMAGE=…`, because the override
 # has nothing to attach to before this point in the file. This is the first
 # time `core` was ever built against the real kernel tier, so the defect had
 # never been exercised. See ROADMAP/evidence/kernel-publish-20260921.md.
@@ -103,21 +103,21 @@
 # scheduler failed to load on a user's machine months later.
 #
 # Building the kernel locally is unaffected: build-local.sh overrides this with
-# `--build-arg APEX_KERNEL_IMAGE=localhost/apex-kernel:local`. To refresh the
-# pin, re-run kernel-build.yml and paste the `ARG APEX_KERNEL_IMAGE=…` line its
+# `--build-arg RIME_KERNEL_IMAGE=localhost/rime-kernel:local`. To refresh the
+# pin, re-run kernel-build.yml and paste the `ARG RIME_KERNEL_IMAGE=…` line its
 # run summary prints. The value below is from run 35557283953, immutable tag
-# `kernel-7.2.6-cachyos1.apex1.fc43.x86_64-544143e`. Exactly one space and no
+# `kernel-7.2.6-cachyos1.rime1.fc43.x86_64-544143e`. Exactly one space and no
 # quotes: build-image.yml's resolve step parses this line with a stricter
 # regex than tests/check-kernel-image-pin.sh, which enforces the rest.
-ARG APEX_KERNEL_IMAGE=ghcr.io/andrenijman/apex-os@sha256:2ff544dd021478dbd36dab4efb1ce43ad9cc858f16cd07a271f01693822972d6
+ARG RIME_KERNEL_IMAGE=ghcr.io/andrenijman/rime-os@sha256:2ff544dd021478dbd36dab4efb1ce43ad9cc858f16cd07a271f01693822972d6
 
 FROM quay.io/fedora/fedora-bootc:43 AS toolbuilder
 # /root is special in bootc images (symlink → /var/roothome), so cargo's default
 # $HOME/.cargo fails ("File exists" on mkdir). Point CARGO_HOME at the build tree.
 ENV CARGO_HOME=/build/.cargo
 # Parallel RPM downloads (default 3 → 20): base stages are download-bound, not
-# CPU-bound, so this is the biggest build-time lever. See apex-logs 38.
-# awww build deps (apex-logs 39): its `common` crate links liblz4 via pkg-config
+# CPU-bound, so this is the biggest build-time lever. See rime-logs 38.
+# awww build deps (rime-logs 39): its `common` crate links liblz4 via pkg-config
 # and awww-daemon needs wayland-protocols/wayland/xkbcommon dev files — without
 # these the build-script exits 101 and the wallpaper daemon silently never builds.
 # gcc/cc is needed by several -sys crates.
@@ -237,7 +237,7 @@ RUN set -eux; \
 
 # ─────────────────────────────────────────────────────────────────────────
 # ── The kernel tier, consumed by digest ──────────────────────────────────
-# APEX builds its own kernel in Containerfile.kernel, published as its own
+# Rime builds its own kernel in Containerfile.kernel, published as its own
 # image and pinned here by digest — the same mechanism Containerfile.base uses
 # to consume this file's output, and for the same reason.
 #
@@ -253,32 +253,32 @@ RUN set -eux; \
 #
 # A NAMED STAGE, not `COPY --from=${ARG}`: an ARG-substituted --from resolves
 # inconsistently across builders and fails in ways that read as a missing file.
-# APEX_KERNEL_IMAGE itself is declared at the top of this file, before the
+# RIME_KERNEL_IMAGE itself is declared at the top of this file, before the
 # first FROM — see the comment there for why it cannot be declared here.
-FROM ${APEX_KERNEL_IMAGE} AS kernel-rpms
+FROM ${RIME_KERNEL_IMAGE} AS kernel-rpms
 
 # ─────────────────────────────────────────────────────────────────────────
 FROM quay.io/fedora/fedora-bootc:43
 
-# OCI provenance. The git SHA is injected by CI (--build-arg APEX_REVISION=…).
-ARG APEX_REVISION=dev
-ARG APEX_VERSION=43
+# OCI provenance. The git SHA is injected by CI (--build-arg RIME_REVISION=…).
+ARG RIME_REVISION=dev
+ARG RIME_VERSION=43
 # The digest of the fedora-bootc image this core was actually built from. CI
 # resolves the live digest of the upstream tag and compares it with the label on
-# the published apex-os-core:latest; when they match, the weekly cron SKIPS the
+# the published rime-os-core:latest; when they match, the weekly cron SKIPS the
 # core rebuild. Without this, every Monday reissued ~5 GiB of byte-different but
 # content-identical layers to every user on the fleet. `unknown` (the default,
 # i.e. a local build) never matches, so a local build is never mistaken for a
 # reusable one.
 ARG FEDORA_BOOTC_DIGEST=unknown
-LABEL org.opencontainers.image.title="APEX-OS core" \
-      org.opencontainers.image.description="APEX-OS slow-moving foundation: fedora-bootc:43 + CachyOS kernel + Hyprland/quickshell + greetd host + scx + Bazaar + codecs + userland" \
-      org.opencontainers.image.source="https://github.com/AndreNijman/apex-os" \
-      org.opencontainers.image.revision="${APEX_REVISION}" \
-      org.opencontainers.image.version="${APEX_VERSION}" \
+LABEL org.opencontainers.image.title="Rime OS core" \
+      org.opencontainers.image.description="Rime OS slow-moving foundation: fedora-bootc:43 + CachyOS kernel + Hyprland/quickshell + greetd host + scx + Bazaar + codecs + userland" \
+      org.opencontainers.image.source="https://github.com/AndreNijman/rime-os" \
+      org.opencontainers.image.revision="${RIME_REVISION}" \
+      org.opencontainers.image.version="${RIME_VERSION}" \
       org.opencontainers.image.licenses="MIT" \
-      org.opencontainers.image.vendor="APEX-OS" \
-      org.apexos.fedora-bootc.digest="${FEDORA_BOOTC_DIGEST}"
+      org.opencontainers.image.vendor="Rime OS" \
+      org.rimeos.fedora-bootc.digest="${FEDORA_BOOTC_DIGEST}"
 
 # ── dnf: parallel downloads (build-speed lever) ────────────────────────────
 # Raise max_parallel_downloads from the default 3 → 20 before any dnf runs. The
@@ -286,7 +286,7 @@ LABEL org.opencontainers.image.title="APEX-OS core" \
 # sits near-idle during them), so more parallel fetches is the single biggest
 # build-time win. This persists in the shipped /etc/dnf/dnf.conf, so the Daily/
 # Gaming derivatives inherit it AND runtime `dnf`/`rpm-ostree` fetches are faster
-# too. (apex-logs 38-dnf-parallel-downloads.md)
+# too. (rime-logs 38-dnf-parallel-downloads.md)
 RUN sed -i '/^\[main\]/a max_parallel_downloads=20' /etc/dnf/dnf.conf
 
 # ── Stage 1: CachyOS kernel swap ───────────────────────────────────────────
@@ -306,9 +306,9 @@ RUN sed -i '/^\[main\]/a max_parallel_downloads=20' /etc/dnf/dnf.conf
 # next step. So: tolerate the install's non-zero exit, then HARD-GATE on
 # `rpm -q` proving the kernel packages actually landed. A genuine failure
 # (COPR down, package missing) fails the `rpm -q` and aborts.
-# ── The kernel now comes from APEX's own build, not from the COPR ──────────
+# ── The kernel now comes from Rime's own build, not from the COPR ──────────
 # Containerfile.kernel builds it, and its build FAILS if the produced kernel
-# carries the sched-ext kfunc BTF defect — the defect that made every APEX
+# carries the sched-ext kfunc BTF defect — the defect that made every Rime
 # image to date unable to load any scheduler
 # (ROADMAP/evidence/kernel-build-20260920.md).
 #
@@ -321,28 +321,28 @@ RUN sed -i '/^\[main\]/a max_parallel_downloads=20' /etc/dnf/dnf.conf
 #
 # The COPRs still get enabled further down for `scx-scheds`/`scx-tools`: that is
 # sched-ext USERSPACE and is unaffected by any of this.
-COPY --from=kernel-rpms /rpms     /tmp/apex-kernel-rpms
-COPY --from=kernel-rpms /manifest /tmp/apex-kernel-manifest
+COPY --from=kernel-rpms /rpms     /tmp/rime-kernel-rpms
+COPY --from=kernel-rpms /manifest /tmp/rime-kernel-manifest
 # The pin as THIS commit has it, so the two can be compared. `kernel/**` is
 # already in the core path filter, so this COPY costs nothing and buys the
 # check that makes that filter mean what it appears to mean.
-COPY kernel/kernel.pin /tmp/apex-kernel-pin-expected
+COPY kernel/kernel.pin /tmp/rime-kernel-pin-expected
 RUN set -eux; \
     dnf5 -y install dnf5-plugins; \
     dnf5 -y remove --no-autoremove \
         kernel kernel-core kernel-modules kernel-modules-core; \
-    test -d /tmp/apex-kernel-rpms \
+    test -d /tmp/rime-kernel-rpms \
         || { echo "FATAL: no kernel RPMs in the build context."; \
              echo "       Containerfile.core consumes the kernel from Containerfile.kernel."; \
              echo "       Build it first (build-local.sh does this for you), or pass"; \
-             echo "       --build-arg APEX_KERNEL_IMAGE=<published kernel image@sha256:…>."; \
+             echo "       --build-arg RIME_KERNEL_IMAGE=<published kernel image@sha256:…>."; \
              exit 1; }; \
-    MAN=/tmp/apex-kernel-manifest/kernel-build.txt; \
+    MAN=/tmp/rime-kernel-manifest/kernel-build.txt; \
     test -s "${MAN}" \
         || { echo "FATAL: the kernel image carries no /manifest/kernel-build.txt — it was not built by Containerfile.kernel"; exit 1; }; \
     cat "${MAN}"; \
     # The cross-tier contract. `btf_scx=usable` is written only after
-    # apex-kernel-btf-gate passed over the vmlinux that produced these exact
+    # rime-kernel-btf-gate passed over the vmlinux that produced these exact
     # RPMs, so this line is core refusing a kernel whose BTF was never checked
     # — not core re-deciding it.
     BTF="$(sed -n 's/^btf_scx=//p' "${MAN}")"; \
@@ -354,19 +354,19 @@ RUN set -eux; \
     # genuinely usable, its kver genuinely matches its own manifest. `kernel/**`
     # triggers a core rebuild precisely so core picks up a new kernel — this is
     # what makes that true rather than assumed.
-    cmp /tmp/apex-kernel-pin-expected "${MAN%/*}/kernel.pin" \
+    cmp /tmp/rime-kernel-pin-expected "${MAN%/*}/kernel.pin" \
         || { echo "FATAL: the kernel image was built from a DIFFERENT kernel/kernel.pin than this commit has."; \
              echo "       Rebuild the kernel tier (./build-local.sh kernel --force-core),"; \
-             echo "       or point APEX_KERNEL_IMAGE at one built from this pin."; \
-             diff /tmp/apex-kernel-pin-expected "${MAN%/*}/kernel.pin" || true; \
+             echo "       or point RIME_KERNEL_IMAGE at one built from this pin."; \
+             diff /tmp/rime-kernel-pin-expected "${MAN%/*}/kernel.pin" || true; \
              exit 1; }; \
     echo "kernel image was built from this commit's kernel/kernel.pin"; \
     # --nogpgcheck is a DECISION, stated rather than left as a warning in the
-    # log. These RPMs are local files APEX built itself; there is no repo
+    # log. These RPMs are local files Rime built itself; there is no repo
     # signature to check and no key to check it against. What stands in for the
     # signature is the identity check above plus the digest-pinned
-    # `FROM ${APEX_KERNEL_IMAGE}` that produced them.
-    dnf5 -y --nogpgcheck install /tmp/apex-kernel-rpms/kernel-cachyos-*.rpm \
+    # `FROM ${RIME_KERNEL_IMAGE}` that produced them.
+    dnf5 -y --nogpgcheck install /tmp/rime-kernel-rpms/kernel-cachyos-*.rpm \
       || echo "WARN: kernel install exited non-zero (expected: cosmetic %posttrans dracut) — verifying RPMs landed"; \
     # That `|| echo` tolerates a cosmetic %posttrans failure, but it also
     # swallows a real one — a missing dependency, a conflict with the Fedora
@@ -383,11 +383,11 @@ RUN set -eux; \
             || { echo "FATAL: ${p} is ${got}, manifest vouches for ${WANT_KVER}"; exit 1; }; \
         echo "installed: ${p}-${got}"; \
     done; \
-    echo "kernel ${WANT_KVER} installed, from APEX's own build"; \
-    mkdir -p /usr/share/apex-os/kernel; \
-    cp "${MAN}" /usr/share/apex-os/kernel/build.txt; \
-    cp /tmp/apex-kernel-manifest/kernel.pin /usr/share/apex-os/kernel/kernel.pin; \
-    rm -rf /tmp/apex-kernel-rpms /tmp/apex-kernel-manifest /tmp/apex-kernel-pin-expected; \
+    echo "kernel ${WANT_KVER} installed, from Rime's own build"; \
+    mkdir -p /usr/share/rime-os/kernel; \
+    cp "${MAN}" /usr/share/rime-os/kernel/build.txt; \
+    cp /tmp/rime-kernel-manifest/kernel.pin /usr/share/rime-os/kernel/kernel.pin; \
+    rm -rf /tmp/rime-kernel-rpms /tmp/rime-kernel-manifest /tmp/rime-kernel-pin-expected; \
     dnf5 clean all
 
 # Ensure the kernel image + initramfs live under /usr/lib/modules/<kver>/ —
@@ -395,7 +395,7 @@ RUN set -eux; \
 # post-transaction, but re-assert it) and regenerate the initramfs with a
 # generic (non-hostonly) dracut, since the %posttrans one did not complete.
 # Then HARD-VERIFY both vmlinuz and initramfs exist. Stamp the kver to
-# /usr/lib/apex-kver so the Gaming akmod stage can read it.
+# /usr/lib/rime-kver so the Gaming akmod stage can read it.
 #
 # ── Serial console: OPT-IN, not default ────────────────────────────────────
 # This image previously shipped `console=ttyS0,115200 console=tty0` to every
@@ -411,10 +411,10 @@ RUN set -eux; \
 #   * The benefit is CI-only and the cost on unknown hardware cannot be
 #     verified from here — so the default must be "off".
 #
-# CI opts back in with `--build-arg APEX_SERIAL_CONSOLE=1`. The
+# CI opts back in with `--build-arg RIME_SERIAL_CONSOLE=1`. The
 # serial-getty@ttyS0 mask stays UNCONDITIONAL further down: it is free
 # insurance for users whose firmware exposes a UART for other reasons.
-ARG APEX_SERIAL_CONSOLE=0
+ARG RIME_SERIAL_CONSOLE=0
 RUN set -eux; \
     KVER="$(basename "$(ls -d /usr/lib/modules/*cachyos*)")"; \
     echo "CachyOS kver: ${KVER}"; \
@@ -426,15 +426,15 @@ RUN set -eux; \
     fi; \
     test -s "/usr/lib/modules/${KVER}/initramfs.img"; \
     test -s "/usr/lib/modules/${KVER}/vmlinuz"; \
-    printf '%s\n' "${KVER}" > /usr/lib/apex-kver; \
+    printf '%s\n' "${KVER}" > /usr/lib/rime-kver; \
     mkdir -p /usr/lib/bootc/kargs.d; \
-    if [ "${APEX_SERIAL_CONSOLE}" = "1" ]; then \
+    if [ "${RIME_SERIAL_CONSOLE}" = "1" ]; then \
         printf 'kargs = ["console=ttyS0,115200", "console=tty0"]\n' \
-            > /usr/lib/bootc/kargs.d/10-apex-serial.toml; \
-        echo "serial console: ENABLED (APEX_SERIAL_CONSOLE=1 — CI/QEMU build)"; \
+            > /usr/lib/bootc/kargs.d/10-rime-serial.toml; \
+        echo "serial console: ENABLED (RIME_SERIAL_CONSOLE=1 — CI/QEMU build)"; \
     else \
-        rm -f /usr/lib/bootc/kargs.d/10-apex-serial.toml; \
-        echo "serial console: disabled (default; pass --build-arg APEX_SERIAL_CONSOLE=1 for CI)"; \
+        rm -f /usr/lib/bootc/kargs.d/10-rime-serial.toml; \
+        echo "serial console: disabled (default; pass --build-arg RIME_SERIAL_CONSOLE=1 for CI)"; \
     fi
 
 # ── Stage 1c: hardware-enablement firmware Fedora's weak deps DO NOT pull ──
@@ -538,72 +538,72 @@ RUN set -eux; \
     dnf5 clean all
 
 # ── The unlock prompt has to be able to explain itself ─────────────────────
-# Plymouth's message() was an empty function in both APEX themes, so everything
+# Plymouth's message() was an empty function in both Rime themes, so everything
 # the boot tried to tell the user was accepted and dropped. That is fixed in
 # the themes; this is the caller. It has to live in the INITRAMFS, because the
 # passphrase prompt happens before any filesystem is mounted, so a dracut
 # module is the only shape it can take.
 #
-# Landed HERE rather than in the apex tier because the LAST dracut run of the
-# build is the apex tier's plymouth one (see Containerfile.apex): a module
+# Landed HERE rather than in the rime tier because the LAST dracut run of the
+# build is the rime tier's plymouth one (see Containerfile.rime): a module
 # copied in after that would never be in a shipped initramfs at all.
-COPY files/dracut/apex-unlock-hint /usr/lib/dracut/modules.d/99apex-unlock-hint
+COPY files/dracut/rime-unlock-hint /usr/lib/dracut/modules.d/99rime-unlock-hint
 RUN set -eux; \
-    chmod 0755 /usr/lib/dracut/modules.d/99apex-unlock-hint/module-setup.sh \
-               /usr/lib/dracut/modules.d/99apex-unlock-hint/apex-unlock-hint; \
-    chmod 0644 /usr/lib/dracut/modules.d/99apex-unlock-hint/apex-unlock-hint.service; \
-    sh -n /usr/lib/dracut/modules.d/99apex-unlock-hint/apex-unlock-hint; \
-    bash -n /usr/lib/dracut/modules.d/99apex-unlock-hint/module-setup.sh; \
-    echo "dracut: 99apex-unlock-hint installed"
+    chmod 0755 /usr/lib/dracut/modules.d/99rime-unlock-hint/module-setup.sh \
+               /usr/lib/dracut/modules.d/99rime-unlock-hint/rime-unlock-hint; \
+    chmod 0644 /usr/lib/dracut/modules.d/99rime-unlock-hint/rime-unlock-hint.service; \
+    sh -n /usr/lib/dracut/modules.d/99rime-unlock-hint/rime-unlock-hint; \
+    bash -n /usr/lib/dracut/modules.d/99rime-unlock-hint/module-setup.sh; \
+    echo "dracut: 99rime-unlock-hint installed"
 
-# ── Stage 1b: Secure Boot — sign the kernel with the APEX MOK ──────────────
+# ── Stage 1b: Secure Boot — sign the kernel with the Rime MOK ──────────────
 # The CachyOS kernel comes from a COPR and is UNSIGNED (verified: PE certificate
 # table size 0). Under Secure Boot, Fedora's signed grub refuses to boot it, so
-# APEX would only run with SB disabled. Microsoft will not sign a custom kernel,
+# Rime would only run with SB disabled. Microsoft will not sign a custom kernel,
 # so the standard answer is a Machine Owner Key: we sign vmlinuz ourselves and
 # the user enrols our public cert once via MokManager (shim's mechanism).
 #
 # The private key is supplied as a BUILD SECRET and never enters the image or the
-# repo:  podman build --secret id=apex_sb_key,src=/path/apex-mok.key \
-#                     --secret id=apex_sb_crt,src=/path/apex-mok.crt
+# repo:  podman build --secret id=rime_sb_key,src=/path/rime-mok.key \
+#                     --secret id=rime_sb_crt,src=/path/rime-mok.crt
 # Without the secret the kernel is left unsigned and the image simply requires
 # SB off — the build says so loudly rather than silently shipping something that
 # will not boot.
-RUN --mount=type=secret,id=apex_sb_key --mount=type=secret,id=apex_sb_crt \
+RUN --mount=type=secret,id=rime_sb_key --mount=type=secret,id=rime_sb_crt \
     set -eux; \
-    KVER="$(cat /usr/lib/apex-kver)"; \
-    if [ -s /run/secrets/apex_sb_key ] && [ -s /run/secrets/apex_sb_crt ]; then \
+    KVER="$(cat /usr/lib/rime-kver)"; \
+    if [ -s /run/secrets/rime_sb_key ] && [ -s /run/secrets/rime_sb_crt ]; then \
         dnf5 -y install sbsigntools >/dev/null; \
-        sbsign --key /run/secrets/apex_sb_key --cert /run/secrets/apex_sb_crt \
+        sbsign --key /run/secrets/rime_sb_key --cert /run/secrets/rime_sb_crt \
                --output "/usr/lib/modules/${KVER}/vmlinuz.signed" \
                "/usr/lib/modules/${KVER}/vmlinuz"; \
         mv "/usr/lib/modules/${KVER}/vmlinuz.signed" "/usr/lib/modules/${KVER}/vmlinuz"; \
         sbverify --list "/usr/lib/modules/${KVER}/vmlinuz" | head -5; \
-        mkdir -p /usr/share/apex-os/secureboot; \
-        openssl x509 -in /run/secrets/apex_sb_crt -outform DER \
-                -out /usr/share/apex-os/secureboot/apex-mok.der; \
-        printf 'signed\n' > /usr/share/apex-os/secureboot/kernel-signed; \
+        mkdir -p /usr/share/rime-os/secureboot; \
+        openssl x509 -in /run/secrets/rime_sb_crt -outform DER \
+                -out /usr/share/rime-os/secureboot/rime-mok.der; \
+        printf 'signed\n' > /usr/share/rime-os/secureboot/kernel-signed; \
         dnf5 -y remove sbsigntools >/dev/null 2>&1 || true; \
         dnf5 clean all; \
-        echo "SECURE BOOT: kernel ${KVER} signed with the APEX MOK"; \
+        echo "SECURE BOOT: kernel ${KVER} signed with the Rime MOK"; \
     else \
-        mkdir -p /usr/share/apex-os/secureboot; \
-        printf 'unsigned\n' > /usr/share/apex-os/secureboot/kernel-signed; \
+        mkdir -p /usr/share/rime-os/secureboot; \
+        printf 'unsigned\n' > /usr/share/rime-os/secureboot/kernel-signed; \
         echo "SECURE BOOT: no signing secret supplied — kernel left UNSIGNED (Secure Boot must be OFF)"; \
     fi
 
 # ── Stage 1d: out-of-tree kernel modules — built AND SIGNED here ───────────
 #
 # WHY THESE ARE IN CORE AND NOT IN A FLAVOR
-# APEX publishes ONE image for every laptop. Userspace can be added to a running
-# machine (`apex install` builds a systemd system extension); a KERNEL MODULE
-# cannot, because a module the kernel will accept has to be signed with the APEX
+# Rime publishes ONE image for every laptop. Userspace can be added to a running
+# machine (`rime install` builds a systemd system extension); a KERNEL MODULE
+# cannot, because a module the kernel will accept has to be signed with the Rime
 # MOK private key, and that key is a CI secret that must never reach a user's
-# machine. `apex-pkg` refuses kernels/akmods for exactly this reason. So the rule
+# machine. `rime-pkg` refuses kernels/akmods for exactly this reason. So the rule
 # that decides what ships and what installs on demand is simply:
 #
 #     kernel module  -> built and signed HERE, in the image
-#     userspace      -> `apex install steam gamescope …` on demand
+#     userspace      -> `rime install steam gamescope …` on demand
 #
 # and everything below is on the kernel-module side of that line.
 #
@@ -612,13 +612,13 @@ RUN --mount=type=secret,id=apex_sb_key --mount=type=secret,id=apex_sb_crt \
 # that owns the kernel these modules must match, and — decisively — the tier the
 # base consumes as `FROM …@sha256:…`. A digest-pinned parent's layer descriptors
 # are reused verbatim, so bootc already holds these blobs and downloads none of
-# them on a normal `apex update`. Put the same content in `base` or a flavor and
+# them on a normal `rime update`. Put the same content in `base` or a flavor and
 # every user would re-download the NVIDIA driver on every push.
 #
 # THE SIGNING GAP THIS CLOSES
 # Nothing in this repository has ever signed an out-of-tree module. The akmod was
 # built in Containerfile.gaming, which is a FLAVOR — and the flavor job is never
-# passed `--secret id=apex_sb_key`, so `sign-file` could not have run there even
+# passed `--secret id=rime_sb_key`, so `sign-file` could not have run there even
 # if someone had written it. CI's Secure Boot check ran `sbverify` against
 # vmlinuz only. AGENTS.md has always required that "the shipped kernel and
 # required out-of-tree modules must be signed by the expected chain".
@@ -662,10 +662,10 @@ RUN --mount=type=secret,id=apex_sb_key --mount=type=secret,id=apex_sb_crt \
 #
 # Build and signing are ONE layer on purpose: signing rewrites every module, so
 # splitting them would commit the unsigned copies to a lower layer and ship both.
-ARG APEX_AKMODS="nvidia xone xpadneo"
-RUN --mount=type=secret,id=apex_sb_key --mount=type=secret,id=apex_sb_crt \
+ARG RIME_AKMODS="nvidia xone xpadneo"
+RUN --mount=type=secret,id=rime_sb_key --mount=type=secret,id=rime_sb_crt \
     set -eux; \
-    KVER="$(cat /usr/lib/apex-kver)"; \
+    KVER="$(cat /usr/lib/rime-kver)"; \
     echo "building out-of-tree modules against CachyOS kver: ${KVER}"; \
     test -d "/usr/src/kernels/${KVER}" \
         || { echo "FATAL: kernel-devel headers missing for ${KVER}"; exit 1; }; \
@@ -676,7 +676,7 @@ RUN --mount=type=secret,id=apex_sb_key --mount=type=secret,id=apex_sb_crt \
     dnf5 -y copr enable shdwchn10/xpadneo; \
     dnf5 -y install akmods kmodtool gcc make; \
     dnf5 -y install akmod-nvidia akmod-xone akmod-xpadneo; \
-    for k in ${APEX_AKMODS}; do \
+    for k in ${RIME_AKMODS}; do \
         echo "=== akmods: building ${k} for ${KVER} ==="; \
         akmods_rc=0; \
         akmods --force --kernels "${KVER}" --kmod "${k}" || akmods_rc=$?; \
@@ -707,16 +707,16 @@ RUN --mount=type=secret,id=apex_sb_key --mount=type=secret,id=apex_sb_crt \
     HASH="$(sed -n 's/^CONFIG_MODULE_SIG_HASH="\(.*\)"$/\1/p' "${MODDIR}/config")"; \
     test -n "${HASH}" \
         || { echo "FATAL: cannot read CONFIG_MODULE_SIG_HASH from ${MODDIR}/config"; exit 1; }; \
-    mkdir -p /usr/share/apex-os/secureboot; \
-    if [ -s /run/secrets/apex_sb_key ] && [ -s /run/secrets/apex_sb_crt ]; then \
+    mkdir -p /usr/share/rime-os/secureboot; \
+    if [ -s /run/secrets/rime_sb_key ] && [ -s /run/secrets/rime_sb_crt ]; then \
         test -x "${SIGN_FILE}" \
             || { echo "FATAL: ${SIGN_FILE} missing — kernel-devel did not ship the signing helper"; exit 1; }; \
         dnf5 -y install zstd xz >/dev/null; \
-        openssl x509 -in /run/secrets/apex_sb_crt -outform DER -out /tmp/apex-mok.der; \
-        SIGNER="$(openssl x509 -in /run/secrets/apex_sb_crt -noout -subject -nameopt multiline \
+        openssl x509 -in /run/secrets/rime_sb_crt -outform DER -out /tmp/rime-mok.der; \
+        SIGNER="$(openssl x509 -in /run/secrets/rime_sb_crt -noout -subject -nameopt multiline \
                   | sed -n 's/^ *commonName *= *//p')"; \
         test -n "${SIGNER}" \
-            || { echo "FATAL: APEX MOK certificate has no commonName to verify against"; exit 1; }; \
+            || { echo "FATAL: Rime MOK certificate has no commonName to verify against"; exit 1; }; \
         echo "signing out-of-tree modules with ${HASH}, signer CN='${SIGNER}'"; \
         SIGNED=0; \
         OOT=""; for d in extra updates; do [ -d "${MODDIR}/${d}" ] && OOT="${OOT} ${MODDIR}/${d}"; done; \
@@ -729,7 +729,7 @@ RUN --mount=type=secret,id=apex_sb_key --mount=type=secret,id=apex_sb_crt \
                 *.ko)     ko="${m}";              recomp=none ;; \
                 *) echo "FATAL: unhandled module file ${m}"; exit 1 ;; \
             esac; \
-            "${SIGN_FILE}" "${HASH}" /run/secrets/apex_sb_key /tmp/apex-mok.der "${ko}"; \
+            "${SIGN_FILE}" "${HASH}" /run/secrets/rime_sb_key /tmp/rime-mok.der "${ko}"; \
             tail -c 28 "${ko}" | grep -q 'Module signature appended' \
                 || { echo "FATAL: no signature trailer on ${ko}"; exit 1; }; \
             case "${recomp}" in \
@@ -738,15 +738,15 @@ RUN --mount=type=secret,id=apex_sb_key --mount=type=secret,id=apex_sb_crt \
             esac; \
             SIGNED=$((SIGNED + 1)); \
         done; \
-        rm -f /tmp/apex-mok.der; \
+        rm -f /tmp/rime-mok.der; \
         test "${SIGNED}" -gt 0 \
             || { echo "FATAL: signed 0 modules — the enumeration found nothing to sign"; exit 1; }; \
         depmod -a "${KVER}"; \
-        printf '%s\n' "${SIGNER}" > /usr/share/apex-os/secureboot/module-signer; \
-        printf 'signed\n' > /usr/share/apex-os/secureboot/modules-signed; \
-        echo "SECURE BOOT: ${SIGNED} out-of-tree modules signed with the APEX MOK"; \
+        printf '%s\n' "${SIGNER}" > /usr/share/rime-os/secureboot/module-signer; \
+        printf 'signed\n' > /usr/share/rime-os/secureboot/modules-signed; \
+        echo "SECURE BOOT: ${SIGNED} out-of-tree modules signed with the Rime MOK"; \
     else \
-        printf 'unsigned\n' > /usr/share/apex-os/secureboot/modules-signed; \
+        printf 'unsigned\n' > /usr/share/rime-os/secureboot/modules-signed; \
         echo "SECURE BOOT: no signing secret — out-of-tree modules left UNSIGNED"; \
     fi; \
     dnf5 clean all
@@ -767,7 +767,7 @@ RUN --mount=type=secret,id=apex_sb_key --mount=type=secret,id=apex_sb_crt \
 # the three and would have to be weakened to pass — the exact shape of check
 # that stops meaning anything.
 RUN set -eux; \
-    KVER="$(cat /usr/lib/apex-kver)"; \
+    KVER="$(cat /usr/lib/rime-kver)"; \
     MODDIR="/usr/lib/modules/${KVER}"; \
     OOT=""; for d in extra updates; do [ -d "${MODDIR}/${d}" ] && OOT="${OOT} ${MODDIR}/${d}"; done; \
     test -n "${OOT}" || { echo "FATAL: no out-of-tree module directory"; exit 1; }; \
@@ -779,8 +779,8 @@ RUN set -eux; \
     done; \
     modinfo -k "${KVER}" nvidia >/dev/null \
         || { echo "FATAL: modinfo cannot resolve nvidia for ${KVER}"; exit 1; }; \
-    if [ "$(cat /usr/share/apex-os/secureboot/modules-signed)" = signed ]; then \
-        SIGNER="$(cat /usr/share/apex-os/secureboot/module-signer)"; \
+    if [ "$(cat /usr/share/rime-os/secureboot/modules-signed)" = signed ]; then \
+        SIGNER="$(cat /usr/share/rime-os/secureboot/module-signer)"; \
         N=0; \
         for m in $(find ${OOT} -type f -name '*.ko*'); do \
             got="$(modinfo -F signer "${m}" 2>/dev/null || true)"; \
@@ -843,7 +843,7 @@ RUN set -eux; \
 
 # ── Stage 1f: NVIDIA boot correctness + the initramfs size budget ──────────
 # Everything here MUST land before the LAST initramfs regeneration in the build,
-# which is the Plymouth dracut run in Containerfile.apex. (apex-logs 46)
+# which is the Plymouth dracut run in Containerfile.rime. (rime-logs 46)
 #
 # ═══ THE SIZE BUDGET, AND WHY IT OWNS THIS FILE ══════════════════════════════
 #
@@ -851,7 +851,7 @@ RUN set -eux; \
 # systemd-boot needs the kernel and initramfs ON the ESP: `bootc` does not
 # implement XBOOTLDR Type #1 entries (measured 2026-09-21 — the GUID constant
 # exists in its source and nothing reachable references it), so there is no
-# second partition to put them on. apex-boot-migrate needs room for three
+# second partition to put them on. rime-boot-migrate needs room for three
 # deployments plus slack — booted, rollback, and the one an update stages
 # alongside them — so the arithmetic is `3 × (vmlinuz + initramfs) + 48 MiB`.
 #
@@ -945,16 +945,16 @@ RUN set -eux; \
 # All of it exists to mount a root filesystem over a network — NFS, NVMe-oF,
 # iSCSI, netboot — or to reach a Tang server for a network-bound keyslot.
 #
-# APEX roots are local block devices. The installer already made this decision
+# Rime roots are local block devices. The installer already made this decision
 # for the live ISO ("No 'livenet' … we don't netboot", installer/build-live-iso.sh
 # line 137) and nothing in this repo sets rd.neednet, netroot, nfsroot or
 # iscsi. So the initramfs stops carrying it.
 #
 # WHAT THIS BETS AGAINST: network-root installs of any kind, and Clevis/Tang
 # network unlock — `clevis-pin-tang` drops out with the network module, while
-# `clevis-pin-tpm2`, which is what 50-bootc-clevis.conf and APEX's own
+# `clevis-pin-tpm2`, which is what 50-bootc-clevis.conf and Rime's own
 # enrolment actually use, stays. A machine that needs a network root cannot run
-# this image's initramfs; it was never a machine APEX shipped for.
+# this image's initramfs; it was never a machine Rime shipped for.
 #
 # ═══ FINDING 3 — nvidia-drm modeset ══════════════════════════════════════════
 #
@@ -963,7 +963,7 @@ RUN set -eux; \
 #    RPMFusion respin that drops that patch cannot silently ship an image with no
 #    KMS — an explicit modprobe option beats whatever the compiled-in default is.
 #
-# WHAT UNIFICATION CHANGES, STATED PLAINLY: every APEX machine now carries the
+# WHAT UNIFICATION CHANGES, STATED PLAINLY: every Rime machine now carries the
 # nouveau blacklist, not just the ex-`gaming-nvidia` ones. On AMD/Intel hardware
 # that is inert (no NVIDIA device, nothing to bind). On a machine whose NVIDIA
 # GPU is too old for the 580 branch it means the dGPU goes unused rather than
@@ -977,7 +977,7 @@ RUN set -eux; \
 RUN set -eux; \
     mkdir -p /usr/lib/modprobe.d /usr/lib/bootc/kargs.d /usr/lib/dracut/dracut.conf.d; \
     printf '%s\n' \
-        '# APEX-OS (apex-logs 46). nouveau must never bind the dGPU: it races' \
+        '# Rime OS (rime-logs 46). nouveau must never bind the dGPU: it races' \
         '# the proprietary driver, and RPMFusion ships its blacklist only via a' \
         '# %posttrans grubby call, which is inert on bootc.' \
         'blacklist nouveau' \
@@ -986,15 +986,15 @@ RUN set -eux; \
         '# surviving a respin. modeset=1 is required by every Wayland compositor;' \
         '# fbdev=1 gives a console/splash framebuffer on dGPU-attached outputs.' \
         'options nvidia-drm modeset=1 fbdev=1' \
-        > /usr/lib/modprobe.d/50-apex-nvidia.conf; \
+        > /usr/lib/modprobe.d/50-rime-nvidia.conf; \
     printf '%s\n' \
         '# rd.driver.blacklist is the mechanism dracut honours in the INITRAMFS' \
         '# phase — modprobe.d alone is weaker there, and nouveau is verifiably' \
         '# inside the initramfs. modprobe.blacklist covers the real root.' \
         'kargs = ["rd.driver.blacklist=nouveau", "modprobe.blacklist=nouveau"]' \
-        > /usr/lib/bootc/kargs.d/25-apex-nvidia.toml; \
+        > /usr/lib/bootc/kargs.d/25-rime-nvidia.toml; \
     printf '%s\n' \
-        '# APEX-OS replacement for RPMFusion 99-nvidia-dracut.conf.' \
+        '# Rime OS replacement for RPMFusion 99-nvidia-dracut.conf.' \
         '# Keeps their filename because this file exists to SHADOW theirs; it' \
         '# now carries the whole initramfs size policy, not just nvidia.' \
         '# See Containerfile.core stage 1f for the measurements and the bets.' \
@@ -1008,7 +1008,7 @@ RUN set -eux; \
         'omit_drivers+=" nouveau amdgpu i915 xe radeon amdkfd "' \
         'omit_drivers+=" nvidia nvidia_modeset nvidia_drm nvidia_uvm "' \
         '#' \
-        '# No network in the initramfs: APEX roots are local block devices.' \
+        '# No network in the initramfs: Rime roots are local block devices.' \
         'omit_dracutmodules+=" network network-manager kernel-network-modules "' \
         'omit_dracutmodules+=" nfs nvmf qemu-net walinuxagent "' \
         > /usr/lib/dracut/dracut.conf.d/99-nvidia-dracut.conf; \
@@ -1016,16 +1016,16 @@ RUN set -eux; \
     for u in nvidia-powerd nvidia-persistenced; do \
         mkdir -p "/usr/lib/systemd/system/${u}.service.d"; \
         printf '%s\n' \
-            '# Portability (apex-logs 46): this image runs on ANY machine,' \
+            '# Portability (rime-logs 46): this image runs on ANY machine,' \
             '# including ones with no NVIDIA GPU. Without this gate these units' \
             '# fail at every boot on AMD/Intel hardware and show up as failed' \
             '# units, which is noise the user then has to triage.' \
             '[Unit]' \
             'ConditionPathExistsGlob=/sys/module/nvidia' \
-            > "/usr/lib/systemd/system/${u}.service.d/10-apex-nvidia-only.conf"; \
+            > "/usr/lib/systemd/system/${u}.service.d/10-rime-nvidia-only.conf"; \
     done; \
-    test -s /usr/lib/modprobe.d/50-apex-nvidia.conf; \
-    test -s /usr/lib/bootc/kargs.d/25-apex-nvidia.toml; \
+    test -s /usr/lib/modprobe.d/50-rime-nvidia.conf; \
+    test -s /usr/lib/bootc/kargs.d/25-rime-nvidia.toml; \
     NVCONF=/usr/lib/dracut/dracut.conf.d/99-nvidia-dracut.conf; \
     grep -q '^omit_drivers=""$' "${NVCONF}"; \
     grep -q 'omit_drivers+=" nouveau amdgpu i915 xe radeon amdkfd "' "${NVCONF}"; \
@@ -1049,46 +1049,46 @@ RUN set -eux; \
 # GF76 (board MS-17L3). msi-wmi-platform does take force=1 and registers an hwmon
 # device, so it is the viable fan/telemetry backend there. Loading it taints the
 # kernel; harmless, and a no-op on non-MSI hardware where the WMI GUID is absent.
-# apexd probes hwmon -> msi-wmi-platform -> msi-ec -> unsupported.
+# rimed probes hwmon -> msi-wmi-platform -> msi-ec -> unsupported.
 #
 # irqbalance is MASKED (it is installed, as a dependency, on every image — so the
 # `|| true` this carried in Containerfile.gaming was dead weight guarding a
-# command that cannot fail, and is gone). It actively undoes apexd's M6 IRQ
+# command that cannot fail, and is gone). It actively undoes rimed's M6 IRQ
 # pinning and a static IRQBALANCE_BANNED_CPULIST cannot track a cpuset chosen at
 # runtime. On a laptop the cost of not running it is negligible; the cost of it
-# fighting apexd is a measurable frame-pacing regression.
+# fighting rimed is a measurable frame-pacing regression.
 #
 # /etc/gamemode.ini ships even though gamemode itself is now an on-demand
 # package: it is inert without gamemode, and it means the FIRST time a user runs
-# `apex install gamemode`, gamemoded already hands the governor to apexd instead
+# `rime install gamemode`, gamemoded already hands the governor to rimed instead
 # of flapping it. Config that arrives after the daemon is config nobody applies.
 #
 # xone/xpadneo module options: xpadneo's rumble and the xone dongle are what the
 # akmods above exist for; these give both sane defaults without a udev rule.
 RUN set -eux; \
     mkdir -p /usr/lib/modules-load.d /usr/lib/modprobe.d; \
-    printf '%s\n' 'msi-wmi-platform' > /usr/lib/modules-load.d/apex-msi.conf; \
+    printf '%s\n' 'msi-wmi-platform' > /usr/lib/modules-load.d/rime-msi.conf; \
     printf '%s\n' 'options msi-wmi-platform force=1' \
-        > /usr/lib/modprobe.d/51-apex-msi.conf; \
+        > /usr/lib/modprobe.d/51-rime-msi.conf; \
     systemctl mask irqbalance.service; \
     printf '%s\n' \
         '[general]' \
-        '; apexd owns scaling_governor (M6 tier engine). Matching gamemoded to' \
-        '; apexd game tier means neither daemon flaps the governor against the' \
+        '; rimed owns scaling_governor (M6 tier engine). Matching gamemoded to' \
+        '; rimed game tier means neither daemon flaps the governor against the' \
         '; other.' \
         'desiredgov=performance' \
         'defaultgov=performance' \
         'igpu_desiredgov=performance' \
         '' \
         '[custom]' \
-        '; Makes Steam `gamemoderun %command%` drive APEX game mode: P-core' \
+        '; Makes Steam `gamemoderun %command%` drive Rime game mode: P-core' \
         '; cpuset, IRQ steering, NVIDIA clock locks and fan boost. Idempotent,' \
-        '; and safe when apexd is absent (the CLI reports unsupported, not err).' \
-        'start=/usr/bin/apex game start' \
-        'end=/usr/bin/apex game stop' \
+        '; and safe when rimed is absent (the CLI reports unsupported, not err).' \
+        'start=/usr/bin/rime game start' \
+        'end=/usr/bin/rime game stop' \
         > /etc/gamemode.ini; \
-    test -s /usr/lib/modules-load.d/apex-msi.conf; \
-    test -s /usr/lib/modprobe.d/51-apex-msi.conf; \
+    test -s /usr/lib/modules-load.d/rime-msi.conf; \
+    test -s /usr/lib/modprobe.d/51-rime-msi.conf; \
     test -s /etc/gamemode.ini; \
     test "$(readlink -f /etc/systemd/system/irqbalance.service)" = /dev/null \
         || { echo "FATAL: irqbalance.service is not masked"; exit 1; }
@@ -1098,7 +1098,7 @@ RUN set -eux; \
 #
 # quickshell-git, NOT quickshell, and the reason is accessibility. Released
 # 0.3.1 publishes NOTHING to AT-SPI: the application node answers ChildCount 0
-# and no window appears, so every `Accessible.role`/`.name` in apex-shell is
+# and no window appears, so every `Accessible.role`/`.name` in rime-shell is
 # source-correct and unreachable at runtime, including the ones on the lock
 # screen's password field. Measured with a per-pid AT-SPI probe across six
 # window configurations.
@@ -1124,7 +1124,7 @@ RUN set -eux; \
 # want (podman + rpm-ostree are already in fedora-bootc). COPRs disabled after.
 #
 # glibc-langpack-en + zram-generator-defaults close two first-boot gaps found on
-# the p6 install (apex-logs 53):
+# the p6 install (rime-logs 53):
 #   • glibc-langpack-en — the image shipped ONLY glibc-minimal-langpack, so
 #     `locale -a` listed nothing but C/C.utf8/POSIX and en_US.UTF-8 did not
 #     EXIST on the system. The installer kickstart asks for `lang en_US.UTF-8`
@@ -1144,7 +1144,7 @@ RUN set -eux; \
 # change live; kanshi holds the persistent per-arrangement profiles and reapplies
 # them on hotplug. Both speak wlr-output-management, so they serve the labwc and
 # niri sessions directly; Hyprland does not implement that protocol and is driven
-# through hyprctl by the same APEX settings model.
+# through hyprctl by the same Rime settings model.
 #
 # wlopm is DISPLAY POWER, which is a different protocol and a different job from
 # wlr-randr's. It is the only thing that can turn the screen off on labwc:
@@ -1170,18 +1170,18 @@ RUN set -eux; \
 #
 # qt6-qttranslations is here for exactly that reason and for a second one that
 # is not obvious. It is a `Recommends:` of qt6-qtbase-gui and NOTHING requires
-# it — measured on a booted APEX host: `rpm -q --whatrequires qt6-qttranslations`
+# it — measured on a booted Rime host: `rpm -q --whatrequires qt6-qttranslations`
 # answers "no package". It owns /usr/share/qt6/translations/qt_<lang>.qm, and
-# those catalogues are the entire mechanism by which any Qt surface in APEX
+# those catalogues are the entire mechanism by which any Qt surface in Rime
 # mirrors for a right-to-left language: Qt does not read the direction off the
 # locale, it TRANSLATES the string QT_LAYOUT_DIRECTION and compares the answer
 # to "RTL". Urdu proves it — unambiguously RTL, QLocale agrees, and Qt still
 # answers LeftToRight because upstream ships no qt_ur.qm. So a build that ever
-# passes --setopt=install_weak_deps=False (apex-pkg already has a
+# passes --setopt=install_weak_deps=False (rime-pkg already has a
 # --no-weak-deps flag) would delete right-to-left support with nothing red
-# anywhere. tests/test-apex-platform-theme.sh is the assertion; this line is
+# anywhere. tests/test-rime-platform-theme.sh is the assertion; this line is
 # what makes it true. mksquashfs reaching the image only as a weak dependency
-# of dracut-squash is the same class, already on record in apex-pkg.
+# of dracut-squash is the same class, already on record in rime-pkg.
 # Own transaction, `dnf5 clean all` at the end.
 RUN set -eux; \
     dnf5 -y copr enable sdegler/hyprland; \
@@ -1207,7 +1207,7 @@ RUN set -eux; \
     : 'EMPTY revision -- "Quickshell 0.3.1 (revision , distributed by ...)" --'; \
     : 'because it is built from a tarball with no git tree. The snapshot reports'; \
     : 'the commit it was built from. An empty revision therefore means the COPR'; \
-    : 'served the release package and every Accessible.* in apex-shell would be'; \
+    : 'served the release package and every Accessible.* in rime-shell would be'; \
     : 'unreachable at runtime, with nothing else failing to say so.'; \
     qs_ver="$(quickshell --version 2>&1 | head -n1)"; \
     printf 'quickshell: %s\n' "$qs_ver"; \
@@ -1273,11 +1273,11 @@ RUN set -eux; \
         ; then echo "FATAL: hyprland-dialog has unresolved shared libraries"; exit 1; fi; \
     test -d /usr/lib64/qt6/qml/org/hyprland/style; \
     test ! -d /usr/usr; \
-    mkdir -p /usr/lib64/apex; \
+    mkdir -p /usr/lib64/rime; \
     gcc -shared -fPIC -O2 -Wl,-z,relro,-z,now \
         /tmp/quickshell-argc-shim.c -ldl \
-        -o /usr/lib64/apex/libapex-quickshell-argc.so; \
-    nm -D /usr/lib64/apex/libapex-quickshell-argc.so \
+        -o /usr/lib64/rime/librime-quickshell-argc.so; \
+    nm -D /usr/lib64/rime/librime-quickshell-argc.so \
         | grep -q '_ZN15QGuiApplicationC1ERiPPci'; \
     rm -rf /b; \
     rm -f /tmp/quickshell-argc-shim.c; \
@@ -1289,7 +1289,7 @@ RUN set -eux; \
     echo "hyprland-qtutils: built against the shipping Qt and hypr libraries"
 
 # ── Stage 3: JetBrainsMono Nerd Font ───────────────────────────────────────
-# apex-greet's QML uses the "JetBrainsMono Nerd Font" family for both body text
+# rime-greet's QML uses the "JetBrainsMono Nerd Font" family for both body text
 # and its Nerd-Font glyphs (person / lock / caps-lock icons). Fedora packages
 # only plain JetBrains Mono (no Nerd glyphs), so fetch the patched family. ADD
 # downloads but does not auto-extract a tarball, so unpack in the RUN.
@@ -1303,14 +1303,14 @@ RUN set -eux; \
 
 # ── Stage 4: sched-ext userspace (scx) ─────────────────────────────────────
 # scx-scheds (the scheduler set) + scx-tools (scx_loader/scxctl) from the
-# CachyOS addons COPR — the sched-ext userspace apexd will drive. Isolated in
+# CachyOS addons COPR — the sched-ext userspace rimed will drive. Isolated in
 # its OWN transaction because M0 spike B traced rpmdb corruption to combining
 # this install with the akmod flow. `dnf5 clean all` at the end.
 RUN set -eux; \
     dnf5 -y copr enable bieszczaders/kernel-cachyos-addons; \
     dnf5 -y install scx-scheds scx-tools; \
     dnf5 -y copr disable bieszczaders/kernel-cachyos-addons; \
-    rpm -q scx-scheds scx-tools > /usr/lib/apex-scx-versions 2>&1 || true; \
+    rpm -q scx-scheds scx-tools > /usr/lib/rime-scx-versions 2>&1 || true; \
     dnf5 clean all
 
 # ── Stage 5: Bazaar app store ──────────────────────────────────────────────
@@ -1347,7 +1347,7 @@ RUN set -eux; \
 #   2. This image is now the one every laptop runs, including the ones whose
 #      acceptance gate is suspend reliability and idle drain. Shipping
 #      main-branch Mesa to all of them to chase frame pacing on some of them is
-#      the wrong trade. `apex repo enable-copr xxmitsu/mesa-git` remains for
+#      the wrong trade. `rime repo enable-copr xxmitsu/mesa-git` remains for
 #      anyone who wants it per-machine.
 #
 # Terra (fyralabs) ships a newer *release* mesa than the fc43-pinned base, built
@@ -1358,7 +1358,7 @@ RUN set -eux; \
 # The Terra repo is REMOVED after the sync. It must NOT stay enabled in the
 # shipped image: terra-release's repo file points gpgkey at
 # file:///etc/pki/rpm-gpg/RPM-GPG-KEY-terra$releasever, and any later depsolve
-# against that enabled repo (bootc-image-builder's ISO build, or an `apex
+# against that enabled repo (bootc-image-builder's ISO build, or an `rime
 # install`) fails to read the key and aborts — which is exactly what broke the
 # first installer-ISO build. Falls back to Fedora-stable mesa + RPMFusion
 # freeworld VA if Terra is unavailable at build time; codecs work either way.
@@ -1381,15 +1381,15 @@ RUN set -eux; \
             terra-release \
        && dnf5 -y distro-sync "mesa*"; then \
         dnf5 -y remove terra-release; \
-        echo "mesa: Terra latest-stable (codec-enabled; repo removed post-bake)" > /usr/lib/apex-mesa-leg; \
+        echo "mesa: Terra latest-stable (codec-enabled; repo removed post-bake)" > /usr/lib/rime-mesa-leg; \
     else \
         echo "Terra unavailable — Fedora-stable mesa + RPMFusion freeworld VA"; \
         dnf5 -y install --allowerasing \
             mesa-va-drivers-freeworld mesa-vdpau-drivers-freeworld; \
-        echo "mesa: Fedora-stable + freeworld VA (Terra fallback)" > /usr/lib/apex-mesa-leg; \
+        echo "mesa: Fedora-stable + freeworld VA (Terra fallback)" > /usr/lib/rime-mesa-leg; \
     fi; \
     rm -f /etc/yum.repos.d/terra*.repo /etc/yum.repos.d/*terra*.repo; \
-    cat /usr/lib/apex-mesa-leg; \
+    cat /usr/lib/rime-mesa-leg; \
     test -z "$(ls /etc/yum.repos.d/ | grep -i terra || true)" \
         || { echo "FATAL: a Terra repo file survived — every later depsolve would abort on its missing gpgkey"; exit 1; }; \
     test -e /usr/lib64/libGLX_mesa.so.0; \
@@ -1397,7 +1397,7 @@ RUN set -eux; \
     dnf5 clean all
 
 # ── Stage 5a-apps: baked userland (both editions) ──────────────────────────
-# The daily-driver application set the plan bakes into every APEX-OS install so a
+# The daily-driver application set the plan bakes into every Rime OS install so a
 # fresh boot is usable with zero Flatpak round-trips: Firefox (the default and
 # only baked browser), the Thunar + gvfs file-manager stack (yazi, the TUI
 # companion, is built in the builder stage), a PDF viewer, image viewer, mpv, the
@@ -1457,11 +1457,11 @@ RUN set -eux; \
     command -v adb; \
     # xdg-terminal-exec is what makes a `Terminal=true` desktop entry
     # launchable at all: the launcher hands it the program and it supplies the
-    # terminal. It was absent from every APEX machine, so nvim — which ships
+    # terminal. It was absent from every Rime machine, so nvim — which ships
     # from the neovim rpm above WITH Terminal=true — could be clicked and did
-    # nothing, while `apex install neovim` correctly refused it as already
+    # nothing, while `rime install neovim` correctly refused it as already
     # provided by the image. Meanwhile /etc/xdg/xdg-terminals.list, this
-    # helper's config file, has been shipped since apex-logs 31. The
+    # helper's config file, has been shipped since rime-logs 31. The
     # configuration was on every machine and the program that reads it was
     # never installed. Asserted here so the pair cannot come apart again;
     # Containerfile.base asserts that the two agree.
@@ -1528,7 +1528,7 @@ RUN set -eux; \
 # does have avahi-daemon.service in multi-user.target.wants, so the enable below
 # changes nothing on a good build. It is a regression guard: everything in this
 # stage rests on avahi — DNS-SD finds driverless printers, nss-mdns resolves
-# .local through avahi's socket, `apex host` discovery is mDNS — and a preset
+# .local through avahi's socket, `rime host` discovery is mDNS — and a preset
 # change or a dropped package would take all of it out silently. The FATAL makes
 # that a failed build instead.
 #
@@ -1543,7 +1543,7 @@ RUN set -eux; \
 #   seconds instead of failing. On a machine with avahi running, the same image
 #   and the same backend list return in twelve seconds and find the same
 #   scanner. So this is avahi's absence, not hplip's presence — hpaio is left
-#   alone, and `apex devices scan` names the mask rather than letting a scan UI
+#   alone, and `rime devices scan` names the mask rather than letting a scan UI
 #   freeze on a device list that will not arrive.
 #
 # simple-scan ships because the image had no scanning application of any kind —
@@ -1561,7 +1561,7 @@ RUN set -eux; \
     systemctl is-enabled avahi-daemon.service \
         || { echo "FATAL: avahi is not enabled — no printer on this network would ever be found"; exit 1; }; \
     command -v simple-scan; \
-    # avahi-tools is named because apex-remoted publishes _apex-remote._tcp by
+    # avahi-tools is named because rime-remoted publishes _rime-remote._tcp by
     # running avahi-publish-service for as long as it is up (P1-052). It was
     # already present as somebody else's dependency, which is exactly the kind
     # of thing that disappears in a rebase nobody connects to remote access
@@ -1608,7 +1608,7 @@ RUN set -eux; \
 # a grep only finds what is named explicitly, and this image names almost none
 # of it — the accessibility plumbing was ALREADY here, as transitive
 # dependencies of gtk4 and Qt: at-spi2-core, at-spi2-atk, speech-dispatcher and
-# espeak-ng are all installed. A note on record that APEX shipped "zero
+# espeak-ng are all installed. A note on record that Rime shipped "zero
 # accessibility packages" was simply wrong.
 #
 # What was missing was the reader itself. Every piece except the one that
@@ -1616,7 +1616,7 @@ RUN set -eux; \
 # not use the desktop, on a system that already carried the whole stack.
 #
 # Cost, measured rather than estimated (`dnf5 install --assumeno orca` inside
-# ghcr.io/andrenijman/apex-os:daily): FIVE packages — orca, brlapi,
+# ghcr.io/andrenijman/rime-os:daily): FIVE packages — orca, brlapi,
 # python3-brlapi, python3-louis, python3-pyatspi — 4 MiB downloaded, 23 MiB
 # installed. Nothing pulls speech-dispatcher or espeak-ng, which is the rpmdb
 # confirming the paragraph above. This is a rounding error beside the 1.3 GB
@@ -1628,12 +1628,12 @@ RUN set -eux; \
 #
 # NOT autostarted, and that is a decision rather than an omission. A screen
 # reader that starts unbidden talks over a sighted user's first boot. orca is
-# started by the user who wants it. tests/test-apex-a11y-stack.sh asserts both
+# started by the user who wants it. tests/test-rime-a11y-stack.sh asserts both
 # halves — that it is installed, and that nothing starts it.
 #
 # At the login screen it would have nothing to talk to in any case: the greet
 # session has no D-Bus session bus at all, so Qt's accessibility bridge has
-# nowhere to publish the greeter's tree. tests/test-apex-greet-session-bus.sh
+# nowhere to publish the greeter's tree. tests/test-rime-greet-session-bus.sh
 # measures that, on both greeter hosts, and goes red when somebody fixes it.
 RUN set -eux; \
     dnf5 -y install orca; \
@@ -1644,7 +1644,7 @@ RUN set -eux; \
 # Shipping a reader nobody can start is not shipping a reader. orca has no
 # keybinding of its own, no tray entry and no toggle, and the one thing a user
 # who needs it cannot do is open a terminal and type `orca`. This is the switch:
-# APEX Shell binds SUPER+ALT+S to it on all three sessions (Hyprland, niri and
+# Rime Shell binds SUPER+ALT+S to it on all three sessions (Hyprland, niri and
 # labwc, from the one KeybindService default), which is GNOME's combination for
 # the same action.
 #
@@ -1657,17 +1657,17 @@ RUN set -eux; \
 # option list is -h -v -r -s -l -e -d -p -u --speech-system --debug-file
 # --debug, and a toggle written around `orca --quit` turns the reader on and
 # never off.
-COPY --chmod=0755 files/system/libexec/apex-screen-reader /usr/libexec/apex-screen-reader
+COPY --chmod=0755 files/system/libexec/rime-screen-reader /usr/libexec/rime-screen-reader
 #
 # The unit file test is not decoration: the script prefers
 # `systemctl --user start orca.service` over exec'ing orca, so an orca that
 # stopped shipping that unit would quietly move every user onto the fallback
-# path. That it is NOT enabled is asserted in tests/test-apex-a11y-stack.sh,
+# path. That it is NOT enabled is asserted in tests/test-rime-a11y-stack.sh,
 # where a systemctl that cannot answer SKIPs with a reason instead of passing.
 RUN set -eux; \
-    bash -n /usr/libexec/apex-screen-reader; \
-    test -x /usr/libexec/apex-screen-reader; \
-    rc=0; /usr/libexec/apex-screen-reader status >/dev/null || rc=$?; \
+    bash -n /usr/libexec/rime-screen-reader; \
+    test -x /usr/libexec/rime-screen-reader; \
+    rc=0; /usr/libexec/rime-screen-reader status >/dev/null || rc=$?; \
     test "$rc" -le 1; \
     test -f /usr/lib/systemd/user/orca.service
 
@@ -1700,7 +1700,7 @@ RUN set -eux; \
 #                      machine this was found on, both domains report
 #                      security=user, which means an attached device sits at
 #                      authorized=0 until something authorises it. Nothing did:
-#                      boltd was not installed, and APEX runs neither GNOME nor
+#                      boltd was not installed, and Rime runs neither GNOME nor
 #                      KDE, so there was no other client of org.freedesktop.bolt
 #                      either. A USB-C dock behind a Thunderbolt controller was
 #                      dead with no message anywhere.
@@ -1738,11 +1738,11 @@ RUN set -eux; \
 #
 # power-profiles-daemon moved here from Containerfile.daily. NOT tlp — tlp
 # conflicts with PPD on Fedora and fights the platform profile driver; the plan
-# standardises on PPD plus apexd's own sysctl/udev layer. It rides this existing
+# standardises on PPD plus rimed's own sysctl/udev layer. It rides this existing
 # transaction rather than getting its own RUN, and that is a download decision,
 # not tidiness: every dnf transaction rewrites the ~200 MB sqlite rpmdb into its
 # own layer, and in the flavor tier that layer moved on EVERY push and shipped to
-# every user on every `apex update`. Here it is inside a layer the base consumes
+# every user on every `rime update`. Here it is inside a layer the base consumes
 # by digest and nobody re-downloads.
 RUN set -eux; \
     dnf5 -y install \
@@ -1774,13 +1774,13 @@ RUN set -eux; \
     test "$(systemctl is-enabled dnsmasq.service 2>&1)" != enabled; \
     mkdir -p /usr/lib/systemd/system/thermald.service.d; \
     printf '%s\n' \
-        '# APEX-OS: thermald is Intel-only, its Fedora unit has no vendor gate,' \
+        '# Rime OS: thermald is Intel-only, its Fedora unit has no vendor gate,' \
         '# and it carries Restart=on-failure — so on an AMD machine it would' \
         '# restart-loop into a permanently failed unit. ExecCondition makes' \
         '# systemd skip it cleanly instead.' \
         '[Service]' \
         'ExecCondition=/bin/sh -c "grep -q GenuineIntel /proc/cpuinfo"' \
-        > /usr/lib/systemd/system/thermald.service.d/10-apex-intel-only.conf; \
+        > /usr/lib/systemd/system/thermald.service.d/10-rime-intel-only.conf; \
     systemctl enable switcheroo-control.service; \
     systemctl enable ModemManager.service; \
     systemctl enable thermald.service; \
@@ -1820,7 +1820,7 @@ RUN set -eux; \
 #
 # ── What is NOT non-fatal, and why this block is assertive now ──────────────
 # Everything after a successful unpack is checked, because the previous version
-# shipped a working Zed that no launcher could see, on every APEX image, and
+# shipped a working Zed that no launcher could see, on every Rime image, and
 # nothing noticed. Two mistakes compounded:
 #
 #   1. It installed from `zed.app/share/applications/zed.desktop`. The tarball
@@ -1862,7 +1862,7 @@ RUN set -eux; \
     else echo "zed: fetch FAILED (editor absent; non-fatal — neovim/nano remain)"; fi; \
     rm -f /tmp/zed.tgz
 
-# ── Stage 5a-devstack: full development toolchain (apex-logs 35-dev-stack.md) ─
+# ── Stage 5a-devstack: full development toolchain (rime-logs 35-dev-stack.md) ─
 # Both editions ship a complete dev environment out of the box: the C/C++
 # toolchain + build systems + debuggers, the language toolchains
 # (Python/Node/Rust/Go/Ruby/JDK), and the common CLI dev tools (gh, git-lfs,
@@ -1881,7 +1881,7 @@ RUN set -eux; \
         gh git-lfs ripgrep fd-find fzf bat buildah; \
     dnf5 clean all
 
-# ── Stage 5a-claude: Claude Code CLI (apex-logs 35) ─────────────────────────
+# ── Stage 5a-claude: Claude Code CLI (rime-logs 35) ─────────────────────────
 # System-wide via npm global into /usr (NOT /usr/local — that becomes a symlink
 # to writable /var below) so every user gets `claude` on PATH. The autoupdater is
 # disabled fleet-wide via /etc/environment (DISABLE_AUTOUPDATER=1) because it
@@ -1901,8 +1901,8 @@ RUN set -eux; \
 
 # ── Stage 5a-aiapps: the desktop AI apps, image-owned (ChatGPT + Claude) ────
 # The 2026-09-11 product decision: the ChatGPT desktop app and the Claude
-# desktop app are PART of APEX-OS, not add-ons a user installs. They ship in
-# the image, existing machines pick them up with `sudo apex update`, and
+# desktop app are PART of Rime OS, not add-ons a user installs. They ship in
+# the image, existing machines pick them up with `sudo rime update`, and
 # neither app carries an update channel of its own. A version bump rides a
 # rebuild of this tier, like every other third-party payload in core.
 #
@@ -1915,11 +1915,11 @@ RUN set -eux; \
 #   - Anthropic's deb writes an apt source, a keyring and an
 #     unattended-upgrades snippet from its maintainer script — "the VS Code /
 #     Chrome / 1Password model", in that script's own words — plus a GNOME
-#     Shell search provider nothing on APEX consumes.
+#     Shell search provider nothing on Rime consumes.
 #
-# On APEX each is wrong twice over. /usr is read-only, so neither updater can
-# ever succeed. And `apex-pkg` builds user system extensions with dnf against
-# the HOST's repo set, so an enabled vendor repo means `apex install chatgpt`
+# On Rime each is wrong twice over. /usr is read-only, so neither updater can
+# ever succeed. And `rime-pkg` builds user system extensions with dnf against
+# the HOST's repo set, so an enabled vendor repo means `rime install chatgpt`
 # layers a NEWER build into an extension that shadows the image's own /usr —
 # a self-update through a side channel, defeating the decision above. That is
 # not a worry about the future: /etc/yum.repos.d/chatgpt.repo and an extension
@@ -1935,9 +1935,9 @@ RUN set -eux; \
 # ── Why ChatGPT goes through dnf and Claude does not ────────────────────────
 # A dnf transaction rewrites the ~200 MB sqlite rpmdb into this layer, so it is
 # never free and the default in this repository is to avoid one. It is bought
-# here deliberately: `apex-pkg` decides whether a package is image-owned by
+# here deliberately: `rime-pkg` decides whether a package is image-owned by
 # asking the system rpmdb (`rpm -qf`), so an rpm-INSTALLED ChatGPT makes
-# `apex install chatgpt` refuse to shadow it, and an rpm merely UNPACKED into
+# `rime install chatgpt` refuse to shadow it, and an rpm merely UNPACKED into
 # /usr would leave that guard blind to 442 MB of application. Claude has no rpm
 # at all — Anthropic publishes an apt repo only (checked: five rpm/yum prefixes
 # under downloads.claude.ai, all 404) — so it is unpacked, and nothing in
@@ -1963,7 +1963,7 @@ RUN set -eux; \
 # ChatGPT: the key is checked against the constant, imported into a THROWAWAY
 # rpmdb, and used to verify the package signature there. The image's own trust
 # store is deliberately NOT widened — a key trusted in the real rpmdb would be
-# honoured by every later rpm/dnf call on the machine, including apex-pkg's
+# honoured by every later rpm/dnf call on the machine, including rime-pkg's
 # extension builds, on behalf of a repository this stage has just deleted.
 #
 # Claude: the deb's sha256 comes out of the apt index, and an index is worth
@@ -1981,7 +1981,7 @@ RUN set -eux; \
 # ChatGPT's icon is the one real repackaging this stage does. Upstream ships it
 # ONLY at /usr/share/pixmaps/chatgpt.png and nothing under hicolor. That is
 # legal — pixmaps is still in the icon-theme search path — but it is one
-# lookup-path change away from the invisible-launcher bug, and APEX's own
+# lookup-path change away from the invisible-launcher bug, and Rime's own
 # launcher assertions look in /usr/share/icons. A 1024x1024 png belongs in the
 # 1024x1024 hicolor directory, so it is installed there as well.
 RUN set -eux; \
@@ -2034,7 +2034,7 @@ RUN set -eux; \
         rm -rf /tmp/cg-rpmdb /tmp/cg-key /tmp/cg-gpg /tmp/cg-primary.xml.gz /tmp/chatgpt.rpm; \
         # The update channel the package brought with it. Deleting the file is
         # the point of this line; see the header for why disabling it is not
-        # enough on a machine where apex-pkg builds extensions with dnf.
+        # enough on a machine where rime-pkg builds extensions with dnf.
         rm -f /etc/yum.repos.d/chatgpt.repo; \
         install -Dm644 /usr/share/pixmaps/chatgpt.png \
             /usr/share/icons/hicolor/1024x1024/apps/chatgpt.png; \
@@ -2043,7 +2043,7 @@ RUN set -eux; \
         test -s /usr/share/applications/chatgpt.desktop \
             || { echo "FATAL: chatgpt installed but shipped no desktop entry; it would be invisible in every launcher"; exit 1; }; \
         test -s /usr/share/icons/hicolor/1024x1024/apps/chatgpt.png \
-            || { echo "FATAL: chatgpt shipped no hicolor icon; its entry's Icon=chatgpt would not resolve where APEX looks"; exit 1; }; \
+            || { echo "FATAL: chatgpt shipped no hicolor icon; its entry's Icon=chatgpt would not resolve where Rime looks"; exit 1; }; \
         test ! -e /etc/yum.repos.d/chatgpt.repo \
             || { echo "FATAL: chatgpt.repo survived; the app would carry its own update channel, which the product decision forbids"; exit 1; }; \
         echo "chatgpt: installed $(rpm -q --qf '%{VERSION}-%{RELEASE}' chatgpt), entry + hicolor icon asserted, vendor repo removed"; \
@@ -2106,7 +2106,7 @@ RUN set -eux; \
         test -u /usr/lib/claude-desktop/chrome-sandbox \
             || { echo "FATAL: claude-desktop's chrome-sandbox is not setuid; Chromium exits at launch when it finds it unprivileged"; exit 1; }; \
         test ! -e /etc/apt/sources.list.d/claude-desktop.list \
-            || { echo "FATAL: an apt source for claude-desktop exists; the deb's maintainer script must never run on APEX"; exit 1; }; \
+            || { echo "FATAL: an apt source for claude-desktop exists; the deb's maintainer script must never run on Rime"; exit 1; }; \
         echo "claude-desktop: installed ${clver}, entry + icons asserted, no maintainer script run"; \
     else echo "claude-desktop: fetch FAILED (app absent; non-fatal — the image still builds)"; fi; \
     \
@@ -2147,7 +2147,7 @@ RUN set -eux; \
 # in a rescue shell that has none of them — but on a real install they are here.
 #
 # NO framework (oh-my-zsh etc). A framework is a second config system with its
-# own update path and a slow startup; everything APEX needs is a zsh builtin or
+# own update path and a slow startup; everything Rime needs is a zsh builtin or
 # one small package.
 #
 # fish, nushell and tmux ride in this SAME transaction rather than a new RUN,
@@ -2157,7 +2157,7 @@ RUN set -eux; \
 # layer instead of two, on the tier where a rebuild already costs the fleet a
 # multi-gigabyte update.
 #
-# Why they are here at all: APEX claims the terminal developer's toolchain is
+# Why they are here at all: Rime claims the terminal developer's toolchain is
 # "unrestricted and excellent", naming bash/zsh/fish/nushell, tmux/zellij and
 # TUI agents. Four of those six were not in any Containerfile — the claim was a
 # claim about packages nobody had installed. zellij is not in Fedora and is
@@ -2213,7 +2213,7 @@ RUN set -eux; \
     rm -f /tmp/zellij.tgz; \
     zellij --version
 
-# ── Plymouth engine (theme + default are set in Containerfile.apex) ────────
+# ── Plymouth engine (theme + default are set in Containerfile.rime) ────────
 # The plymouth packages moved here from the retired flavor Containerfiles, and
 # the reason is download size, not tidiness. Each flavor ran its own
 # `dnf5 -y install plymouth …`, and every dnf transaction rewrites the ~200 MB
@@ -2226,15 +2226,15 @@ RUN set -eux; \
 #
 # plymouth-plugin-label is what draws TEXT. The script plugin's Image.Text()
 # hands every string to a label plugin, and with none installed it returns an
-# empty image without a word in any log. That was every APEX image until
-# 2026-09-26: the LUKS passphrase prompt, the bullets, apex-unlock-hint's
+# empty image without a word in any log. That was every Rime image until
+# 2026-09-26: the LUKS passphrase prompt, the bullets, rime-unlock-hint's
 # keyboard/recovery-key line and the wordmark all drew as nothing, so an
 # encrypted machine booted to a dimmed star and a prompt nobody could see.
 # Measured in a VM booting the released initramfs against a LUKS2 disk, then
 # the same initramfs rebuilt with this package: all four appear. The package
 # ships label-pango.so and label-freetype.so; plymouth-populate-initrd copies
 # only the freetype one into the initramfs, with the default font linked as
-# usr/share/fonts/Plymouth.ttf (+1.3 MB). Containerfile.apex asserts both.
+# usr/share/fonts/Plymouth.ttf (+1.3 MB). Containerfile.rime asserts both.
 RUN set -eux; \
     dnf5 -y install plymouth plymouth-scripts plymouth-plugin-script plymouth-plugin-label; \
     dnf5 clean all
@@ -2253,7 +2253,7 @@ RUN set -eux; \
 
 # ── systemd-boot and ukify: the pivot's dnf half ───────────────────────────
 #
-# Andre decided on 2026-09-20 that APEX moves to systemd-boot on every machine
+# Andre decided on 2026-09-20 that Rime moves to systemd-boot on every machine
 # (docs/boot-v2.md, "The pivot to systemd-boot"). The loader binary and the UKI
 # tooling are dnf transactions, so they belong here and not in the files tier.
 #
@@ -2275,7 +2275,7 @@ RUN set -eux; \
 # a single RUN -- and this line moves there.
 #
 # checkpolicy and policycoreutils are made EXPLICIT for the same reason
-# efibootmgr is: Containerfile.base compiles the apex_sdboot policy module with
+# efibootmgr is: Containerfile.base compiles the rime_sdboot policy module with
 # checkmodule/semodule_package/semodule, they are only present transitively
 # today, and a future core change that drops them would turn the boot blessing
 # back into a silent rollback loop.
@@ -2297,7 +2297,7 @@ RUN set -eux; \
 
 # ── the boot blessing has to be able to write a FAT ESP ───────────────────
 #
-# Measured on the APEX image in the VM lab, composefs + systemd-boot, SELinux
+# Measured on the Rime image in the VM lab, composefs + systemd-boot, SELinux
 # enforcing (ROADMAP/evidence/sdboot-image-20260920-decision.md):
 #
 #   systemd-bless-boot: Failed to rename '/loader/entries/…+2-1.conf'
@@ -2314,26 +2314,26 @@ RUN set -eux; \
 #
 # Compiled HERE and not in the files tier on purpose: this is compilation, and
 # `semodule -i` rewrites the binary policy under /etc. Measured in
-# ghcr.io/andrenijman/apex-os:daily: /etc/selinux grows by 466 bytes, but
+# ghcr.io/andrenijman/rime-os:daily: /etc/selinux grows by 466 bytes, but
 # policy.35 (3.8 MB) is rewritten whole, and an OCI layer carries a changed
 # file whole — so doing it in the thin tier would put ~4 MB into every update.
 # docs/update-cost.md, "What the systemd-boot pivot added".
-COPY files/system/selinux/apex_sdboot.te /usr/share/apex-os/selinux/apex_sdboot.te
-COPY files/system/selinux/verify-apex-sdboot.py \
-     /usr/share/apex-os/selinux/verify-apex-sdboot.py
+COPY files/system/selinux/rime_sdboot.te /usr/share/rime-os/selinux/rime_sdboot.te
+COPY files/system/selinux/verify-rime-sdboot.py \
+     /usr/share/rime-os/selinux/verify-rime-sdboot.py
 RUN set -eux; \
-    cd /usr/share/apex-os/selinux; \
+    cd /usr/share/rime-os/selinux; \
     : 'checkmodule refuses a module whose name differs from the .pp basename.'; \
-    checkmodule -M -m -o apex_sdboot.mod apex_sdboot.te; \
-    semodule_package -o apex_sdboot.pp -m apex_sdboot.mod; \
-    semodule -N -i apex_sdboot.pp; \
-    rm -f apex_sdboot.mod; \
-    semodule -l | grep -qx apex_sdboot; \
+    checkmodule -M -m -o rime_sdboot.mod rime_sdboot.te; \
+    semodule_package -o rime_sdboot.pp -m rime_sdboot.mod; \
+    semodule -N -i rime_sdboot.pp; \
+    rm -f rime_sdboot.mod; \
+    semodule -l | grep -qx rime_sdboot; \
     : '-- and the rule reached the BINARY policy, which is what the kernel'; \
     : '-- enforces. `semodule -l` only proves a module is installed.'; \
-    python3 /usr/share/apex-os/selinux/verify-apex-sdboot.py
+    python3 /usr/share/rime-os/selinux/verify-rime-sdboot.py
 
-# ── npm global prefix: per-user, not root-owned /usr/local (apex-logs 16) ────
+# ── npm global prefix: per-user, not root-owned /usr/local (rime-logs 16) ────
 # Fedora's nodejs ships /etc/npmrc with `prefix=/usr/local`. On a bootc system
 # /usr/local is a symlink to ../var/usrlocal, created root-owned 0755 by the
 # tmpfiles rule below, so ANY `npm install -g` as a normal user dies with:
@@ -2371,7 +2371,7 @@ RUN set -eux; \
     echo "npm global prefix -> \${HOME}/.local (was root-owned /usr/local)"
 
 # ── Third-party Rust tools from the builder stage ──────────────────────────
-# awww / awww-daemon / matugen / yazi / ya. apexd + apex are NOT here — they are
+# awww / awww-daemon / matugen / yazi / ya. rimed + rime are NOT here — they are
 # the volatile pair and are added by Containerfile.base.
 COPY --from=toolbuilder /out/usr/bin/ /usr/bin/
 
@@ -2380,33 +2380,33 @@ COPY --from=toolbuilder /out/usr/bin/ /usr/bin/
 # patch was made against: a newer scx-scheds already carries the fix, and
 # installing a patched older build over it would be a downgrade. An OLDER COPR
 # is a surprise nobody has reviewed, so that one is fatal.
-COPY --from=toolbuilder /out/scx/ /tmp/apex-scx/
+COPY --from=toolbuilder /out/scx/ /tmp/rime-scx/
 RUN set -eux; \
     have="$(rpm -q --qf '%{VERSION}' scx-scheds)"; \
-    base="$(cat /tmp/apex-scx/base-version)"; \
+    base="$(cat /tmp/rime-scx/base-version)"; \
     if [ "$have" = "$base" ]; then \
-        install -m755 /tmp/apex-scx/scx_lavd /usr/bin/scx_lavd; \
-        cmp /tmp/apex-scx/scx_lavd /usr/bin/scx_lavd; \
-        echo "scx_lavd: ${base} + upstream 6d31ddd89 (REENQ cpus_ptr fix), built by APEX" >> /usr/lib/apex-scx-versions; \
+        install -m755 /tmp/rime-scx/scx_lavd /usr/bin/scx_lavd; \
+        cmp /tmp/rime-scx/scx_lavd /usr/bin/scx_lavd; \
+        echo "scx_lavd: ${base} + upstream 6d31ddd89 (REENQ cpus_ptr fix), built by Rime" >> /usr/lib/rime-scx-versions; \
     elif [ "$(printf '%s\n%s\n' "$base" "$have" | sort -V | tail -1)" = "$have" ]; then \
-        echo "scx_lavd: COPR ${have} kept; it postdates the ${base} fix, drop the APEX rebuild" >> /usr/lib/apex-scx-versions; \
+        echo "scx_lavd: COPR ${have} kept; it postdates the ${base} fix, drop the Rime rebuild" >> /usr/lib/rime-scx-versions; \
     else \
         echo "FATAL: COPR scx-scheds ${have} is OLDER than the ${base} the lavd fix targets"; exit 1; \
     fi; \
     /usr/bin/scx_lavd --version; \
-    rm -rf /tmp/apex-scx; \
-    cat /usr/lib/apex-scx-versions
+    rm -rf /tmp/rime-scx; \
+    cat /usr/lib/rime-scx-versions
 
 # Wallpaper daemon fallback: awww is built best-effort in the builder stage. If
 # it did NOT land (build hiccup), the shell's WallpaperService (`awww img …`) and
 # the seeded `exec-once = awww-daemon` would silently do nothing → no wallpaper on
-# a fresh install (apex-logs 39). swaybg IS installed, so drop in swaybg-backed
+# a fresh install (rime-logs 39). swaybg IS installed, so drop in swaybg-backed
 # shims for the two subcommands the shell uses, guaranteeing a working wallpaper
 # either way. If the real awww built, these are skipped.
 RUN set -eux; \
     if [ ! -x /usr/bin/awww ]; then \
       printf '%s\n' '#!/usr/bin/env bash' \
-        '# APEX-OS swaybg shim for `awww img … <path>` (real awww absent). apex-logs 39.' \
+        '# Rime OS swaybg shim for `awww img … <path>` (real awww absent). rime-logs 39.' \
         'sub="${1:-}"; shift || true' \
         '[ "$sub" = "img" ] || exit 0' \
         'img=""; for a in "$@"; do [ -f "$a" ] && img="$a"; done' \
@@ -2415,9 +2415,9 @@ RUN set -eux; \
         'setsid -f swaybg -i "$img" -m fill >/dev/null 2>&1; exit 0' \
         > /usr/bin/awww; \
       printf '%s\n' '#!/usr/bin/env bash' \
-        '# APEX-OS swaybg shim for awww-daemon (restore last wallpaper, stay as swaybg). apex-logs 39.' \
+        '# Rime OS swaybg shim for awww-daemon (restore last wallpaper, stay as swaybg). rime-logs 39.' \
         'wall=""; [ -e "$HOME/.curr_wall" ] && wall="$(readlink -f "$HOME/.curr_wall" 2>/dev/null)"' \
-        'if [ -z "$wall" ] || [ ! -f "$wall" ]; then wall="/usr/share/backgrounds/apex/default.jpg"; fi' \
+        'if [ -z "$wall" ] || [ ! -f "$wall" ]; then wall="/usr/share/backgrounds/rime/default.jpg"; fi' \
         '[ -f "$wall" ] || exit 0' \
         'pkill -x swaybg >/dev/null 2>&1 || true' \
         'exec swaybg -i "$wall" -m fill' \
@@ -2427,13 +2427,13 @@ RUN set -eux; \
     else echo "awww: real binary present"; fi
 
 # ── System defaults + hardening (no dnf) ────────────────────────────────────
-#   - os-release: brand as APEX-OS, keep ID=fedora for ecosystem compat; the
-#     flavor images append VARIANT/VARIANT_ID after this. (apex-logs 34)
+#   - os-release: brand as Rime OS, keep ID=fedora for ecosystem compat; the
+#     flavor images append VARIANT/VARIANT_ID after this. (rime-logs 34)
 #     Every DISPLAY key is rebranded (NAME/PRETTY_NAME/VERSION/URLs/LOGO/CPE,
 #     REDHAT_* dropped). ID and VERSION_ID deliberately stay `fedora`/`43` —
 #     they are machine-facing keys with verified consumers: `dnf copr enable`
-#     derives its chroot from ID+VERSION_ID (ID=apex → "Chroot not found in the
-#     given Copr project (apex-43-x86_64)", reproduced) and dnf's $releasever
+#     derives its chroot from ID+VERSION_ID (ID=rime → "Chroot not found in the
+#     given Copr project (rime-43-x86_64)", reproduced) and dnf's $releasever
 #     comes from VERSION_ID. Nothing user-visible reads ID. See docs/branding.md.
 #     A surgical `sed -e` (not a heredoc) so a future fedora-bootc base bump
 #     keeps any new keys it adds.
@@ -2446,7 +2446,7 @@ RUN set -eux; \
 #
 #     Writing /usr/lib and TRUSTING the /etc symlinks is what broke: every
 #     weekly `core` build from 2026-08-17 on failed CI's
-#     `grep "^APEX-OS release" /etc/system-release` while /usr/lib/fedora-release
+#     `grep "^Rime OS release" /etc/system-release` while /usr/lib/fedora-release
 #     itself was branded correctly. fedora-release-common ships those three /etc
 #     entries as hardlinked symlinks inherited from the base layer
 #     (`/etc/system-release` and `/etc/redhat-release` share one inode, nlink=3);
@@ -2492,51 +2492,51 @@ RUN set -eux; \
 #     banner brands itself), but the stock "Kernel \r on \m" line prints
 #     7.1.3-cachyos1.fc43.x86_64. Drop that line — the kernel release string
 #     itself cannot be changed without building the kernel from source.
-#     (That last clause stopped being true when APEX took over the kernel
-#     build: the release is now `cachyos1.apex<N>.fc<ver>`, set from
+#     (That last clause stopped being true when Rime took over the kernel
+#     build: the release is now `cachyos1.rime<N>.fc<ver>`, set from
 #     kernel/kernel.pin. The line is still dropped — branding a VT banner is
 #     not a reason to touch a kernel release string — but the stated
 #     impossibility is no longer the reason.)
-#   - LOGO=apex-os-logo names an icon that is COPY'd in the base tier, so the
+#   - LOGO=rime-os-logo names an icon that is COPY'd in the base tier, so the
 #     hicolor cache rebuild lives there too — running it here would cache an
 #     icon theme that does not yet contain the spark. Same for `dconf update`,
 #     which compiles a database seeded from files/system/dconf/.
 #   - mask serial-getty@ttyS0: the console=ttyS0 karg (for QEMU/CI) makes systemd
 #     spawn a getty that restart-loops on hardware with no serial port; masking
-#     stops the loop while serial *console* output still works. (apex-logs 04)
-#   - mask systemd-remount-fs: fails on the composefs/overlay root. (apex-logs 03)
+#     stops the loop while serial *console* output still works. (rime-logs 04)
+#   - mask systemd-remount-fs: fails on the composefs/overlay root. (rime-logs 03)
 #   - /usr/local -> ../var/usrlocal: /usr is read-only on bootc, so redirect
-#     /usr/local to writable per-machine state + a tmpfiles dir. (apex-logs 08)
+#     /usr/local to writable per-machine state + a tmpfiles dir. (rime-logs 08)
 #   - /etc/environment: session-wide theme + default terminal + Claude autoupdate
 #     off + the Electron platform hint, via pam_env so a greetd/Hyprland session
 #     (no uwsm) inherits them. ELECTRON_OZONE_PLATFORM_HINT=auto is what makes
 #     the shipped Electron apps (ChatGPT, Claude Desktop — stage 5a-aiapps) run
 #     as native Wayland clients instead of defaulting to XWayland.
 #   - /etc/bashrc: fastfetch greeting on every interactive terminal, colour by
-#     scheme, once per shell session. (apex-logs 33) The greeting script itself
+#     scheme, once per shell session. (rime-logs 33) The greeting script itself
 #     is COPY'd in the base tier; the source line is guarded with `-r`, so it is
 #     inert until that lands and correct afterwards.
 RUN set -eux; \
     sed -i \
-      -e 's|^NAME=.*|NAME="APEX-OS"|' \
-      -e 's|^PRETTY_NAME=.*|PRETTY_NAME="APEX-OS"|' \
+      -e 's|^NAME=.*|NAME="Rime OS"|' \
+      -e 's|^PRETTY_NAME=.*|PRETTY_NAME="Rime OS"|' \
       -e 's|^VERSION=.*|VERSION="43"|' \
       -e 's|^VERSION_CODENAME=.*|VERSION_CODENAME=""|' \
       -e 's|^ANSI_COLOR=.*|ANSI_COLOR="0;38;2;161;201;153"|' \
-      -e 's|^LOGO=.*|LOGO=apex-os-logo|' \
-      -e 's|^CPE_NAME=.*|CPE_NAME="cpe:/o:apexos:apex_os:43"|' \
-      -e 's|^HOME_URL=.*|HOME_URL="https://github.com/AndreNijman/apex-os"|' \
-      -e 's|^DOCUMENTATION_URL=.*|DOCUMENTATION_URL="https://github.com/AndreNijman/apex-os#readme"|' \
-      -e 's|^SUPPORT_URL=.*|SUPPORT_URL="https://github.com/AndreNijman/apex-os/discussions"|' \
-      -e 's|^BUG_REPORT_URL=.*|BUG_REPORT_URL="https://github.com/AndreNijman/apex-os/issues"|' \
-      -e 's|^DEFAULT_HOSTNAME=.*|DEFAULT_HOSTNAME="apex"|' \
+      -e 's|^LOGO=.*|LOGO=rime-os-logo|' \
+      -e 's|^CPE_NAME=.*|CPE_NAME="cpe:/o:rimeos:rime_os:43"|' \
+      -e 's|^HOME_URL=.*|HOME_URL="https://github.com/AndreNijman/rime-os"|' \
+      -e 's|^DOCUMENTATION_URL=.*|DOCUMENTATION_URL="https://github.com/AndreNijman/rime-os#readme"|' \
+      -e 's|^SUPPORT_URL=.*|SUPPORT_URL="https://github.com/AndreNijman/rime-os/discussions"|' \
+      -e 's|^BUG_REPORT_URL=.*|BUG_REPORT_URL="https://github.com/AndreNijman/rime-os/issues"|' \
+      -e 's|^DEFAULT_HOSTNAME=.*|DEFAULT_HOSTNAME="rime"|' \
       -e '/^REDHAT_/d' \
       /usr/lib/os-release; \
-    grep -q '^PRETTY_NAME="APEX-OS"$' /usr/lib/os-release; \
+    grep -q '^PRETTY_NAME="Rime OS"$' /usr/lib/os-release; \
     test "$(grep -ci fedora /usr/lib/os-release)" = 1; \
     grep -qx 'ID=fedora' /usr/lib/os-release; \
-    printf '%s\n' 'APEX-OS release 43' > /usr/lib/fedora-release; \
-    printf '%s\n' 'cpe:/o:apexos:apex_os:43' > /usr/lib/system-release-cpe; \
+    printf '%s\n' 'Rime OS release 43' > /usr/lib/fedora-release; \
+    printf '%s\n' 'cpe:/o:rimeos:rime_os:43' > /usr/lib/system-release-cpe; \
     printf '%s\n\n' '\S' > /usr/lib/issue; \
     printf '%s\n' '\S' > /usr/lib/issue.net; \
     ln -sfn ../usr/lib/os-release         /etc/os-release; \
@@ -2546,17 +2546,17 @@ RUN set -eux; \
     ln -sfn ../usr/lib/system-release-cpe /etc/system-release-cpe; \
     ln -sfn ../usr/lib/issue              /etc/issue; \
     ln -sfn ../usr/lib/issue.net          /etc/issue.net; \
-    grep -q '^APEX-OS release' /etc/system-release; \
-    grep -q '^APEX-OS release' /etc/redhat-release; \
-    grep -q '^APEX-OS release' /etc/fedora-release; \
-    grep -q '^PRETTY_NAME="APEX-OS"$' /etc/os-release; \
-    grep -qx 'cpe:/o:apexos:apex_os:43' /etc/system-release-cpe; \
+    grep -q '^Rime OS release' /etc/system-release; \
+    grep -q '^Rime OS release' /etc/redhat-release; \
+    grep -q '^Rime OS release' /etc/fedora-release; \
+    grep -q '^PRETTY_NAME="Rime OS"$' /etc/os-release; \
+    grep -qx 'cpe:/o:rimeos:rime_os:43' /etc/system-release-cpe; \
     systemctl mask serial-getty@ttyS0.service; \
     systemctl mask systemd-remount-fs.service; \
     rm -rf /usr/local && ln -s ../var/usrlocal /usr/local; \
-    printf 'd /var/usrlocal 0755 root root -\n' > /usr/lib/tmpfiles.d/apex-usrlocal.conf; \
+    printf 'd /var/usrlocal 0755 root root -\n' > /usr/lib/tmpfiles.d/rime-usrlocal.conf; \
     printf 'QT_QPA_PLATFORMTHEME=qt6ct\nTERMINAL=alacritty\nDISABLE_AUTOUPDATER=1\nELECTRON_OZONE_PLATFORM_HINT=auto\n' >> /etc/environment; \
-    printf '\n# APEX-OS fastfetch greeting. The logic lives in ONE file shared with zsh —\n# zsh is the default login shell, so a bash-only greeting was never seen by\n# real users (apex-logs 14). Guarded so a partial image cannot break bash.\n[ -r /usr/share/apex/shell/greeting.sh ] && . /usr/share/apex/shell/greeting.sh\n' >> /etc/bashrc
+    printf '\n# Rime OS fastfetch greeting. The logic lives in ONE file shared with zsh —\n# zsh is the default login shell, so a bash-only greeting was never seen by\n# real users (rime-logs 14). Guarded so a partial image cannot break bash.\n[ -r /usr/share/rime/shell/greeting.sh ] && . /usr/share/rime/shell/greeting.sh\n' >> /etc/bashrc
 
 # ── zsh becomes the default login shell for accounts created from here on ──
 # This sets the DEFAULT in useradd's config rather than rewriting existing
@@ -2571,7 +2571,7 @@ RUN set -eux; \
     # listed in /etc/shells when a non-root user runs it, so an unlisted shell
     # is one a user cannot actually switch to. fish and tmux add themselves
     # from their own %post scriptlets (both write the /usr/bin and /bin forms);
-    # nushell's package does not, so APEX registers it.
+    # nushell's package does not, so Rime registers it.
     for s in /usr/bin/nu /bin/nu; do \
         grep -qx "$s" /etc/shells || echo "$s" >> /etc/shells; \
     done; \
@@ -2586,7 +2586,7 @@ RUN set -eux; \
 # fedora-bootc ships bootc-fetch-apply-updates.timer, which on this machine was
 # ACTIVE despite being `preset: disabled` — nothing in this repo enabled it. It
 # fires roughly every 2h, runs `bootc upgrade --apply`, and then reboots the
-# machine on its own. Observed live (apex-logs 57):
+# machine on its own. Observed live (rime-logs 57):
 #
 #   systemd[1]: Stopped run-p147322-i134392.service - [systemd-run]
 #               /usr/bin/systemctl reboot "--message=Initiated by bootc"
@@ -2596,8 +2596,8 @@ RUN set -eux; \
 # reasonable default. On a daily-driver laptop it is data loss waiting to happen:
 # anything unsaved in any application is simply gone.
 #
-# APEX-OS already has an explicit, user-driven update path — `apex update`
-# (bootc upgrade + fwupdmgr) — plus `apex rollback` and `apex pin`. An
+# Rime OS already has an explicit, user-driven update path — `rime update`
+# (bootc upgrade + fwupdmgr) — plus `rime rollback` and `rime pin`. An
 # unattended timer duplicating that while adding a surprise reboot is strictly
 # worse than the command the user chose to run.
 #
@@ -2615,37 +2615,37 @@ RUN set -eux; \
     systemctl mask bootc-fetch-apply-updates.service; \
     test -L /etc/systemd/system/bootc-fetch-apply-updates.timer; \
     test "$(readlink /etc/systemd/system/bootc-fetch-apply-updates.timer)" = /dev/null; \
-    echo "unattended bootc updates masked - 'apex update' is the update path"
+    echo "unattended bootc updates masked - 'rime update' is the update path"
 
 # ── Default locale: a REAL one, not systemd's C.UTF-8 fallback ──────────────
 # With no /etc/locale.conf, systemd falls back to LANG=C.UTF-8, which has no
 # collation rules (bytewise sorting) and C-style time/number formatting. Nothing
-# in the image set one, and the script installer (installer/apex-install) never
+# in the image set one, and the script installer (installer/rime-install) never
 # ran localectl either — so every install booted with the fallback. Shipping the
 # file here means EVERY install path gets a valid locale, including a bare
-# `bootc install` with no APEX installer involved.
+# `bootc install` with no Rime installer involved.
 #
 # This is an /etc file, so ostree 3-way-merges it: a user who runs
 # `localectl set-locale ...` overrides it and their choice survives upgrades.
 # Requires glibc-langpack-en (installed in the desktop-stack layer above) —
-# without it this would name a locale that does not exist. See apex-logs 53.
-RUN printf '# APEX-OS default locale. Override with: localectl set-locale LANG=...\nLANG=en_US.UTF-8\n' \
+# without it this would name a locale that does not exist. See rime-logs 53.
+RUN printf '# Rime OS default locale. Override with: localectl set-locale LANG=...\nLANG=en_US.UTF-8\n' \
       > /etc/locale.conf; \
-    printf '# APEX-OS default console keymap. Override with: localectl set-keymap ...\nKEYMAP=us\n' \
+    printf '# Rime OS default console keymap. Override with: localectl set-keymap ...\nKEYMAP=us\n' \
       > /etc/vconsole.conf
 
 # ── Default timezone ────────────────────────────────────────────────────────
 # /etc/localtime did not exist at all on the p6 install, so systemd fell back to
 # UTC: the clock read 13:45 while the wall clock said 21:45 (AWST is UTC+8).
 # Everything time-stamped was eight hours out — the bar clock, journal entries,
-# file mtimes, hypridle's timers. Neither the image nor installer/apex-install
+# file mtimes, hypridle's timers. Neither the image nor installer/rime-install
 # ever wrote it; only the ISO kickstart did (`timezone Australia/Perth --utc`),
 # and this machine was installed via the script path.
 #
 # Australia/Perth matches installer/bib-config.toml so both install paths agree.
 # It is an /etc symlink, so ostree 3-way-merges it and
 # `timedatectl set-timezone <tz>` overrides it permanently.
-# See apex-logs 55 / apexlogs/09-timezone-utc.md.
+# See rime-logs 55 / rimelogs/09-timezone-utc.md.
 RUN ln -sfn ../usr/share/zoneinfo/Australia/Perth /etc/localtime
 
 # ── Container sanity lint (informational) ─────────────────────────────────

@@ -5,9 +5,9 @@
 #
 # Building our own kernel changed the shape of the security-update obligation,
 # and not for the better. Before: the COPR rebuilt kernel-cachyos when CachyOS
-# tagged a release, and APEX picked it up with a forced core rebuild. Nothing
+# tagged a release, and Rime picked it up with a forced core rebuild. Nothing
 # had to be remembered. Now: KERNEL_TAG and its sha256 in kernel/kernel.pin are
-# what decide which kernel APEX ships, and they change when a human changes
+# what decide which kernel Rime ships, and they change when a human changes
 # them. An unbumped pin is a kernel that quietly stops receiving security fixes
 # WHILE EVERY GATE IN THIS REPOSITORY STAYS GREEN -- the build still verifies
 # its sha256, the BTF gate still passes, CI is still all ticks. Green means
@@ -94,7 +94,7 @@ else
     elif [ "${newest_series}" != "${KERNEL_TAG}" ]; then
         drifted "CachyOS has tagged ${newest_series} in the ${SERIES} series; kernel.pin is on ${KERNEL_TAG}."
         echo "         THIS IS THE SECURITY UPDATE. Bump KERNEL_TAG, KERNEL_SRC_URL and"
-        echo "         KERNEL_SRC_SHA256. Until that happens APEX ships a kernel that"
+        echo "         KERNEL_SRC_SHA256. Until that happens Rime ships a kernel that"
         echo "         receives no security fixes, and every gate stays green while it does."
     else
         current "KERNEL_TAG=${KERNEL_TAG} is the newest stable tag in the ${SERIES} series (of ${n_tags} stable tags)"

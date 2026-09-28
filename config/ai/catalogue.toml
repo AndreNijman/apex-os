@@ -1,6 +1,6 @@
-# APEX-OS model catalogue (roadmap §14).
+# Rime OS model catalogue (roadmap §14).
 #
-# Installed to /usr/share/apexos/ai/catalogue.toml. This file is the ONLY place
+# Installed to /usr/share/rimeos/ai/catalogue.toml. This file is the ONLY place
 # a model name becomes a digest, and it is image content rather than something
 # fetched — which is the whole of §14's provenance story.
 #
@@ -19,10 +19,10 @@
 #     proving only that the file had not changed since a moment nobody watched.
 # Neither ships. A model outside this file needs an explicit
 # `--url … --digest sha256:…`, which is the user vouching for it, and
-# `apex ai models` keeps saying so for the life of that model.
+# `rime ai models` keeps saying so for the life of that model.
 #
 # HOW TO ADD AN ENTRY
-# Every field is required except `note`, and `apexd_core::ai::Catalogue`
+# Every field is required except `note`, and `rimed_core::ai::Catalogue`
 # validates all of them at parse time — a bad entry is a build failure, not a
 # runtime surprise, because a user cannot fix image content.
 #
@@ -48,7 +48,7 @@
 # has a specific digest, and that its layer count and KV cost are the measured
 # ones. None of that can be asserted from documentation, and transcribing it
 # would put four unverified numbers into the one file whose entire purpose is
-# being the thing you can trust. The first symptom would be `apex ai pull`
+# being the thing you can trust. The first symptom would be `rime ai pull`
 # refusing the model with a digest mismatch, or `plan_fit` planning an offload
 # against a layer count that is not real.
 #
@@ -70,7 +70,7 @@
 # `plan_fit` charges context separately from `weights_mib`.
 #
 # A model outside this file still needs an explicit `--url … --digest sha256:…`,
-# which is the user vouching for it, and `apex ai models` keeps saying so for
+# which is the user vouching for it, and `rime ai models` keeps saying so for
 # the life of that model.
 
 version = 1

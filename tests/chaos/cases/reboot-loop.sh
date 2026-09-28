@@ -33,14 +33,14 @@
 #
 #  ═══ THE FAULT ═══
 #
-#  The ESP is built with two entries, which is the shape of a real APEX machine
+#  The ESP is built with two entries, which is the shape of a real Rime machine
 #  mid-update:
 #
-#    apex-new+3-0   the deployment just installed. Three boot attempts granted,
+#    rime-new+3-0   the deployment just installed. Three boot attempts granted,
 #                   none used. NOTHING blesses it, because the guest is not a
 #                   systemd guest — which is exactly what a deployment that
 #                   never finishes booting looks like to the bootloader.
-#    apex-good      the previous deployment. A blessed entry carries no +N-M
+#    rime-good      the previous deployment. A blessed entry carries no +N-M
 #                   suffix at all, so it stays eligible forever.
 #
 #  INJECTION   a staged deployment that can never be blessed, on a real ESP,
@@ -71,7 +71,7 @@
 #                 that stayed broken.
 #              4. The exhausted entry is STILL IN THE ESP, still carrying
 #                 +0-3. That is the "and say so": the reason the machine rolled
-#                 back is legible after the fact, to `apex boot status` and to
+#                 back is legible after the fact, to `rime boot status` and to
 #                 a person with a torch. An entry the loader deleted on failure
 #                 would leave a machine that silently went back in time.
 #
@@ -92,7 +92,7 @@
 #  directory bind-mounted into a container, the ESP is a file, the firmware
 #  varstore is a file, and the guest is an unprivileged qemu process with
 #  `-display none -nodefaults -no-reboot`. /dev/kvm is a device pass-through,
-#  not a privilege. tests/test-apex-chaos.sh asserts that no file under
+#  not a privilege. tests/test-rime-chaos.sh asserts that no file under
 #  tests/chaos/ runs bootctl, efibootmgr, ostree admin or rpm-ostree, and this
 #  file is held to it like the rest.
 # ─────────────────────────────────────────────────────────────────────────────
@@ -114,7 +114,7 @@ LAB_OUT=""
 # harness's intermediate file is how a case starts passing because a file
 # exists rather than because a machine behaved: if boot-v2 renamed it, this
 # would report "the ESP could not be read" and the reason would be nothing to
-# do with APEX. The offset is the one esp_disk_readback uses — the partition
+# do with Rime. The offset is the one esp_disk_readback uses — the partition
 # starts at 1 MiB and runs to two short of the end.
 _esp_entries() {
     podman run --rm -v "$LAB_OUT:/lab:z" "$CHAOS_BOOTLAB_IMAGE" -c '
@@ -134,7 +134,7 @@ case_setup() {
     echo "boot lab work directory $LAB_OUT, image $CHAOS_BOOTLAB_IMAGE"
 }
 
-# No baseline. The control here is INSIDE the fault: `apex-good` is the entry
+# No baseline. The control here is INSIDE the fault: `rime-good` is the entry
 # with no tally, and every assertion about the broken deployment is paired with
 # one about the good one in the same ESP. A separate "healthy" run would boot a
 # different disk and prove nothing about this one.
@@ -171,11 +171,11 @@ case_prove() {
         echo "the ESP could not be read, so nothing shows a deployment was staged"
         return 1
     fi
-    if [[ "$entries" != *"apex-new+"* ]]; then
+    if [[ "$entries" != *"rime-new+"* ]]; then
         echo "no counted entry in the ESP: nothing was staged with a boot tally"
         return 1
     fi
-    if [[ "$entries" != *"apex-good.efi"* ]]; then
+    if [[ "$entries" != *"rime-good.efi"* ]]; then
         echo "no blessed entry in the ESP: there was nothing to fall back to, so the case tests nothing"
         return 1
     fi
@@ -188,7 +188,7 @@ case_observe() {
     local log entry
     printf 'boot   selected      serial log\n'
     for log in count-0 count-1 count-2 count-fallback count-fallback2; do
-        entry="$(grep -ao 'apex\.bootlab\.entry=[a-z]*' "$LAB_OUT/serial-$log.log" 2>/dev/null \
+        entry="$(grep -ao 'rime\.bootlab\.entry=[a-z]*' "$LAB_OUT/serial-$log.log" 2>/dev/null \
                  | head -1 | cut -d= -f2)"
         printf '%-22s %-13s %s bytes\n' "$log" "${entry:-<none>}" \
             "$(wc -c < "$LAB_OUT/serial-$log.log" 2>/dev/null || echo 0)"
@@ -213,7 +213,7 @@ case_prove_exposed() {
         if [[ ! -s "$LAB_OUT/serial-$log.log" ]]; then
             echo "serial-$log.log is missing or empty: that guest never ran"
             missing=$((missing + 1))
-        elif ! grep -aq 'apex\.bootlab\.entry=' "$LAB_OUT/serial-$log.log"; then
+        elif ! grep -aq 'rime\.bootlab\.entry=' "$LAB_OUT/serial-$log.log"; then
             echo "serial-$log.log carries no bootlab marker: that guest produced no evidence"
             missing=$((missing + 1))
         fi
@@ -228,7 +228,7 @@ case_prove_exposed() {
 
 # entry_for LOG — which entry a boot selected, from the guest's own serial log.
 _entry_for() {
-    grep -ao 'apex\.bootlab\.entry=[a-z]*' "$LAB_OUT/serial-$1.log" 2>/dev/null \
+    grep -ao 'rime\.bootlab\.entry=[a-z]*' "$LAB_OUT/serial-$1.log" 2>/dev/null \
         | head -1 | cut -d= -f2
 }
 
@@ -253,11 +253,11 @@ case_judge() {
     else
         _chaos_fail "the machine did not fall back: boot 4 selected '${fb:-<nothing>}'"
     fi
-    # …and the loader said so in an EFI variable, which is what `apex boot
+    # …and the loader said so in an EFI variable, which is what `rime boot
     # status` reads. A fallback the firmware performed and did not record is a
     # machine that cannot tell you why it is running what it is running.
     expect_says "…and the loader recorded which entry it chose" \
-        "LoaderEntrySelected=apex-good.efi" \
+        "LoaderEntrySelected=rime-good.efi" \
         "$(cat "$LAB_OUT/serial-count-fallback.log" 2>/dev/null)"
 
     # 3 ── and it STAYED there. A machine that alternates is worse than one
@@ -275,15 +275,15 @@ case_judge() {
     #      back in time — which is "updated but nothing changed", the incident
     #      this case is named for, with no way left to find out why.
     local entries; entries="$(_esp_entries)"
-    if [[ "$entries" == "apex-good.efi apex-new+0-3.efi " ]]; then
+    if [[ "$entries" == "rime-good.efi rime-new+0-3.efi " ]]; then
         _chaos_pass "the exhausted deployment is still in the ESP at +0-3, so the rollback is legible"
     else
-        _chaos_fail "the ESP reads '$entries', wanted 'apex-good.efi apex-new+0-3.efi '"
+        _chaos_fail "the ESP reads '$entries', wanted 'rime-good.efi rime-new+0-3.efi '"
     fi
 
     # 5 ── the blessed entry never grew a tally. If it had, the machine would
     #      be three bad boots away from having nowhere to go.
-    if [[ "$entries" == *"apex-good.efi"* && "$entries" != *"apex-good+"* ]]; then
+    if [[ "$entries" == *"rime-good.efi"* && "$entries" != *"rime-good+"* ]]; then
         _chaos_pass "the known-good deployment is still unconditional — it can never be evicted by a counter"
     else
         _chaos_fail "the known-good deployment grew a boot counter: $entries"

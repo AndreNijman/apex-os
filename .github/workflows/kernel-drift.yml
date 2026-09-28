@@ -1,13 +1,13 @@
 name: kernel-drift
 
-# APEX builds its own kernel now, and that changed the shape of the
+# Rime builds its own kernel now, and that changed the shape of the
 # security-update obligation.
 #
 # Before: the COPR rebuilt kernel-cachyos when CachyOS tagged a release and
-# APEX picked it up with a forced core rebuild. Nothing had to be remembered.
+# Rime picked it up with a forced core rebuild. Nothing had to be remembered.
 #
 # Now: `KERNEL_TAG` and its sha256 in kernel/kernel.pin decide which kernel
-# APEX ships, and they move when a human moves them. An unbumped pin is a
+# Rime ships, and they move when a human moves them. An unbumped pin is a
 # kernel that quietly stops receiving security fixes WHILE EVERY OTHER GATE IN
 # THIS REPOSITORY STAYS GREEN — the build verifies its sha256, the BTF gate
 # passes, CI is all ticks. Green means "this is the kernel you pinned", never

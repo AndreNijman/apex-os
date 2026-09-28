@@ -1,4 +1,4 @@
-# APEX-OS system profile: generic-desktop
+# Rime OS system profile: generic-desktop
 #
 # Base fallback for any desktop/tower chassis. Selected by chassis type when
 # no more specific class (amd-zen / intel-hybrid) or device profile matches.

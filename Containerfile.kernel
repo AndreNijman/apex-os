@@ -1,5 +1,5 @@
 # ═══════════════════════════════════════════════════════════════════════════
-#  Containerfile.kernel — APEX builds its own kernel.
+#  Containerfile.kernel — Rime builds its own kernel.
 #
 #  WHY THIS IS ITS OWN TIER AND NOT A STAGE IN Containerfile.core
 #
@@ -27,7 +27,7 @@
 #  at no other time. Core keeps the dnf transaction that INSTALLS the kernel —
 #  which is what the tier rule is actually about — and gets the RPMs from here:
 #
-#      COPY --from=ghcr.io/andrenijman/apex-os:kernel@sha256:… /rpms /tmp/krpms
+#      COPY --from=ghcr.io/andrenijman/rime-os:kernel@sha256:… /rpms /tmp/krpms
 #      RUN dnf5 -y install /tmp/krpms/*.rpm
 #
 #  The fleet download cost is unchanged: core moving is a full download either
@@ -48,32 +48,32 @@
 #  A kernel build that can ship the exact bug it exists to fix is the "gate that
 #  inspects nothing" — this repository's dominant defect family, five of which
 #  cost five days of image builds. So the build dumps .BTF out of the vmlinux it
-#  just linked and runs apex-kernel-btf-gate over it, which reuses the SAME
-#  reader `apex game status` answers from. It exits 0 on `Usable` and on nothing
+#  just linked and runs rime-kernel-btf-gate over it, which reuses the SAME
+#  reader `rime game status` answers from. It exits 0 on `Usable` and on nothing
 #  else. A kernel with the defect cannot leave this file.
 # ═══════════════════════════════════════════════════════════════════════════
 
 # ── The gate, built from this repo's own reader ─────────────────────────────
-# apexd-core is the crate that owns kernelbtf.rs. Building only this one bin
+# rimed-core is the crate that owns kernelbtf.rs. Building only this one bin
 # keeps the stage to the four crates it needs rather than the whole workspace.
 FROM registry.fedoraproject.org/fedora@sha256:84325c671db8a23b0679e04fb863d4081d98c4fc4ae9c9d5bcd883b4cea4e003 AS gate-builder
 RUN dnf5 -y install cargo rust >/dev/null && dnf5 clean all
 ENV CARGO_HOME=/build/.cargo
-COPY apexd/ /build/apexd/
+COPY rimed/ /build/rimed/
 COPY config/ /build/config/
 RUN set -eux; \
-    cd /build/apexd; \
-    cargo build --release --locked -p apexd-core --bin apex-kernel-btf-gate; \
-    install -Dm755 target/release/apex-kernel-btf-gate /out/apex-kernel-btf-gate; \
-    /out/apex-kernel-btf-gate 2>&1 | head -1 || true
+    cd /build/rimed; \
+    cargo build --release --locked -p rimed-core --bin rime-kernel-btf-gate; \
+    install -Dm755 target/release/rime-kernel-btf-gate /out/rime-kernel-btf-gate; \
+    /out/rime-kernel-btf-gate 2>&1 | head -1 || true
 
 # ── The kernel ──────────────────────────────────────────────────────────────
 FROM registry.fedoraproject.org/fedora@sha256:84325c671db8a23b0679e04fb863d4081d98c4fc4ae9c9d5bcd883b4cea4e003 AS kbuild
 
 COPY kernel/kernel.pin /build/kernel.pin
 COPY kernel/kernel-cachyos.spec /build/kernel-cachyos.spec
-COPY kernel/btf-xcheck.sh /usr/local/bin/apex-btf-xcheck
-COPY --from=gate-builder /out/apex-kernel-btf-gate /usr/local/bin/apex-kernel-btf-gate
+COPY kernel/btf-xcheck.sh /usr/local/bin/rime-btf-xcheck
+COPY --from=gate-builder /out/rime-kernel-btf-gate /usr/local/bin/rime-kernel-btf-gate
 
 # Build dependencies. Transcribed from the spec's own BuildRequires, plus the
 # tools rpmbuild itself needs. `dwarves` is DELIBERATELY ABSENT from this list:
@@ -155,7 +155,7 @@ RUN set -eux; \
     # disagrees with BUILDER_BASE the day that pin moves.
     FEDVER="$(. /etc/os-release; echo "${VERSION_ID}")"; \
     test -n "${FEDVER}" || { echo "FATAL: no VERSION_ID in the builder's os-release"; exit 1; }; \
-    echo "builder is Fedora ${FEDVER}; release will be cachyos1.apex${APEX_KERNEL_BUILD}.fc${FEDVER}"; \
+    echo "builder is Fedora ${FEDVER}; release will be cachyos1.rime${RIME_KERNEL_BUILD}.fc${FEDVER}"; \
     # `--noclean` IS LOAD-BEARING, DO NOT DROP IT. rpm >= 4.20 runs an
     # `Executing(rmbuild)` phase after a successful build that deletes
     # %{buildsubdir} — the whole kernel source tree, vmlinux included. Without
@@ -173,7 +173,7 @@ RUN set -eux; \
     echo "rpmbuild starting at $(date -u +%Y-%m-%dT%H:%M:%SZ)"; \
     if ! rpmbuild -bb kernel-cachyos.spec \
             --define "_topdir /build/rpm" \
-            --define "dist .apex${APEX_KERNEL_BUILD}.fc${FEDVER}" \
+            --define "dist .rime${RIME_KERNEL_BUILD}.fc${FEDVER}" \
             --define "_smp_build_ncpus ${KERNEL_BUILD_JOBS}" \
             --noclean \
             > /build/rpmbuild.log 2>&1; then \
@@ -211,7 +211,7 @@ RUN set -eux; \
     test "${GOTPAHOLE}" = "${PAHOLE_VERSION_EXPECTED}" \
         || { echo "FATAL: kernel was built with CONFIG_PAHOLE_VERSION=${GOTPAHOLE}, pin requires ${PAHOLE_VERSION_EXPECTED}"; exit 1; }; \
     echo "CONFIG_PAHOLE_VERSION=${GOTPAHOLE} (as pinned)"; \
-    # CONFIG_DRM_SIMPLEDRM and friends are here because APEX's initramfs
+    # CONFIG_DRM_SIMPLEDRM and friends are here because Rime's initramfs
     # deliberately carries NO KMS driver — that is what took it from 358 MiB to
     # 98 MiB and what makes a 512 MiB ESP possible (Containerfile.core stage
     # 1f). The only thing left to draw the LUKS passphrase prompt is simpledrm
@@ -251,7 +251,7 @@ RUN set -eux; \
     # it finds, before the reader that can abort the build.
     #
     # They ask different questions on purpose (root cause vs symptom) and share
-    # no code: sh + bpftool here, apexd's kernelbtf.rs there. `if …; then` and
+    # no code: sh + bpftool here, rimed's kernelbtf.rs there. `if …; then` and
     # not `!`, because `set -e` does not apply to an inverted command.
     echo "--- reading 1 of 2: bpftool, the root cause (did pahole emit the tag?)"; \
     # Keep the EXIT CODE, not a pass/fail boolean. btf-xcheck exits 1 for "a tag
@@ -259,18 +259,18 @@ RUN set -eux; \
     # those loses the difference between the two readers DISAGREEING and only
     # one of them having run. The second, reported as the first, sends whoever
     # reads it hunting for untagged names that were never printed.
-    if apex-btf-xcheck /build/vmlinux.btf; then XRC=0; else XRC=$?; fi; \
-    echo "--- reading 2 of 2: apexd kernelbtf.rs, the symptom — THIS ONE IS THE GATE"; \
-    apex-kernel-btf-gate /build/vmlinux.btf; \
+    if rime-btf-xcheck /build/vmlinux.btf; then XRC=0; else XRC=$?; fi; \
+    echo "--- reading 2 of 2: rimed kernelbtf.rs, the symptom — THIS ONE IS THE GATE"; \
+    rime-kernel-btf-gate /build/vmlinux.btf; \
     case "${XRC}" in \
         0) echo "both readers agree: this kernel's scx_bpf_* kfuncs are intact" ;; \
         1) echo "FATAL: the two readers disagree about this kernel's BTF."; \
-           echo "       apex-kernel-btf-gate says the published prototypes are clean, and"; \
+           echo "       rime-kernel-btf-gate says the published prototypes are clean, and"; \
            echo "       the bpftool reading above says a bpf_kfunc DECL_TAG is missing."; \
            echo "       One of them is wrong and this kernel does not ship until it is"; \
            echo "       known which. Start from the untagged names printed above."; \
            exit 1 ;; \
-        *) echo "FATAL: only ONE reader actually ran. apex-btf-xcheck exited ${XRC},"; \
+        *) echo "FATAL: only ONE reader actually ran. rime-btf-xcheck exited ${XRC},"; \
            echo "       which is its 'I could not read this BTF' code, not a verdict —"; \
            echo "       so there are no untagged names above to go and look at. The gate"; \
            echo "       passed, but it passed unaccompanied, and this tier requires two"; \
@@ -329,11 +329,11 @@ RUN set -eux; \
 FROM scratch
 COPY --from=kbuild /rpms /rpms
 COPY --from=kbuild /manifest /manifest
-# One label, deliberately. A `org.apexos.kernel.tag="cachyos-7.2.6-1"` here
+# One label, deliberately. A `org.rimeos.kernel.tag="cachyos-7.2.6-1"` here
 # would be a second copy of kernel.pin that nothing makes agree with the first,
 # and the day the pin moves it becomes a confident lie in `skopeo inspect`.
 # /manifest/kernel-build.txt is written by the build that produced these RPMs,
 # carries the kver, the toolchain and the BTF verdict, and cannot disagree with
 # them. /manifest/kernel.pin is the inputs it came from.
-LABEL org.apexos.tier="kernel" \
-      org.apexos.kernel.manifest="/manifest/kernel-build.txt"
+LABEL org.rimeos.tier="kernel" \
+      org.rimeos.kernel.manifest="/manifest/kernel-build.txt"

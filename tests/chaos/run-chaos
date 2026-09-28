@@ -1,6 +1,6 @@
 #!/usr/bin/env bash
 # ─────────────────────────────────────────────────────────────────────────────
-#  run-chaos — the APEX chaos/torture driver. Roadmap P1-062.
+#  run-chaos — the Rime chaos/torture driver. Roadmap P1-062.
 #
 #  Usage:
 #    run-chaos [--out DIR] [--seed N] [--cases-dir DIR] [CASE ...]
@@ -12,7 +12,7 @@
 #
 #    CASE_TITLE      one line, what the fault is
 #    CASE_CRITERION  which of P1-062's three criteria it serves
-#    CASE_NEEDS      space-separated prerequisites: apex-binary userns netns
+#    CASE_NEEDS      space-separated prerequisites: rime-binary userns netns
 #                    tmpfs-ns kvm
 #    case_setup      build the fixture tree at $CASE_ROOT
 #    case_inject     apply the fault
@@ -43,14 +43,14 @@
 #      otherwise ───────────────────────────────────► survived
 #
 #  There is no arm in which a case that injected nothing reports a pass, and
-#  tests/test-apex-chaos.sh proves that by feeding the driver cases whose
+#  tests/test-rime-chaos.sh proves that by feeding the driver cases whose
 #  injector, whose observer and whose exposure proof each cannot run.
 #
 #  ═══ THE FOURTH ARM, AND WHY IT HAD TO BE ADDED ═══
 #
 #  `case_prove` answers "is the fault present?". It does not answer "did the
 #  subject meet it?", and the first network-loss case found out the hard way
-#  that those are different questions. It put `apex trust --verify` inside a
+#  that those are different questions. It put `rime trust --verify` inside a
 #  network namespace with no route to anything, proved with a refused
 #  connect() that the network really was gone, and went RED — because
 #  verify.rs short-circuits the registry entirely under a fixture root, so the
@@ -183,18 +183,18 @@ fi
 
 [[ -n "$SEED" ]] || SEED="$(date +%s)"
 if [[ -z "$OUT" ]]; then
-    OUT="$(mktemp -d -t apex-chaos-XXXXXX)"
+    OUT="$(mktemp -d -t rime-chaos-XXXXXX)"
 fi
 mkdir -p "$OUT"
 
-# The real binary, and the wrapper the cases are actually handed. `$APEX_BIN`
+# The real binary, and the wrapper the cases are actually handed. `$RIME_BIN`
 # is deliberately NOT the binary — see the fixture-root rule in lib.sh.
-CHAOS_APEX_REAL="${APEX_BIN:-$CHAOS_REPO/apexd/target/debug/apex}"
+CHAOS_RIME_REAL="${RIME_BIN:-$CHAOS_REPO/rimed/target/debug/rime}"
 CHAOS_GUARD_MARKER="$OUT/unrooted-subject-invocations"
 : > "$CHAOS_GUARD_MARKER"
-chaos_write_guard "$OUT/apex-guard" "$CHAOS_APEX_REAL" "$CHAOS_GUARD_MARKER"
-APEX_BIN="$OUT/apex-guard"
-export APEX_BIN CHAOS_APEX_REAL CHAOS_GUARD_MARKER
+chaos_write_guard "$OUT/rime-guard" "$CHAOS_RIME_REAL" "$CHAOS_GUARD_MARKER"
+RIME_BIN="$OUT/rime-guard"
+export RIME_BIN CHAOS_RIME_REAL CHAOS_GUARD_MARKER
 
 # A case that ran the subject with no fixture root has not produced a result,
 # it has produced an accident. Exit 2, not a verdict.
@@ -205,7 +205,7 @@ chaos_check_guard() {
     chaos_die "a case invoked the subject with no fixture root set; refusing to run it against this machine"
 }
 
-chaos_log "APEX chaos run — seed $SEED, bundles in $OUT"
+chaos_log "Rime chaos run — seed $SEED, bundles in $OUT"
 chaos_write_env "$OUT/env.txt"
 sed 's/^/    /' "$OUT/env.txt" >&2
 

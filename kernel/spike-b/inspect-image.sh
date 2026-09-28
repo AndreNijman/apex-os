@@ -1,11 +1,11 @@
 #!/bin/bash
 # Run all in-image spike checks against the built spike image.
 set -uo pipefail
-IMG="${1:-localhost/apex-kernel-spike:latest}"
+IMG="${1:-localhost/rime-kernel-spike:latest}"
 
 sudo podman run --rm "$IMG" bash -c '
 set -uo pipefail
-KVER="$(cat /usr/lib/apex-cachyos-kver)"
+KVER="$(cat /usr/lib/rime-cachyos-kver)"
 CONF="/usr/lib/modules/${KVER}/config"
 echo "########## KVER=${KVER}"
 echo "########## uname vmlinuz present:"; ls -la /usr/lib/modules/${KVER}/vmlinuz /usr/lib/modules/${KVER}/initramfs.img
@@ -22,7 +22,7 @@ for opt in CONFIG_ANDROID_BINDERFS CONFIG_ANDROID_BINDER_IPC CONFIG_NTSYNC \
 done
 
 echo "########## NVIDIA AKMOD STATUS"
-cat /usr/lib/apex-nvidia-akmod-status 2>&1 || echo "no status file"
+cat /usr/lib/rime-nvidia-akmod-status 2>&1 || echo "no status file"
 echo "--- modinfo nvidia (against cachyos kver) ---"
 modinfo -k "${KVER}" nvidia 2>&1 | grep -iE "^filename|^version|^vermagic|^license" || echo "modinfo nvidia FAILED to resolve"
 echo "--- built kmod rpm installed? ---"
@@ -43,5 +43,5 @@ echo "--- bootc version ---"; bootc --version
 echo "--- dnf5 present? ---"; rpm -q dnf5 2>&1
 
 echo "########## KARGS"
-cat /usr/lib/bootc/kargs.d/10-apex-serial.toml 2>&1
+cat /usr/lib/bootc/kargs.d/10-rime-serial.toml 2>&1
 '

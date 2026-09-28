@@ -1,8 +1,8 @@
 #!/bin/bash
-# Render a preview GIF of the APEX-OS boot splash.
+# Render a preview GIF of the Rime OS boot splash.
 #   render-preview.sh <theme-dir> <out.gif> [render-preview.py options]
 # A thin wrapper kept for the documented command: the renderer is
-# render-preview.py, a frame-exact simulation of apex-os.script on plymouth's
+# render-preview.py, a frame-exact simulation of rime-os.script on plymouth's
 # script plugin (see its header). For the 60 fps MP4, the contact sheet and the
 # per-frame metrics, run render-preview.py directly with an output directory.
 set -euo pipefail

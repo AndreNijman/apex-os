@@ -1,6 +1,6 @@
 #!/usr/bin/env bash
 # ─────────────────────────────────────────────────────────────────────────────
-#  mutate-greet-session-bus.sh — prove test-apex-greet-session-bus.sh can go red.
+#  mutate-greet-session-bus.sh — prove test-rime-greet-session-bus.sh can go red.
 #
 #  That suite used to assert ABSENCE — no session bus, no accessibility bus, on
 #  either host — and these mutants were written to match: each one SUPPLIED the
@@ -21,14 +21,14 @@
 set -uo pipefail
 cd "$(dirname "$0")/.." || exit 2
 
-TOML="files/desktop/apex-greet/greetd-config.toml"
-SWAYC="files/desktop/apex-greet/sway-greet.conf"
-AUTO="files/desktop/apex-greet/labwc-greet/autostart"
-LABWCRC="files/desktop/apex-greet/labwc-greet/rc.xml"
-WRAP="files/system/libexec/apex-greet-session"
-SUITE_F="tests/test-apex-greet-session-bus.sh"
+TOML="files/desktop/rime-greet/greetd-config.toml"
+SWAYC="files/desktop/rime-greet/sway-greet.conf"
+AUTO="files/desktop/rime-greet/labwc-greet/autostart"
+LABWCRC="files/desktop/rime-greet/labwc-greet/rc.xml"
+WRAP="files/system/libexec/rime-greet-session"
+SUITE_F="tests/test-rime-greet-session-bus.sh"
 FILES="$TOML $SWAYC $AUTO $LABWCRC $WRAP $SUITE_F"
-SUITE="./tests/test-apex-greet-session-bus.sh"
+SUITE="./tests/test-rime-greet-session-bus.sh"
 
 applied=0; noapply=0; caught=0; survived=0
 
@@ -74,7 +74,7 @@ EDIT
     else
         printf '%-5s SURVIVED  %s\n' "$id" "$want"
         printf '      ── what the suite said instead ──\n'
-        printf '%s\n' "$out" | grep -E '^(FAIL|SKIP|apex-greet-session-bus)' | sed 's/^/      /'
+        printf '%s\n' "$out" | grep -E '^(FAIL|SKIP|rime-greet-session-bus)' | sed 's/^/      /'
         survived=$((survived + 1))
     fi
     restore
@@ -82,8 +82,8 @@ EDIT
 
 echo "── baseline: green, or nothing below means anything ──"
 base="$(run_suite)"
-printf '%s\n' "$base" | grep -E '^apex-greet-session-bus'
-if ! printf '%s' "$base" | grep -qE '^apex-greet-session-bus: [0-9]+ passed, 0 failed'; then
+printf '%s\n' "$base" | grep -E '^rime-greet-session-bus'
+if ! printf '%s' "$base" | grep -qE '^rime-greet-session-bus: [0-9]+ passed, 0 failed'; then
     echo "ABORT: the suite is not green to begin with" >&2
     printf '%s\n' "$base" | grep -E '^(FAIL|SKIP)' >&2
     exit 3
@@ -96,7 +96,7 @@ echo "── the mutants ──"
 #      the greeter shipped in until this round. Everything the login screen
 #      needs for accessibility disappears at once.
 mutate C1 "$TOML" \
-    'command = "/usr/libexec/apex-greet-session sway --unsupported-gpu' \
+    'command = "/usr/libexec/rime-greet-session sway --unsupported-gpu' \
     'command = "sway --unsupported-gpu' \
     "the greeter's client can reach a session bus"
 
@@ -104,15 +104,15 @@ mutate C1 "$TOML" \
 #      lines already sitting in this file as comments. A grep cannot tell a live
 #      line from a commented one; tomllib can.
 mutate C2 "$TOML" \
-    'command = "/usr/libexec/apex-greet-session sway --unsupported-gpu -c /usr/share/apex-greet/sway-greet.conf"' \
-    'command = "cage -ds -- qs -p /usr/share/apex-greet/shell.qml"' \
+    'command = "/usr/libexec/rime-greet-session sway --unsupported-gpu -c /usr/share/rime-greet/sway-greet.conf"' \
+    'command = "cage -ds -- qs -p /usr/share/rime-greet/shell.qml"' \
     "the live command is not one of the two hosts kept in comments"
 
 # C3 — the host stops launching the greeter's client. Every assertion about what
 #      that client can see is then vacuously true, so the floor assertion is the
 #      only thing between this and a clean green run.
 mutate C3 "$SWAYC" \
-    'exec "qs -p /usr/share/apex-greet/shell.qml; swaymsg exit"' \
+    'exec "qs -p /usr/share/rime-greet/shell.qml; swaymsg exit"' \
     'exec "swaymsg exit"' \
     "the shipped chain really reaches the greeter's own client"
 
@@ -120,7 +120,7 @@ mutate C3 "$SWAYC" \
 #      took the fallback would have a login screen no reader can hear, and
 #      nothing anywhere to say so.
 mutate C4 "$TOML" \
-    '#   command = "/usr/libexec/apex-greet-session labwc' \
+    '#   command = "/usr/libexec/rime-greet-session labwc' \
     '#   command = "labwc' \
     "the documented labwc fallback command carries the wrapper too"
 
@@ -176,13 +176,13 @@ mutate C9 "$WRAP" \
 #       the sway host. The buses are all still there and there is no way to ask
 #       for the reader that would use them.
 mutate C10 "$SWAYC" \
-    'bindsym --to-code Mod4+Mod1+s exec /usr/libexec/apex-screen-reader toggle' \
+    'bindsym --to-code Mod4+Mod1+s exec /usr/libexec/rime-screen-reader toggle' \
     '# (binding removed)' \
     "the sway host binds a key that starts the screen reader"
 
 # C11 — the same key deleted from the fallback host only.
 mutate C11 "$LABWCRC" \
-    '      <action name="Execute" command="/usr/libexec/apex-screen-reader toggle"/>' \
+    '      <action name="Execute" command="/usr/libexec/rime-screen-reader toggle"/>' \
     '      <action name="Execute" command="true"/>' \
     "the labwc fallback host binds the same key"
 

@@ -2,9 +2,9 @@
   "reply": "worktrees",
   "worktrees": [
     {
-      "name": "apex-os",
-      "slug": "apex-os",
-      "path": "/var/home/andre/Projects/apex/apex-os",
+      "name": "rime-os",
+      "slug": "rime-os",
+      "path": "/var/home/andre/Projects/rime/rime-os",
       "branch": "roadmap/v2.2",
       "head": "4ae4cf22f1a0",
       "is_agent": false,
@@ -35,8 +35,8 @@
     },
     {
       "name": "wt-p1-053b",
-      "slug": "apex-os",
-      "path": "/var/home/andre/Projects/apex/apex-os/.apex/worktrees/wt-p1-053b",
+      "slug": "rime-os",
+      "path": "/var/home/andre/Projects/rime/rime-os/.rime/worktrees/wt-p1-053b",
       "branch": "task/p1-053b-android-ux",
       "head": "9c1e77aa0b31",
       "is_agent": true,
@@ -71,8 +71,8 @@
     },
     {
       "name": "wt-conflicted",
-      "slug": "apex-os",
-      "path": "/var/home/andre/Projects/apex/apex-os/.apex/worktrees/wt-conflicted",
+      "slug": "rime-os",
+      "path": "/var/home/andre/Projects/rime/rime-os/.rime/worktrees/wt-conflicted",
       "branch": "task/other",
       "head": "1122334455aa",
       "is_agent": true,
@@ -90,7 +90,7 @@
       "conflicts": {
         "state": "conflicted",
         "paths": [
-          "apexd/apex-agent-core/src/protocol.rs",
+          "rimed/rime-agent-core/src/protocol.rs",
           "android/core/build.gradle.kts"
         ]
       },
@@ -114,8 +114,8 @@
     },
     {
       "name": "wt-unknown",
-      "slug": "apex-os",
-      "path": "/var/home/andre/Projects/apex/apex-os/.apex/worktrees/wt-unknown",
+      "slug": "rime-os",
+      "path": "/var/home/andre/Projects/rime/rime-os/.rime/worktrees/wt-unknown",
       "branch": null,
       "head": null,
       "is_agent": true,
@@ -149,9 +149,9 @@
       }
     },
     {
-      "name": "apex-shell",
-      "slug": "apex-shell",
-      "path": "/var/home/andre/Projects/apex/apex-shell",
+      "name": "rime-shell",
+      "slug": "rime-shell",
+      "path": "/var/home/andre/Projects/rime/rime-shell",
       "branch": "roadmap/v2.2",
       "head": "6e741011cd22",
       "is_agent": false,

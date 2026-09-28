@@ -2,7 +2,7 @@
 # Does the in-app guide read like something a person wrote?
 #
 # P1-060 carries the `stop_slop` gate, and the desktop's own help has the same
-# one (`apex-shell/tests/check-agent-help.sh`, which reports TOTAL 0). This is
+# one (`rime-shell/tests/check-agent-help.sh`, which reports TOTAL 0). This is
 # that check for the Android guide.
 #
 # It scans PROSE, not Kotlin. `help-prose.py` pulls out exactly what a user
@@ -19,7 +19,7 @@
 set -uo pipefail
 
 here="$(cd -- "$(dirname -- "${BASH_SOURCE[0]}")" && pwd)"
-help="$here/../core/src/main/kotlin/com/apexos/remote/core/agent/Help.kt"
+help="$here/../core/src/main/kotlin/com/rimeos/remote/core/agent/Help.kt"
 allow="$here/../.slopcheck-allow"
 slop="${SLOPCHECK:-$HOME/.claude/skills/stop-slop/scripts/slopcheck.py}"
 

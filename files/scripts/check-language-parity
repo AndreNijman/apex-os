@@ -3,8 +3,8 @@
 
 WHY THIS EXISTS
 
-`[development] languages` is validated by `apexd-core::blueprint::LANGUAGES` and
-converged by `LANGUAGES` in `files/system/libexec/apex-env`. Two lists, in two
+`[development] languages` is validated by `rimed-core::blueprint::LANGUAGES` and
+converged by `LANGUAGES` in `files/system/libexec/rime-env`. Two lists, in two
 languages, in two files — and that split is deliberate: the planner needs the
 VOCABULARY so a blueprint can be validated before any engine exists, and it must
 NOT have the table, because a language -> package table on the host is precisely
@@ -13,8 +13,8 @@ what roadmap §8 exists to avoid. The toolchain belongs in a capsule.
 Both failure modes are silent, and each side is internally consistent:
 
   * a language the blueprint ACCEPTS and the engine does not provision — the
-    blueprint validates, `apex apply` plans a step, and the step fails with
-    "not a language APEX provisions". The user is told their own valid
+    blueprint validates, `rime apply` plans a step, and the step fails with
+    "not a language Rime provisions". The user is told their own valid
     blueprint is invalid, by a different program.
   * a language the engine provisions and the blueprint REFUSES — a capsule
     nobody can declare. It looks like a missing feature rather than a
@@ -28,8 +28,8 @@ resolves to all three.
 
 WHY IT RUNS IN THE `static` CI JOB
 
-The path selectors would otherwise hide it. `rust` fires on `^(apexd/|...)` and
-`engine` on `^(files/|tests/)`, so a PR that changes only `apex-env`'s table
+The path selectors would otherwise hide it. `rust` fires on `^(rimed/|...)` and
+`engine` on `^(files/|tests/)`, so a PR that changes only `rime-env`'s table
 never runs the Rust job and a PR that changes only the Rust const never runs the
 engine job — and a skipped job counts as success. This check needs no toolchain
 and no container, so it belongs in the job that always runs.
@@ -50,8 +50,8 @@ import subprocess
 import sys
 
 HERE = pathlib.Path(__file__).resolve().parent.parent.parent
-DEFAULT_PLANNER = HERE / "apexd/apexd-core/src/blueprint.rs"
-DEFAULT_ENGINE = HERE / "files/system/libexec/apex-env"
+DEFAULT_PLANNER = HERE / "rimed/rimed-core/src/blueprint.rs"
+DEFAULT_ENGINE = HERE / "files/system/libexec/rime-env"
 
 
 def fail(message):
@@ -94,7 +94,7 @@ def engine_languages(path):
 
 
 def engine_table(path):
-    """`apex-env languages`, as rows of (language, capsule, probe, packages).
+    """`rime-env languages`, as rows of (language, capsule, probe, packages).
 
     Runs the shipped engine. `languages` touches no container, no network and
     no state — it is a pure print of three case statements — so this is safe in
@@ -150,7 +150,7 @@ def main():
     table = engine_table(args.engine)
     if sorted(table) != sorted(engine):
         fail(
-            "`apex-env languages` prints "
+            "`rime-env languages` prints "
             f"{sorted(table)}, but LANGUAGES says {sorted(engine)}"
         )
 

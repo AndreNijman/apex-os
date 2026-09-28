@@ -9,7 +9,7 @@
 // written on — there is no wrangler here and deploying one is a decision
 // about somebody's Cloudflare account — so the rules live where `node --test`
 // can reach them, and the Rust suite in
-// `apexd/apex-remoted/tests/relay.rs` is the conformance reference for the
+// `rimed/rime-remoted/tests/relay.rs` is the conformance reference for the
 // half that has to travel over a socket.
 //
 // Plain JavaScript rather than TypeScript for the same reason: `node --test`
@@ -17,7 +17,7 @@
 
 /// The three things a relay is allowed to say about itself.
 ///
-/// Byte-for-byte what `apex_remote_core::relay::Notice::text()` produces. A
+/// Byte-for-byte what `rime_remote_core::relay::Notice::text()` produces. A
 /// Rust test reads this file and asserts that, because two independently
 /// maintained spellings of one wire value is the drift that would make a
 /// desktop sit waiting through a relay that had already paired it.

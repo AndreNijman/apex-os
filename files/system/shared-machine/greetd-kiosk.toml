@@ -1,10 +1,10 @@
-# APEX-OS — greetd config for a KIOSK machine (P2-016 criterion 3).
+# Rime OS — greetd config for a KIOSK machine (P2-016 criterion 3).
 #
 # A RECIPE, not a shipped default. It installs to
-# /usr/share/apex/shared-machine/greetd-kiosk.toml and is never
+# /usr/share/rime/shared-machine/greetd-kiosk.toml and is never
 # /etc/greetd/config.toml unless somebody puts it there. The shipped login
-# config is files/desktop/apex-greet/greetd-config.toml, which has no
-# auto-login of any kind — tests/test-apex-shared-machine.sh asserts that
+# config is files/desktop/rime-greet/greetd-config.toml, which has no
+# auto-login of any kind — tests/test-rime-shared-machine.sh asserts that
 # absence, because "kiosk policy is possible WITHOUT weakening ordinary
 # desktop use" is a claim about the ordinary config, not about this one.
 #
@@ -40,11 +40,11 @@ vt = 1
 [default_session]
 # --unsupported-gpu for the same reason the greeter config carries it: sway
 # 1.11's detect_proprietary() exits(EXIT_FAILURE) on any machine where
-# nvidia-drm is present, and APEX bakes the NVIDIA driver into one image.
-command = "sway --unsupported-gpu -c /usr/share/apex/shared-machine/sway-kiosk.conf"
+# nvidia-drm is present, and Rime bakes the NVIDIA driver into one image.
+command = "sway --unsupported-gpu -c /usr/share/rime/shared-machine/sway-kiosk.conf"
 # The kiosk account. Create it WITHOUT wheel:
-#   useradd --system-ish -m -s /usr/sbin/nologin apex-kiosk   (see README)
-user = "apex-kiosk"
+#   useradd --system-ish -m -s /usr/sbin/nologin rime-kiosk   (see README)
+user = "rime-kiosk"
 
 # Deliberately NO [initial_session]. See above — it would fire once per boot
 # and leave the machine at a greeter for the rest of the day.

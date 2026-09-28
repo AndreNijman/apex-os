@@ -1,5 +1,5 @@
 #!/usr/bin/env python3
-"""keymap-boot-drive.py — boot the SHIPPED APEX initramfs under qemu, type a
+"""keymap-boot-drive.py — boot the SHIPPED Rime initramfs under qemu, type a
 passphrase on the EMULATED KEYBOARD through QMP, and report what the guest did
 with it.
 
@@ -109,7 +109,7 @@ def main():
         # reason. The probe unit is ordered After=systemd-vconsole-setup.
         while time.time() < deadline:
             txt = open(serial, errors="replace").read()
-            if "APEX-KEYMAP-PROBE: READY" in txt:
+            if "RIME-KEYMAP-PROBE: READY" in txt:
                 break
             if proc.poll() is not None:
                 verdict = "guest-died-before-ready"
@@ -131,7 +131,7 @@ def main():
 
         while time.time() < deadline:
             txt = open(serial, errors="replace").read()
-            if "APEX-KEYMAP-RESULT: DONE" in txt:
+            if "RIME-KEYMAP-RESULT: DONE" in txt:
                 verdict = "result-reported"
                 break
             if proc.poll() is not None:
@@ -153,7 +153,7 @@ def main():
         err.close()
 
     txt = open(serial, errors="replace").read()
-    m = re.search(r"APEX-KEYMAP-RESULT: (unlocked=\S+.*)", txt)
+    m = re.search(r"RIME-KEYMAP-RESULT: (unlocked=\S+.*)", txt)
     print("verdict=%s" % verdict)
     print("qemu-rc=%s" % proc.returncode)
     print("typed=%s" % ("yes" if typed_at else "no"))

@@ -33,14 +33,14 @@
 #  ── WHAT A USER NAMESPACE IS, AND WHAT IT IS NOT ────────────────────────────
 #
 #  Inside `unshare -r` the process is uid 0 in its own namespace and maps to
-#  the invoking user outside it. Every check APEX makes about being root is a
+#  the invoking user outside it. Every check Rime makes about being root is a
 #  real check that really passes. What it does NOT get is capability over
 #  anything owned by real root — so the operation that runs afterwards has to
 #  be one that cannot touch the machine. `unshare -m` gives this run its own
-#  mount namespace, and a mirror of /usr/libexec carrying a stub `apex-pkg` is
-#  bind-mounted over the real directory — /usr/libexec/apex-pkg is the absolute
-#  path `apex install` execs. The directory rather than the file, because
-#  `mount --bind` cannot create a target that is not there and only an APEX
+#  mount namespace, and a mirror of /usr/libexec carrying a stub `rime-pkg` is
+#  bind-mounted over the real directory — /usr/libexec/rime-pkg is the absolute
+#  path `rime install` execs. The directory rather than the file, because
+#  `mount --bind` cannot create a target that is not there and only a Rime
 #  machine has that file; see the inner half for what that cost. The mount is
 #  invisible outside this process tree and the real engine is never run.
 #
@@ -63,8 +63,8 @@ ROOT="$(cd "$(dirname "${BASH_SOURCE[0]}")/.." && pwd)"
 # session and the guard, so it must not try to re-enter: `sudo -n` from a uid 0
 # that only exists inside a user namespace would fail anyway, and the wrapper
 # would then print its degradation notice in the middle of the run.
-if [ "${APEX_ROOT_APPROVAL_INNER:-}" != "1" ] \
-   && [ -z "${APEX_LOGIN_SESSION_WRAPPED:-}" ] \
+if [ "${RIME_ROOT_APPROVAL_INNER:-}" != "1" ] \
+   && [ -z "${RIME_LOGIN_SESSION_WRAPPED:-}" ] \
    && [ -x "${ROOT}/tests/in-login-session.sh" ]; then
     exec "${ROOT}/tests/in-login-session.sh" "${BASH_SOURCE[0]}" "$@"
 fi
@@ -79,22 +79,22 @@ section() { printf '\n── %s ──\n' "$1"; }
 # One file, re-executed. The alternative — a second script under tests/ that
 # only ever runs through this one — is a file nobody remembers to keep in step
 # with the outer half.
-if [ "${APEX_ROOT_APPROVAL_INNER:-}" = "1" ]; then
-    WORK="$APEX_ROOT_APPROVAL_WORK"
-    APEX="$APEX_ROOT_APPROVAL_APEX"
+if [ "${RIME_ROOT_APPROVAL_INNER:-}" = "1" ]; then
+    WORK="$RIME_ROOT_APPROVAL_WORK"
+    Rime="$RIME_ROOT_APPROVAL_RIME"
 
     printf 'inner: euid %s, /proc/self/status says %s\n' \
         "$(id -u)" "$(awk '/^Uid:/{print $3}' /proc/self/status)"
 
-    # The engine `apex install` execs, by absolute path. Replaced inside this
+    # The engine `rime install` execs, by absolute path. Replaced inside this
     # mount namespace only; the real engine is never run.
     #
     # The DIRECTORY is replaced rather than the file, and that is not
     # fastidiousness. `mount --bind` cannot create its own target, and on a
-    # machine that is not APEX there is nothing at /usr/libexec/apex-pkg to
+    # machine that is not Rime there is nothing at /usr/libexec/rime-pkg to
     # bind over. An ubuntu-24.04 runner answered
     #
-    #     mount: /usr/libexec/apex-pkg: mount point does not exist.
+    #     mount: /usr/libexec/rime-pkg: mount point does not exist.
     #
     # and took eight assertions down with it — every one of them about what
     # happens AFTER the engine is reached — while this laptop, where the image
@@ -107,7 +107,7 @@ if [ "${APEX_ROOT_APPROVAL_INNER:-}" = "1" ]; then
     # where /usr is mounted read-only.
     #
     # So the real directory is bound aside, a mirror of it is built out of
-    # symlinks, the stub is dropped in as `apex-pkg`, and the mirror is bound
+    # symlinks, the stub is dropped in as `rime-pkg`, and the mirror is bound
     # over /usr/libexec. Nothing else in the directory disappears. There is one
     # code path rather than an `if the file is missing` branch, because a
     # branch only CI takes is how the original defect survived.
@@ -121,23 +121,23 @@ if [ "${APEX_ROOT_APPROVAL_INNER:-}" = "1" ]; then
         sed 's/^/      /' "${WORK}/mount.err"
         exit 3
     fi
-    # `apex-pkg` is deliberately NOT mirrored, and the `rm -f` after the loop
-    # is not belt and braces. On an APEX machine the real engine IS in this
-    # directory, so mirroring it would leave ${WORK}/libexec/apex-pkg a symlink
-    # pointing at /usr/libexec/apex-pkg — and `cp` follows a symlink and writes
+    # `rime-pkg` is deliberately NOT mirrored, and the `rm -f` after the loop
+    # is not belt and braces. On a Rime machine the real engine IS in this
+    # directory, so mirroring it would leave ${WORK}/libexec/rime-pkg a symlink
+    # pointing at /usr/libexec/rime-pkg — and `cp` follows a symlink and writes
     # through it. Measured here: the copy failed only because this machine
     # mounts /usr read-only, which turned overwriting the shipped engine into
     # an INNER-FATAL. On any machine where /usr is writable — a GitHub runner
     # mounts it rw — a test suite would have overwritten the real
-    # /usr/libexec/apex-pkg with a stub that exits 23.
+    # /usr/libexec/rime-pkg with a stub that exits 23.
     for entry in "${WORK}/real-libexec"/* "${WORK}/real-libexec"/.[!.]*; do
         [ -e "$entry" ] || continue
-        [ "$(basename "$entry")" = "apex-pkg" ] && continue
+        [ "$(basename "$entry")" = "rime-pkg" ] && continue
         ln -sfn "$entry" "${WORK}/libexec/$(basename "$entry")"
     done
-    rm -f "${WORK}/libexec/apex-pkg"
-    cp "${WORK}/fake-apex-pkg" "${WORK}/libexec/apex-pkg"
-    chmod 0755 "${WORK}/libexec/apex-pkg"
+    rm -f "${WORK}/libexec/rime-pkg"
+    cp "${WORK}/fake-rime-pkg" "${WORK}/libexec/rime-pkg"
+    chmod 0755 "${WORK}/libexec/rime-pkg"
     if ! mount --bind "${WORK}/libexec" /usr/libexec 2>"${WORK}/mount.err"; then
         echo "INNER-FATAL: could not bind the stub engine over /usr/libexec"
         sed 's/^/      /' "${WORK}/mount.err"
@@ -146,13 +146,13 @@ if [ "${APEX_ROOT_APPROVAL_INNER:-}" = "1" ]; then
     # Asked of the filesystem rather than inferred from mount(8) exiting 0.
     # ops::PKG_ENGINE is this path and nothing else; if it is not the stub now,
     # everything below would be measuring the real engine.
-    if [ ! -x /usr/libexec/apex-pkg ] || ! cmp -s "${WORK}/fake-apex-pkg" /usr/libexec/apex-pkg; then
-        echo "INNER-FATAL: /usr/libexec/apex-pkg is not the stub after the bind"
+    if [ ! -x /usr/libexec/rime-pkg ] || ! cmp -s "${WORK}/fake-rime-pkg" /usr/libexec/rime-pkg; then
+        echo "INNER-FATAL: /usr/libexec/rime-pkg is not the stub after the bind"
         exit 3
     fi
 
     id="$1"
-    printf 'y\n' | "$APEX" request approve "$id" > "${WORK}/approve.out" 2>&1
+    printf 'y\n' | "$Rime" request approve "$id" > "${WORK}/approve.out" 2>&1
     printf 'APPROVE_EXIT=%s\n' "$?"
     sed 's/^/      | /' "${WORK}/approve.out"
     exit 0
@@ -191,17 +191,17 @@ if ! unshare -r true 2>/dev/null; then
 fi
 
 section "the binaries"
-if ! cargo build --manifest-path "${ROOT}/apexd/Cargo.toml" \
-        --bin apex-agentd --bin apex >/dev/null 2>&1; then
-    bad "apex-agentd and apex build"
+if ! cargo build --manifest-path "${ROOT}/rimed/Cargo.toml" \
+        --bin rime-agentd --bin rime >/dev/null 2>&1; then
+    bad "rime-agentd and rime build"
     printf '\nroot-approval: %d passed, %d failed\n' "$pass" "$fail"
     exit 1
 fi
-ok "apex-agentd and apex build"
+ok "rime-agentd and rime build"
 
-BIN="${CARGO_TARGET_DIR:-${ROOT}/apexd/target}/debug"
-AGENTD="${BIN}/apex-agentd"
-APEX="${BIN}/apex"
+BIN="${CARGO_TARGET_DIR:-${ROOT}/rimed/target}/debug"
+AGENTD="${BIN}/rime-agentd"
+Rime="${BIN}/rime"
 
 # ── an isolated runtime ──────────────────────────────────────────────────────
 export XDG_RUNTIME_DIR="${WORK}/run"
@@ -215,22 +215,22 @@ chmod 0700 "$XDG_RUNTIME_DIR"
 # makes about this whole path: the daemon holds no privilege and never executes
 # anything, so the operation must be run by the approving human's own process
 # with the approving human's own root.
-cat > "${WORK}/fake-apex-pkg" <<'STUB'
+cat > "${WORK}/fake-rime-pkg" <<'STUB'
 #!/usr/bin/env bash
 {
     printf 'ARGV=%s\n' "$*"
     printf 'EUID=%s\n' "$(id -u)"
     printf 'PARENT=%s\n' "$(cat "/proc/$PPID/comm" 2>/dev/null)"
-} >> "$APEX_ROOT_APPROVAL_WORK/engine.log"
+} >> "$RIME_ROOT_APPROVAL_WORK/engine.log"
 exit 23
 STUB
-chmod +x "${WORK}/fake-apex-pkg"
+chmod +x "${WORK}/fake-rime-pkg"
 : > "${WORK}/engine.log"
 
 section "the daemon"
 "$AGENTD" > "${WORK}/agentd.log" 2>&1 &
 DAEMON_PID=$!
-SOCK="${XDG_RUNTIME_DIR}/apex-agentd/control.sock"
+SOCK="${XDG_RUNTIME_DIR}/rime-agentd/control.sock"
 for _ in $(seq 1 50); do [ -S "$SOCK" ] && break; sleep 0.1; done
 if [ -S "$SOCK" ]; then
     ok "the daemon came up on an isolated socket"
@@ -244,7 +244,7 @@ fi
 # ── without root ─────────────────────────────────────────────────────────────
 section "an ordinary user cannot approve an operation that will run"
 
-id="$("$APEX" request ask install clang --reason "the project needs a compiler" \
+id="$("$Rime" request ask install clang --reason "the project needs a compiler" \
         --no-wait 2>"${WORK}/ask.err")"
 if [ -n "$id" ]; then
     ok "a request was filed (id ${id})"
@@ -264,13 +264,13 @@ else
     bad "this half runs as an ordinary user — it is root, so the refusal below proves nothing"
 fi
 
-out="$(printf 'y\n' | "$APEX" request approve "$id" 2>&1)"
+out="$(printf 'y\n' | "$Rime" request approve "$id" 2>&1)"
 rc=$?
 printf '%s' "$out" | grep -q "must run as root" \
     && ok "approving without --no-run is refused" \
     || { bad "approving without --no-run is refused"; printf '      %s\n' "$out"; }
 [ "$rc" -ne 0 ] && ok "and it exits non-zero" || bad "and it exits non-zero"
-printf '%s' "$out" | grep -q "sudo apex request approve ${id}" \
+printf '%s' "$out" | grep -q "sudo rime request approve ${id}" \
     && ok "the refusal names the exact command to run instead" \
     || { bad "the refusal names the exact command to run instead"; printf '      %s\n' "$out"; }
 printf '%s' "$out" | grep -q "wheel group is not enough" \
@@ -279,7 +279,7 @@ printf '%s' "$out" | grep -q "wheel group is not enough" \
 
 # The refusal is BEFORE the socket call, which is the difference between a
 # guard and a message. If the daemon had been asked, this would say approved.
-"$APEX" request list --all --json 2>/dev/null | python3 -c "
+"$Rime" request list --all --json 2>/dev/null | python3 -c "
 import json,sys
 r = [x for x in json.load(sys.stdin) if x['id'] == ${id}][0]
 assert r['decision'] == 'pending', f'the daemon was asked anyway: {r}'
@@ -293,8 +293,8 @@ assert r['decision'] == 'pending', f'the daemon was asked anyway: {r}'
 # And the gate is on the EXECUTION, not on the decision: the same user may
 # record a decision that runs nothing. Without this the refusal above would be
 # consistent with a CLI that simply cannot approve at all.
-id2="$("$APEX" request ask install cmake --reason "and a build system" --no-wait 2>/dev/null)"
-out="$(printf 'y\n' | "$APEX" request approve "$id2" --no-run 2>&1)"
+id2="$("$Rime" request ask install cmake --reason "and a build system" --no-wait 2>/dev/null)"
+out="$(printf 'y\n' | "$Rime" request approve "$id2" --no-run 2>&1)"
 printf '%s' "$out" | grep -q "approved" \
     && ok "the same user may approve with --no-run, so the gate is on the execution" \
     || { bad "the same user may approve with --no-run, so the gate is on the execution"; printf '      %s\n' "$out"; }
@@ -302,11 +302,11 @@ printf '%s' "$out" | grep -q "approved" \
 # ── with a real effective uid 0 ──────────────────────────────────────────────
 section "a real uid 0, reached without asking anybody for a password"
 
-export APEX_ROOT_APPROVAL_INNER=1
-export APEX_ROOT_APPROVAL_WORK="$WORK"
-export APEX_ROOT_APPROVAL_APEX="$APEX"
+export RIME_ROOT_APPROVAL_INNER=1
+export RIME_ROOT_APPROVAL_WORK="$WORK"
+export RIME_ROOT_APPROVAL_RIME="$Rime"
 inner="$(unshare -r -m --propagation private "${BASH_SOURCE[0]}" "$id" 2>&1)"
-unset APEX_ROOT_APPROVAL_INNER
+unset RIME_ROOT_APPROVAL_INNER
 printf '%s\n' "$inner" | sed 's/^/      /'
 
 printf '%s' "$inner" | grep -q "INNER-FATAL" && {
@@ -320,11 +320,11 @@ printf '%s' "$inner" | grep -q "must run as root" \
     && bad "the root gate let a real uid 0 through" \
     || ok "the root gate let a real uid 0 through"
 
-printf '%s' "$inner" | grep -qE "apex request: running: .*install clang" \
+printf '%s' "$inner" | grep -qE "rime request: running: .*install clang" \
     && ok "and the approval went on to run the operation" \
     || bad "and the approval went on to run the operation"
 
-"$APEX" request list --all --json 2>/dev/null | python3 -c "
+"$Rime" request list --all --json 2>/dev/null | python3 -c "
 import json,sys
 r = [x for x in json.load(sys.stdin) if x['id'] == ${id}][0]
 assert r['decision'] == 'allow_once', f'not approved: {r}'
@@ -337,8 +337,8 @@ assert r['exit_code'] == 23, f\"the engine's exit code was not recorded: {r}\"
 
 # What the engine saw. The argv is rebuilt from the TYPED verb, so it is
 # `install clang` and nothing else; the euid is 0, so the operation really did
-# run with privilege; and the parent is the `apex` CLI rather than
-# `apex-agentd`, which is §3.3's whole point — the daemon holds no privilege
+# run with privilege; and the parent is the `rime` CLI rather than
+# `rime-agentd`, which is §3.3's whole point — the daemon holds no privilege
 # and executes nothing, so the root exercised here is the approving human's.
 grep -q '^ARGV=install clang$' "${WORK}/engine.log" \
     && ok "the engine was called with the argv rebuilt from the typed verb" \
@@ -346,9 +346,9 @@ grep -q '^ARGV=install clang$' "${WORK}/engine.log" \
          sed 's/^/      /' "${WORK}/engine.log"; }
 grep -q '^EUID=0$' "${WORK}/engine.log" \
     && ok "it ran as root" || bad "it ran as root"
-grep -q '^PARENT=apex$' "${WORK}/engine.log" \
-    && ok "its parent is the apex CLI, not the unprivileged daemon" \
-    || { bad "its parent is the apex CLI, not the unprivileged daemon"
+grep -q '^PARENT=rime$' "${WORK}/engine.log" \
+    && ok "its parent is the rime CLI, not the unprivileged daemon" \
+    || { bad "its parent is the rime CLI, not the unprivileged daemon"
          sed 's/^/      /' "${WORK}/engine.log"; }
 
 # Exactly one execution. A gate that ran the operation on the refused attempt
@@ -358,7 +358,7 @@ n="$(grep -c '^ARGV=' "${WORK}/engine.log")"
     || bad "the engine ran ${n} times across both attempts, not once"
 
 # ── and the decision cannot be taken twice ───────────────────────────────────
-out="$(printf 'y\n' | "$APEX" request approve "$id" --no-run 2>&1)"
+out="$(printf 'y\n' | "$Rime" request approve "$id" --no-run 2>&1)"
 printf '%s' "$out" | grep -q "already" \
     && ok "an executed request cannot be approved again" \
     || { bad "an executed request cannot be approved again"; printf '      %s\n' "$out"; }
@@ -371,7 +371,7 @@ cat <<'BOUNDARY'
       still outside it, and no test can reach either without a person:
 
         1. sudo's own authentication. Whether `sudo` accepts this user's
-           password is PAM's business and pam_unix's, not APEX's; APEX only
+           password is PAM's business and pam_unix's, not Rime's; Rime only
            refuses when euid is not 0 and says what to type.
         2. the operation running with capability over the real machine. A
            namespace root cannot write /var/lib or talk to systemd, so the
@@ -381,21 +381,21 @@ cat <<'BOUNDARY'
       A person closes both in about a minute, on a machine where installing a
       package is acceptable:
 
-        apex request ask install cowsay --reason "checking the approval path" --no-wait
-        apex request pending                  # the id, the argv, the reason
-        sudo apex request approve <id>        # sudo asks for the password HERE
+        rime request ask install cowsay --reason "checking the approval path" --no-wait
+        rime request pending                  # the id, the argv, the reason
+        sudo rime request approve <id>        # sudo asks for the password HERE
 
       Expect, in order:
         * sudo's own password prompt, in the terminal, before anything else;
-        * the confirmation prompt showing `apex install cowsay`, its reason
+        * the confirmation prompt showing `rime install cowsay`, its reason
           and its effect, answered y;
-        * `apex request: running: /usr/bin/apex install cowsay`, then the real
+        * `rime request: running: /usr/bin/rime install cowsay`, then the real
           engine's own output;
-        * `apex request audit` ending in a line whose event is `executed` and
+        * `rime request audit` ending in a line whose event is `executed` and
           whose exit code is the engine's.
 
-      Answering the sudo prompt wrongly must end at sudo, with no APEX line
-      after it and the request still `pending` in `apex request pending`.
+      Answering the sudo prompt wrongly must end at sudo, with no Rime line
+      after it and the request still `pending` in `rime request pending`.
 BOUNDARY
 
 printf '\nroot-approval: %d passed, %d failed\n' "$pass" "$fail"

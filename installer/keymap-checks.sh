@@ -16,7 +16,7 @@
 #
 #  It never SKIPs. Missing data is a FAIL that names the package.
 #
-#  Usage: keymap-checks.sh <path-to-apex-install> <writable-work-dir>
+#  Usage: keymap-checks.sh <path-to-rime-install> <writable-work-dir>
 #  Prints PASS/FAIL lines and, as its last line, `KEYMAP-CHECKS: <p> <f>`.
 #  The caller folds those counts into its own and treats a missing last line
 #  as a failure, so a crash in here cannot read as "nothing to report".
@@ -41,13 +41,13 @@ bad() { printf 'FAIL  %-46s %s\n' "$1" "${2:-}"; fail=$((fail+1)); }
 same_file() { [ "$(cat "$1")" = "$(cat "$2")" ]; }
 
 # THIS FILE MEASURES REAL DATA, AND MUST NOT BE REDIRECTABLE.
-# apex-install's console_keymap_for()/keymap_can_type() honour
-# APEX_KBD_KEYMAPS and APEX_KBD_MODEL_MAP so that test-installer-luks.sh can
+# rime-install's console_keymap_for()/keymap_can_type() honour
+# RIME_KBD_KEYMAPS and RIME_KBD_MODEL_MAP so that test-installer-luks.sh can
 # measure the engine's WIRING against a fixture on a machine with no Fedora
 # kbd. The division of labour only holds if this half still reads the real
 # tree, so an ambient value of either — exported by a caller, or left in the
 # environment — is dropped here rather than silently obeyed.
-unset APEX_KBD_KEYMAPS APEX_KBD_MODEL_MAP
+unset RIME_KBD_KEYMAPS RIME_KBD_MODEL_MAP
 
 MODELMAP=/usr/share/systemd/kbd-model-map
 KEYMAP_TREE=/usr/lib/kbd/keymaps
@@ -152,7 +152,7 @@ if [ -s "$FNS" ]; then
     #
     # Anchored on the PATH, not on the assignment. The first version of this
     # matched the literal `mapf=/usr/share/systemd/kbd-model-map`; when the
-    # engine's default became an override-able `${APEX_KBD_MODEL_MAP:-...}`
+    # engine's default became an override-able `${RIME_KBD_MODEL_MAP:-...}`
     # the sed program matched nothing, the "mutant" was a byte-identical copy
     # of the function, and it answered `bg_bds-utf8` — a mutation arm that had
     # quietly stopped mutating. The guard below is why that was caught in one
@@ -211,16 +211,16 @@ else
           *)     printf 'FAIL  %-46s %s -> %s, want %s*\n' "$4" "$1" "$got" "$3"; _f=$((_f+1)) ;;
         esac
     }
-    tcase us          'apexzed1' yes  "us can type a Latin passphrase"
-    tcase de          'apexzed1' yes  "de can type a Latin passphrase"
-    tcase bg_bds-utf8 'apexzed1' yes  "bg_bds-utf8 can: Latin is its base plane"
-    tcase ru          'apexzed1' yes  "ru can: Cyrillic is on AltGr, Latin is not"
-    tcase jp106       'apexzed1' yes  "jp106 can, and only through its include"
-    tcase hr-unicode  'apexzed1' no:  "hr-unicode cannot — no x anywhere"
-    tcase vn          'apexzed1' no:  "vn cannot — no digit 1 anywhere"
-    tcase fa          'apexzed1' no:  "fa cannot — almost no Latin at all"
+    tcase us          'rimezed1' yes  "us can type a Latin passphrase"
+    tcase de          'rimezed1' yes  "de can type a Latin passphrase"
+    tcase bg_bds-utf8 'rimezed1' yes  "bg_bds-utf8 can: Latin is its base plane"
+    tcase ru          'rimezed1' yes  "ru can: Cyrillic is on AltGr, Latin is not"
+    tcase jp106       'rimezed1' yes  "jp106 can, and only through its include"
+    tcase hr-unicode  'rimezed1' no:  "hr-unicode cannot — no x anywhere"
+    tcase vn          'rimezed1' no:  "vn cannot — no digit 1 anywhere"
+    tcase fa          'rimezed1' no:  "fa cannot — almost no Latin at all"
     tcase hr-unicode  'alpha123' yes  "hr-unicode CAN type a passphrase avoiding q w x y"
-    tcase nosuchkeymapatall 'apexzed1' unknown "a keymap that does not exist is unknown, not no"
+    tcase nosuchkeymapatall 'rimezed1' unknown "a keymap that does not exist is unknown, not no"
 
     # THE FALLBACK'S OWN PRECONDITION. When a layout cannot type the
     # passphrase the engine moves the unlock prompt to `us`. That is only safe
@@ -245,7 +245,7 @@ else
     elif ! bash -n "$MUT" 2>/dev/null; then
         printf 'FAIL  %-46s the mutant does not parse\n' "mutant: the keysym name table"; _f=$((_f+1))
     else
-        got=$(bash -c '. "$1"; keymap_can_type apexzed1 "$2" bg_bds-utf8' _ "$MUT" "$T" 2>/dev/null)
+        got=$(bash -c '. "$1"; keymap_can_type rimezed1 "$2" bg_bds-utf8' _ "$MUT" "$T" 2>/dev/null)
         case "$got" in
           no:*) printf 'PASS  %-46s names removed -> bg_bds-utf8 loses its digits (%s)\n' "mutant: the keysym name table" "$got"; _p=$((_p+1)) ;;
           *)    printf 'FAIL  %-46s got %s\n' "mutant: the keysym name table" "$got"; _f=$((_f+1)) ;;
@@ -261,7 +261,7 @@ else
     if same_file "$TFNS" "$MUT2"; then
         printf 'FAIL  %-46s the mutation matched nothing\n' "mutant: the unanchored keycode pattern"; _f=$((_f+1))
     else
-        got=$(bash -c '. "$1"; keymap_can_type apexzed1 "$2" fi' _ "$MUT2" "$T" 2>/dev/null)
+        got=$(bash -c '. "$1"; keymap_can_type rimezed1 "$2" fi' _ "$MUT2" "$T" 2>/dev/null)
         case "$got" in
           no:*) printf 'PASS  %-46s anchored -> fi loses keys it has (%s)\n' "mutant: the unanchored keycode pattern" "$got"; _p=$((_p+1)) ;;
           *)    printf 'FAIL  %-46s got %s\n' "mutant: the unanchored keycode pattern" "$got"; _f=$((_f+1)) ;;
@@ -276,7 +276,7 @@ else
     for f in $(find "$T/xkb" "$T/legacy/i386" "$T/i386" -type f -name '*.map.gz' 2>/dev/null | sort); do
         # The FILE, not the name: keymap_ascii_set takes an absolute path as
         # the map itself, which skips one find over the whole tree per keymap.
-        case "$(keymap_can_type apexzed1 "$T" "$f")" in
+        case "$(keymap_can_type rimezed1 "$T" "$f")" in
             yes)  yes=$((yes+1)) ;;
             no:*) no=$((no+1)) ;;
             *)    unk=$((unk+1)) ;;

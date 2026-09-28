@@ -18,7 +18,7 @@ here="$(cd -- "$(dirname -- "${BASH_SOURCE[0]}")" && pwd)"
 app="$here/../app/src/main"
 
 # The adapter, and the only file allowed to name a storage location.
-adapter="kotlin/com/apexos/remote/data/MachineRepository.kt"
+adapter="kotlin/com/rimeos/remote/data/MachineRepository.kt"
 
 # Each entry is a pattern and what is wrong with it. `filesDir` is here too:
 # it is not dangerous, it is simply the thing exactly one file may say.

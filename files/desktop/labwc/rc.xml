@@ -1,7 +1,7 @@
 <?xml version="1.0"?>
 <!--
   ─────────────────────────────────────────────────────────────────────────────
-   APEX-OS — labwc configuration (seeded per-user by apex-shell-firstrun).
+   Rime OS — labwc configuration (seeded per-user by rime-shell-firstrun).
 
    The labwc counterpart of files/desktop/hypr/hyprland.conf, kept deliberately
    in step with it: same modifier, same app keys, same screenshot bindings, same
@@ -17,13 +17,13 @@
        hyprctl. Everything the shell needs from the compositor arrives over
        Wayland protocols instead (labwc implements ext-workspace, session-lock,
        layer-shell, foreign-toplevel, idle-notify and gamma control). In the
-       other direction, the shell is driven from here by `apex shell <verb>`,
+       other direction, the shell is driven from here by `rime shell <verb>`,
        which wraps its IPC client so neither the install path nor the internal
        target names appear in this file.
 
    Decorations are server-side on purpose: labwc supplies the application
-   titlebar, drag area and native window controls below APEX Shell's reserved
-   top bar. APEX Shell still owns the outer frame and rounded screen corners.
+   titlebar, drag area and native window controls below Rime Shell's reserved
+   top bar. Rime Shell still owns the outer frame and rounded screen corners.
   ─────────────────────────────────────────────────────────────────────────────
 -->
 <labwc_config>
@@ -31,7 +31,7 @@
   <core>
     <!-- `client` would hand decoration to the app, which many Wayland clients
          decline, leaving no controls or draggable titlebar. `server` keeps
-         those native controls while APEX Shell reserves non-overlapping space. -->
+         those native controls while Rime Shell reserves non-overlapping space. -->
     <decoration>server</decoration>
     <!-- 8 px, matching the Floating-mode spec. Was 6: close enough to look
          accidental rather than chosen, which is the difference this whole
@@ -61,7 +61,7 @@
   </desktops>
 
   <focus>
-    <!-- Focus follows the pointer. Hyprland's own APEX config uses
+    <!-- Focus follows the pointer. Hyprland's own Rime config uses
          follow_mouse=1, so this matches the other session rather than diverging
          from it, and it means focus never depends on a click landing on the
          right surface. -->
@@ -76,14 +76,14 @@
   </focus>
 
   <theme>
-    <!-- Keep native labwc controls explicit. APEX Shell reserves the top bar's
+    <!-- Keep native labwc controls explicit. Rime Shell reserves the top bar's
          complete height in the labwc session, so these no longer sit beneath a
          transparent layer-shell input surface. -->
     <titlebar>
       <layout>icon:iconify,max,close</layout>
       <showTitle>yes</showTitle>
     </titlebar>
-    <!-- Rounded corners. APEX Floating is presented as the traditional
+    <!-- Rounded corners. Rime Floating is presented as the traditional
          overlapping-window mode, not a fallback, and square corners under a
          rounded shell were the single clearest tell that it was one. -->
     <cornerRadius>10</cornerRadius>
@@ -121,7 +121,7 @@
 
   <!-- Thumbnail window switcher. labwc ships this and it is a large, free step
        up from the classic text list; the roadmap asks for it as the baseline
-       now, with a full APEX Shell overview as the longer-term replacement.
+       now, with a full Rime Shell overview as the longer-term replacement.
        Scoped to the focused output so a switcher does not appear on every
        monitor at once. -->
   <windowSwitcher preview="yes" outlines="yes">
@@ -140,7 +140,7 @@
        every device category. The intent was met by accident, and anyone who had
        tried to write `<tapToClick>no</tapToClick>` to turn tapping OFF would
        have found the setting simply ignored. The element-name guard in
-       tests/test-apex-firstrun.sh now catches this whole class.
+       tests/test-rime-firstrun.sh now catches this whole class.
 
        Not set here, deliberately, because both are already labwc's defaults and
        writing them would be decoration rather than configuration:
@@ -161,7 +161,7 @@
   </resistance>
 
   <keyboard>
-    <!-- ── APEX Shell popups ────────────────────────────────────────────────
+    <!-- ── Rime Shell popups ────────────────────────────────────────────────
          These MUST match the shell's own defaults in
          src/services/config_tab/KeybindService.qml (_defaults). The shell's
          keybind editor generates Hyprland .conf/.lua and niri .kdl, but NOT
@@ -192,7 +192,7 @@
          thumbnails (see <windowSwitcher> above), and already cycles in focus
          order. The attribute is the only thing it was missing.
 
-         ── Why this is NOT the APEX Shell switcher the Hyprland session gets ──
+         ── Why this is NOT the Rime Shell switcher the Hyprland session gets ──
          The shell's switcher needs the compositor to tell it when ALT is
          RELEASED, because a switcher surface that took keyboard focus to see
          the release itself would be taking focus off the window it is about to
@@ -211,7 +211,7 @@
          it makes a shell-drawn hold-and-release switcher impossible here.
 
          So the Floating session keeps the switcher labwc already has, which
-         does the same job properly, and APEX's own is bound on the session
+         does the same job properly, and Rime's own is bound on the session
          that can support it. docs/window-switcher.md says which is which
          rather than implying the three sessions match. -->
     <keybind key="A-Tab">
@@ -283,12 +283,12 @@
     <keybind key="W-S-r">
       <action name="Reconfigure"/>
     </keybind>
-    <!-- APEX-KEYBINDS-BEGIN — generated by apex-labwc-keybinds. Do not edit. -->
+    <!-- RIME-KEYBINDS-BEGIN — generated by rime-labwc-keybinds. Do not edit. -->
     <keybind key="W-Escape">
-      <action name="Execute" command="apex shell power"/>
+      <action name="Execute" command="rime shell power"/>
     </keybind>
     <keybind key="W-w">
-      <action name="Execute" command="/usr/libexec/apex-open-browser"/>
+      <action name="Execute" command="/usr/libexec/rime-open-browser"/>
     </keybind>
     <keybind key="W-e">
       <action name="Execute" command="thunar"/>
@@ -297,16 +297,16 @@
       <action name="Execute" command="alacritty"/>
     </keybind>
     <keybind key="W-A-i">
-      <action name="Execute" command="apex shell audio in"/>
+      <action name="Execute" command="rime shell audio in"/>
     </keybind>
     <keybind key="W-m">
-      <action name="Execute" command="apex shell audio mixer"/>
+      <action name="Execute" command="rime shell audio mixer"/>
     </keybind>
     <keybind key="W-a">
-      <action name="Execute" command="apex shell audio out"/>
+      <action name="Execute" command="rime shell audio out"/>
     </keybind>
     <keybind key="W-A-b">
-      <action name="Execute" command="apex shell network bluetooth"/>
+      <action name="Execute" command="rime shell network bluetooth"/>
     </keybind>
     <keybind key="W-C-Down">
       <action name="Execute" command="brightnessctl set 5%-"/>
@@ -315,25 +315,25 @@
       <action name="Execute" command="brightnessctl set 5%+"/>
     </keybind>
     <keybind key="W-v">
-      <action name="Execute" command="apex shell clipboard"/>
+      <action name="Execute" command="rime shell clipboard"/>
     </keybind>
     <keybind key="W-S-m">
-      <action name="Execute" command="apex shell menu"/>
+      <action name="Execute" command="rime shell menu"/>
     </keybind>
     <keybind key="W-c">
-      <action name="Execute" command="apex shell settings"/>
+      <action name="Execute" command="rime shell settings"/>
     </keybind>
     <keybind key="W-d">
-      <action name="Execute" command="apex shell dashboard home"/>
+      <action name="Execute" command="rime shell dashboard home"/>
     </keybind>
     <keybind key="W-z">
-      <action name="Execute" command="apex shell dashboard kanban"/>
+      <action name="Execute" command="rime shell dashboard kanban"/>
     </keybind>
     <keybind key="A-space">
-      <action name="Execute" command="apex shell launcher"/>
+      <action name="Execute" command="rime shell launcher"/>
     </keybind>
     <keybind key="C-S-Escape">
-      <action name="Execute" command="apex shell dashboard stats"/>
+      <action name="Execute" command="rime shell dashboard stats"/>
     </keybind>
     <keybind key="W-Down">
       <action name="MoveToEdge" direction="down"/>
@@ -348,14 +348,14 @@
       <action name="WarpCursor" to="window"/>
     </keybind>
     <keybind key="W-b">
-      <action name="Execute" command="apex shell focus"/>
+      <action name="Execute" command="rime shell focus"/>
     </keybind>
     <keybind key="W-Up">
       <action name="MoveToEdge" direction="up"/>
       <action name="WarpCursor" to="window"/>
     </keybind>
     <keybind key="W-A-h">
-      <action name="Execute" command="apex shell network hotspot"/>
+      <action name="Execute" command="rime shell network hotspot"/>
     </keybind>
     <keybind key="W-C-Right">
       <action name="Execute" command="playerctl next"/>
@@ -413,25 +413,25 @@
       <action name="SendToDesktop" to="9"/>
     </keybind>
     <keybind key="W-n">
-      <action name="Execute" command="apex shell notifications"/>
+      <action name="Execute" command="rime shell notifications"/>
     </keybind>
     <keybind key="W-A-s">
-      <action name="Execute" command="/usr/libexec/apex-screen-reader toggle"/>
+      <action name="Execute" command="/usr/libexec/rime-screen-reader toggle"/>
     </keybind>
     <keybind key="A-F9">
-      <action name="Execute" command="apex shell record"/>
+      <action name="Execute" command="rime shell record"/>
     </keybind>
     <keybind key="Print">
-      <action name="Execute" command="bash /usr/share/apex-shell/src/scripts/screenshot.sh area"/>
+      <action name="Execute" command="bash /usr/share/rime-shell/src/scripts/screenshot.sh area"/>
     </keybind>
     <keybind key="W-Print">
-      <action name="Execute" command="bash /usr/share/apex-shell/src/scripts/screenshot.sh screen"/>
+      <action name="Execute" command="bash /usr/share/rime-shell/src/scripts/screenshot.sh screen"/>
     </keybind>
     <keybind key="W-l">
-      <action name="Execute" command="apex shell lock"/>
+      <action name="Execute" command="rime shell lock"/>
     </keybind>
     <keybind key="W-A-v">
-      <action name="Execute" command="apex shell voice"/>
+      <action name="Execute" command="rime shell voice"/>
     </keybind>
     <keybind key="W-C-minus">
       <action name="Execute" command="wpctl set-volume @DEFAULT_AUDIO_SINK@ 5%-"/>
@@ -443,13 +443,13 @@
       <action name="Execute" command="wpctl set-volume @DEFAULT_AUDIO_SINK@ 5%+"/>
     </keybind>
     <keybind key="W-A-g">
-      <action name="Execute" command="apex shell network vpn"/>
+      <action name="Execute" command="rime shell network vpn"/>
     </keybind>
     <keybind key="W-S-w">
-      <action name="Execute" command="apex shell wallpaper"/>
+      <action name="Execute" command="rime shell wallpaper"/>
     </keybind>
     <keybind key="W-A-w">
-      <action name="Execute" command="apex shell network wifi"/>
+      <action name="Execute" command="rime shell network wifi"/>
     </keybind>
     <keybind key="W-q">
       <action name="Close"/>
@@ -490,11 +490,11 @@
     <keybind key="W-9">
       <action name="GoToDesktop" to="9"/>
     </keybind>
-    <!-- APEX-KEYBINDS-END -->
+    <!-- RIME-KEYBINDS-END -->
   </keyboard>
 
   <mouse>
-    <!-- Desktop right-click opens the APEX QML context menu instead of the
+    <!-- Desktop right-click opens the Rime QML context menu instead of the
          Openbox-derived root menu. That menu is the single loudest "this is a
          fallback" signal left in the Floating session, and the same QML surface
          serves the Hyprland and niri sessions, so the menu is one object rather
@@ -502,7 +502,7 @@
 
          The helper is what makes this safe: a mousebind is a fixed action and
          cannot express "…or the built-in menu if the shell is down", so the
-         decision lives in /usr/libexec/apex-desktop-menu, which also tries to
+         decision lives in /usr/libexec/rime-desktop-menu, which also tries to
          restart a dead shell — the most likely reason the desktop has no menu
          is that the shell died, and right-clicking is what people do when they
          notice.
@@ -511,7 +511,7 @@
          documented emergency path when the shell cannot be revived. -->
     <context name="Root">
       <mousebind button="Right" action="Press">
-        <action name="Execute" command="/usr/libexec/apex-desktop-menu"/>
+        <action name="Execute" command="/usr/libexec/rime-desktop-menu"/>
       </mousebind>
       <mousebind button="W-Right" action="Press">
         <action name="ShowMenu" menu="root-menu"/>

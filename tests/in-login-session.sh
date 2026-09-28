@@ -8,7 +8,7 @@
 #
 #  ## Why this exists
 #
-#  `apex-agentd` decides whether a human is at this machine by reading the
+#  `rime-agentd` decides whether a human is at this machine by reading the
 #  connecting peer's cgroup — `origin::classify`. A process in
 #  `session-N.scope` descends from a login; a process under `user@N.service`
 #  was started by systemd with nobody present. §7 reserves approving a root
@@ -16,7 +16,7 @@
 #
 #  That rule is correct and it is also why a test runner started by systemd
 #  cannot reach the behaviour those tests are about. An agent dispatched by
-#  `apex-roadmap-resume.timer`, a CI job, a bare `systemd-run --user` scope —
+#  `rime-roadmap-resume.timer`, a CI job, a bare `systemd-run --user` scope —
 #  all of them classify as `scheduled-job`, so the gate refuses before the
 #  assertion under test is reached. Measured on 2026-09-07, on the same tree
 #  and the same commit:
@@ -75,7 +75,7 @@
 #    record whose scope is already gone), classifies the session as
 #    `Class=background`, and flaked once with "Connection timed out" in seven
 #    tries. `--pty` gives `Class=user`, `Type=tty` and a controlling terminal
-#    — so the peer is observed as `local-terminal` rather than `apex-shell`,
+#    — so the peer is observed as `local-terminal` rather than `rime-shell`,
 #    which is §7's first column exactly — and ten consecutive mints left the
 #    session count unchanged.
 #  * **stdin is `/dev/null`, and the redirect is applied INSIDE the session as
@@ -85,7 +85,7 @@
 #    fails, so callers must not expect to feed the command through it. Second,
 #    `--pty` otherwise hands the command a terminal on fd 0, and code that
 #    asks `isatty(0)` then answers differently in here than it does under a
-#    plain `cargo test`: `apex/src/dispatch.rs`'s
+#    plain `cargo test`: `rime/src/dispatch.rs`'s
 #    `a_terminal_is_requested_only_when_there_is_one_to_forward` asserts
 #    `tty_for_stdin() == Tty::None` and fails, 1881/1 instead of 1882/0.
 #    Redirecting fd 0 does NOT give up the controlling terminal — `tty_nr` in
@@ -120,10 +120,10 @@ fi
 # The recursion guard is checked FIRST, before anything else can go wrong. A
 # minted session that somehow still fails detection would otherwise mint
 # another, and another.
-if [ -n "${APEX_LOGIN_SESSION_WRAPPED:-}" ]; then
+if [ -n "${RIME_LOGIN_SESSION_WRAPPED:-}" ]; then
     exec "$@"
 fi
-export APEX_LOGIN_SESSION_WRAPPED=1
+export RIME_LOGIN_SESSION_WRAPPED=1
 
 # ── are we already in one? ───────────────────────────────────────────────────
 #
@@ -200,7 +200,7 @@ setenv+=("--setenv=TERM=dumb")
 # not have to be added here.
 while IFS= read -r -d '' kv; do
     case "$kv" in
-        APEX_*|CARGO_*|RUST*|GITHUB_*|CI=*|ACTIONS_*|XDG_STATE_HOME=*|XDG_CONFIG_HOME=*|XDG_DATA_HOME=*)
+        RIME_*|CARGO_*|RUST*|GITHUB_*|CI=*|ACTIONS_*|XDG_STATE_HOME=*|XDG_CONFIG_HOME=*|XDG_DATA_HOME=*)
             pass "${kv%%=*}" ;;
     esac
 done < <(env -0)

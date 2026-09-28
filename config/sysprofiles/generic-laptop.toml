@@ -1,4 +1,4 @@
-# APEX-OS system profile: generic-laptop
+# Rime OS system profile: generic-laptop
 #
 # Base fallback for any portable/notebook chassis. Selected by chassis type
 # when no more specific class (amd-zen / intel-hybrid) or device profile
@@ -17,7 +17,7 @@
 #
 # No [charge] table. Charge thresholds are a policy the *user* should opt into,
 # the safe window differs per pack chemistry, and most hardware cannot honour
-# one at all. Where a window is wanted, apexd discovers the batteries and their
+# one at all. Where a window is wanted, rimed discovers the batteries and their
 # threshold attributes at runtime — no profile ever names BAT0 or BAT1.
 
 id = "generic-laptop"

@@ -2,6 +2,6 @@
 # may use them, but only the repository owner may approve policy changes.
 /.github/CODEOWNERS @AndreNijman
 /AGENTS.md @AndreNijman
-/apexd/AGENTS.md @AndreNijman
+/rimed/AGENTS.md @AndreNijman
 /installer/AGENTS.md @AndreNijman
 /.github/workflows/pr-validation.yml @AndreNijman

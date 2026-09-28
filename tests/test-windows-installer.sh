@@ -50,7 +50,7 @@ if ! command -v podman >/dev/null 2>&1; then
     exit 0
 fi
 
-IMAGE="${APEX_WIN_BUILD_IMAGE:-registry.fedoraproject.org/fedora:43}"
+IMAGE="${RIME_WIN_BUILD_IMAGE:-registry.fedoraproject.org/fedora:43}"
 OUT="$(mktemp -d)"
 trap 'rm -rf "$OUT"' EXIT
 
@@ -117,11 +117,11 @@ else
     fi
     bad "the Windows cross-build failed (rc $rc)"
     tail -15 "$build_log" | sed 's/^/        /'
-    printf '\napex-windows-installer: %d passed, %d failed\n' "$pass" "$fail"
+    printf '\nrime-windows-installer: %d passed, %d failed\n' "$pass" "$fail"
     exit 1
 fi
 
-exe="$OUT/apex-windows-installer.exe"
+exe="$OUT/rime-windows-installer.exe"
 if [ -s "$exe" ]; then
     ok "a binary was produced"
 else
@@ -152,13 +152,13 @@ if podman run --rm -v "$PWD/windows-installer":/src:ro,z "$IMAGE" bash -euo pipe
         cp -r /src /build && cd /build
         cargo test --offline --locked 2>&1
         cargo build --offline --locked 2>&1
-        echo "APEX_IMAGE_LAB_BEGIN"
+        echo "RIME_IMAGE_LAB_BEGIN"
         python3 tests/image_lab.py 2>&1
     ' >"$unit_log" 2>&1; then
     n="$(grep -c '^test .* ok$' "$unit_log")"
     ok "the partition-eligibility and confirmation rules pass ($n unit tests)"
-    lab_n="$(sed -n '/APEX_IMAGE_LAB_BEGIN/,$p' "$unit_log" | grep -oE 'Ran [0-9]+ tests' | grep -oE '[0-9]+')"
-    lab_tail="$(sed -n '/APEX_IMAGE_LAB_BEGIN/,$p' "$unit_log" | grep -E '^OK( |$)|^FAILED')"
+    lab_n="$(sed -n '/RIME_IMAGE_LAB_BEGIN/,$p' "$unit_log" | grep -oE 'Ran [0-9]+ tests' | grep -oE '[0-9]+')"
+    lab_tail="$(sed -n '/RIME_IMAGE_LAB_BEGIN/,$p' "$unit_log" | grep -E '^OK( |$)|^FAILED')"
     if [ "$lab_tail" = OK ]; then
         ok "the GPT image laboratory passes (${lab_n:-?} cases, against the compiled binary)"
     elif [ -n "$lab_tail" ] && [ "${lab_tail#OK}" != "$lab_tail" ]; then
@@ -169,7 +169,7 @@ if podman run --rm -v "$PWD/windows-installer":/src:ro,z "$IMAGE" bash -euo pipe
         bad "the GPT image laboratory did not run every case: $lab_tail"
     else
         bad "the GPT image laboratory failed"
-        sed -n '/APEX_IMAGE_LAB_BEGIN/,$p' "$unit_log" | tail -20 | sed 's/^/        /'
+        sed -n '/RIME_IMAGE_LAB_BEGIN/,$p' "$unit_log" | tail -20 | sed 's/^/        /'
     fi
 else
     bad "the rule unit tests or the image laboratory failed"
@@ -189,21 +189,21 @@ fi
 run_out="$OUT/run.txt"
 podman run --rm -v "$OUT":/exe:ro,z "$IMAGE" bash -c '
     dnf install -y -q --setopt=install_weak_deps=False wine >/dev/null 2>&1 \
-        || { echo "APEX_WINE_UNAVAILABLE"; exit 0; }
+        || { echo "RIME_WINE_UNAVAILABLE"; exit 0; }
     export WINEDEBUG=-all WINEPREFIX=/tmp/wineprefix
-    wine /exe/apex-windows-installer.exe >/tmp/out 2>/tmp/err
-    echo "APEX_RC=$?"
-    echo "APEX_STDOUT_BEGIN"; cat /tmp/out
-    echo "APEX_STDERR_BEGIN"; cat /tmp/err
-    echo "APEX_SURVEY_BEGIN"
-    wine /exe/apex-windows-installer.exe survey 2>&1
-    echo "APEX_SURVEY_RC=$?"
+    wine /exe/rime-windows-installer.exe >/tmp/out 2>/tmp/err
+    echo "RIME_RC=$?"
+    echo "RIME_STDOUT_BEGIN"; cat /tmp/out
+    echo "RIME_STDERR_BEGIN"; cat /tmp/err
+    echo "RIME_SURVEY_BEGIN"
+    wine /exe/rime-windows-installer.exe survey 2>&1
+    echo "RIME_SURVEY_RC=$?"
 ' >"$run_out" 2>&1
 
-if grep -q APEX_WINE_UNAVAILABLE "$run_out"; then
+if grep -q RIME_WINE_UNAVAILABLE "$run_out"; then
     nogo "the binary was not executed: wine is unavailable in $IMAGE"
 else
-    rc_line="$(grep -m1 '^APEX_RC=' "$run_out" | cut -d= -f2)"
+    rc_line="$(grep -m1 '^RIME_RC=' "$run_out" | cut -d= -f2)"
     if [ "$rc_line" = 1 ]; then
         ok "running it with no arguments exits 1"
     else
@@ -211,7 +211,7 @@ else
     fi
 
     # The discriminator: our text, not wine's.
-    if grep -q 'apex-windows-installer lab FILE.img' "$run_out"; then
+    if grep -q 'rime-windows-installer lab FILE.img' "$run_out"; then
         ok "the usage line the program itself prints reached the user"
     else
         bad "the program's own usage text never appeared — it may not have run at all"
@@ -233,7 +233,7 @@ else
         ok "the Windows survey path runs to a stated conclusion under wine"
     else
         bad "survey produced neither a conclusion nor a refusal"
-        sed -n '/APEX_SURVEY_BEGIN/,$p' "$run_out" | head -12 | sed 's/^/        /'
+        sed -n '/RIME_SURVEY_BEGIN/,$p' "$run_out" | head -12 | sed 's/^/        /'
     fi
 fi
 
@@ -242,15 +242,15 @@ fi
 #  image, and neither is a repository file: `windows-installer/lab/winlab
 #  golden` builds one in about three minutes from Microsoft's evaluation media.
 #  CI runners have no KVM, so this reports could-not-run there — never a pass.
-WINLAB_DIR="${APEX_WINLAB_DIR:-/var/lab-scratch/winlab}"
+WINLAB_DIR="${RIME_WINLAB_DIR:-/var/lab-scratch/winlab}"
 if [ ! -x "$WINLAB" ]; then
     nogo "the Windows guest was not exercised: $WINLAB is missing"
 elif [ ! -r /dev/kvm ] || [ ! -w /dev/kvm ]; then
     nogo "the Windows guest was not exercised: /dev/kvm is not usable here"
 elif [ ! -s "$WINLAB_DIR/golden.raw" ]; then
     nogo "the Windows guest was not exercised: no golden image at $WINLAB_DIR/golden.raw (build one with '$WINLAB golden')"
-elif [ "${APEX_WINLAB_GUEST:-}" != 1 ]; then
-    nogo "the Windows guest was not exercised: it takes several minutes, so set APEX_WINLAB_GUEST=1 to ask for it"
+elif [ "${RIME_WINLAB_GUEST:-}" != 1 ]; then
+    nogo "the Windows guest was not exercised: it takes several minutes, so set RIME_WINLAB_GUEST=1 to ask for it"
 else
     # Both enumeration orders. The second is not a repetition: --swap moves
     # fixture A to a different AHCI port, so Windows gives it a different disk
@@ -311,16 +311,16 @@ else
                  'IDENTICAL'
 
     # ── the enumeration-order claim, made properly ───────────────────────────
-    WINLAB_DIR="${APEX_WINLAB_DIR:-/var/lab-scratch/winlab}"
+    WINLAB_DIR="${RIME_WINLAB_DIR:-/var/lab-scratch/winlab}"
     a="$WINLAB_DIR/guest-normal.txt"
     b="$WINLAB_DIR/guest-swapped.txt"
     if [ -s "$a" ] && [ -s "$b" ]; then
         # Windows' own disk number for the fixture must actually have moved,
         # or the comparison below is vacuous.
-        na="$(grep -E '^ *[0-9]+ +APEX-FIXTURE-A' "$a" | awk '{print $1}')"
-        nb="$(grep -E '^ *[0-9]+ +APEX-FIXTURE-A' "$b" | awk '{print $1}')"
+        na="$(grep -E '^ *[0-9]+ +RIME-FIXTURE-A' "$a" | awk '{print $1}')"
+        nb="$(grep -E '^ *[0-9]+ +RIME-FIXTURE-A' "$b" | awk '{print $1}')"
         if [ -n "$na" ] && [ -n "$nb" ] && [ "$na" != "$nb" ]; then
-            ok "guest: Windows numbered APEX-FIXTURE-A as disk $na and then as disk $nb"
+            ok "guest: Windows numbered RIME-FIXTURE-A as disk $na and then as disk $nb"
         else
             bad "guest: the swapped run did not change Windows' disk number (${na:-?} vs ${nb:-?}); the comparison below would prove nothing"
         fi
@@ -347,6 +347,6 @@ else
 fi
 
 echo
-printf 'apex-windows-installer: %d passed, %d failed, %d could-not-run\n' \
+printf 'rime-windows-installer: %d passed, %d failed, %d could-not-run\n' \
     "$pass" "$fail" "$cannot"
 [ "$fail" -eq 0 ]

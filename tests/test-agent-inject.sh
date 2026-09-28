@@ -1,6 +1,6 @@
 #!/usr/bin/env bash
 # ─────────────────────────────────────────────────────────────────────────────
-#  End-to-end assertions for `apex agent send` (P1-035): handing a file to a
+#  End-to-end assertions for `rime agent send` (P1-035): handing a file to a
 #  running TUI agent.
 #
 #  The unit tests cover the name reduction, the destination and the exact bytes.
@@ -35,7 +35,7 @@ ROOT="$(cd "$(dirname "${BASH_SOURCE[0]}")/.." && pwd)"
 
 # Before the temp tree, the daemon or the build: this suite needs an
 # environment the daemon will observe as LOCAL, and that has to be arranged
-# from outside the suite. `apex-agentd` places a peer from its cgroup, and a
+# from outside the suite. `rime-agentd` places a peer from its cgroup, and a
 # process started by systemd — a CI job, a timer-dispatched agent — is in
 # neither a login session nor a user service, so §7 refuses it before the
 # behaviour under test is reached. Here it stops the suite starting the two
@@ -45,7 +45,7 @@ ROOT="$(cd "$(dirname "${BASH_SOURCE[0]}")/.." && pwd)"
 # session it created or — saying why, out loud — in place; either way the
 # suite runs exactly once, so this is `exec` and not a call. Same block, and
 # the same reason, as tests/test-privilege-requests.sh.
-if [ -z "${APEX_LOGIN_SESSION_WRAPPED:-}" ] && [ -x "${ROOT}/tests/in-login-session.sh" ]; then
+if [ -z "${RIME_LOGIN_SESSION_WRAPPED:-}" ] && [ -x "${ROOT}/tests/in-login-session.sh" ]; then
     exec "${ROOT}/tests/in-login-session.sh" "${BASH_SOURCE[0]}" "$@"
 fi
 WORK="$(mktemp -d)"
@@ -76,17 +76,17 @@ for tool in cargo git python3 stty bwrap; do
 done
 
 section "the binaries"
-if ! cargo build --manifest-path "${ROOT}/apexd/Cargo.toml" \
-        --bin apex-agentd --bin apex >/dev/null 2>&1; then
-    bad "apex-agentd and apex build"
+if ! cargo build --manifest-path "${ROOT}/rimed/Cargo.toml" \
+        --bin rime-agentd --bin rime >/dev/null 2>&1; then
+    bad "rime-agentd and rime build"
     printf '\ninject: %d passed, %d failed\n' "$pass" "$fail"
     exit 1
 fi
-ok "apex-agentd and apex build"
+ok "rime-agentd and rime build"
 
-BIN="${CARGO_TARGET_DIR:-${ROOT}/apexd/target}/debug"
-AGENTD="${BIN}/apex-agentd"
-APEX="${BIN}/apex"
+BIN="${CARGO_TARGET_DIR:-${ROOT}/rimed/target}/debug"
+AGENTD="${BIN}/rime-agentd"
+Rime="${BIN}/rime"
 
 # ── an isolated runtime ──────────────────────────────────────────────────────
 export XDG_RUNTIME_DIR="${WORK}/run"
@@ -103,14 +103,14 @@ git -C "$PROJ" config user.name t
 
 # ── the last thing that used to be un-fixtured ───────────────────────────────
 #
-# Session scratch was `/tmp/apex-agent/<id>` with no XDG in it, so a fixture
+# Session scratch was `/tmp/rime-agent/<id>` with no XDG in it, so a fixture
 # daemon and the user's own daemon shared that namespace — and a session reap
 # runs `remove_dir_all` on its own id's directory. A fixture daemon numbers its
 # sessions from 1, because its reservation store IS fixtured, so a machine whose
 # real daemon happened to hold session 1 would have had it deleted by a test
-# suite. APEX_AGENT_SCRATCH_ROOT is what closes that, and the two assertions
+# suite. RIME_AGENT_SCRATCH_ROOT is what closes that, and the two assertions
 # below are what say it is closed rather than that it was intended to be.
-export APEX_AGENT_SCRATCH_ROOT="${WORK}/scratch"
+export RIME_AGENT_SCRATCH_ROOT="${WORK}/scratch"
 # Pre-created, and 0755 deliberately. The scratch root is the one agent path
 # whose parent is world-writable, so another account can pre-create it in /tmp
 # and own it — and the daemon used to ensure only the session LEAF under it,
@@ -118,15 +118,15 @@ export APEX_AGENT_SCRATCH_ROOT="${WORK}/scratch"
 # the daemon MAKES is 0700 either way now, so a root it FINDS is the only shape
 # that can tell the boundary call from its absence. See
 # `paths::SCRATCH_ROOT_PREFIX` for what was measured with a second account.
-mkdir -p "$APEX_AGENT_SCRATCH_ROOT"
-chmod 0755 "$APEX_AGENT_SCRATCH_ROOT"   # not `mkdir -m`: SC2174, and the mode
+mkdir -p "$RIME_AGENT_SCRATCH_ROOT"
+chmod 0755 "$RIME_AGENT_SCRATCH_ROOT"   # not `mkdir -m`: SC2174, and the mode
                                         # is the whole point of this fixture
-PRE_SCRATCH="$(ls /tmp/apex-agent 2>/dev/null | sort -n | tr '\n' ' ')"
+PRE_SCRATCH="$(ls /tmp/rime-agent 2>/dev/null | sort -n | tr '\n' ' ')"
 
 section "the daemon"
 "$AGENTD" > "${WORK}/agentd.log" 2>&1 &
 DAEMON_PID=$!
-SOCK="${XDG_RUNTIME_DIR}/apex-agentd/control.sock"
+SOCK="${XDG_RUNTIME_DIR}/rime-agentd/control.sock"
 for _ in $(seq 1 50); do [ -S "$SOCK" ] && break; sleep 0.1; done
 if [ -S "$SOCK" ]; then
     ok "the daemon came up on an isolated socket"
@@ -155,7 +155,7 @@ exec cat > "${WORK}/${tag}.cap"
 EOF
     chmod +x "$script"
     : > "${WORK}/${tag}.cap"
-    "$APEX" agent run --agent generic --sandbox unrestricted --cwd "$PROJ" -d \
+    "$Rime" agent run --agent generic --sandbox unrestricted --cwd "$PROJ" -d \
         -- /bin/bash "$script" 2>"${WORK}/${tag}.err" \
         | sed -n 's/^session \([0-9]\+\) .*/\1/p' | head -1
 }
@@ -191,12 +191,12 @@ wait_ready a && wait_ready b \
     && ok "both sessions put their terminals into raw mode" \
     || bad "both sessions put their terminals into raw mode"
 
-if [ -d "${APEX_AGENT_SCRATCH_ROOT}/${A}" ]; then
+if [ -d "${RIME_AGENT_SCRATCH_ROOT}/${A}" ]; then
     ok "the daemon put its session scratch where the fixture told it to"
 else
     bad "the daemon put its session scratch where the fixture told it to"
-    echo "      expected ${APEX_AGENT_SCRATCH_ROOT}/${A}" >&2
-    echo "      this suite would otherwise share /tmp/apex-agent with the real daemon" >&2
+    echo "      expected ${RIME_AGENT_SCRATCH_ROOT}/${A}" >&2
+    echo "      this suite would otherwise share /tmp/rime-agent with the real daemon" >&2
     printf '\ninject: %d passed, %d failed\n' "$pass" "$fail"
     exit 1
 fi
@@ -205,13 +205,13 @@ fi
 # is the line above: the session directory landing where the fixture said is
 # what makes this a measurement of THIS daemon's root rather than of a chmod
 # nobody ran.
-ROOT_MODE="$(stat -c '%a' "$APEX_AGENT_SCRATCH_ROOT" 2>/dev/null)"
-LEAF_MODE="$(stat -c '%a' "${APEX_AGENT_SCRATCH_ROOT}/${A}" 2>/dev/null)"
+ROOT_MODE="$(stat -c '%a' "$RIME_AGENT_SCRATCH_ROOT" 2>/dev/null)"
+LEAF_MODE="$(stat -c '%a' "${RIME_AGENT_SCRATCH_ROOT}/${A}" 2>/dev/null)"
 if [ "$ROOT_MODE" = "700" ] && [ "$LEAF_MODE" = "700" ]; then
     ok "the scratch ROOT was made private too, not only the session directory"
 else
     bad "the scratch ROOT was made private too, not only the session directory"
-    echo "      root ${APEX_AGENT_SCRATCH_ROOT} is ${ROOT_MODE:-<absent>}, wanted 700" >&2
+    echo "      root ${RIME_AGENT_SCRATCH_ROOT} is ${ROOT_MODE:-<absent>}, wanted 700" >&2
     echo "      leaf is ${LEAF_MODE:-<absent>}, wanted 700" >&2
     echo "      a root another account pre-created is left in place by a leaf-only call" >&2
 fi
@@ -224,7 +224,7 @@ SRC="${SRCDIR}/shot.png"
 printf 'not really a png, but bytes are bytes\n' > "$SRC"
 
 section "the path reaches the terminal it was addressed to"
-out="$("$APEX" agent send "$A" "$SRC" 2>&1)"
+out="$("$Rime" agent send "$A" "$SRC" 2>&1)"
 printf '%s\n' "$out" | sed 's/^/      | /'
 
 DEST="$(printf '%s' "$out" | sed -n "s#.*as \(/[^ ]*inbox/[^ ]*\)#\1#p" | head -1)"
@@ -278,16 +278,16 @@ else
     bad "the copy is byte-identical to the source"
 fi
 case "$DEST" in
-    "${APEX_AGENT_SCRATCH_ROOT}/${A}"/inbox/*)
+    "${RIME_AGENT_SCRATCH_ROOT}/${A}"/inbox/*)
         ok "the copy is inside that session's own scratch directory" ;;
     *)  bad "the copy is inside that session's own scratch directory (${DEST})" ;;
 esac
 
-"$APEX" agent status "$A" 2>/dev/null | grep -q '^files sent   1$' \
+"$Rime" agent status "$A" 2>/dev/null | grep -q '^files sent   1$' \
     && ok "the session records that a file was handed to it" \
     || bad "the session records that a file was handed to it"
 
-"$APEX" agent list --all --json 2>/dev/null | python3 -c "
+"$Rime" agent list --all --json 2>/dev/null | python3 -c "
 import json,sys
 ss = {s['id']: s for s in json.load(sys.stdin)}
 assert ss[${A}]['injected'] == 1, ss[${A}]
@@ -299,7 +299,7 @@ assert ss[${B}]['injected'] == 0, ss[${B}]
 section "the name that is typed is the daemon's, not the caller's"
 EVIL="${SRCDIR}/we ird;\$(id) 'q' \"q\".log"
 printf 'evil\n' > "$EVIL"
-out="$("$APEX" agent send "$A" "$EVIL" 2>&1)"
+out="$("$Rime" agent send "$A" "$EVIL" 2>&1)"
 printf '%s\n' "$out" | sed 's/^/      | /'
 DEST2="$(printf '%s' "$out" | sed -n "s#.*as \(/[^ ]*inbox/[^ ]*\)#\1#p" | head -1)"
 if [ -n "$DEST2" ]; then
@@ -326,7 +326,7 @@ before="$(wc -c < "${WORK}/a.cap")"
 NL_FILE="${SRCDIR}/$(printf 'break\nout.log')"
 printf 'x\n' > "$NL_FILE" 2>/dev/null
 if [ -f "$NL_FILE" ]; then
-    out="$("$APEX" agent send "$A" "$NL_FILE" 2>&1)"
+    out="$("$Rime" agent send "$A" "$NL_FILE" 2>&1)"
     printf '%s' "$out" | grep -qi "control character" \
         && ok "a file name with a newline in it is refused by name" \
         || { bad "a file name with a newline in it is refused by name"; printf '%s\n' "$out" | sed 's/^/      | /'; }
@@ -340,24 +340,24 @@ else
 fi
 
 section "what cannot be handed over"
-out="$("$APEX" agent send "$A" "${SRCDIR}/does-not-exist" 2>&1)"
+out="$("$Rime" agent send "$A" "${SRCDIR}/does-not-exist" 2>&1)"
 printf '%s' "$out" | grep -qi "cannot hand over" \
     && ok "a file that is not there is refused before the daemon is asked" \
     || bad "a file that is not there is refused before the daemon is asked"
 
-out="$("$APEX" agent send "$A" "$SRCDIR" 2>&1)"
+out="$("$Rime" agent send "$A" "$SRCDIR" 2>&1)"
 printf '%s' "$out" | grep -qi "is a directory" \
     && ok "a directory is refused, and told apart from a file" \
     || { bad "a directory is refused, and told apart from a file"; printf '%s\n' "$out" | sed 's/^/      | /'; }
 
-out="$("$APEX" agent send 999999 "$SRC" 2>&1)"
+out="$("$Rime" agent send 999999 "$SRC" 2>&1)"
 printf '%s' "$out" | grep -qi "no session" \
     && ok "a session that does not exist is refused" \
     || bad "a session that does not exist is refused"
 
 # The CLI turns a relative path into an absolute one; the daemon refuses a
 # relative one, because its working directory is not the caller's.
-( cd "$SRCDIR" && "$APEX" agent send "$A" shot.png ) >"${WORK}/rel.out" 2>&1
+( cd "$SRCDIR" && "$Rime" agent send "$A" shot.png ) >"${WORK}/rel.out" 2>&1
 grep -q "inbox/" "${WORK}/rel.out" \
     && ok "a relative path works from the caller's own directory" \
     || { bad "a relative path works from the caller's own directory"; sed 's/^/      | /' "${WORK}/rel.out"; }
@@ -374,21 +374,21 @@ grep -q "absolute path" "${WORK}/relwire.out" \
     || { bad "the daemon refuses a relative path on the wire"; sed 's/^/      | /' "${WORK}/relwire.out"; }
 
 section "the screenshot shortcut takes no picture"
-export APEX_SCREENSHOT_DIR="${WORK}/shots"
-mkdir -p "$APEX_SCREENSHOT_DIR"
-out="$("$APEX" agent send "$A" --last-screenshot 2>&1)"
+export RIME_SCREENSHOT_DIR="${WORK}/shots"
+mkdir -p "$RIME_SCREENSHOT_DIR"
+out="$("$Rime" agent send "$A" --last-screenshot 2>&1)"
 printf '%s' "$out" | grep -qi "holds no screenshots yet" \
     && ok "an empty screenshot directory says so instead of guessing" \
     || { bad "an empty screenshot directory says so instead of guessing"; printf '%s\n' "$out" | sed 's/^/      | /'; }
 
-printf 'older\n' > "${APEX_SCREENSHOT_DIR}/Screenshot_old.png"
+printf 'older\n' > "${RIME_SCREENSHOT_DIR}/Screenshot_old.png"
 sleep 1.1
-printf 'newest\n' > "${APEX_SCREENSHOT_DIR}/Screenshot_new.png"
-out="$("$APEX" agent send "$A" --last-screenshot 2>&1)"
+printf 'newest\n' > "${RIME_SCREENSHOT_DIR}/Screenshot_new.png"
+out="$("$Rime" agent send "$A" --last-screenshot 2>&1)"
 printf '%s' "$out" | grep -q "Screenshot_new.png -> session ${A}" \
     && ok "the newest screenshot is the one handed over" \
     || { bad "the newest screenshot is the one handed over"; printf '%s\n' "$out" | sed 's/^/      | /'; }
-unset APEX_SCREENSHOT_DIR
+unset RIME_SCREENSHOT_DIR
 
 section "an agent reading pasted text gets the markers, and only then"
 C="$(make_session c decset)"
@@ -397,7 +397,7 @@ if [ -n "$C" ] && wait_ready c; then
     # The daemon learns the mode from the session's OUTPUT, so give the reader
     # thread a moment to have seen it.
     sleep 0.5
-    "$APEX" agent send "$C" "$SRC" >"${WORK}/c.out" 2>&1
+    "$Rime" agent send "$C" "$SRC" >"${WORK}/c.out" 2>&1
     wait_capture c "inbox/" \
         && ok "the path arrived on session ${C}'s terminal" \
         || bad "the path arrived on session ${C}'s terminal"
@@ -430,17 +430,17 @@ printf 'PRIVATE KEY MATERIAL\n' > "$SECRET"
 cat > "${WORK}/inside.sh" <<EOF
 #!/usr/bin/env bash
 echo "--- a session naming another session ---"
-"$APEX" agent send ${A} "$SECRET" 2>&1
+"$Rime" agent send ${A} "$SECRET" 2>&1
 echo "OTHER_EXIT=\$?"
 echo "--- a session naming itself ---"
-"$APEX" agent send \${APEX_AGENT_SESSION:-0} "$SECRET" 2>&1
+"$Rime" agent send \${RIME_AGENT_SESSION:-0} "$SECRET" 2>&1
 echo "SELF_EXIT=\$?"
 echo "DONE"
 EOF
 chmod +x "${WORK}/inside.sh"
 
 before_a="$(wc -c < "${WORK}/a.cap")"
-sid="$("$APEX" agent run --agent generic --sandbox unrestricted --cwd "$PROJ" -d \
+sid="$("$Rime" agent run --agent generic --sandbox unrestricted --cwd "$PROJ" -d \
         -- /bin/bash "${WORK}/inside.sh" 2>"${WORK}/inside.err" \
         | sed -n 's/^session \([0-9]\+\) .*/\1/p' | head -1)"
 if [ -z "$sid" ]; then
@@ -449,10 +449,10 @@ if [ -z "$sid" ]; then
 else
     ok "a session started to try it from the inside (id ${sid})"
     for _ in $(seq 1 80); do
-        "$APEX" agent logs "$sid" 2>/dev/null | grep -q DONE && break
+        "$Rime" agent logs "$sid" 2>/dev/null | grep -q DONE && break
         sleep 0.25
     done
-    logs="$("$APEX" agent logs "$sid" 2>/dev/null)"
+    logs="$("$Rime" agent logs "$sid" 2>/dev/null)"
     printf '%s\n' "$logs" | sed 's/^/      | /'
 
     printf '%s' "$logs" | grep -q "may not hand a file to a session" \
@@ -469,7 +469,7 @@ else
     [ "$before_a" = "$after_a" ] \
         && ok "nothing was typed into the session it named" \
         || bad "nothing was typed into the session it named"
-    if grep -rqF "PRIVATE KEY MATERIAL" "${APEX_AGENT_SCRATCH_ROOT}/${A}/inbox" 2>/dev/null; then
+    if grep -rqF "PRIVATE KEY MATERIAL" "${RIME_AGENT_SCRATCH_ROOT}/${A}/inbox" 2>/dev/null; then
         bad "the file the session asked for never crossed the boundary"
     else
         ok "the file the session asked for never crossed the boundary"
@@ -508,7 +508,7 @@ IFS= read -r -d ' ' path
 sleep 60
 EOF
     chmod +x "${D}/run.sh"
-    out="$("$APEX" agent run --agent generic --sandbox project --network offline -d \
+    out="$("$Rime" agent run --agent generic --sandbox project --network offline -d \
             --cwd "$PROJ" -- /bin/bash "${D}/run.sh" 2>&1)"
     E="$(printf '%s' "$out" | sed -n 's/^session \([0-9]\+\) .*/\1/p' | head -1)"
     if [ -z "$E" ]; then
@@ -517,7 +517,7 @@ EOF
     else
         ok "a confined session started (id ${E})"
         for _ in $(seq 1 150); do [ -e "${D}/ready" ] && break; sleep 0.1; done
-        out="$("$APEX" agent send "$E" "$SRC" 2>&1)"
+        out="$("$Rime" agent send "$E" "$SRC" 2>&1)"
         printf '%s\n' "$out" | sed 's/^/      | /'
         for _ in $(seq 1 150); do
             grep -q '^DONE$' "${D}/report" 2>/dev/null && break
@@ -525,7 +525,7 @@ EOF
         done
         sed 's/^/      | /' "${D}/report" 2>/dev/null
 
-        grep -q "^GOT=${APEX_AGENT_SCRATCH_ROOT}/" "${D}/report" 2>/dev/null \
+        grep -q "^GOT=${RIME_AGENT_SCRATCH_ROOT}/" "${D}/report" 2>/dev/null \
             && ok "the confined session received the path" \
             || bad "the confined session received the path"
         grep -q '^COPY=readable$' "${D}/report" 2>/dev/null \
@@ -542,31 +542,31 @@ EOF
         cmp -s "$SRC" "${D}/copy" 2>/dev/null \
             && ok "what the confined session read is the file that was sent" \
             || bad "what the confined session read is the file that was sent"
-        "$APEX" agent kill "$E" --signal kill >/dev/null 2>&1
+        "$Rime" agent kill "$E" --signal kill >/dev/null 2>&1
     fi
 fi
 
 # The real root is untouched: same entries as before, and no new ones. This is
 # the assertion that would have failed on every version of this suite written
-# before APEX_AGENT_SCRATCH_ROOT existed.
-now_scratch="$(ls /tmp/apex-agent 2>/dev/null | sort -n | tr '\n' ' ')"
+# before RIME_AGENT_SCRATCH_ROOT existed.
+now_scratch="$(ls /tmp/rime-agent 2>/dev/null | sort -n | tr '\n' ' ')"
 [ "$PRE_SCRATCH" = "$now_scratch" ] \
-    && ok "the real /tmp/apex-agent was neither written to nor emptied" \
-    || { bad "the real /tmp/apex-agent was neither written to nor emptied"
+    && ok "the real /tmp/rime-agent was neither written to nor emptied" \
+    || { bad "the real /tmp/rime-agent was neither written to nor emptied"
          echo "      before: ${PRE_SCRATCH}" >&2
          echo "      after:  ${now_scratch}" >&2; }
 
 section "a session that has gone"
-"$APEX" agent kill "$B" --signal kill >/dev/null 2>&1
+"$Rime" agent kill "$B" --signal kill >/dev/null 2>&1
 for _ in $(seq 1 40); do
-    "$APEX" agent list --all --json 2>/dev/null | python3 -c "
+    "$Rime" agent list --all --json 2>/dev/null | python3 -c "
 import json,sys
 s=[x for x in json.load(sys.stdin) if x['id']==${B}][0]
 sys.exit(0 if s['exit_code'] is not None or s['exit_signal'] is not None else 1)
 " && break
     sleep 0.25
 done
-out="$("$APEX" agent send "$B" "$SRC" 2>&1)"
+out="$("$Rime" agent send "$B" "$SRC" 2>&1)"
 printf '%s' "$out" | grep -qi "already exited" \
     && ok "an exited session is refused, and told apart from a missing one" \
     || { bad "an exited session is refused, and told apart from a missing one"; printf '%s\n' "$out" | sed 's/^/      | /'; }

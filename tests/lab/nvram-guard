@@ -6,13 +6,13 @@
 #  ═══ WHY THIS EXISTS ═══
 #
 #  2026-09-20, 09:02:17 AWST. A container `gallant_ride`
-#  (`localhost/apex-os:daily`, `--privileged --pid=host`) running
-#  `installer/apex-install` reached its bootloader step. bootupd did exactly
+#  (`localhost/rime-os:daily`, `--privileged --pid=host`) running
+#  `installer/rime-install` reached its bootloader step. bootupd did exactly
 #  what it is designed to do, to the wrong machine:
 #
 #      efibootmgr -b 0000 -B
 #      efibootmgr --create --disk /dev/loop1 --part 1 \
-#                 --loader '\EFI\fedora\shimx64.efi' --label 'APEX-OS'
+#                 --loader '\EFI\fedora\shimx64.efi' --label 'Rime OS'
 #
 #  The replacement entry named PARTUUID ee26313c-…, which is the ESP *inside
 #  the disk image file being built* and exists on no physical disk. Nothing on
@@ -24,12 +24,12 @@
 #  at the wrong shape guards nothing. It was NOT `bootc install to-disk
 #  --via-loopback`: the engine had already attached the image file itself, and
 #  bootc was handed the LOOP DEVICE `/dev/loop1` on a `to-filesystem` install.
-#  That run's log is /var/lab-scratch/apex-luks-live.oRDxu4/engine-stdout.txt —
+#  That run's log is /var/lab-scratch/rime-luks-live.oRDxu4/engine-stdout.txt —
 #  `Bootloader: grub`, `Installing bootloader via bootupd`, then the efibootmgr
 #  pair above. Nothing in either incident contained the string
 #  `--via-loopback`, so no scan for that literal would have seen either one.
 #  And neither run carried `--generic-image`: `set_nvram_args_for` did not
-#  exist in `apex-install` until 68855e92, that same evening.
+#  exist in `rime-install` until 68855e92, that same evening.
 #
 #  ═══ THIS FILE IS DETECTION. IT IS ALSO THE ONLY THING THAT HAS EVER WORKED ═══
 #
@@ -40,7 +40,7 @@
 #
 #  Prevention lives in ONE place: `bootc install --generic-image`, which skips
 #  the firmware step. `tests/lab/bootc-install-lab` puts it in the argv and
-#  refuses to launch without it, and `installer/apex-install` passes it for a
+#  refuses to launch without it, and `installer/rime-install` passes it for a
 #  loop-backed target.
 #
 #  What this file is NOT paired with is an efivars tmpfs. That mask was called
@@ -58,7 +58,7 @@
 #
 #  ═══ THREE VERDICTS, NEVER A BOOLEAN ═══
 #
-#  Same vocabulary as tests/chaos/lib.sh and apexd/apex/src/verify.rs, for the
+#  Same vocabulary as tests/chaos/lib.sh and rimed/rime/src/verify.rs, for the
 #  same reason: a measurement that could not be TAKEN is not a pass.
 #
 #      verified            both snapshots were taken, both are real, and they
@@ -101,10 +101,10 @@
 # ─────────────────────────────────────────────────────────────────────────────
 set -euo pipefail
 
-# The one test seam. Same shape as APEX_BOOT_EFIVARS in apex-boot-health: the
+# The one test seam. Same shape as RIME_BOOT_EFIVARS in rime-boot-health: the
 # suite points it at a fixture tree so both arms of the diff can be driven
 # without a real firmware anywhere near the run.
-EFI_ROOT="${APEX_NVRAM_EFI_ROOT:-/sys/firmware/efi}"
+EFI_ROOT="${RIME_NVRAM_EFI_ROOT:-/sys/firmware/efi}"
 
 OUT=""
 LABEL="nvram-guard"

@@ -32,14 +32,14 @@ fatal() { echo "FATAL: $*" >&2; exit 1; }
 [ -n "$dir" ]  || fatal "--dir is required"
 [ -d "$dir" ]  || fatal "$dir is not a directory"
 
-apk="apex-remote-$name.apk"
+apk="rime-remote-$name.apk"
 [ -f "$dir/$apk" ] || fatal "$dir/$apk is missing; notes must not describe an artefact that was not built"
 
 sums=$(cat "$dir/$apk.sha256" 2>/dev/null) || fatal "$dir/$apk.sha256 is missing"
 digest="${sums%% *}"
 [ -n "$digest" ] || fatal "the checksum file is empty"
 
-meta="$dir/apex-remote-$name.json"
+meta="$dir/rime-remote-$name.json"
 [ -f "$meta" ] || fatal "$meta is missing"
 protocol=$(python3 -c 'import json,sys; print(json.load(open(sys.argv[1]))["remoteProtocolPreferred"])' "$meta") \
     || fatal "could not read the protocol revision out of $meta"
@@ -64,7 +64,7 @@ window_lo=$(printf '%s' "$window" | tr ',' '\n' | sort -n | head -1)
 window_hi=$(printf '%s' "$window" | tr ',' '\n' | sort -n | tail -1)
 if [ "$window_lo" = "$window_hi" ]; then
     compat="This build speaks exactly one revision of that protocol, **v$window_hi**, and no
-other — today that is the only revision there is, so every APEX machine speaks
+other — today that is the only revision there is, so every Rime machine speaks
 it. When a second one appears, a later build of this app will speak both and try
 each in turn. That is why, when it cannot connect, it tells you the version may
 be the cause instead of claiming your phone has been unpaired."
@@ -82,7 +82,7 @@ size_mb=$(python3 -c 'import os,sys; print(f"{os.path.getsize(sys.argv[1])/10485
 # matters because it is full of backticks and dollar signs that would otherwise
 # be command substitutions and variables.
 cat <<'HEADER'
-**APEX Remote** is the phone half of APEX-OS. It pairs with one of your own
+**Rime Remote** is the phone half of Rime OS. It pairs with one of your own
 machines over your network — or through a relay when you are away from it — and
 lets you watch and drive what is running on it: agent sessions, approvals, and a
 real terminal.
@@ -93,9 +93,9 @@ middle holding your data.
 
 ## What you need
 
-* A machine running APEX-OS with the remote service switched on. On that
-  machine, run `apex remote status` — if it prints a protocol version, you are
-  ready. If it says the service is not running, `apex remote enable` starts it.
+* A machine running Rime OS with the remote service switched on. On that
+  machine, run `rime remote status` — if it prints a protocol version, you are
+  ready. If it says the service is not running, `rime remote enable` starts it.
 * A phone running Android 9 (API 28) or newer.
 
 ## Installing it, if you have never sideloaded an app
@@ -120,7 +120,7 @@ On GrapheneOS the flow is identical; nothing special is required.
 Worth doing once, on the machine rather than the phone:
 
 ```
-sha256sum -c apex-remote-VERSION.apk.sha256
+sha256sum -c rime-remote-VERSION.apk.sha256
 ```
 
 HEADER
@@ -142,7 +142,7 @@ from; you do not need them to install the app.
 On the machine:
 
 \`\`\`
-apex remote pair
+rime remote pair
 \`\`\`
 
 It shows a QR code that is good for three minutes. In the app, press **Pair a
@@ -161,7 +161,7 @@ and is unlocked by your fingerprint or PIN. It never leaves the phone.
 
 The app and your machine are updated by different people at different times, so
 they will not always be the same age. Your machine prints the protocol version
-it speaks in \`apex remote status\`.
+it speaks in \`rime remote status\`.
 
 $compat
 

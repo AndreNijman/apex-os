@@ -6,7 +6,7 @@ to it lands *in the same commit* as the work it describes, so it can never
 drift more than one commit from reality.
 
 P1 is rows 5-8 of the roadmap's own implementation order
-(`APEX-OS_Full_Roadmap.pdf` §23):
+(`Rime OS_Full_Roadmap.pdf` §23):
 
 | Phase | Roadmap rows | Branch |
 |-------|--------------|--------|
@@ -15,10 +15,10 @@ P1 is rows 5-8 of the roadmap's own implementation order
 | 7 | §10 declarative blueprint + sync | `p1/blueprint-and-sync` |
 | 8 | §11 modes, §12 gaming mode, §13 workload manager | `p1/modes-and-workloads` |
 
-## apex-shell is landing on `main`, 2026-09-03
+## rime-shell is landing on `main`, 2026-09-03
 
-Merging apex-shell triggers no image build (`release-shell` is dispatch-only,
-`build-image` lives in apex-os), so the shell half of P1 lands as it is
+Merging rime-shell triggers no image build (`release-shell` is dispatch-only,
+`build-image` lives in rime-os), so the shell half of P1 lands as it is
 finished. `Containerfile.base` vendors the shell from remote `main`, so this is
 the documented merge order rather than a shortcut.
 
@@ -32,23 +32,23 @@ the documented merge order rather than a shortcut.
 | #13 | niri application keybinds | merged `34ba36c` |
 | #14 | Caffeine + SystemStats | merged `6f2e55d` |
 
-**Every apex-shell PR is on `main`.** #13 and #14 both needed rebasing onto the
+**Every rime-shell PR is on `main`.** #13 and #14 both needed rebasing onto the
 moved main first: both conflicted on `ci.yml`, where each had added a step in
 the same place. The union was correct, and the suites were re-run on the
 rebased trees before merging rather than assumed to pass.
 
 Verified afterwards, because this is the coupling that has bitten twice: the
 seeded `rc.xml` still passes `check-labwc-keybinds` against the **new**
-apex-shell `main`.
+rime-shell `main`.
 
-**Merging #9 immediately unblocked apex-os PR #34**, whose `Package engine` job
+**Merging #9 immediately unblocked rime-os PR #34**, whose `Package engine` job
 failed on a single labelled assertion: the CLI takes its plugin verdicts from
-apex-shell's `manifest.js`, and CI clones the shell from `main`, where it did not
+rime-shell's `manifest.js`, and CI clones the shell from `main`, where it did not
 yet exist. The agent predicted exactly that, and the job went green on re-run
 with no change on either side. That is the vendoring coupling working as
 designed.
 
-## Caffeine did nothing at all on Hyprland (apex-shell #14)
+## Caffeine did nothing at all on Hyprland (rime-shell #14)
 
 This was the most consequential finding of the session, and it was on Andre's
 own daily driver.
@@ -112,7 +112,7 @@ something real: never mutate his live session or anything under his
 - **Every branch is stacked on the previous one**, and the bottom of the stack
   is `feat/input-display-parity` (P0, PR #24, unmerged on purpose). Nothing
   merges to `main` until Andre asks for the single final image build: a push to
-  `main` touching `files/**`, `apexd/**` or `config/**` triggers `build-image`,
+  `main` touching `files/**`, `rimed/**` or `config/**` triggers `build-image`,
   and he asked for exactly one of those at the end.
 - **Each phase opens a PR against `main`** even though it will not be merged
   there yet. `pr-validation.yml` only fires on `pull_request: branches: [main]`,
@@ -121,8 +121,8 @@ something real: never mutate his live session or anything under his
 - Because the branches are stacked, merging **only the tip** at the end lands
   every phase and produces **one** build.
 - **Commit and push every logical step.** An unpushed commit is not durable.
-- apex-shell is a separate repo with no image build on push, so shell phases
-  merge to `apex-shell/main` as they go. `Containerfile.base` vendors the shell
+- rime-shell is a separate repo with no image build on push, so shell phases
+  merge to `rime-shell/main` as they go. `Containerfile.base` vendors the shell
   from remote `main`, so shell must land before or with the OS side.
 
 ## The three deferred P1 items: DONE
@@ -134,9 +134,9 @@ now that the branches are merged.
 
 | Item | Was deferred because | Closed as |
 |------|----------------------|-----------|
-| §8 GUI export from capsules | "§8 says 'when useful'; needs a real desktop to verify" | `apex env export / unexport / exports` |
-| §10 `[development] languages` convergence | "a language→package table here would conflict at integration" | `Step::ProvisionLanguage` → `apex env provision` |
-| §16 `apex plugin` CLI | apex-shell PR #9 shipped the platform and left the OS side out | `apex plugin list / info / enable / disable` |
+| §8 GUI export from capsules | "§8 says 'when useful'; needs a real desktop to verify" | `rime env export / unexport / exports` |
+| §10 `[development] languages` convergence | "a language→package table here would conflict at integration" | `Step::ProvisionLanguage` → `rime env provision` |
+| §16 `rime plugin` CLI | rime-shell PR #9 shipped the platform and left the OS side out | `rime plugin list / info / enable / disable` |
 
 ### 1. §8's GUI export
 
@@ -152,7 +152,7 @@ Three decisions worth keeping:
 
 - **The host-side filename is recorded, never derived.** distrobox names the
   file after the `.desktop` it found *inside* the capsule, so
-  `apex env export py gimp` produces `py-org.gimp.GIMP.desktop`. `export`
+  `rime env export py gimp` produces `py-org.gimp.GIMP.desktop`. `export`
   snapshots the launcher directory before and after and records what appeared.
   The test fixture deliberately uses a name the naive derivation does not
   produce. With a matching fixture the claim would be untestable, and a
@@ -174,7 +174,7 @@ state and the refusals.
 
 A declared language is satisfied two ways, and the order matters:
 
-1. **The toolchain is already on the host's `PATH`.** The APEX images ship a
+1. **The toolchain is already on the host's `PATH`.** The Rime images ship a
    full dev stack (gcc, g++, python3, node, cargo, golang, bash), so this is the
    *common* case. Reading it as drift would provision seven multi-gigabyte
    capsules to duplicate software the image already has, which is the
@@ -190,59 +190,59 @@ leave the others converged.
 The step carries the **language** and never a capsule name: `c`/`cpp` share one
 toolchain and `javascript`/`typescript` one runtime, so which capsule provides
 what is the engine's decision. That is exactly the second answer phase 7
-deferred the section to avoid. The table lives only in `apex-env`; the planner
+deferred the section to avoid. The table lives only in `rime-env`; the planner
 has the vocabulary, which it needs to validate a blueprint before any engine
 exists.
 
 `provision` records a language only after running the language's probe **inside**
 the capsule. `dnf -y install` exits 0 for a package set that puts nothing on
 `PATH`, and recording on the strength of that exit code is the "exited 0 having
-changed nothing" case `apexd/AGENTS.md` forbids. For the same reason `create`
+changed nothing" case `rimed/AGENTS.md` forbids. For the same reason `create`
 records no language even for the `python` alias, whose `--additional-packages`
 distrobox installs during container setup, and which can partly fail while
 leaving the container present.
 
 **A behaviour change on a shipped command, called out because it looks
-identical to the feature working:** `apex blueprint diff` now exits 1 for a
+identical to the feature working:** `rime blueprint diff` now exits 1 for a
 missing language. Phase 7 shipped the section with `step: None`, so it reported
 CANNOT CONVERGE and exited 0 forever.
 
 Two couplings that would otherwise drift silently, both now checked:
 
 - The record directory follows the engine's precedence exactly
-  (`APEX_ENV_HOME`, then `XDG_DATA_HOME`, then `$HOME/.local/share`). If writer
+  (`RIME_ENV_HOME`, then `XDG_DATA_HOME`, then `$HOME/.local/share`). If writer
   and observer disagreed, `apply` would provision a capsule the next `diff`
   could not see, and it would show up first in the isolated-HOME test, where it
   reads as a broken test rather than a broken path. The suite's engine stub
   writes the record so that assertion is real.
-- `files/scripts/check-language-parity` compares `apexd-core`'s `LANGUAGES` with
-  `apex-env`'s, and runs `apex-env languages` to assert every row resolves to a
+- `files/scripts/check-language-parity` compares `rimed-core`'s `LANGUAGES` with
+  `rime-env`'s, and runs `rime-env languages` to assert every row resolves to a
   capsule, packages **and** a probe. It is in the **`static`** job on purpose:
-  `rust` fires on `^(apexd/|…)` and `engine` on `^(files/|tests/)`, so a PR that
+  `rust` fires on `^(rimed/|…)` and `engine` on `^(files/|tests/)`, so a PR that
   touched only the other side would skip a check in either specialised job, and
   a skipped job counts as success. That is the same bug this file already
-  records for `test-apex-modes.sh`.
+  records for `test-rime-modes.sh`.
 
-`APEX_ENV_ENGINE` is new and overridable, which is the *opposite* of the rule
-`Containerfile.base` asserts for `apex-pkg`'s `readonly ENV_ENGINE`. The
+`RIME_ENV_ENGINE` is new and overridable, which is the *opposite* of the rule
+`Containerfile.base` asserts for `rime-pkg`'s `readonly ENV_ENGINE`. The
 reasoning there ("a caller-controlled variable naming a program a root process
 executes is a hole") is right, and it does not apply here for a structural
 reason: `ProvisionLanguage` is user-domain and `perform()` refuses a step from
 the other domain before it builds any path or spawns anything, so the variable
 can only name a program the invoking user could already have run. In return, a
-live `apex apply` exercises the real convergence path: the engine is reached by
+live `rime apply` exercises the real convergence path: the engine is reached by
 absolute path, so no `PATH` faking intercepts it, and a user-domain step has no
-domain filtering to fall back on. It is the sibling of `APEX_WINDOW_ADAPTER`.
+domain filtering to fall back on. It is the sibling of `RIME_WINDOW_ADAPTER`.
 
-**Unverified:** a real `apex env provision` against live podman. No capsule was
+**Unverified:** a real `rime env provision` against live podman. No capsule was
 created; the path is exercised end to end against a recording stub.
 
-### 3. §16's `apex plugin`
+### 3. §16's `rime plugin`
 
-**It owns no plugin rules.** Every verdict comes from apex-shell's own
+**It owns no plugin rules.** Every verdict comes from rime-shell's own
 `src/services/plugins/manifest.js`, `require`d by a node shim. It is the same
-file the QML engine imports and the same file apex-shell's tests load. `nodejs`
-is in `Containerfile.core` and the shell is vendored to `/usr/share/apex-shell`,
+file the QML engine imports and the same file rime-shell's tests load. `nodejs`
+is in `Containerfile.core` and the shell is vendored to `/usr/share/rime-shell`,
 so this works in the image. If manifest.js is absent, `list` and `info`
 **refuse**; a fallback would be the second, drifting answer the design exists to
 prevent, appearing on exactly the machines where the shell was installed wrong.
@@ -269,10 +269,10 @@ mutation.
 path in the whole shell (no allowlist file, no IPC). `disable` therefore moves
 the plugin to a sibling the shell does not scan and `enable` moves it back,
 which takes effect against the shipped shell with no shell change. A state file
-invented on the OS side would be an `apex plugin disable` the shell ignored,
+invented on the OS side would be an `rime plugin disable` the shell ignored,
 which is a lie told by a command whose whole job is to be believed. A
 shell-side enabled list is the better long-term answer and is a §16 follow-up
-in apex-shell.
+in rime-shell.
 
 `list` reports a **VALID** column, not LOADED: a disabled plugin can be valid,
 and nothing here can see a live shell's loaded set. Both verbs state that a
@@ -294,26 +294,26 @@ when a user most needs it. `enable` moves without one too, then reports the
 verdict as *unknown* rather than guessing.
 
 The suite **hard-exits** if either plugin directory resolves outside its temp
-tree. `disable` moves directories and `~/.config/apex-shell/plugins` is real on
+tree. `disable` moves directories and `~/.config/rime-shell/plugins` is real on
 the developer's machine; a skip would be the accident the rule exists for.
 
-**Unverified:** no running APEX Shell was restarted to confirm it stops loading
+**Unverified:** no running Rime Shell was restarted to confirm it stops loading
 a disabled plugin. That rests on `PluginService.qml` scanning one directory,
 which is read from source and tripwired, not observed live.
 
 ### EXPECT ONE JOB RED: the cross-repo merge order, third time
 
-The `Package engine` job fails on **one labelled assertion** until apex-shell
-**PR #9** merges. `manifest.js` is on `p1/plugin-platform`, not on apex-shell
+The `Package engine` job fails on **one labelled assertion** until rime-shell
+**PR #9** merges. `manifest.js` is on `p1/plugin-platform`, not on rime-shell
 `main`, which is what CI clones. `git ls-tree` confirms it: `main` has no
 `src/services/plugins` at all. This is the documented order (shell before or
 with the OS) doing its job, exactly as it did for 5.3's keybind suite on PRs #27
-and #28. **Check apex-shell `main` before looking anywhere else in this repo.**
+and #28. **Check rime-shell `main` before looking anywhere else in this repo.**
 
 It is deliberately one labelled assertion rather than a refusal at the top of
 the file: **62 of the 117** assertions do not need manifest.js and run
 regardless, a figure measured by running the suite against a checkout of
-apex-shell `main` rather than estimated. A suite that hard-exited would report
+rime-shell `main` rather than estimated. A suite that hard-exited would report
 `passed=0` with a red tick: the same vacuous shape that has bitten this
 repository, only inverted.
 
@@ -321,11 +321,11 @@ repository, only inverted.
 
 | Suite | Before | After |
 |-------|--------|-------|
-| `tests/test-apex-env.sh` | 149 | 253 |
-| `tests/test-apex-blueprint.sh` | 105 | 129 |
-| `tests/test-apex-plugin.sh` | none | **117** (62 without the shell tree) |
+| `tests/test-rime-env.sh` | 149 | 253 |
+| `tests/test-rime-blueprint.sh` | 105 | 129 |
+| `tests/test-rime-plugin.sh` | none | **117** (62 without the shell tree) |
 
-Beyond the table: 35 planner unit tests in `apexd-core`, 108 in the `apex`
+Beyond the table: 35 planner unit tests in `rimed-core`, 108 in the `rime`
 crate, and two new static CI checks (`check-language-parity`, `node --check` on
 the shim). Every load-bearing new assertion was mutation-verified: eight mutants
 across the three items, all caught, and one (a derived export filename)
@@ -333,17 +333,17 @@ survived until the fixture was changed to make the claim reachable.
 
 ## Phase 5: compositor-neutral shell + plugin platform
 
-Roadmap §17 asks for one `ApexCompositor` surface with compositor adapters
+Roadmap §17 asks for one `RimeCompositor` surface with compositor adapters
 underneath; §16 asks for a plugin platform with permissions. The shell today
 branches on `Compositor.isHyprland` / `.isNiri` / `.isLabwc` in 33 files, which
 is the technical debt §17 names.
 
 - [x] **5.1** `CompositorService` facade + capability map, with Hyprland, niri,
-      labwc and null backends (apex-shell PR #8, branch
+      labwc and null backends (rime-shell PR #8, branch
       `p1/compositor-adapter`). 37 live assertions + 23 headless static ones.
       The facade selects its backend by URL so `Quickshell.Hyprland` is never
       parsed off Hyprland. Nothing is rewired yet; consumers move in 5.2.
-- [x] **5.2** Migrate consumers onto the facade: **DONE**, apex-shell **PR #11**
+- [x] **5.2** Migrate consumers onto the facade: **DONE**, rime-shell **PR #11**
       (`p1/finish-5.2`), CI green. No file outside `src/services/compositor/`
       imports `Quickshell.Hyprland`, and none spawns `hyprctl`.
 
@@ -375,20 +375,20 @@ is the technical debt §17 names.
       **labwc, not niri**: the shell already wrote Hyprland `.conf`/`.lua` and
       niri `.kdl`, while labwc's bindings were hand-maintained in `rc.xml`. That
       made the Keybinds page inert on labwc: rebind, UI confirms, nothing
-      happens. `apex-labwc-keybinds` now generates and splices them, and
+      happens. `rime-labwc-keybinds` now generates and splices them, and
       `check-labwc-keybinds` became an assertion that the seeded config IS the
       generator's output rather than a comparison of two hand-written lists.
       32 assertions; input and display already emitted for all three.
-- [x] **5.4** Plugin platform: apex-shell **PR #9**, branch
+- [x] **5.4** Plugin platform: rime-shell **PR #9**, branch
       `p1/plugin-platform`, CI green. Manifest + permission model, loader,
       crash isolation, the `bar-widget` extension point end to end, and
-      `plugins/apex-worldclock` as a real example. 156 headless decision
+      `plugins/rime-worldclock` as a real example. 156 headless decision
       assertions + 46 static invariants both run on CI; the 43 behavioural ones
       skip there, which is why the security logic lives in a plain `.js` file
       Node can import.
 
       That last decision paid off twice. Because `manifest.js` is plain
-      JavaScript, **apex-os's `apex plugin` CLI can `require` it directly**
+      JavaScript, **rime-os's `rime plugin` CLI can `require` it directly**
       instead of reimplementing the permission model (see "The three deferred P1 items"
       at the top of this file). The OS side is done on `p1/deferred-items`;
       this shell PR is the dependency it waits on.
@@ -406,7 +406,7 @@ is the technical debt §17 names.
       it with no `..` and no absolute path. Discovery now refuses any plugin
       containing a symlink at any depth.
 
-      **Extended by apex-shell PR #12** (`p1/plugin-points`): two more points,
+      **Extended by rime-shell PR #12** (`p1/plugin-points`): two more points,
       `launcher-provider` and `quick-settings-tile`, each with a host, a working
       example and coverage in both suite halves. API 1.0 → 1.1, additively.
       275 headless / 98 static / 94 behavioural assertions.
@@ -422,7 +422,7 @@ is the technical debt §17 names.
       a pass-through with bad keys deleted, and the suite asserts the surviving
       key set *exactly* so it holds for row fields the launcher does not have
       yet. A behavioural fixture returns hostile rows whose `exec` is
-      `touch /tmp/apex-plugin-breach`; the file's absence is the assertion.
+      `touch /tmp/rime-plugin-breach`; the file's absence is the assertion.
 
       **The notification handler was declined, deliberately.** Reading
       notification summaries and bodies (2FA codes, message previews, reset
@@ -450,7 +450,7 @@ severe ones, all introduced by this branch:
 - **A shared `Process` could leave every key captured.** Four commands
   consolidated onto one Process could kill each other (`running = false; true`
   terminates the child). The worst case is a retint killing `submap reset`,
-  leaving Hyprland in `ApexShell_clean` until it restarts.
+  leaving Hyprland in `RimeShell_clean` until it restarts.
 - **Focus mode could permanently lose the user's gaps**: a double-toggle raced
   its own restore and saved 0/6 as the "real" values.
 - **The layout indicator never released its ref**, so the polling saving its
@@ -548,7 +548,7 @@ All work stopped at Andre's request. **Nothing uncommitted, nothing unpushed**,
 verified by sweeping every worktree in both repos.
 
 One worktree was dirty and is now checkpointed: `p1/gaming-profiles` held a
-complete 109-assertion `tests/test-apex-gaming.sh` plus its CI wiring, none of
+complete 109-assertion `tests/test-rime-gaming.sh` plus its CI wiring, none of
 it committed. It passes and is shellcheck-clean, **but no assertion has been
 mutation-checked**, so 109/0 is not yet evidence of anything. That is the next
 step on that branch and the commit says so.
@@ -557,20 +557,20 @@ Branches in flight, all pushed:
 
 | Branch | Repo | State |
 |--------|------|-------|
-| `p1/finish-5.2` | apex-shell | pushed, unreported |
-| `p1/plugin-points` | apex-shell | pushed, unreported |
-| `p1/blueprint-editor` | apex-shell | **PR #10 open**, unreported |
-| `p1/gaming-profiles` | apex-os | suite checkpointed, mutation pass owed |
-| `p1/deferred-items` | apex-os | pushed, was on the `apex plugin` CLI when stopped |
-| `p1/blueprint-write` | apex-os | done: `apex blueprint set` |
-| `feat/zen-browser` | apex-os | done, **PR #32** |
-| `feat/labwc-default-browser` | apex-os | done |
-| `fix/core-system-release-branding` | apex-os | done, **PR #31** |
-| `p1/integration` | apex-os | done, **PR #30**, all four phases |
+| `p1/finish-5.2` | rime-shell | pushed, unreported |
+| `p1/plugin-points` | rime-shell | pushed, unreported |
+| `p1/blueprint-editor` | rime-shell | **PR #10 open**, unreported |
+| `p1/gaming-profiles` | rime-os | suite checkpointed, mutation pass owed |
+| `p1/deferred-items` | rime-os | pushed, was on the `rime plugin` CLI when stopped |
+| `p1/blueprint-write` | rime-os | done: `rime blueprint set` |
+| `feat/zen-browser` | rime-os | done, **PR #32** |
+| `feat/labwc-default-browser` | rime-os | done |
+| `fix/core-system-release-branding` | rime-os | done, **PR #31** |
+| `p1/integration` | rime-os | done, **PR #30**, all four phases |
 
-**Still not merged to `apex-os/main`, so no image has been built.**
+**Still not merged to `rime-os/main`, so no image has been built.**
 
-### Fixed: niri had no application keybinds (apex-shell PR #13)
+### Fixed: niri had no application keybinds (rime-shell PR #13)
 
 **On niri, SUPER+W / SUPER+T / SUPER+E did not exist.** `KeybindService._genKdl`
 has `if (e.type) continue`, commented "native compositor actions remain in
@@ -603,7 +603,7 @@ wrote a blueprint. The agent sent to build §10's GUI editor stopped before
 implementing and said so, which was correct: the only write-shaped verb was
 `sync import`, which consumes a *bundle*, so the shell would have had to author
 bundle TOML, which is the schema reimplemented with extra steps.
-`apex blueprint set --json -` now exists (`p1/blueprint-write`), reusing the
+`rime blueprint set --json -` now exists (`p1/blueprint-write`), reusing the
 same normalise + validate + to_toml + atomic write a hand-edited file goes
 through.
 
@@ -620,15 +620,15 @@ in parallel worktrees:
 
 | Work | Branch | Repo |
 |------|--------|------|
-| finish 5.2 (screen shader, night light, SystemStats) + the two open review items | `p1/finish-5.2` | apex-shell |
-| §16 more extension points (launcher provider, quick-settings tile) | `p1/plugin-points` | apex-shell |
-| §10 GUI blueprint editor (7.4) | `p1/blueprint-editor` | apex-shell |
-| §10 `apex blueprint set`, the write verb the editor needs | `p1/blueprint-write` | apex-os |
-| shell completions for every P1 verb | `p1/completions` | apex-os |
-| §12 controller-first gaming + per-game profiles (8.4) | `p1/gaming-profiles` | apex-os |
-| §8 GUI export, §10 `[development] languages` convergence, §16 `apex plugin` CLI | `p1/deferred-items` | apex-os |
+| finish 5.2 (screen shader, night light, SystemStats) + the two open review items | `p1/finish-5.2` | rime-shell |
+| §16 more extension points (launcher provider, quick-settings tile) | `p1/plugin-points` | rime-shell |
+| §10 GUI blueprint editor (7.4) | `p1/blueprint-editor` | rime-shell |
+| §10 `rime blueprint set`, the write verb the editor needs | `p1/blueprint-write` | rime-os |
+| shell completions for every P1 verb | `p1/completions` | rime-os |
+| §12 controller-first gaming + per-game profiles (8.4) | `p1/gaming-profiles` | rime-os |
+| §8 GUI export, §10 `[development] languages` convergence, §16 `rime plugin` CLI | `p1/deferred-items` | rime-os |
 
-The two apex-os branches are off `p1/integration`, so they already contain all
+The two rime-os branches are off `p1/integration`, so they already contain all
 four phases, which is what unblocks two of them: 8.4 needed phase 7's schema
 for per-game profile storage, and the languages convergence needed phase 6's
 capsules.
@@ -640,15 +640,15 @@ unpushed, in either repo, verified by sweeping every worktree.
 
 | Work | Where | State |
 |------|-------|-------|
-| Phase 5 §17 compositor adapter | apex-shell, **merged to main** as `30d1801` | done |
-| Phase 5 §16 plugin platform | apex-shell **#9** (rebased onto main) | done |
-| Phase 5.3 OS side | apex-os **#25** | done |
-| Phase 6 capsules + resolver | apex-os **#29** | done |
-| Phase 7 blueprint + sync | apex-os **#28** | done |
-| Phase 8 modes + workloads | apex-os **#27** | done |
-| MT7925 wifi resume fix | apex-os **#26** | done |
+| Phase 5 §17 compositor adapter | rime-shell, **merged to main** as `30d1801` | done |
+| Phase 5 §16 plugin platform | rime-shell **#9** (rebased onto main) | done |
+| Phase 5.3 OS side | rime-os **#25** | done |
+| Phase 6 capsules + resolver | rime-os **#29** | done |
+| Phase 7 blueprint + sync | rime-os **#28** | done |
+| Phase 8 modes + workloads | rime-os **#27** | done |
+| MT7925 wifi resume fix | rime-os **#26** | done |
 
-**Nothing is merged to `apex-os/main`, so no image has been built.**
+**Nothing is merged to `rime-os/main`, so no image has been built.**
 
 **Integration is done: `p1/integration`, PR #30.** That is the branch to merge
 when the final build is wanted: it lands all four phases and produces exactly
@@ -666,8 +666,8 @@ Verified on the merged tree: builds, 246 Rust tests, shell suites 35 / 154 / 88
 Two integration lessons worth keeping:
 
 - **`test-labwc-keybinds.sh` failed three assertions for a reason unrelated to
-  the code.** Its shell-tree discovery tries `$ROOT/../apex-shell` and otherwise
-  falls back to the installed `/usr/share/apex-shell`, and in a git worktree it
+  the code.** Its shell-tree discovery tries `$ROOT/../rime-shell` and otherwise
+  falls back to the installed `/usr/share/rime-shell`, and in a git worktree it
   always takes the fallback, where the installed shell is whatever the last
   image shipped. It was silent about that, so staleness read as regression. It
   now prints which tree it picked and warns when that tree is the installed one.
@@ -696,7 +696,7 @@ commits intact.
 
 In the failing builds `/etc/system-release` existed and was readable but still
 said `Fedora release 43`, while `/usr/lib/fedora-release`, written in the same
-layer, said `APEX-OS release 43`. That is a flattened symlink: content snapshotted
+layer, said `Rime OS release 43`. That is a flattened symlink: content snapshotted
 at copy-up, no longer tracking its target.
 
 **What moved.** GitHub's `ubuntu-24.04` runner image `20260810.271` (2026-08-11)
@@ -732,7 +732,7 @@ Nothing was pushed for it; the work was live probing on the Katana. The one
 finding worth keeping, from the agent's last report:
 
 > The branding layer itself is correct on Katana (probe 029 =
-> `APEX-OS release 43`). The question is now whether the committed image keeps
+> `Rime OS release 43`). The question is now whether the committed image keeps
 > it.
 
 The debranding step therefore *works*; the suspicion has moved to a later layer
@@ -755,39 +755,39 @@ The state of each branch:
 
 | Branch | State |
 |--------|-------|
-| `p1/compositor-adapter` (apex-shell #8) | **MERGED to apex-shell/main** as `30d1801` |
-| `p1/compositor-and-plugins` (apex-os #25) | **done**: 5.3 OS side, CI green |
-| `fix/mt7925-resume` (apex-os #26) | **done**: wifi fix, applied live and verified |
-| `p1/plugin-platform` (apex-shell) | substantial: manifest, permissions, loader, crash isolation, bar-widget point, example plugin. Not finished, no PR yet |
+| `p1/compositor-adapter` (rime-shell #8) | **MERGED to rime-shell/main** as `30d1801` |
+| `p1/compositor-and-plugins` (rime-os #25) | **done**: 5.3 OS side, CI green |
+| `fix/mt7925-resume` (rime-os #26) | **done**: wifi fix, applied live and verified |
+| `p1/plugin-platform` (rime-shell) | substantial: manifest, permissions, loader, crash isolation, bar-widget point, example plugin. Not finished, no PR yet |
 | `p1/modes-and-workloads` | mode catalogue, workload signals, perf readers, then a `wip` commit: `cargo check` clean, verbs not all wired, nothing tested |
 | `p1/capsules-and-packages` | capsules + project binding landed, then a `wip` checkpoint. **The claim recorded here that it "does not parse" was WRONG**; see the correction below |
-| `p1/blueprint-and-sync` | schema, pure planner, `show`/`diff`/`init`. Clean tree. `apex sync` not started |
+| `p1/blueprint-and-sync` | schema, pure planner, `show`/`diff`/`init`. Clean tree. `rime sync` not started |
 
 ### Katana build of `p1/compositor-and-plugins`: PASSED, 96/96
 
 CI never builds the base image, so this is the only place a broken
 `Containerfile.base` shows up before the final build. It builds cleanly:
-`localhost/apex-os-base:p1-validate`, ~49 min, no failures. Every step this
+`localhost/rime-os-base:p1-validate`, ~49 min, no failures. Every step this
 branch touched passed: 61 (the generator COPYs and the verification block),
 72 (the Hyprland verify-config block), and 81, the one that mattered:
 
-    apex-labwc-keybinds: 48 defaults, 4 without a labwc equivalent
-    PASS  /usr/share/apex/labwc/rc.xml matches what the shell's defaults generate
+    rime-labwc-keybinds: 48 defaults, 4 without a labwc equivalent
+    PASS  /usr/share/rime/labwc/rc.xml matches what the shell's defaults generate
 
 In-image: the helper is present and executable, `print` emits 44 `<keybind>`
 elements (48 − 4 unmappable, consistent), and the seeded `rc.xml` carries a
 134-line marked region matching the generated block exactly.
 
 **The result has a shelf life.** The verified claim is that the coupling holds
-*at apex-shell `main` = `44b1fb4`*. Any commit to apex-shell `main` that touches
-`_defaults` in `KeybindService.qml` invalidates it without touching apex-os at
+*at rime-shell `main` = `44b1fb4`*. Any commit to rime-shell `main` that touches
+`_defaults` in `KeybindService.qml` invalidates it without touching rime-os at
 all. That is the merge-order rule doing its job, not a fragile test.
 
 It is trustworthy rather than lucky because the staleness question was checked:
-59 of 96 steps came from cache, so the apex-shell clone layer could have been
+59 of 96 steps came from cache, so the rime-shell clone layer could have been
 testing an old shell. It was not: the cached commit equals current
 `origin/main` HEAD, confirmed by `git ls-remote` before the build and by
-`.apex-shell-commit` inside the finished image.
+`.rime-shell-commit` inside the finished image.
 
 A 47K build log is left at `/var/home/andre/build/p1-validate.log` on the
 Katana. Everything else was cleaned up; `:latest` was never touched.
@@ -804,10 +804,10 @@ cross-branch commit pollution on three of them.
 
 | Work | Branch | Repo |
 |------|--------|------|
-| 5.4 plugin platform | `p1/plugin-platform` | apex-shell |
-| 6 capsules + resolver | `p1/capsules-and-packages` | apex-os |
-| 7 blueprint + sync | `p1/blueprint-and-sync` | apex-os |
-| 8 modes + workloads | `p1/modes-and-workloads` | apex-os |
+| 5.4 plugin platform | `p1/plugin-platform` | rime-shell |
+| 6 capsules + resolver | `p1/capsules-and-packages` | rime-os |
+| 7 blueprint + sync | `p1/blueprint-and-sync` | rime-os |
+| 8 modes + workloads | `p1/modes-and-workloads` | rime-os |
 
 Three more are running alongside them, independent of P1 and of each other:
 
@@ -817,26 +817,26 @@ Three more are running alongside them, independent of P1 and of each other:
 | adversarial review of the landed 5.1-5.3 work | read-only, no branch |
 | Katana build of `p1/compositor-and-plugins` (CI never builds the base image, so a broken `Containerfile.base` is invisible on a PR) | read-only, no branch |
 
-The three apex-os branches all add subcommands to `apexd/apex/src/main.rs`, so
+The three rime-os branches all add subcommands to `rimed/rime/src/main.rs`, so
 that file is the expected merge conflict at integration. Each branch is
 independently complete and independently tested; integration is a separate step
 and belongs to whoever picks this up.
 
 ## Phase 6: capsules + universal package resolver, DONE
 
-apex-os **PR #29**, branch `p1/capsules-and-packages`. All CI green.
+rime-os **PR #29**, branch `p1/capsules-and-packages`. All CI green.
 154 + 88 shell assertions, 8 Rust integration tests, 78 CLI unit tests.
 
-- [x] **6.1** `apex env create|list|info|enter|exec|install|rm|images`:
+- [x] **6.1** `rime env create|list|info|enter|exec|install|rm|images`:
       rootless podman via distrobox. Each record holds the image, **the digest
       its tag resolved to at create time**, and the device profile.
-- [x] **6.2** `Project.capsule` + `apex project env`, surfaced in `project info`
+- [x] **6.2** `Project.capsule` + `rime project env`, surfaced in `project info`
       and `list --json`.
-- [x] **6.3** Resolver built *into* `apex-pkg` rather than beside it:
-      `apex resolve`, `apex install --source rpm|flatpak|capsule [--env NAME]`,
-      `apex search` across repos and Flathub, provenance on every install.
-- [x] GUI export via `distrobox-export`: apex-os **PR #34**, now fully green.
-      `apex env export / unexport / exports`. `distrobox-export` only runs
+- [x] **6.3** Resolver built *into* `rime-pkg` rather than beside it:
+      `rime resolve`, `rime install --source rpm|flatpak|capsule [--env NAME]`,
+      `rime search` across repos and Flathub, provenance on every install.
+- [x] GUI export via `distrobox-export`: rime-os **PR #34**, now fully green.
+      `rime env export / unexport / exports`. `distrobox-export` only runs
       *inside* a container and reaches back through `/run/host`, so there is no
       host-side program to call: the host side is
       `distrobox enter --no-tty <capsule> -- distrobox-export --app <name>`.
@@ -856,12 +856,12 @@ apex-os **PR #29**, branch `p1/capsules-and-packages`. All CI green.
       and the ShellCheck gate below it; and the suite assumed `/usr/bin/node`,
       which would have produced ~50 spurious failures on the runner.
 - [x] GUI export via `distrobox-export`: **done** on `p1/deferred-items`.
-      `apex env export / unexport / exports`. See "The three deferred P1 items"
+      `rime env export / unexport / exports`. See "The three deferred P1 items"
       at the top of this file for what a real desktop would still be needed to
       check.
 - [x] **6.4** Tests.
 
-`apex install <bare-name>` behaves exactly as before: an exact-name RPM still
+`rime install <bare-name>` behaves exactly as before: an exact-name RPM still
 wins, and only a one-entry curated table re-routes, saying why and staying
 overridable. `cuda`/`rocm` are **device profiles on Ubuntu LTS**, not the 5-20 GB
 vendor images.
@@ -877,19 +877,19 @@ state are written down here:
 
 | | file | who writes it |
 |---|---|---|
-| **desired** | `~/.config/apex/blueprint.toml` | a person (and, one day, the GUI) |
+| **desired** | `~/.config/rime/blueprint.toml` | a person (and, one day, the GUI) |
 | **observed** | nothing: probed live on every `diff` | nobody |
-| **applied** | `~/.local/state/apex/blueprint-state.toml` | `apex apply`, generated |
+| **applied** | `~/.local/state/rime/blueprint-state.toml` | `rime apply`, generated |
 
 Collapsing observed into a cached file is the trap: `diff` would then agree with
 `apply` by construction instead of by measurement, and a step that silently did
 nothing would report as converged forever.
 
-- [x] **7.1** Blueprint schema and `apex blueprint show/diff/init`.
-      `apexd-core/src/blueprint.rs` is the §10 shape with
+- [x] **7.1** Blueprint schema and `rime blueprint show/diff/init`.
+      `rimed-core/src/blueprint.rs` is the §10 shape with
       `deny_unknown_fields` throughout, closed vocabularies, hostile-input
       checks on app names and bundle project paths, and the pure
-      `plan(desired, observed)`. `apex/src/blueprint.rs` is the other half:
+      `plan(desired, observed)`. `rime/src/blueprint.rs` is the other half:
       path resolution, the `Host` probes, and the renderers. 24 + 13 tests.
       Two things worth knowing:
       - `Host` takes a fixture `root` **and** a separate `probe_programs`
@@ -901,7 +901,7 @@ nothing would report as converged forever.
         `state.json`. `state.json` records the resolved transaction including
         every dependency, so diffing against it reports convergence based on
         packages nobody asked for.
-- [x] **7.2** `apex apply` convergence, idempotent with a real dry run.
+- [x] **7.2** `rime apply` convergence, idempotent with a real dry run.
       Idempotency is a property, not a code path: the plan is recomputed from a
       fresh measurement every run, so "twice changes nothing" *is* "observed ==
       desired plans an empty list". The dry run is real for the same reason:
@@ -913,19 +913,19 @@ nothing would report as converged forever.
          after `RealWriter::for_daemon`. CI has a static check with the same
          three parts as the existing host-command one, including "the real
          caller must still use it".
-      2. `APEX_BLUEPRINT_NO_APPLY` refuses, after `APEX_DISPLAY_NO_LIVE`. It
+      2. `RIME_BLUEPRINT_NO_APPLY` refuses, after `RIME_DISPLAY_NO_LIVE`. It
          blocks only the *live* path, unlike the display guard. That is
          deliberate, and it lets CI export it for a whole job as a blanket net
          while every dry-run assertion still runs.
       3. **`apply` never runs `sudo`.** It converges the privilege domain it is
          already in and reports the other. That is the structural answer to
          "never cause a polkit prompt", and it also removes the silent bug
-         where `sudo apex apply` writes user config into `/root` or leaves
+         where `sudo rime apply` writes user config into `/root` or leaves
          root-owned files in `~/.config`.
       After converging, `apply` **re-measures** and reports residual drift, per
-      `apexd/AGENTS.md`: a command that reports success must verify the
+      `rimed/AGENTS.md`: a command that reports success must verify the
       requested state, and a step can exit 0 having changed nothing.
-- [x] **7.3** `apex sync export` / `show` / `import`. One bundle file carries
+- [x] **7.3** `rime sync export` / `show` / `import`. One bundle file carries
       the blueprint, which projects exist and where they came from, and no
       credentials of any kind, because this is a file people put in a git
       repository. Three deliberate refusals:
@@ -941,12 +941,12 @@ nothing would report as converged forever.
       uses; otherwise a bad bundle only fails on the *other* machine, hours
       later, with no way to tell which end was wrong.
 - [ ] **7.4** GUI editing in the shell. **Deferred out of this phase**: it is
-      §10's last bullet, and it is apex-shell work, not apex-os work. The schema
+      §10's last bullet, and it is rime-shell work, not rime-os work. The schema
       round-trips through TOML losslessly so the editor has something to write.
-- [x] **7.5** Tests. `tests/test-apex-blueprint.sh` (105 assertions against
-      the compiled binary), plus 27 planner unit tests in `apexd-core` and 16
-      in the `apex` crate, and two static CI checks.
-      The suite runs a **live** `apex apply`, deliberately. "The dry run prints
+- [x] **7.5** Tests. `tests/test-rime-blueprint.sh` (105 assertions against
+      the compiled binary), plus 27 planner unit tests in `rimed-core` and 16
+      in the `rime` crate, and two static CI checks.
+      The suite runs a **live** `rime apply`, deliberately. "The dry run prints
       the same steps" is only meaningful if it is compared against what a real
       run does; two identical printouts from the same unused code path prove
       nothing. It is safe because `apply` never escalates, so as an ordinary
@@ -959,7 +959,7 @@ nothing would report as converged forever.
       HOME/XDG_CONFIG_HOME/XDG_STATE_HOME per invocation; the domain split;
       and the environment guard.
       Also asserted: that the blueprint classifies app names **identically to
-      the shipped `apex-pkg`**, by sourcing the engine and calling its own
+      the shipped `rime-pkg`**, by sourcing the engine and calling its own
       `is_flatpak_id`. The planner has to classify independently, because it
       compares against different sources, but classifying *differently* would
       report an app missing forever while the engine kept installing it.
@@ -977,17 +977,17 @@ Two scope decisions made up front, both because the alternative was invention:
   and tuning. No command turns Daily into Gaming, and installing a gaming
   package set onto Daily is the edition leakage the root `AGENTS.md` forbids.
 - **`[development] languages` is validated and diffed, not converged.**
-  Toolchains belong to phase 6's `apex env` capsules, which are being built on a
+  Toolchains belong to phase 6's `rime env` capsules, which are being built on a
   parallel branch right now; a language→package table here would be a second,
   conflicting answer to the same question. Validating today is still worth it:
   someone who writes `typscript` finds out today.
   **Superseded:** both branches are merged, and it converges through a capsule
-  on `p1/deferred-items`. The table still lives only in `apex-env`, so the
+  on `p1/deferred-items`. The table still lives only in `rime-env`, so the
   reason for the deferral is honoured rather than worked around.
 
 During the pause I recorded that the phase 6 checkpoint "does not parse", quoted
 a bash line, and amended a commit message to say so. **That was wrong.** I ran
-`python3 -m ast` over `files/system/libexec/apex-pkg`, which is
+`python3 -m ast` over `files/system/libexec/rime-pkg`, which is
 `#!/usr/bin/env bash`. `bash -n` accepts it. CI picks its syntax checker **by
 shebang**, a rule explained in a comment in `pr-validation.yml` that I had
 written myself a few hours earlier.
@@ -999,21 +999,21 @@ useful lesson than the line number.
 
 ## Phase 7: blueprint + sync, DONE
 
-apex-os **PR #28**, branch `p1/blueprint-and-sync`. 105 shell assertions against
+rime-os **PR #28**, branch `p1/blueprint-and-sync`. 105 shell assertions against
 the compiled binary, 43 Rust unit tests, two static CI checks.
 
-- [x] **7.1** Schema + a **pure** planner in `apexd-core/src/blueprint.rs`.
+- [x] **7.1** Schema + a **pure** planner in `rimed-core/src/blueprint.rs`.
       `plan(desired, observed)` does no I/O, so the dry run and the live apply
       are the *same computation*, which is the only way a dry run is real
       rather than a plan the apply then ignores.
-- [x] **7.2** `apex apply`, idempotent by construction (replanned from a fresh
+- [x] **7.2** `rime apply`, idempotent by construction (replanned from a fresh
       measurement each run) and re-measuring afterwards to report residual drift.
-- [x] **7.3** `apex sync export / show / import`. Import converges nothing and
+- [x] **7.3** `rime sync export / show / import`. Import converges nothing and
       will not clobber an existing blueprint without `--force`.
-- [x] **7.4** GUI editing: apex-shell **PR #10**, branch `p1/blueprint-editor`.
+- [x] **7.4** GUI editing: rime-shell **PR #10**, branch `p1/blueprint-editor`.
       CI green, and the job log confirms the suites *executed* rather than
       skipping (75 assertions on CI, 80 locally; the 5-assertion gap is a
-      vocabulary-parity block needing apex-os checked out beside the shell, and
+      vocabulary-parity block needing rime-os checked out beside the shell, and
       it is deliberately **not** a skip: the Node suite asserts the vocabularies
       regardless).
 
@@ -1044,14 +1044,14 @@ the compiled binary, 43 Rust unit tests, two static CI checks.
 
       **Not verified: the QML page has never been rendered.** It is `qmllint`
       clean and statically checked, but the round trip is proven at the JSON/CLI
-      boundary, not through the GUI. It stays inert until apex-os
+      boundary, not through the GUI. It stays inert until rime-os
       `p1/blueprint-write` merges.
 - [x] **7.5** Tests.
 
 **`apply` never runs `sudo`.** It converges the privilege domain it is already
 in and reports the other. That is the structural answer to "never cause a polkit
 prompt" (there is no escalation path to prompt from), and it also kills the
-silent `sudo apex apply` bug that writes user config into `/root`.
+silent `sudo rime apply` bug that writes user config into `/root`.
 
 Three sections are deliberately observed-but-not-converged: `[gaming] enabled`
 (gaming provisioning is an image; a gaming package set on Daily is the edition
@@ -1062,47 +1062,47 @@ removing applications (`apply` is additive).
 **`[development] languages` is no longer one of them**: it converges through a
 capsule on `p1/deferred-items`. `[gaming] enabled` and removing applications
 still are, and both for reasons that do not expire. `Plan::is_converged()`
-therefore now returns false for a missing language, so `apex blueprint diff`
+therefore now returns false for a missing language, so `rime blueprint diff`
 exits 1 where it used to exit 0.
 
-**Untested:** every run was non-root, so `sudo apex apply` driving the package
+**Untested:** every run was non-root, so `sudo rime apply` driving the package
 engine for real has only been exercised as a refusal.
 
 ## Phase 8: modes + gaming + workload manager, DONE
 
-apex-os **PR #27**, branch `p1/modes-and-workloads`. All CI green. 66 Rust
-assertions + 67 in `tests/test-apex-modes.sh` against the built binary.
+rime-os **PR #27**, branch `p1/modes-and-workloads`. All CI green. 66 Rust
+assertions + 67 in `tests/test-rime-modes.sh` against the built binary.
 
-- [x] **8.1** `apex mode`: eight modes composing levers that already ship
-      (tier, apexd's AC/battery auto-switch, game mode). **No new D-Bus
-      member.** The active mode is *derived* from what apexd reports rather than
+- [x] **8.1** `rime mode`: eight modes composing levers that already ship
+      (tier, rimed's AC/battery auto-switch, game mode). **No new D-Bus
+      member.** The active mode is *derived* from what rimed reports rather than
       stored, so `set` needs no root and the answer cannot go stale. `status`
       reports every exactly-matching mode, because development/creator/server
       are indistinguishable from observable state.
-- [x] **8.2** `apex workload`: every signal is measured *with its path* or
+- [x] **8.2** `rime workload`: every signal is measured *with its path* or
       unavailable *with a reason*; there is no third state. Process names never
       decide alone: uncorroborated by PSI or load, the verdict is `unknown`.
       That is the roadmap's "do not market random tuning as AI optimization"
       taken literally.
-- [x] **8.3** `apex perf`: clocks, power, temps, VRAM, sched-ext state. Frame
+- [x] **8.3** `rime perf`: clocks, power, temps, VRAM, sched-ext state. Frame
       time is reported unavailable *with the reason* rather than substituted.
-- [x] **8.4** Controller-first / per-game profiles: apex-os **PR #33**, all
+- [x] **8.4** Controller-first / per-game profiles: rime-os **PR #33**, all
       checks green.
 
-      **Storage: `~/.config/apex/games.toml`, a separate user-owned file, not a
+      **Storage: `~/.config/rime/games.toml`, a separate user-owned file, not a
       blueprint section.** The deciding argument is the blueprint's own stated
-      contract ("the only file a person or a future GUI edits… nothing in APEX
-      ever rewrites it behind the user's back"), and `apex game profile set` is
+      contract ("the only file a person or a future GUI edits… nothing in Rime
+      ever rewrites it behind the user's back"), and `rime game profile set` is
       a program that writes. It is still *desired* state on the test that
       matters: only an explicit user command causes a write, never a reconcile
-      or a probe, and nothing reads it back as a measurement. `apex sync`
+      or a probe, and nothing reads it back as a measurement. `rime sync`
       deliberately does not carry it.
 
       **A latent bug in 8.1 that 8.4 does not inherit.** Read out of
       `game_enter` rather than assumed: the daemon applies the *sysprofile's*
       `[game] tier` and `fan_mode` **after** `GameMode.SetActive`, so a
       per-title tier must be re-asserted afterwards and the fan step must be
-      last. `apex mode set gaming` has the same exposure and is invisible only
+      last. `rime mode set gaming` has the same exposure and is invisible only
       because every shipped sysprofile uses `performance` for both. It was left
       alone on purpose, because it is 8.1's code, but it is real and it is
       written down.
@@ -1113,7 +1113,7 @@ assertions + 67 in `tests/test-apex-modes.sh` against the built binary.
 
       Controller-first was already built, so it was not rebuilt. The missing
       piece: nothing could answer "will Gaming Mode start here?" without
-      rebooting into it. `apex gaming` measures what the session checks and
+      rebooting into it. `rime gaming` measures what the session checks and
       separates blockers from warnings using the session's own list.
 
       **The mutation pass found a real bug in its own suite:** seven hostile-id
@@ -1131,13 +1131,13 @@ assertions + 67 in `tests/test-apex-modes.sh` against the built binary.
       starts is worse than none. Nothing restores on exit, and `show` says so.
       Nothing ran against a real controller or a real Steam, and `apply` against
       a live daemon is exercised only as a refusal. A gamepad still cannot pick
-      the session at the greeter, which is apex-shell work.
+      the session at the greeter, which is rime-shell work.
 - [x] **8.4** Controller-first / per-game profiles: **DONE**, on branch
       `p1/gaming-profiles`, off `p1/integration`. Phase 7 landing unblocked it:
       the schema decision it was waiting on is recorded below.
 - [x] **8.5** Tests.
 
-**A real bug, found by running it rather than reading it:** `apex perf` printed
+**A real bug, found by running it rather than reading it:** `rime perf` printed
 `package: 20.47 W` above `battery: 20.47 W`: the same sensor twice, because the
 reader took the first hwmon exposing `power1_*` and on this ThinkPad that is
 `hwmon4`, owned by `BAT0`. Both numbers were real; the label was invented.
@@ -1151,31 +1151,31 @@ the tripwire was armed, so the trap cannot itself pass vacuously. Verified
 independently afterwards: **zero** polkit or keyring prompt events in the whole
 session, no scx scheduler running, Hyprland gaps still the user's 5/10.
 
-**Not verified:** a real `apex mode set` against a live daemon. The plan → state
+**Not verified:** a real `rime mode set` against a live daemon. The plan → state
 mapping is proven by a property test over all 48 start-state/mode combinations,
 not by a live switch. GPU clocks and VRAM on NVIDIA and i915/xe are fixtures
 only; the amdgpu path is the one exercised for real.
-**8.1, 8.2, 8.3 and 8.5 are done; 8.4 is deliberately not.** `apex mode` was
-free as a top-level verb; the existing `Mode` is `apex fan mode`.
+**8.1, 8.2, 8.3 and 8.5 are done; 8.4 is deliberately not.** `rime mode` was
+free as a top-level verb; the existing `Mode` is `rime fan mode`.
 
-- [x] **8.1** `apex mode list/show/set/status`. Eight modes composing tier,
-      apexd's AC/battery auto-switch and game mode. No new D-Bus member, no
+- [x] **8.1** `rime mode list/show/set/status`. Eight modes composing tier,
+      rimed's AC/battery auto-switch and game mode. No new D-Bus member, no
       daemon change, no state file: the active mode is **derived** from what
-      apexd reports, so it cannot go stale and `set` needs no root.
-      `apexd-core/src/mode.rs` is pure (no I/O, no writer) and carries the
+      rimed reports, so it cannot go stale and `set` needs no root.
+      `rimed-core/src/mode.rs` is pure (no I/O, no writer) and carries the
       ordering rules, 22 unit assertions.
-- [x] **8.2** `apex workload`. Signals carry provenance (`Measured` with the
+- [x] **8.2** `rime workload`. Signals carry provenance (`Measured` with the
       path, or `Unavailable` with the reason); a process name never decides
       anything without corroboration from PSI or load; the battery row of §13 is
       a constraint layered on top, and it does **not** unwind a running game
       session. 24 assertions.
-- [x] **8.3** `apex perf`: CPU/GPU clocks, power, temperatures, VRAM, sched-ext
+- [x] **8.3** `rime perf`: CPU/GPU clocks, power, temperatures, VRAM, sched-ext
       state, game cpuset. **Frame time is reported as unavailable with the
       reason** and nothing is substituted for it. 20 assertions.
 - [x] **8.4** Controller-first boot-to-game and per-game profiles. **DONE**;
       see "Phase 8.4" below for the storage decision, the two ordering rules,
       and what is left undone on purpose.
-- [x] **8.5** `tests/test-apex-modes.sh`: 58 assertions against the built
+- [x] **8.5** `tests/test-rime-modes.sh`: 58 assertions against the built
       binary, wired into the **`rust`** job (the only one with a toolchain).
       `tests/` was added to that job's path selector: a PR touching only the
       suite set `engine=true`/`rust=false`, so it would never have run, and
@@ -1185,7 +1185,7 @@ free as a top-level verb; the existing `Mode` is `apex fan mode`.
 
 Branch `p1/gaming-profiles`, off `p1/integration` (the only base with all four
 P1 phases built and tested together). 36 + 39 Rust assertions, 113 in
-`tests/test-apex-gaming.sh`, and a four-part static CI check. The check is
+`tests/test-rime-gaming.sh`, and a four-part static CI check. The check is
 verified to sit in the `static` job, which is ungated and therefore always
 runs, and not only to be *correct* (a step in the wrong job, or a workflow that
 stops parsing, surfaces on GitHub as a missing check rather than a red one).
@@ -1194,15 +1194,15 @@ mutation pass found the real bug.
 
 ### The storage decision, and why it is not the blueprint
 
-Per-game profiles live in **`~/.config/apex/games.toml`**, beside the blueprint
+Per-game profiles live in **`~/.config/rime/games.toml`**, beside the blueprint
 and not inside it. The deciding argument is the blueprint's own stated
-contract, quoted from `apexd-core/src/blueprint.rs`:
+contract, quoted from `rimed-core/src/blueprint.rs`:
 
 > **Desired** — `Blueprint`. Hand-written, user-owned, the only file a person
-> or a future GUI edits […] Nothing in APEX ever rewrites it behind the user's
+> or a future GUI edits […] Nothing in Rime ever rewrites it behind the user's
 > back.
 
-`apex game profile set` is a program that writes. Putting a program-written
+`rime game profile set` is a program that writes. Putting a program-written
 table inside the one file whose contract is that no program writes it breaks
 that contract directly, and does so for every user who runs the convenience
 verb rather than hand-editing TOML, which is most of them.
@@ -1216,10 +1216,10 @@ a third kind of section. §10 already pays for two.
 **It is still desired state, not generated state**, on the test that matters:
 what causes a write. Only an explicit user command writes it, never a
 reconcile, a timer or a probe, and nothing reads it back as a measurement
-(applying re-reads the machine over D-Bus, as `apex mode set` does). It
+(applying re-reads the machine over D-Bus, as `rime mode set` does). It
 therefore keeps `deny_unknown_fields` and stays hand-editable.
 
-`apex sync` does **not** carry it, and that is a decision rather than an
+`rime sync` does **not** carry it, and that is a decision rather than an
 oversight: it would need the no-credentials assertion extended to plant a
 sentinel in a profile and prove it does not travel. The requirement was that
 the storage round-trip losslessly, which it does; sync is a separate question.
@@ -1228,14 +1228,14 @@ the storage round-trip losslessly, which it does; sync is a separate question.
 
 Three settings are executable, all behind `manage-power`, which ships
 `allow_active = yes`. That was verified against
-`files/system/polkit-1/actions/org.apexos.apexd.policy` and the daemon's
+`files/system/polkit-1/actions/org.rimeos.rimed.policy` and the daemon's
 `authorize(..., ACTION_POWER)` calls **before** any step was emitted, because a
 per-game lever behind an `auth_admin` action would be a password prompt in the
 area that has burned this repository twice:
 
 - `mode`: a §11 mode, itself tier + auto-switch + game mode;
 - `tier`: an override of that mode's tier, for one title;
-- `fan`: `Fan.SetMode`, the one lever `apex mode` models and never touched.
+- `fan`: `Fan.SetMode`, the one lever `rime mode` models and never touched.
 
 **A per-game `scheduler` or `gpu` is refused, not accepted and ignored.** Both
 already exist: the *sysprofile*'s `[game]` section chooses both, and the daemon
@@ -1249,7 +1249,7 @@ granularity: `mode = "gaming"` is what turns them on.
 
 ### Two ordering rules, from reading the daemon rather than guessing
 
-`apexd/src/game.rs::game_enter` applies the **sysprofile's** `[game] tier` and
+`rimed/src/game.rs::game_enter` applies the **sysprofile's** `[game] tier` and
 `[game] fan_mode` *after* entering game mode, which has two consequences:
 
 1. **A pinned tier is set again after `GameMode.SetActive`.** Without it, a
@@ -1259,21 +1259,21 @@ granularity: `mode = "gaming"` is what turns them on.
 2. **The fan step is last of all**, for the same reason one lever along.
 
 **This is a latent bug in 8.1 that 8.4 did not inherit.**
-`apex mode set gaming` sets the tier and then enters game mode, so `game_enter`
+`rime mode set gaming` sets the tier and then enters game mode, so `game_enter`
 overwrites it with `cfg.tier`. It is invisible today only because every shipped
 sysprofile uses `performance` for both. `mode::plan` was deliberately left
 alone, because changing phase 8's frozen semantics on this branch is scope
-creep, but whoever touches `apex mode` next should fix it there.
+creep, but whoever touches `rime mode` next should fix it there.
 
-### `apex gaming`: what was missing
+### `rime gaming`: what was missing
 
 §12's Desktop/Gaming split is **already built** and was not rebuilt:
-`apex-gaming.desktop`, `apex-gaming-session` (gamescope straight to KMS, Steam
-`-gamepadui`, fail-safe bounce to the greeter) and `apex-session-select` with
+`rime-gaming.desktop`, `rime-gaming-session` (gamescope straight to KMS, Steam
+`-gamepadui`, fail-safe bounce to the greeter) and `rime-session-select` with
 its NOPASSWD rule. Nothing could answer *"will Gaming Mode start here?"* before
 rebooting into it: the session's only preflight is a `FATAL` at start-up that
 bounces to the greeter and guesses at the cause in a log nobody sees.
-`apex gaming` measures every requirement the session checks, with the path
+`rime gaming` measures every requirement the session checks, with the path
 measured or a reason it could not be, and separates blockers from warnings
 using the session's own hard-requirement list so it cannot report "ready" about
 a session that would then FATAL.
@@ -1294,25 +1294,25 @@ length, which is wrong for any 64-bit device whose top word is small; the
 ### Left undone, deliberately
 
 - **No launch wrapper.** The honest equivalent of SteamOS's per-game
-  application is `apex game launch -- %command%`: resolve the AppID from
+  application is `rime game launch -- %command%`: resolve the AppID from
   Steam's environment, apply, spawn, restore on exit. It needs a real Steam
   install, a real title and real launch options to verify, none of which this
   machine has, and an unverified exec path in the position where *every* game
   starts is worse than none: its failure mode is "the game does not launch"
-  and the user cannot tell whether APEX or Proton broke it. The shipped verb is
-  `apex game profile launch-command`, which prints
-  `apex game profile apply <id> && %command%`, built only from verbs that
+  and the user cannot tell whether Rime or Proton broke it. The shipped verb is
+  `rime game profile launch-command`, which prints
+  `rime game profile apply <id> && %command%`, built only from verbs that
   exist. `show` states that applying does not undo itself.
-- **Nothing restores on exit**, following from the above. `apex mode set daily`
-  or `apex game stop` is the explicit leave step. `apex-gaming-session` has the
+- **Nothing restores on exit**, following from the above. `rime mode set daily`
+  or `rime game stop` is the explicit leave step. `rime-gaming-session` has the
   same exposure and accepts it with a trap.
 - **Not verified on hardware:** a real controller, a real Steam install, and
   `apply` against a live daemon. Every `apply` in the suite runs against a
   redirected D-Bus address, so the executed path is proven only as a refusal;
   the plan → step mapping is proven by unit tests over all 48
   start-state/mode combinations.
-- **A gamepad cannot pick the session at the greeter.** That is apex-shell's
-  greeter UI, not apex-os, so "controller-first" is true of the session and not
+- **A gamepad cannot pick the session at the greeter.** That is rime-shell's
+  greeter UI, not rime-os, so "controller-first" is true of the session and not
   yet of the login screen.
 
 ### The mutation pass, and the bug it found
@@ -1351,16 +1351,16 @@ self-tests prove that log still records.
 
 - **No timer, no daemon loop, no background auto-apply.** §13 permits automatic
   policy "where safe" but is emphatic that automatic choices must be visible and
-  overrideable. `apex workload` reports and `apex mode set --auto` applies once,
+  overrideable. `rime workload` reports and `rime mode set --auto` applies once,
   explicitly. A shipped-but-disabled unit was considered and rejected: the root
   `AGENTS.md` treats aspirational-language-as-implemented as a defect, and this
   is the phase that has already burned the developer twice.
 - **Service sets and system extensions are reported, not executed.** They are
-  modelled so `apex mode show` can state the full intent. Merging a sysext on a
+  modelled so `rime mode show` can state the full intent. Merging a sysext on a
   mode switch is a heavyweight lever with its own rebuild service, and
   `Containerfile.gaming` already masks `irqbalance` permanently, so a mode
   toggling it would fight the image.
-- **`docs/apexd-dbus.md` is untouched**, because this phase adds no D-Bus
+- **`docs/rimed-dbus.md` is untouched**, because this phase adds no D-Bus
   member. For whoever picks it up: that file is stale on a separate point, still
   listing five tier IDs including `ultra-max`/`ultra`, which `tier.rs` removed.
 
@@ -1370,21 +1370,21 @@ This is worth recording because it is the first time the mechanism fired. PR
 #27's **`Package engine`** job was red on two assertions in
 `tests/test-labwc-keybinds.sh`: "KeybindService invokes the generator" and "it
 checks the helper exists before spawning it". Both grep
-`src/services/config_tab/KeybindService.qml` in an **apex-shell** tree cloned
+`src/services/config_tab/KeybindService.qml` in an **rime-shell** tree cloned
 from remote `main`, and at that moment `main` had zero occurrences of
-`apex-labwc-keybinds`, because the shell half was still on the unmerged
-apex-shell PR #8.
+`rime-labwc-keybinds`, because the shell half was still on the unmerged
+rime-shell PR #8.
 
 Nothing was done about it on this side. The shell change landed while phase 8
 was in flight, `main` now has three occurrences, and the job went green on the
 next run. That is exactly what 5.3's CI comment predicted: "a shell change …
 fails here until it lands, which is the documented merge order doing its job
 rather than a broken check". If a future phase sees this suite red, check
-apex-shell `main` before looking anywhere else.
+rime-shell `main` before looking anywhere else.
 
 ### The safety rule this phase is built around
 
-`apexd-core::mode`, `::workload` and `::perf` construct **no `SysWriter` of any
+`rimed-core::mode`, `::workload` and `::perf` construct **no `SysWriter` of any
 kind**, and the shell suite puts fake `scxctl`/`nvidia-smi`/`systemctl` first on
 PATH and fails if any is called, with a negative control proving the fakes were
 in place. That is a direct response to the earlier game-mode suite, which
@@ -1397,19 +1397,19 @@ Newest last. One line per pushed commit that changes the state above.
 
 - 2026-09-03: tracker created; `p1/compositor-and-plugins` branched off
   `feat/input-display-parity`.
-- 2026-09-03: **5.1 done.** apex-shell PR #8 (`p1/compositor-adapter`): the
+- 2026-09-03: **5.1 done.** rime-shell PR #8 (`p1/compositor-adapter`): the
   `CompositorService` facade, four backends, a shared picker-script library, and
   both halves of its test coverage. niri and labwc gained output-box screenshot
   picking that nobody had wired up, and `NiriService` gained a window list off
   its existing event stream.
 - 2026-09-03: **5.2 in progress**, four pushed commits on
-  `apex-shell/p1/compositor-adapter`. The facade grew what the consumers
+  `rime-shell/p1/compositor-adapter`. The facade grew what the consumers
   needed as they moved: `focusedAppName`, a `focusMoved` signal,
   `readGaps`, `workspaceSlots`, per-entry workspace `ref`,
   `specialWorkspaceOpen`, and the tiling-layout surface. 42 live assertions,
   23 static. The whole shell loads under a nested labwc session with zero
   errors, which exercises the labwc backend for real.
-- 2026-09-03: **5.3 done.** `files/system/libexec/apex-labwc-keybinds` +
+- 2026-09-03: **5.3 done.** `files/system/libexec/rime-labwc-keybinds` +
   32 assertions in `tests/test-labwc-keybinds.sh`; the seeded `rc.xml` now
   carries a generated, marker-delimited region and 44 previously hand-written
   bindings came out of it byte-identical. Two things worth knowing: the reading
@@ -1418,11 +1418,11 @@ Newest last. One line per pushed commit that changes the state above.
   the shipped config, and 4 bindings have no labwc equivalent (scratchpad ×2,
   pseudo-tiling, split), so they are reported rather than mapped onto something
   approximate.
-- 2026-09-03: **6.1 done.** `files/system/libexec/apex-env` + `apex env` in
+- 2026-09-03: **6.1 done.** `files/system/libexec/rime-env` + `rime env` in
   the CLI + 149 assertions. Three things worth knowing. (1) `cuda` and `rocm`
   are **device profiles on an Ubuntu LTS base**, not the vendor images:
   `nvidia/cuda` and `rocm/dev-ubuntu` are 5-20 GB carrying a toolchain most
-  users replace, and §8 asks for the *access profile*, which is the part APEX
+  users replace, and §8 asks for the *access profile*, which is the part Rime
   has to get right. `--image` still takes a vendor image. (2) The `python`
   alias is fedora-toolbox plus the Python toolchain, **not**
   `docker.io/library/python`: that image has no user and is not a
@@ -1433,24 +1433,24 @@ Newest last. One line per pushed commit that changes the state above.
   suite pins the exact argv per profile, because `create` can never run for
   real in CI.
 - 2026-09-03: **6.2 done.** The binding is one optional field, and the whole
-  difficulty is one line in `remember`: it runs on every `apex agent run` and
+  difficulty is one line in `remember`: it runs on every `rime agent run` and
   every layout save with a project detected from the filesystem, and the
   filesystem does not know which capsule the user chose. A plain replace would
   have silently unbound the project the first time an agent started: the
   record would still be there and still valid. `remember` now keeps an
   existing binding when the incoming one is `None`, and
-  `apex project env --clear` writes directly instead of going back through it,
+  `rime project env --clear` writes directly instead of going back through it,
   or the merge would undo the clear. Both have their own assertion. A second
   thing found by the suite rather than by reading: `project::list` DELETES the
   record of any project whose checkout has gone, so a test using a root that
   does not exist loses its record the moment another case runs a listing.
-- 2026-09-03: **6.3 and 6.4 done.** The resolver extends `apex-pkg`; there is
+- 2026-09-03: **6.3 and 6.4 done.** The resolver extends `rime-pkg`; there is
   still exactly one package engine. The design question was what
-  `apex install <bare-name>` should do now, and the answer is **the same thing
+  `rime install <bare-name>` should do now, and the answer is **the same thing
   it did before**: that command ships, and silently re-routing a name which
   installs an RPM today would be a behaviour change on a shipped command. An
   exact-name repository package therefore still wins (it puts the command on
-  `$PATH`, its signature is checked against keys APEX already trusts, and it
+  `$PATH`, its signature is checked against keys Rime already trusts, and it
   rolls back with the extension), and the resolver's job is to SAY what it
   chose, print the alternative as a runnable command, and take `--source` when
   the user disagrees. The one thing that can move a name is a curated table,
@@ -1466,61 +1466,61 @@ Newest last. One line per pushed commit that changes the state above.
   it; it is covered by a static check over `cmd_install`, labelled as such.
 - 2026-09-03: for the record, because it cost an hour: a mid-session sweep
   committed the half-finished resolver as `wip(pkg)` and reported it as "DOES
-  NOT PARSE", having run `python3 -m ast` over `files/system/libexec/apex-pkg`.
+  NOT PARSE", having run `python3 -m ast` over `files/system/libexec/rime-pkg`.
   That file is bash. `bash -n` passes, and CI selects the syntax checker BY
-  SHEBANG: only `installer/apex-installer-gui` is fed to Python. The cited
+  SHEBANG: only `installer/rime-installer-gui` is fed to Python. The cited
   line 124 is `is_flatpak_id`, untouched upstream code. Nothing was broken. The
   commit has been squashed into the finished §9 commit, so the false claim is
   not in the branch history.
 - 2026-09-03: **do not judge these suites by a local run.** They look for an
-  apex-shell tree at `../apex-shell` and fall back to `/usr/share/apex-shell`,
+  rime-shell tree at `../rime-shell` and fall back to `/usr/share/rime-shell`,
   which is whatever the booted image shipped and therefore lags the tree under
   test. The file says so itself, and it is still easy to forget.
-  `test-apex-firstrun.sh` fails against that stale copy and passes (24/0) in
+  `test-rime-firstrun.sh` fails against that stale copy and passes (24/0) in
   CI. I then predicted, from a worktree of the local `origin/main` ref, that
   `test-labwc-keybinds.sh` would fail on two assertions; **that prediction was
   wrong**: the local ref was behind, the phase-5 shell work is on
-  `apex-shell/main`, and CI reports 32/0. PR #29 is green in full. It is
+  `rime-shell/main`, and CI reports 32/0. PR #29 is green in full. It is
   recorded because the mistake is repeatable: a stale `origin/main` in the
-  sibling apex-shell clone looks exactly like an unmerged shell branch.
+  sibling rime-shell clone looks exactly like an unmerged shell branch.
   `git fetch` there before drawing any conclusion about the merge order.
 - 2026-09-03: **Phase 7 done.** PR #28 (`p1/blueprint-and-sync`): the schema
-  and pure planner in `apexd-core/src/blueprint.rs`, the probes, converger and
-  verbs in `apex/src/blueprint.rs`, `tests/test-apex-blueprint.sh`, and two
-  static CI checks. `apex blueprint show/diff/init`, `apex apply`,
-  `apex sync export/show/import`. Rust validation and Static validation both
+  and pure planner in `rimed-core/src/blueprint.rs`, the probes, converger and
+  verbs in `rime/src/blueprint.rs`, `tests/test-rime-blueprint.sh`, and two
+  static CI checks. `rime blueprint show/diff/init`, `rime apply`,
+  `rime sync export/show/import`. Rust validation and Static validation both
   green on the first CI run.
   The `Package engine` job is red on that PR and it is **not** phase 7's: the
-  two failing assertions are phase 5.3's, checking that apex-shell's
-  `KeybindService.qml` invokes `apex-labwc-keybinds`. The suite clones
-  apex-shell from remote `main`, and that change has not landed there yet;
-  `gh api` confirms zero occurrences on `apex-shell/main`. This is the
+  two failing assertions are phase 5.3's, checking that rime-shell's
+  `KeybindService.qml` invokes `rime-labwc-keybinds`. The suite clones
+  rime-shell from remote `main`, and that change has not landed there yet;
+  `gh api` confirms zero occurrences on `rime-shell/main`. This is the
   documented merge order (shell before or with the OS) doing its job, and it
-  will clear when `p1/compositor-adapter` merges to `apex-shell/main`.
+  will clear when `p1/compositor-adapter` merges to `rime-shell/main`.
 - 2026-09-03: **Phase 8 done bar 8.4** on `p1/modes-and-workloads`:
-  `apex mode`, `apex workload`, `apex perf`, 66 new Rust assertions and a
+  `rime mode`, `rime workload`, `rime perf`, 66 new Rust assertions and a
   58-assertion shell suite. Two things worth carrying forward. First,
-  `apex perf` shipped a real bug that only running it exposed: it reported
+  `rime perf` shipped a real bug that only running it exposed: it reported
   "package: 20.47 W" and "battery: 20.47 W", the same sensor twice, because the
   package reader took the first hwmon publishing `power1_*` and on this ThinkPad
   that is `hwmon4`, owned by `BAT0`. There is now no single "package power"
   figure at all: every sensor is reported with its chip and label, and hwmon
   devices hanging off a `power_supply` are skipped. Second, the ordering rules
   in `mode::plan` are not cosmetic: game mode must be left *before* the new tier
-  is set, because `apex game stop` restores the pre-session tier and would
+  is set, because `rime game stop` restores the pre-session tier and would
   otherwise overwrite it, and auto-switch must go off *before* a tier is
   pinned, because enabling it reconciles immediately. Both are
   mutation-verified.
 - 2026-09-03: **8.4 done**, closing the last deferred P1 item, on
   `p1/gaming-profiles` off `p1/integration`. Per-game profiles in
-  `~/.config/apex/games.toml` (a separate user-owned file, because the
+  `~/.config/rime/games.toml` (a separate user-owned file, because the
   blueprint's own contract is that no program rewrites it, and `profile set` is
-  a program that writes), `apex game profile list/show/set/remove/apply/launch-command/path`,
-  and `apex gaming` for boot-to-game readiness. Three things worth carrying
+  a program that writes), `rime game profile list/show/set/remove/apply/launch-command/path`,
+  and `rime gaming` for boot-to-game readiness. Three things worth carrying
   forward. First, `game_enter` applies the SYSPROFILE's `[game] tier` and
   `fan_mode` after `GameMode.SetActive`, so a per-title tier has to be
   re-asserted afterwards and the fan step has to be last, which means
-  `apex mode set gaming` has the same latent bug, invisible only because every
+  `rime mode set gaming` has the same latent bug, invisible only because every
   shipped sysprofile uses `performance` for both. Second, an input device's
   `capabilities/key` bitmap must be indexed from the RIGHT (the kernel elides
   leading zero words) and its word width belongs to the READING process, not
@@ -1536,7 +1536,7 @@ Newest last. One line per pushed commit that changes the state above.
   perform; check the capable ones by shape and never invoke them.
 - 2026-09-03: **the three deferred P1 items are done** on
   `p1/deferred-items`, off `origin/p1/integration`: §8's GUI export from
-  capsules, §10's `[development] languages` convergence, and §16's `apex plugin`
+  capsules, §10's `[development] languages` convergence, and §16's `rime plugin`
   CLI. Full write-up at the top of this file. Four things worth carrying
   forward.
   **First**, a mutant survived and that is the useful part: "the exported
@@ -1548,22 +1548,22 @@ Newest last. One line per pushed commit that changes the state above.
   decorative, and no amount of running it would have shown that; only mutating
   the code did.
   **Second**, the language vocabulary check went in the **`static`** job, not
-  `rust` or `engine`. The path selectors are `^(apexd/|config/sysprofiles/|tests/)`
+  `rust` or `engine`. The path selectors are `^(rimed/|config/sysprofiles/|tests/)`
   and `^(files/|tests/)`, so a PR that changes only the other side skips a check
   in either specialised job, and a skipped job counts as success. This file
-  already records that exact bug once, for `test-apex-modes.sh`. Any future
+  already records that exact bug once, for `test-rime-modes.sh`. Any future
   cross-file parity check belongs in `static` unless it needs a toolchain.
-  **Third**, `apex plugin` calls apex-shell's `manifest.js` through node rather
+  **Third**, `rime plugin` calls rime-shell's `manifest.js` through node rather
   than reimplementing it, and the coupling is asserted **differentially**: the
   suite asks manifest.js directly for each fixture and compares the reason code.
   The four structural refusals that live in `PluginService.qml` instead could
   not be shared, so they carry a tripwire on the count of literal-reason
   refusals in that file. "Declare the duplication and make it fail loudly" beat
   both alternatives here.
-  **Fourth**, `apex plugin disable` moves a directory and never edits a file,
+  **Fourth**, `rime plugin disable` moves a directory and never edits a file,
   which is the strongest available compliance with the live-config rule added to
   `AGENTS.md` the same day. The suite hard-exits if its plugin directory
-  resolves outside the temp tree, because `~/.config/apex-shell/plugins` is real
+  resolves outside the temp tree, because `~/.config/rime-shell/plugins` is real
   on the developer's machine.
 
 ---
@@ -1576,14 +1576,14 @@ single image build. The distinction below is deliberate: code-complete and
 CI-complete is not the same as shipped, and this file should not blur it.
 
 **The merge target is PR #35 (`p1/integration-2`) and nothing else.** Every
-other open apex-os PR is an ancestor of it; verified with
+other open rime-os PR is an ancestor of it; verified with
 `git merge-base --is-ancestor` against all eleven. The only commit that had
 been outside it was this file's own last update, cherry-picked here so the
 merge target carries its own tracker.
 
 ### The nine-minute staleness, and why it is cosmetic
 
-#35's checks passed at 11:37:44Z. apex-shell #13 and #14 merged *after*, at
+#35's checks passed at 11:37:44Z. rime-shell #13 and #14 merged *after*, at
 11:46:18Z and 11:46:23Z. The green tick was therefore earned against the
 previous shell main, and the question is whether anything in the OS tree is
 coupled to the shell tree.
@@ -1592,22 +1592,22 @@ Two things are, and both were re-run by hand against shell main `6f2e55d`:
 
 | suite | coupling | result |
 | --- | --- | --- |
-| `tests/test-labwc-keybinds.sh` | clones shell main in CI; `APEX_REQUIRE_SHELL_TREE=1` | 37 passed, 0 failed |
-| `tests/test-apex-firstrun.sh` | reads `${ROOT}/../apex-shell` for the keybind check | 51 passed, 0 failed |
+| `tests/test-labwc-keybinds.sh` | clones shell main in CI; `RIME_REQUIRE_SHELL_TREE=1` | 37 passed, 0 failed |
+| `tests/test-rime-firstrun.sh` | reads `${ROOT}/../rime-shell` for the keybind check | 51 passed, 0 failed |
 
-`test-apex-display.sh` and `test-apex-input.sh` mention `apex-shell` only as
-`~/.config/apex-shell` paths they create themselves, so they carry no coupling.
+`test-rime-display.sh` and `test-rime-input.sh` mention `rime-shell` only as
+`~/.config/rime-shell` paths they create themselves, so they carry no coupling.
 
 The firstrun one matters more than it looks: with no shell tree beside the
-checkout it prints `SKIP  no apex-shell tree available` and still exits 0. Run
+checkout it prints `SKIP  no rime-shell tree available` and still exits 0. Run
 it from a bare checkout and the assertion that the seeded `rc.xml` matches the
 shell's defaults silently does not run. It was made to run here by cloning
-apex-shell next to the worktree, and it printed PASS rather than SKIP.
+rime-shell next to the worktree, and it printed PASS rather than SKIP.
 
 **The image does not need a refresh commit either way.** `build-image.yml`'s
 `shell` step resolves the ref at build time
-(`git ls-remote https://github.com/AndreNijman/apex-shell refs/heads/main`) and
-passes it as `APEX_SHELL_REF` with `APEX_SHELL_STRICT=1`. The build pins
+(`git ls-remote https://github.com/AndreNijman/rime-shell refs/heads/main`) and
+passes it as `RIME_SHELL_REF` with `RIME_SHELL_STRICT=1`. The build pins
 whatever main is at the moment it starts, so #35 picks up #13 and #14 with no
 action. There is no vendored SHA in the repo to bump.
 
@@ -1630,7 +1630,7 @@ to surface a problem that no suite here can catch.
 
 ### Deliberately unfixed, carried forward
 
-- **8.1's ordering bug.** `apex mode set gaming` re-asserts the sysprofile's
+- **8.1's ordering bug.** `rime mode set gaming` re-asserts the sysprofile's
   tier and fan *after* `GameMode.SetActive`. It is invisible only because every
   shipped sysprofile uses `performance` for both. It is 8.1's code, not 8.4's.
 - **`measure-idle-inhibit.sh hyprland` reports MISMATCH** on the layer-surface
@@ -1645,7 +1645,7 @@ to surface a problem that no suite here can catch.
 Rows 9 and 10 of §23 are P2: Local AI service + remote compute, and Boot v2
 (composefs + systemd-boot + UKIs + measured boot).
 
-`apex-os/main` is at `4e3c490` and carries **no P1 content**. A P2 branch cut
+`rime-os/main` is at `4e3c490` and carries **no P1 content**. A P2 branch cut
 from `main` would develop and run CI against a tree with no capsules, no
 resolver, no blueprint and no modes, all of which §14's local-AI service needs
 for model storage and for VRAM/power handling. Branch from `p1/integration-2`,

@@ -1,6 +1,6 @@
 #!/usr/bin/env bash
 # ─────────────────────────────────────────────────────────────────────────────
-#  mutate-platform-theme.sh — prove test-apex-platform-theme.sh can go red,
+#  mutate-platform-theme.sh — prove test-rime-platform-theme.sh can go red,
 #  AND prove it does not go red at the three decoys it was written to ignore.
 #
 #  A guard on a value is the easy kind to write vacuously. `grep -q qt6ct` over
@@ -39,14 +39,14 @@ cd "$(dirname "$0")/.." || exit 2
 
 CF="Containerfile.core"
 LABWC="files/desktop/labwc/environment"
-SUITE_F="tests/test-apex-platform-theme.sh"
+SUITE_F="tests/test-rime-platform-theme.sh"
 # Containerfile.base is in the set because G1 is not the only reason a run can
 # touch it: the COPY assertion resolves across every Containerfile, and a mutant
 # applied to a file outside $FILES is never put back, which makes every verdict
 # after it a verdict about a tree nobody is watching.
 CFB="Containerfile.base"
 FILES="$CF $CFB $LABWC $SUITE_F"
-SUITE="./tests/test-apex-platform-theme.sh"
+SUITE="./tests/test-rime-platform-theme.sh"
 
 applied=0; noapply=0; caught=0; survived=0; misscored=0; held=0; falsered=0
 
@@ -62,7 +62,7 @@ restore() {
 }
 
 # `env -i` deliberately. This suite reads files rather than the environment, but
-# the sister suite in apex-shell was green for a whole round only because it
+# the sister suite in rime-shell was green for a whole round only because it
 # inherited QT_QPA_PLATFORMTHEME from the operator's shell, and the harness that
 # found that is this one's shape. A verdict must not be about whose terminal it
 # ran in.
@@ -75,7 +75,7 @@ run_suite() {
 # line at all — a crash must never read as a clean green run.
 suite_failures() {
     printf '%s\n' "$1" \
-        | sed -n 's/^apex-platform-theme: [0-9]* passed, \([0-9]*\) failed.*/\1/p' \
+        | sed -n 's/^rime-platform-theme: [0-9]* passed, \([0-9]*\) failed.*/\1/p' \
         | head -1 | grep -E '^[0-9]+$' || echo 0
 }
 
@@ -95,8 +95,8 @@ classify() {
 selftest() {
     local red green fails=0
     red="FAIL    ...and the theme it names is qt6ct, the plugin that installs a QTranslator
-apex-platform-theme: 15 passed, 3 failed, 0 skipped"
-    green="apex-platform-theme: 18 passed, 0 failed, 0 skipped"
+rime-platform-theme: 15 passed, 3 failed, 0 skipped"
+    green="rime-platform-theme: 18 passed, 0 failed, 0 skipped"
 
     chk() {  # chk <label> <want> <got>
         if [ "$2" = "$3" ]; then printf '  ok   %s\n' "$1"
@@ -149,7 +149,7 @@ score_red() {   # score_red <id> <expected FAIL substring>
     else
         printf '%-5s SURVIVED  %s\n' "$id" "$want"
         printf '      ── the suite stayed GREEN with this mutant applied ──\n'
-        printf '%s\n' "$out" | grep -E '^(FAIL|SKIP|apex-platform-theme)' | sed 's/^/      /'
+        printf '%s\n' "$out" | grep -E '^(FAIL|SKIP|rime-platform-theme)' | sed 's/^/      /'
         survived=$((survived + 1))
     fi
 }
@@ -200,13 +200,13 @@ hold() {
     applied=$((applied + 1))
     local out; out="$(run_suite)"
     if [ "$(suite_failures "$out")" -eq 0 ] \
-       && printf '%s' "$out" | grep -q '^apex-platform-theme: [0-9]* passed, 0 failed'; then
+       && printf '%s' "$out" | grep -q '^rime-platform-theme: [0-9]* passed, 0 failed'; then
         printf '%-5s HELD      %s\n' "$id" "$why"
         held=$((held + 1))
     else
         printf '%-5s FALSE-RED %s\n' "$id" "$why"
         printf '      ── the suite fired on something that sets nothing ──\n'
-        printf '%s\n' "$out" | grep -E '^(FAIL|apex-platform-theme)' | sed 's/^/      /'
+        printf '%s\n' "$out" | grep -E '^(FAIL|rime-platform-theme)' | sed 's/^/      /'
         falsered=$((falsered + 1))
     fi
     restore
@@ -215,8 +215,8 @@ hold() {
 echo
 echo "── baseline: green, or nothing below means anything ──"
 base="$(run_suite)"
-printf '%s\n' "$base" | grep -E '^apex-platform-theme'
-if ! printf '%s' "$base" | grep -qE '^apex-platform-theme: [0-9]+ passed, 0 failed'; then
+printf '%s\n' "$base" | grep -E '^rime-platform-theme'
+if ! printf '%s' "$base" | grep -qE '^rime-platform-theme: [0-9]+ passed, 0 failed'; then
     echo "ABORT: the suite is not green to begin with" >&2
     printf '%s\n' "$base" | grep -E '^(FAIL|SKIP)' >&2
     exit 3
@@ -252,7 +252,7 @@ mutate_both M3 \
     'QT_QPA_PLATFORMTHEME=qt6ct'         'QT_QPA_PLATFORMTHEME=qt5ct' \
     "the image installs the platform theme plugin the variable names"
 
-# M4 — the whole /etc/environment write is deleted. test-apex-ai-apps.sh also
+# M4 — the whole /etc/environment write is deleted. test-rime-ai-apps.sh also
 #      goes red on this one, with a message about Electron; this is the suite
 #      that says what it costs.
 mutate M4 "$CF" \
@@ -319,9 +319,9 @@ echo "── GREEN mutants: a decoy that sets nothing must not fire the guard �
 #      `grep -q QT_QPA_PLATFORMTHEME` or `grep -q qt6ct` cannot tell this line
 #      from the one three thousand lines above it.
 hold G1 "$CFB" \
-    '# Dark mode (apex-logs 28)' \
+    '# Dark mode (rime-logs 28)' \
     "# printf 'QT_QPA_PLATFORMTHEME=qt5ct\n' >> /etc/environment  <- prose, not a command
-# Dark mode (apex-logs 28)" \
+# Dark mode (rime-logs 28)" \
     "a Containerfile COMMENT naming a different theme does not fire the guard"
 
 # G2 — the same decoy in the labwc environment file, where a `#` line is a

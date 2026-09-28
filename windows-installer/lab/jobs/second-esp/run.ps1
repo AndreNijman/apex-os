@@ -2,7 +2,7 @@
 #  jobs/second-esp -- does Windows tolerate a SECOND EFI System Partition on
 #  its own disk, and which one does Windows' own tooling write?
 #
-#  docs/apex-owns-its-esp.md settled that APEX builds its own ESP and NEVER
+#  docs/rime-owns-its-esp.md settled that Rime builds its own ESP and NEVER
 #  writes Windows'. It then listed what must be measured before that is claimed
 #  to work. migrate-preconditions' card confirms it takes none of the four lab
 #  measurements, so they are this unit's. This job takes two of them, and
@@ -41,7 +41,7 @@ $root  = $PSScriptRoot
 $phase = 1
 $phaseFile = Join-Path $root 'phase.txt'
 if (Test-Path $phaseFile) { $phase = [int](Get-Content $phaseFile -Raw).Trim() }
-$exe = Join-Path $root 'apex-windows-installer.exe'
+$exe = Join-Path $root 'rime-windows-installer.exe'
 
 function Emit { param([string]$T) $T }
 function Run-Diskpart {
@@ -76,7 +76,7 @@ function Test-PathUsable {
     param([string]$Root, [string]$Tag)
     $script:PathUsable = $false
     if (-not (Test-Path $Root)) { Emit "PATH-USABLE[$Tag]: NO -- $Root does not exist"; return }
-    $probe = Join-Path $Root 'apexlab-probe.tmp'
+    $probe = Join-Path $Root 'rimelab-probe.tmp'
     try {
         Set-Content -Path $probe -Value 'probe' -Encoding Ascii -ErrorAction Stop
         $ok = [bool](Test-Path $probe)
@@ -165,7 +165,7 @@ if ($phase -eq 1) {
     Show-Layout 'after shrink'
     Run-Diskpart @("select disk 0",
                    "create partition efi size=500",
-                   "format quick fs=fat32 label=APEXESP",
+                   "format quick fs=fat32 label=RIMEESP",
                    "assign letter=S")
     Show-Layout 'after creating the second ESP'
 

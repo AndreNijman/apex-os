@@ -73,12 +73,12 @@ QtObject {
     // always been the only reachable one and is invisible on matugen's light
     // surface (#fdf9f3 on the default wallpaper). 20 of them are in the settings
     // pages, including the description text under every section heading. A
-    // Light/Dark toggle would hand the user a blank Settings window. So APEX
+    // Light/Dark toggle would hand the user a blank Settings window. So Rime
     // Shell is a dark shell, on purpose, until those are tokens.
     //
     // It is REACHABLE, so the palette above is not dead code and can be worked
     // on: WallpaperService passes matugen `-m <mode>` and takes the mode from
-    // ~/.config/apex-shell/src/user_data/wallpaper.json. Set `"mode": "light"`
+    // ~/.config/rime-shell/src/user_data/wallpaper.json. Set `"mode": "light"`
     // there and re-apply a wallpaper. There is no control in Settings, by the
     // paragraph above.
     //

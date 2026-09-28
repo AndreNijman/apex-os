@@ -1,5 +1,5 @@
 #!/usr/bin/env bash
-# Do the vendored copies of the desktop's tables still match apex-shell?
+# Do the vendored copies of the desktop's tables still match rime-shell?
 #
 # `AgentStateAgreementTest` proves the Kotlin agrees with
 # `core/src/test/resources/desktop/agentstate.js`, and `ToneColoursTest` proves
@@ -7,12 +7,12 @@
 # The two repositories are separate and neither CI checks out the other, so
 # this is the part that can only be run where both exist.
 #
-# It reports NOT CHECKED and exits 0 when there is no apex-shell to compare
+# It reports NOT CHECKED and exits 0 when there is no rime-shell to compare
 # against. A script that printed "ok" because it could not look would be the
 # "permission denied is not absence" mistake, in a shell script.
 #
 # One more thing it checks, and the reason is the same mistake in a different
-# costume: apex-shell's DEFAULT branch does not have these files in the state
+# costume: rime-shell's DEFAULT branch does not have these files in the state
 # they were vendored from — `info` and `attention` only exist on `roadmap/v2.2`
 # — so a checkout sitting on some other branch would produce a confident,
 # meaningless diff. The branch is named in the report.
@@ -20,9 +20,9 @@ set -uo pipefail
 
 here="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
 vendored_dir="$here/../core/src/test/resources/desktop"
-shell_dir="${APEX_SHELL_DIR:-/var/tmp/apex-work/int-shell}"
+shell_dir="${RIME_SHELL_DIR:-/var/tmp/rime-work/int-shell}"
 
-# vendored basename -> path within apex-shell
+# vendored basename -> path within rime-shell
 pairs=(
     "agentstate.js|src/services/agentstate.js"
     "Colors.qml|src/theme/Colors.qml"
@@ -49,7 +49,7 @@ for entry in "${pairs[@]}"; do
     fi
 
     if [ ! -r "$live" ]; then
-        echo "NOT CHECKED: $name — no readable apex-shell file at $live"
+        echo "NOT CHECKED: $name — no readable rime-shell file at $live"
         echo "  the vendored copy is $(sha256sum "$vendored" | cut -c1-16)... (see desktop/PROVENANCE.md)"
         skipped=$((skipped + 1))
         continue
@@ -62,7 +62,7 @@ for entry in "${pairs[@]}"; do
         continue
     fi
 
-    echo "FAIL: apex-shell's $rel has changed since it was vendored."
+    echo "FAIL: rime-shell's $rel has changed since it was vendored."
     echo "  vendored: $vendored"
     echo "  live:     $live"
     echo
@@ -73,7 +73,7 @@ done
 
 if [ "$skipped" -gt 0 ]; then
     echo
-    echo "  set APEX_SHELL_DIR to an apex-shell checkout to compare the $skipped that were skipped"
+    echo "  set RIME_SHELL_DIR to a rime-shell checkout to compare the $skipped that were skipped"
 fi
 
 if [ "$checked" -gt 0 ] && [ -e "$shell_dir/.git" ]; then

@@ -5,11 +5,11 @@
 # comment.
 #
 # Why a list at all, rather than a green build. The reverse pass was written
-# for one defect -- `apex remote pair|devices|revoke|status|enable` shipped and
+# for one defect -- `rime remote pair|devices|revoke|status|enable` shipped and
 # appeared in no document, and the forward pass structurally cannot see that,
 # because a verb nobody wrote about produces no line to check. Turning the
 # direction on found that `remote` was not special: measured on 2026-09-12, of
-# the 259 `apex <verb>` and `apex <verb> <sub>` commands in the binary, 127
+# the 259 `rime <verb>` and `rime <verb> <sub>` commands in the binary, 127
 # were named somewhere and 132 were not. Documenting 132 commands is not one
 # change, and a checker that only lands once the whole tree is clean is a
 # checker that never lands.
@@ -18,175 +18,175 @@
 # happens NEXT: a verb added from here on is either documented or shows up as
 # a line added to this file, in the diff of the pull request that adds it,
 # where somebody can argue about it. Nothing below is endorsed. Every line is
-# a thing APEX-OS can do that its documentation does not mention.
+# a thing Rime OS can do that its documentation does not mention.
 #
 # Removing a line is the whole point: write the doc, delete the line, and the
 # ratchet checks you did both.
 #
 # 2026-09-12: 132 entries.
-# 2026-09-12: 117. `apex host` (8 of 8) and `apex ai` (7 of 7) left, written
+# 2026-09-12: 117. `rime host` (8 of 8) and `rime ai` (7 of 7) left, written
 #             up as docs/hosts.md and docs/ai.md -- the two worst whole-verb
 #             gaps the first measurement found. Still here, and worth naming
-#             because they are the next worst: `apex shell` (14), `apex env`
-#             (11), `apex task` (7), and section 20's handoff verbs `apex
-#             build`, `apex send` and `apex open`, which docs/hosts.md wants
+#             because they are the next worst: `rime shell` (14), `rime env`
+#             (11), `rime task` (7), and section 20's handoff verbs `rime
+#             build`, `rime send` and `rime open`, which docs/hosts.md wants
 #             to link to and cannot.
 # 2026-09-12: 121. Four verbs landed on the integration tip the same day the
 #             count above was taken, each documented nowhere and declared
 #             nowhere, so the reverse pass -- which is a CI gate -- failed on
 #             the tip with four BADs:
 #
-#                 apex task audit          2814a56d, section 13.14
-#                 apex cloudflare preview  7f4475dd, section 13.13
-#                 apex secret approve      a67eb704, section 13.8
-#                 apex secret approvals    a67eb704, section 13.8
+#                 rime task audit          2814a56d, section 13.14
+#                 rime cloudflare preview  7f4475dd, section 13.13
+#                 rime secret approve      a67eb704, section 13.8
+#                 rime secret approvals    a67eb704, section 13.8
 #
 #             Declared rather than written up, which is the choice this file
 #             exists to offer. Each belongs to a cluster that is undocumented
-#             as a whole -- `apex task` is 7 more lines below, `apex cloudflare`
+#             as a whole -- `rime task` is 7 more lines below, `rime cloudflare`
 #             3 -- and a single sub-verb written up alone would take its parent
 #             off this list on a passing mention, which is precisely the rot
 #             the ratchet is here to stop. The number goes UP because these
 #             four did not exist when 132 was measured, not because the
 #             ratchet slipped: the 132 the docs owed is 117 now.
 
-apex profile
+rime profile
 
-apex battery
+rime battery
 
-apex fan
-apex fan status
-apex fan mode
-apex fan pwm
-apex fan restore
+rime fan
+rime fan status
+rime fan mode
+rime fan pwm
+rime fan restore
 
-apex game attach
-apex game profile
-
-
-apex qualify status
-apex qualify consent
-apex qualify probe
-apex qualify export
-apex qualify import
-
-apex storage
-apex storage status
-apex storage warnings
-apex storage erase
-
-apex firmware
-apex firmware status
-
-apex build
-
-apex send
-
-apex open
-
-apex fingerprint
-
-apex shell launcher
-apex shell dashboard
-apex shell settings
-apex shell notifications
-apex shell clipboard
-apex shell wallpaper
-apex shell power
-apex shell menu
-apex shell audio
-apex shell network
-apex shell focus
-apex shell record
-apex shell voice
-apex shell list
-apex shell ipc
+rime game attach
+rime game profile
 
 
-apex env create
-apex env info
-apex env enter
-apex env exec
-apex env install
-apex env images
-apex env export
-apex env unexport
-apex env exports
-apex env provision
-apex env languages
+rime qualify status
+rime qualify consent
+rime qualify probe
+rime qualify export
+rime qualify import
 
-apex agent resume
-apex agent checkpoint
-apex agent origin
-apex agent rm
-apex agent prune
+rime storage
+rime storage status
+rime storage warnings
+rime storage erase
 
-apex plugin
-apex plugin list
-apex plugin info
-apex plugin enable
-apex plugin disable
+rime firmware
+rime firmware status
 
-apex skill
-apex skill list
-apex skill audit
+rime build
 
-apex provenance show
-apex provenance record
+rime send
 
-apex firewall status
-apex firewall list
-apex firewall deny
-apex firewall reload
+rime open
+
+rime fingerprint
+
+rime shell launcher
+rime shell dashboard
+rime shell settings
+rime shell notifications
+rime shell clipboard
+rime shell wallpaper
+rime shell power
+rime shell menu
+rime shell audio
+rime shell network
+rime shell focus
+rime shell record
+rime shell voice
+rime shell list
+rime shell ipc
 
 
-apex project worktrees
-apex project checkpoints
-apex project remove
-apex project forget
-apex project identity
-apex project env
+rime env create
+rime env info
+rime env enter
+rime env exec
+rime env install
+rime env images
+rime env export
+rime env unexport
+rime env exports
+rime env provision
+rime env languages
 
-apex task new
-apex task set
-apex task list
-apex task show
-apex task checkpoint
-apex task rm
-apex task path
-apex task audit
+rime agent resume
+rime agent checkpoint
+rime agent origin
+rime agent rm
+rime agent prune
 
-apex request list
-apex request show
-apex request grants
+rime plugin
+rime plugin list
+rime plugin info
+rime plugin enable
+rime plugin disable
 
-apex cloudflare status
-apex cloudflare preview
+rime skill
+rime skill list
+rime skill audit
 
-apex backup
-apex backup key
-apex backup targets
-apex backup init
-apex backup run
-apex backup list
-apex backup verify
-apex backup restore
+rime provenance show
+rime provenance record
 
-apex secret remove
-apex secret revoke
-apex secret approve
-apex secret approvals
+rime firewall status
+rime firewall list
+rime firewall deny
+rime firewall reload
 
-apex mcp planes
-apex mcp memory
 
-apex blueprint show
-apex blueprint init
-apex blueprint set
+rime project worktrees
+rime project checkpoints
+rime project remove
+rime project forget
+rime project identity
+rime project env
 
-apex sync
-apex sync export
-apex sync show
-apex sync import
+rime task new
+rime task set
+rime task list
+rime task show
+rime task checkpoint
+rime task rm
+rime task path
+rime task audit
 
-apex disposable rm
+rime request list
+rime request show
+rime request grants
+
+rime cloudflare status
+rime cloudflare preview
+
+rime backup
+rime backup key
+rime backup targets
+rime backup init
+rime backup run
+rime backup list
+rime backup verify
+rime backup restore
+
+rime secret remove
+rime secret revoke
+rime secret approve
+rime secret approvals
+
+rime mcp planes
+rime mcp memory
+
+rime blueprint show
+rime blueprint init
+rime blueprint set
+
+rime sync
+rime sync export
+rime sync show
+rime sync import
+
+rime disposable rm

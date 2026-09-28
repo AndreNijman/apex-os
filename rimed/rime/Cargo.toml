@@ -1,0 +1,33 @@
+[package]
+name = "rime"
+description = "Rime OS control CLI: power tiers, battery, profile, fingerprint, update/rollback/pin, doctor"
+version.workspace = true
+edition.workspace = true
+license.workspace = true
+authors.workspace = true
+repository.workspace = true
+rust-version.workspace = true
+
+[[bin]]
+name = "rime"
+path = "src/main.rs"
+
+[dependencies]
+rime-secret-core = { path = "../rime-secret-core" }
+rime-backup-core = { path = "../rime-backup-core" }
+rime-perm-core = { path = "../rime-perm-core" }
+rimed-core = { path = "../rimed-core" }
+rime-agent-core = { path = "../rime-agent-core" }
+rime-remote-core = { path = "../rime-remote-core" }
+anyhow.workspace = true
+serde.workspace = true
+serde_json.workspace = true
+# `rime channel` reads ~/.config/rime/channel.toml, which is where every other
+# user-facing Rime config lives. Already in the build graph through rimed-core,
+# so the direct edge costs nothing but says what this crate actually uses.
+toml.workspace = true
+libc.workspace = true
+zbus.workspace = true
+zvariant.workspace = true
+tokio.workspace = true
+clap.workspace = true

@@ -9,15 +9,15 @@ DID drift — the launcher shipped as SUPER+SPACE when every other session used
 ALT+SPACE, plus two more wrong combos and eleven missing bindings.
 
 The labwc bindings are now GENERATED from that same model by
-`/usr/libexec/apex-labwc-keybinds`, so the question changed. It is no longer
+`/usr/libexec/rime-labwc-keybinds`, so the question changed. It is no longer
 "do these two hand-written lists agree", it is "is the seeded file exactly what
 the generator produces". That is a stronger check and a much shorter one, and
 this script is now a thin wrapper that asks it.
 
-The generated commands name `/usr/share/apex-shell`, because that is where the
+The generated commands name `/usr/share/rime-shell`, because that is where the
 shell lives on a booted system, and the seeded rc.xml is written for that
 system. So the substitution path is fixed here even when the MODEL is read out
-of a source checkout — which is what happens in `tests/test-apex-firstrun.sh`
+of a source checkout — which is what happens in `tests/test-rime-firstrun.sh`
 and in the image build.
 """
 
@@ -33,26 +33,26 @@ REPO = os.path.dirname(os.path.dirname(HERE))
 # tree. Both locations are tried so this works from a checkout and from inside a
 # container that has already installed it.
 CANDIDATES = [
-    os.path.join(REPO, "files/system/libexec/apex-labwc-keybinds"),
-    "/usr/libexec/apex-labwc-keybinds",
+    os.path.join(REPO, "files/system/libexec/rime-labwc-keybinds"),
+    "/usr/libexec/rime-labwc-keybinds",
 ]
 
 # Where the shell lives on a booted system. Not the directory the model is read
 # from — see the module docstring.
-INSTALLED_SHELL = "/usr/share/apex-shell"
+INSTALLED_SHELL = "/usr/share/rime-shell"
 
 
 def main(argv):
     shell_dir = argv[1] if len(argv) > 1 else INSTALLED_SHELL
-    rc_xml = argv[2] if len(argv) > 2 else "/usr/share/apex/labwc/rc.xml"
+    rc_xml = argv[2] if len(argv) > 2 else "/usr/share/rime/labwc/rc.xml"
 
     generator = next((c for c in CANDIDATES if os.path.exists(c)), None)
     if generator is None:
-        print("check-labwc-keybinds: apex-labwc-keybinds not found in "
+        print("check-labwc-keybinds: rime-labwc-keybinds not found in "
               + " or ".join(CANDIDATES), file=sys.stderr)
         return 2
 
-    mod = SourceFileLoader("apex_labwc_keybinds", generator).load_module()
+    mod = SourceFileLoader("rime_labwc_keybinds", generator).load_module()
     return mod.do_check(shell_dir, rc_xml, INSTALLED_SHELL)
 
 

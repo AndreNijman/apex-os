@@ -1,8 +1,8 @@
-# Disk encryption in the APEX-OS installer
+# Disk encryption in the Rime OS installer
 
 This is the installer's half of L-002, "Enable LUKS2 by default". The other
 half (what is enrolled into the LUKS2 header, and when a TPM keyslot is safe)
-is `/usr/libexec/apex-luks-enroll` and `docs/boot-v2.md`.
+is `/usr/libexec/rime-luks-enroll` and `docs/boot-v2.md`.
 
 The acceptance line for the item is *"encryption default does not strand users
 across qualified hardware and recovery cases"*, so this document is organised
@@ -12,7 +12,7 @@ around the ways a person can be locked out, and what stops each one.
 
 ## What happens when encryption is on
 
-`installer/apex-install` is handed `encrypt=yes` and a `lukspass=` in its
+`installer/rime-install` is handed `encrypt=yes` and a `lukspass=` in its
 answers file, and builds the disk itself instead of letting `bootc install
 to-disk` do it:
 
@@ -41,7 +41,7 @@ lab and on real hardware, which is worth more than the megabyte.
 Then `bootc install to-filesystem` installs into the opened volume, with the
 `/boot` partition already mounted so bootc picks up its UUID.
 
-**Why `/boot` is outside the encryption.** APEX boots GRUB through bootupd.
+**Why `/boot` is outside the encryption.** Rime boots GRUB through bootupd.
 GRUB can be talked into reading some LUKS2 headers, but not all, and getting
 that wrong produces a machine that does not boot at all instead of one that
 asks for a passphrase. A separate plain `/boot` is what Fedora ships for
@@ -70,7 +70,7 @@ own help points at `to-filesystem` for LUKS.
 
 1. `cryptsetup luksFormat --type luks2 --pbkdf argon2id`, passphrase on stdin.
    Never on a command line: argv is world-readable in `/proc`.
-2. `/usr/libexec/apex-luks-enroll --device <dev> --recovery-out <file>`, run out
+2. `/usr/libexec/rime-luks-enroll --device <dev> --recovery-out <file>`, run out
    of the **image being installed**, not the live environment, because
    enrolment policy belongs to the system it applies to. The installer offers
    the existing passphrase both as `$PASSWORD` (systemd-cryptenroll's own
@@ -85,7 +85,7 @@ own help points at `to-filesystem` for LUKS.
 
 **One path runs step 2 later than you would expect, and this section says so
 as well as the code.** On a *network* install of a machine with nowhere to
-stage the download (no second drive, no spare partition, so APEX-OS is
+stage the download (no second drive, no spare partition, so Rime OS is
 downloaded onto the target disk as it installs), the enrolment helper lives in
 an image that is not on the machine yet. Steps 2 to 4 therefore happen after
 that download instead of before it: the order is luksFormat, open, mkfs, mount,
@@ -107,14 +107,14 @@ key is one passphrase is one forgotten password away from being a brick.
 
 It reaches the user by two routes, because each fails differently.
 
-1. **On screen.** The engine emits `APEX-INSTALL-RECOVERY-KEY: <key>` on
+1. **On screen.** The engine emits `RIME-INSTALL-RECOVERY-KEY: <key>` on
    stdout. The graphical installer captures that line, keeps it out of the
    scrolling install log, and shows it on the final page in large monospace,
    with a checkbox that must be ticked before **Reboot now** is enabled. A user
    who reboots past it never sees it again: the installer's RAM disk goes with
    the reboot.
 2. **On the USB stick they booted from**, as a 0600
-   `apex-recovery-key-<hostname>.txt` on the live ISO's own ESP. The file says,
+   `rime-recovery-key-<hostname>.txt` on the live ISO's own ESP. The file says,
    in as many words, that a stick in the same bag as the laptop protects
    nothing, and to move the key elsewhere and delete it.
 
@@ -175,7 +175,7 @@ layout, which is the lockout this exists to prevent.
 
 A UKI carries its command line inside the signed PE, and `systemd-stub` ignores
 a command line handed to it by the boot loader when Secure Boot is on. So the
-`--karg` route above stops being per-machine the moment APEX pivots to
+`--karg` route above stops being per-machine the moment Rime pivots to
 sd-boot + UKIs.
 
 The replacement that needs no re-signing is a **system credential**:
@@ -189,7 +189,7 @@ version of it does not work.**
 
 `systemd-vconsole-setup(8)`, about the `vconsole.keymap` credential: *"The
 matching options in vconsole.conf and on the kernel command line take
-precedence over these credentials."* APEX's image ships `/etc/vconsole.conf`
+precedence over these credentials."* Rime's image ships `/etc/vconsole.conf`
 with `KEYMAP=us`, and dracut's i18n module copies that file **into the
 initramfs**. So the credential arrives, loses to a baked-in `us`, and a `.cred`
 on the ESP on its own is **inert**. That comes from a boot, not from the
@@ -202,12 +202,12 @@ measures each:
 
 | piece | file | what it does |
 | --- | --- | --- |
-| the credential on the ESP | `installer/apex-install` | writes `loader/credentials/vconsole.keymap.cred` on every encrypted install, alongside the karg. GRUB ignores it; a machine installed today needs no migration when the pivot happens |
-| the shim that makes it count | `files/dracut/apex-unlock-hint/apex-vconsole-credential` | runs `Before=systemd-vconsole-setup.service`, pulled in by `sysinit.target.wants`, and writes the credential's value into the **initramfs's own** `/etc/vconsole.conf`: a tmpfs, gone at switch-root. Nothing on disk is touched |
+| the credential on the ESP | `installer/rime-install` | writes `loader/credentials/vconsole.keymap.cred` on every encrypted install, alongside the karg. GRUB ignores it; a machine installed today needs no migration when the pivot happens |
+| the shim that makes it count | `files/dracut/rime-unlock-hint/rime-vconsole-credential` | runs `Before=systemd-vconsole-setup.service`, pulled in by `sysinit.target.wants`, and writes the credential's value into the **initramfs's own** `/etc/vconsole.conf`: a tmpfs, gone at switch-root. Nothing on disk is touched |
 | the precedence guard | the same script's first loop | a kernel command line that already sets `vconsole.keymap=` wins, and the shim says so and exits. Every machine installed before the pivot keeps working exactly as it does now |
 
 The `.wants` directory is load-bearing, and the image build asserts it by name:
-`files/scripts/check-initramfs-budget.sh`, which `Containerfile.apex` runs
+`files/scripts/check-initramfs-budget.sh`, which `Containerfile.rime` runs
 against the built initramfs, fails if `sysinit.target.wants` does not pull in
 the shim. `systemd-vconsole-setup` is ordered `Before=sysinit.target`, so a
 unit pulled in by `initrd.target.wants` (where this module's other unit lives)
@@ -236,9 +236,9 @@ Every one of these fires **before anything is written**, and says so.
 | a passphrase shorter than 8 characters | refused. |
 | `encrypt=yes` with a non-btrfs root | refused: an untested combination is not something to discover on somebody's only disk. |
 | `cryptsetup`, `sgdisk`, `mkfs.*` or dm-crypt missing | refused, naming what is missing and offering the unencrypted route. |
-| the image has no `/usr/libexec/apex-luks-enroll` | refused, naming the path. |
+| the image has no `/usr/libexec/rime-luks-enroll` | refused, naming the path. |
 | the target already carries a `crypto_LUKS` header (partition mode) | refused, exactly as before. That guard is unchanged. |
-| unattended (`apex.unattended`, test builds only) with `apex.encrypt=yes` | refused: that path has nobody to show a recovery key to. |
+| unattended (`rime.unattended`, test builds only) with `rime.encrypt=yes` | refused: that path has nobody to show a recovery key to. |
 
 ---
 
@@ -266,7 +266,7 @@ new recovery key, and `cryptsetup luksChangeKey` changes the passphrase.
 
 * **The installer's own tests exercise no TPM enrolment.** The installer calls
   the helper and checks what came back; whether a TPM keyslot is safe is
-  `apex-luks-enroll`'s decision and `docs/boot-v2.md`'s evidence.
+  `rime-luks-enroll`'s decision and `docs/boot-v2.md`'s evidence.
 * **A disk this installer produced has booted in the lab.** A boot on real
   hardware is a separate claim, and this document does not make it.
 
@@ -280,7 +280,7 @@ new recovery key, and `cryptsetup luksChangeKey` changes the passphrase.
   `installer/test-installer-luks-boot.sh` covers firmware → shim → GRUB →
   kernel → unlock → the pivot into the real root; the login after that is not
   its subject. It builds an encrypted disk with the real engine, boots it under OVMF in the
-  `apex-bootlab` container, types the passphrase through QMP, and reads
+  `rime-bootlab` container, types the passphrase through QMP, and reads
   dracut's own "Switching root" line from the serial log. The round 38 run, on
   2026-09-21, reported `switched-root=yes`, the first time anything had booted
   such a disk end to end (`ROADMAP/evidence/L-002-esp-fallback-20260921.md`).

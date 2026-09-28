@@ -3,7 +3,7 @@
 ## Where the tree stands
 
 Everything the roadmap describes is merged. `main` is at `7c88f27` (179
-commits): P1, P2 and P3, plus the UI polish pass and the §24 audit. apex-shell
+commits): P1, P2 and P3, plus the UI polish pass and the §24 audit. rime-shell
 `main` is at `9141ea7` (PR #16).
 
 P4 sits outside the roadmap's sections. It is the one structural change Andre
@@ -35,20 +35,20 @@ Andre set two constraints on that:
    on-demand gaming set. A machine with NVIDIA hardware must have working
    graphics from first boot whether or not it ever games. The akmod has to
    match the shipped kernel, which is a build-time property that no later
-   `apex install` can fix.
+   `rime install` can fix.
 2. **Everything else gaming-specific is on demand:** Steam, gamescope,
    MangoHud, Proton, Sunshine, OBS.
 
 ## The constraint that outlives the refactor
 
-`installer/apex-install` derives, with an explicit "this MUST drive
+`installer/rime-install` derives, with an explicit "this MUST drive
 TARGET_IMAGE, it is not cosmetic" comment:
 
-    EDITION="${APEX_EDITION:-$(cat /usr/lib/apex-installer/edition ... || echo daily)}"
-    TARGET_IMAGE="${APEX_TARGET_IMAGE:-ghcr.io/andrenijman/apex-os:${EDITION}}"
+    EDITION="${RIME_EDITION:-$(cat /usr/lib/rime-installer/edition ... || echo daily)}"
+    TARGET_IMAGE="${RIME_TARGET_IMAGE:-ghcr.io/andrenijman/rime-os:${EDITION}}"
 
 `TARGET_IMAGE` becomes `bootc install --target-imgref`, the ref the installed
-machine tracks for every future `apex update`. Therefore **all three tags must
+machine tracks for every future `rime update`. Therefore **all three tags must
 keep resolving forever**, `daily` included. A machine installed from an existing
 ISO tracks `:daily`; machines installed from the gaming ISOs track the other
 two.
@@ -64,13 +64,13 @@ Given that, the installer needs **no functional change**:
   already-published `:daily`. There is no ISO matrix to collapse.
 * `installer/build-live-iso.sh`'s `EDITION` variable already defaults to
   `daily`; it becomes vestigial but stays correct.
-* `installer/apex-installer-gui`'s `ACCENTS` and `ed_name` maps are keyed on
+* `installer/rime-installer-gui`'s `ACCENTS` and `ed_name` maps are keyed on
   the three editions and collapse to the `daily` branch on their own. They are
   cosmetic; leave them.
 
-## What `apex gaming` has to say afterwards
+## What `rime gaming` has to say afterwards
 
-`Readiness::blockers()` in `apexd-core/src/gaming.rs` currently treats a
+`Readiness::blockers()` in `rimed-core/src/gaming.rs` currently treats a
 missing greeter entry as meaning "this is not a Gaming edition image". Under
 one image the greeter entry and the gamescope session script ship everywhere
 (otherwise a daily machine that installs Steam and gamescope still could not
@@ -79,7 +79,7 @@ stops telling editions apart.
 
 The blockers that remain are exactly the installable ones, and those are what
 the switch-to-gaming flow acts on. `install_hint()` (branch `fix/gaming-remedy`)
-already produces the single `sudo apex install gamescope steam` line that
+already produces the single `sudo rime install gamescope steam` line that
 clears them.
 
 The test `a_non_gaming_image_gets_no_install_hint_because_no_package_fixes_it`
@@ -128,10 +128,10 @@ Still ungated on evidence, in this order:
    non-NVIDIA laptop.
 2. Merge (fast-forward: this repository takes neither merge commits nor a
    rebase of `main`). The push triggers `build-image` automatically, because
-   `Containerfile*`, `apexd/**` and `.github/**` are all in its path filter.
+   `Containerfile*`, `rimed/**` and `.github/**` are all in its path filter.
 3. **Only after that run is green**, dispatch `build-image` again with
    `build_iso: true`. The `installer-iso` job is `workflow_dispatch`-only, has
-   no `needs:`, and pulls `$IMAGE:apex`, a tag that does not exist until the
+   no `needs:`, and pulls `$IMAGE:rime`, a tag that does not exist until the
    merge build publishes it. Dispatching earlier fails on a missing tag.
 
 `build_qcow2` is a separate input, needed only for a VM disk.
@@ -151,7 +151,7 @@ shipped that failure before.
 ## Standing rules that bit during this work
 
 * Never run a test that opens a window on Andre's desktop.
-  `APEX_LABWC_SESSION_TESTS` stays unset; compositor validation runs headless
+  `RIME_LABWC_SESSION_TESTS` stays unset; compositor validation runs headless
   (`WLR_BACKENDS=headless`) and asserts on the Wayland socket count.
 * Never cause a polkit or keyring prompt.
 * `build-image.yml` triggers on push to `main` only. Pushing a feature branch
@@ -159,7 +159,7 @@ shipped that failure before.
 * `cargo clippy --all-targets --locked -- -D warnings` is a CI gate. Neither
   this laptop nor the Katana has clippy installed; run it in a
   `docker.io/library/rust:latest` container, and mount the **repo root** rather
-  than `apexd/`, because `apexd-core/src/profile.rs` `include_str!`s
+  than `rimed/`, because `rimed-core/src/profile.rs` `include_str!`s
   `config/sysprofiles/` from above the workspace.
 * There is deliberately no `cargo fmt` gate: rustfmt has never run over the
   workspace, and 24 files differ.

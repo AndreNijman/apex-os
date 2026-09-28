@@ -1,22 +1,22 @@
 name: build-image
 
-# Build, sign (cosign keyless), and push the APEX-OS images to GHCR.
+# Build, sign (cosign keyless), and push the Rime OS images to GHCR.
 #
-#   core            → ghcr.io/andrenijman/apex-os:core   (heavy, slow-moving)
-#   base            → ghcr.io/andrenijman/apex-os:base   (thin, per-commit)
-#   the image       → ghcr.io/andrenijman/apex-os:apex
+#   core            → ghcr.io/andrenijman/rime-os:core   (heavy, slow-moving)
+#   base            → ghcr.io/andrenijman/rime-os:base   (thin, per-commit)
+#   the image       → ghcr.io/andrenijman/rime-os:rime
 #                     …and :daily, :gaming-mesa, :gaming-nvidia, which are the
 #                     SAME MANIFEST DIGEST under their old names.
 #
 # ═══ ONE IMAGE, AND WHY THE OLD TAGS MUST NEVER STOP RESOLVING ═══
 #
-# APEX published three images that were one operating system with different
+# Rime published three images that were one operating system with different
 # payloads. That forced a choice at install time — pick Daily on a gaming laptop
 # and you had no GPU driver — so it is now a single image: NVIDIA and the
 # xone/xpadneo controller modules are built and SIGNED into it (a kernel module
 # cannot be installed at runtime under Secure Boot, because signing needs the MOK
 # private key that never leaves CI), while Steam, gamescope, MangoHud, Sunshine
-# and OBS install on demand through `apex install`.
+# and OBS install on demand through `rime install`.
 #
 # Every machine already deployed has bootc pointed at ONE of `:daily`,
 # `:gaming-mesa` or `:gaming-nvidia`. A tag that stops being updated does not
@@ -28,10 +28,10 @@ name: build-image
 # manifest write each because the blobs are already there, and needs nothing
 # from the installed machines.
 #
-# ═══ THE THREE-TIER SPLIT, AND WHY `apex update` USED TO PULL 5.3 GB ═══
+# ═══ THE THREE-TIER SPLIT, AND WHY `rime update` USED TO PULL 5.3 GB ═══
 #
 # Everything used to live in one `base` image. That base was gated on a path
-# filter covering files/**, apexd/** and config/** — i.e. essentially every
+# filter covering files/**, rimed/** and config/** — i.e. essentially every
 # commit — and it built with no layer cache, so every dnf/RUN layer got a fresh
 # digest even when the installed bytes were identical. bootc reuses a layer only
 # when it already holds that exact digest, so a one-line shell tweak invalidated
@@ -43,7 +43,7 @@ name: build-image
 #
 # 153 of 153 layers, every single update. The fix is the `core` tier: the
 # slow-moving ~95% of the image is built once and consumed by the base as
-# FROM apex-os-core@sha256:… . A digest-pinned FROM reuses those layer
+# FROM rime-os-core@sha256:… . A digest-pinned FROM reuses those layer
 # descriptors verbatim, so bootc already has the blobs and downloads none of
 # them. A normal push now rebuilds only base + flavor — tens of MiB.
 #
@@ -74,7 +74,7 @@ on:
     paths:
       - "Containerfile*"
       - "files/**"
-      - "apexd/**"
+      - "rimed/**"
       - "config/**"
       - "kernel/**"
       - ".github/**"
@@ -90,7 +90,7 @@ on:
   #
   # That was already possible — this dispatch trigger is not new. What was
   # missing, and what made using it a bad idea, is the PUBLISH guard below: a
-  # dispatch from a non-main ref used to move `:apex`, `:daily`, `:gaming-mesa`,
+  # dispatch from a non-main ref used to move `:rime`, `:daily`, `:gaming-mesa`,
   # `:gaming-nvidia`, every `platform-*`, `edge`, `:core` and `:base` — i.e. ship
   # an unreviewed branch to every deployed machine. It now builds, signs and
   # verifies without touching a name anything tracks.
@@ -105,7 +105,7 @@ on:
         type: boolean
         default: false
       build_iso:
-        description: "Build the APEX-OS installer ISO (anaconda-iso)"
+        description: "Build the Rime OS installer ISO (anaconda-iso)"
         type: boolean
         default: false
       force_core:
@@ -119,7 +119,7 @@ on:
     - cron: "0 6 * * 1"
 
 concurrency:
-  group: apex-image-publish
+  group: rime-image-publish
   cancel-in-progress: false
 
 # Least privilege. id-token:write is required for cosign keyless (OIDC) signing;
@@ -132,12 +132,12 @@ permissions:
 env:
   REGISTRY: ghcr.io
   # ONE repository for every tier, distinguished by tag (core and base used to be
-  # separate repos: apex-os-core / apex-os-base).
+  # separate repos: rime-os-core / rime-os-base).
   #
   # HONEST NOTE ON WHY: this was done expecting the registry to skip blobs it
   # already held — a registry dedups only WITHIN a repository, so pushing :daily
   # was re-uploading ~4.7 GB of layers inherited from core while identical blobs
-  # sat in apex-os-core. That expectation was WRONG, and measuring it locally
+  # sat in rime-os-core. That expectation was WRONG, and measuring it locally
   # against a throwaway registry:2 showed why:
   #
   #   push core (zstd:chunked) ................. 99 blobs copied,  0 skipped
@@ -157,10 +157,10 @@ env:
   # which now matters far more than it did, because those three names are the
   # ONLY thing keeping already-deployed machines updating after the collapse to a
   # single image. But it is NOT a speed optimisation, and should not be cited as one.
-  IMAGE: ghcr.io/andrenijman/apex-os
+  IMAGE: ghcr.io/andrenijman/rime-os
   # ═══ THE ONE THING THAT SEPARATES A BUILD FROM A RELEASE ═══
   #
-  # Every floating tag this workflow writes — :core, :base, :apex, :daily,
+  # Every floating tag this workflow writes — :core, :base, :rime, :daily,
   # :gaming-mesa, :gaming-nvidia, platform-*, edge — is a name somebody else's
   # machine is tracking, or that another workflow builds FROM. Moving one is a
   # release to the fleet, and it used to happen on EVERY run of this workflow
@@ -173,7 +173,7 @@ env:
   # No CACHE_PREFIX: nothing reads or writes a registry build cache any more.
   # `--cache-to` killed two builds outright (podman "image not known" mid-push)
   # and `--cache-from` became meaningless once base stopped producing
-  # intermediate layers. The ghcr.io/andrenijman/apex-os-build-cache-base
+  # intermediate layers. The ghcr.io/andrenijman/rime-os-build-cache-base
   # repository is orphaned and can be deleted in the GHCR UI.
   TAG_CORE: core
   TAG_BASE: base
@@ -181,7 +181,7 @@ env:
   # copies core across on the first run so this does NOT force a core rebuild —
   # which would have meant 55 minutes of CI and a full ~5 GB download for every
   # machine, to change a name.
-  LEGACY_CORE: ghcr.io/andrenijman/apex-os-core
+  LEGACY_CORE: ghcr.io/andrenijman/rime-os-core
   UPSTREAM_BASE: quay.io/fedora/fedora-bootc:43
 
 jobs:
@@ -215,7 +215,7 @@ jobs:
         run: ./tests/check-containerfile-assertions.sh
 
       # Seconds, and it guards the one line whose failure costs EVERY image
-      # build: `FROM ${APEX_KERNEL_IMAGE}`. It has already broken twice — once
+      # build: `FROM ${RIME_KERNEL_IMAGE}`. It has already broken twice — once
       # pointing at a localhost image CI cannot have, once declared where the
       # ARG was invisible to its own FROM — and each time the symptom was
       # "determining starting point for build: no FROM statement found" after
@@ -236,9 +236,9 @@ jobs:
           set -euo pipefail
           ./files/scripts/check-run-recovery-reachable \
               Containerfile.base Containerfile.core Containerfile.kernel \
-              Containerfile.apex Containerfile.release
+              Containerfile.rime Containerfile.release
 
-      - name: Pin apex-shell
+      - name: Pin rime-shell
         id: shell
         run: |
           set -euo pipefail
@@ -246,7 +246,7 @@ jobs:
           #
           # This program develops both repos on roadmap/v2.2 and is forbidden
           # from pushing main until the final integration, so pinning main
-          # vendored an apex-shell months behind the apex-os being built. The
+          # vendored a rime-shell months behind the rime-os being built. The
           # two halves then drift, and `base` dies in check-labwc-keybinds the
           # moment this repo's rc.xml gains a keybind the old shell's defaults
           # do not generate: W-A-s (the screen reader) and W-A-v (voice), both
@@ -255,35 +255,35 @@ jobs:
           # so.
           #
           # pr-validation.yml learned exactly this once already — its parity
-          # check cloned apex-shell's DEFAULT branch and reported drift between
-          # apex-os roadmap/v2.2 and apex-shell main while the two INTEGRATION
+          # check cloned rime-shell's DEFAULT branch and reported drift between
+          # rime-os roadmap/v2.2 and rime-shell main while the two INTEGRATION
           # branches agreed perfectly. It now clones the matching branch and
           # PRINTS which one it used; so does this.
           # The fallback is ORDERED, and main is last rather than first. The
           # comment above described this failure and the code still reached
           # straight for main: on 2026-09-19 build 35447611644 died in
           # check-labwc-keybinds on task/sbom-oom -- a branch that exists only
-          # in apex-os -- because main's shell publishes 68 keybind defaults
+          # in rime-os -- because main's shell publishes 68 keybind defaults
           # where the integration branch publishes 70. roadmap/v2.2's own
           # halves agree perfectly (the checker PASSES against the two repo
           # trees); the build was comparing this repo's integration branch
-          # against the other repo's release branch. Any apex-os branch with no
-          # apex-shell counterpart hit this, which is most of them.
+          # against the other repo's release branch. Any rime-os branch with no
+          # rime-shell counterpart hit this, which is most of them.
           want="${GITHUB_REF_NAME}"
           sha=""; used=""
           for cand in "$want" roadmap/v2.2 main; do
-            sha="$(git ls-remote https://github.com/AndreNijman/apex-shell \
+            sha="$(git ls-remote https://github.com/AndreNijman/rime-shell \
                      "refs/heads/${cand}" | awk '{print $1}')"
             if [ -n "$sha" ]; then
               if [ "$cand" = "$want" ]; then used="$cand"
-              else used="$cand (apex-shell has no branch named ${want})"
+              else used="$cand (rime-shell has no branch named ${want})"
               fi
               break
             fi
           done
-          [[ "$sha" =~ ^[0-9a-f]{40}$ ]] || { echo "::error::Could not resolve apex-shell ${used}"; exit 1; }
+          [[ "$sha" =~ ^[0-9a-f]{40}$ ]] || { echo "::error::Could not resolve rime-shell ${used}"; exit 1; }
           echo "sha=$sha" >> "$GITHUB_OUTPUT"
-          echo "Pinned apex-shell ${used}: $sha"
+          echo "Pinned rime-shell ${used}: $sha"
 
       - name: Path filter
         id: filter
@@ -308,8 +308,8 @@ jobs:
               # download for the common one.
             base:
               - 'Containerfile.base'
-              - 'Containerfile.apex'
-              - 'apexd/**'
+              - 'Containerfile.rime'
+              - 'rimed/**'
               - 'config/**'
               - 'files/**'
               - '.github/workflows/build-image.yml'
@@ -367,7 +367,7 @@ jobs:
           # core job's upstream read is: this answer now gates EVERY push, and a
           # single transient registry error must not cost an hour of build and a
           # fleet-wide download. After five failures it is treated as absent.
-          fmt='{{ index .Labels "org.opencontainers.image.revision" }}|{{ index .Labels "org.apexos.fedora-bootc.digest" }}'
+          fmt='{{ index .Labels "org.opencontainers.image.revision" }}|{{ index .Labels "org.rimeos.fedora-bootc.digest" }}'
           inspect() {
             # stderr kept apart: a warning on a SUCCESSFUL inspect must not
             # end up inside the revision it returns.
@@ -436,8 +436,8 @@ jobs:
           [ "$HAVE" = "$UP" ] && decide false "upstream fedora-bootc has not moved since the last core"
           decide true "upstream fedora-bootc moved"
 
-  # ── Job 1: Rust — fast gate on the apexd/apex workspace ───────────────────
-  # apexd and apex are compiled INSIDE the base build, so a compile error used
+  # ── Job 1: Rust — fast gate on the rimed/rime workspace ───────────────────
+  # rimed and rime are compiled INSIDE the base build, so a compile error used
   # to surface ~10 minutes into a container build with no test coverage at all
   # (the workspace has 100+ tests and CI ran none of them). This job takes ~2
   # min and blocks the base, so a broken CLI can never be published.
@@ -446,7 +446,7 @@ jobs:
     if: ${{ !(github.event_name == 'workflow_dispatch' && inputs.build_iso && !inputs.build_qcow2) }}
     defaults:
       run:
-        working-directory: apexd
+        working-directory: rimed
     steps:
       - name: Checkout
         uses: actions/checkout@v4
@@ -454,9 +454,9 @@ jobs:
         run: rustup component add clippy
 
       # The same setup pr-validation.yml needs, for the same six assertions,
-      # in the second workflow that runs them. apex/tests/mcp_sidecar_live.rs
-      # confines a real MCP server and checks the confinement holds; APEX ships
-      # bubblewrap so they pass on any APEX machine, and the GitHub runner is
+      # in the second workflow that runs them. rime/tests/mcp_sidecar_live.rs
+      # confines a real MCP server and checks the confinement holds; Rime ships
+      # bubblewrap so they pass on any Rime machine, and the GitHub runner is
       # Ubuntu and does not. Without this the rust job fails, and because
       # `base` needs `rust` and `image` needs `base`, THE IMAGE NEVER BUILDS —
       # which is how this branch went from 2026-09-07 to 2026-09-12 without a
@@ -483,8 +483,8 @@ jobs:
           path: |
             ~/.cargo/registry
             ~/.cargo/git
-            apexd/target
-          key: cargo-${{ runner.os }}-${{ hashFiles('apexd/Cargo.lock') }}
+            rimed/target
+          key: cargo-${{ runner.os }}-${{ hashFiles('rimed/Cargo.lock') }}
           restore-keys: cargo-${{ runner.os }}-
       # NOTE: no `cargo fmt --all --check`. The workspace has never been
       # rustfmt'd — 24 of its source files differ — so adding that gate here
@@ -497,12 +497,12 @@ jobs:
       # Through tests/in-login-session.sh, the same wrapper pr-validation.yml
       # runs its tests under, and for the same reason — this job never got it.
       #
-      # `apex-agentd` decides whether a human is at this machine from the
+      # `rime-agentd` decides whether a human is at this machine from the
       # CONNECTING PEER's cgroup (`origin::classify`). A GitHub-hosted runner
       # places its processes in `/system.slice/hosted-compute-agent.service`,
       # which is neither a login session nor a user service, so the daemon
       # cannot classify the connection at all and refuses before reaching the
-      # behaviour under test. Six of `apex-agentd/tests/budget.rs`'s eight
+      # behaviour under test. Six of `rime-agentd/tests/budget.rs`'s eight
       # assertions fail that way, `cargo test` exits 101, and because `base`
       # declares `needs: [changes, rust, core]` the failure SKIPS the whole
       # image build — so this one missing wrapper is why no image can be built
@@ -606,8 +606,8 @@ jobs:
 
       # ═══ THE KERNEL TIER — resolved and proven reachable BEFORE the build ═══
       #
-      # `Containerfile.core` opens with `ARG APEX_KERNEL_IMAGE=<a ghcr digest>`
-      # and consumes it as `FROM ${APEX_KERNEL_IMAGE} AS kernel-rpms`. If that
+      # `Containerfile.core` opens with `ARG RIME_KERNEL_IMAGE=<a ghcr digest>`
+      # and consumes it as `FROM ${RIME_KERNEL_IMAGE} AS kernel-rpms`. If that
       # image cannot be pulled, podman fails — which is correct and loud, and
       # deliberately so: a core that fell back to the COPR kernel would ship the
       # BTF defect the kernel tier exists to fix, and nobody would find out until
@@ -628,11 +628,11 @@ jobs:
           set -euo pipefail
           command -v skopeo >/dev/null || { sudo apt-get update -qq && sudo apt-get install -y -qq skopeo; }
 
-          ref="$(sed -nE 's|^ARG APEX_KERNEL_IMAGE=(ghcr\.io/andrenijman/apex-os@sha256:[0-9a-f]{64})$|\1|p' Containerfile.core | head -1)"
+          ref="$(sed -nE 's|^ARG RIME_KERNEL_IMAGE=(ghcr\.io/andrenijman/rime-os@sha256:[0-9a-f]{64})$|\1|p' Containerfile.core | head -1)"
           if [ -z "$ref" ]; then
-            echo "::error::Containerfile.core's ARG APEX_KERNEL_IMAGE default is not a"
-            echo "::error::ghcr.io/andrenijman/apex-os@sha256:<64 hex> digest reference."
-            grep -n '^ARG APEX_KERNEL_IMAGE=' Containerfile.core || true
+            echo "::error::Containerfile.core's ARG RIME_KERNEL_IMAGE default is not a"
+            echo "::error::ghcr.io/andrenijman/rime-os@sha256:<64 hex> digest reference."
+            grep -n '^ARG RIME_KERNEL_IMAGE=' Containerfile.core || true
             exit 1
           fi
           echo "kernel tier: $ref"
@@ -668,16 +668,16 @@ jobs:
 
       - name: Build core
         env:
-          APEX_SB_KEY_B64: ${{ secrets.APEX_SB_KEY_B64 }}
-          APEX_SB_CRT_B64: ${{ secrets.APEX_SB_CRT_B64 }}
-          APEX_KERNEL_IMAGE: ${{ steps.kernel.outputs.ref }}
+          RIME_SB_KEY_B64: ${{ secrets.APEX_SB_KEY_B64 }}
+          RIME_SB_CRT_B64: ${{ secrets.APEX_SB_CRT_B64 }}
+          RIME_KERNEL_IMAGE: ${{ steps.kernel.outputs.ref }}
         run: |
           # ── Secure Boot signing key ──────────────────────────────────────
-          # Containerfile.core signs the CachyOS kernel with the APEX MOK only
+          # Containerfile.core signs the CachyOS kernel with the Rime MOK only
           # when these build secrets are present, and otherwise stamps the image
           # `unsigned` and carries on. CI used to pass nothing, so every image
           # ever PUBLISHED to GHCR was unsigned: anyone installing from the
-          # registry could not use Secure Boot at all, and enrolling the APEX
+          # registry could not use Secure Boot at all, and enrolling the Rime
           # key would not have helped them, because their kernel did not carry
           # its signature. Only locally-built images were signed.
           #
@@ -695,22 +695,22 @@ jobs:
           # NOTE: signing now happens once here, in core, and every tier
           # inherits the signed vmlinuz. The base and flavor jobs re-verify it
           # on the artefact users actually pull.
-          SECDIR="$RUNNER_TEMP/apex-sb"
+          SECDIR="$RUNNER_TEMP/rime-sb"
           mkdir -p "$SECDIR"; chmod 700 "$SECDIR"
           SECRET_ARGS=""
-          if [ -n "${APEX_SB_KEY_B64:-}" ] && [ -n "${APEX_SB_CRT_B64:-}" ]; then
-            printf '%s' "$APEX_SB_KEY_B64" | base64 -d > "$SECDIR/apex-mok.key"
-            printf '%s' "$APEX_SB_CRT_B64" | base64 -d > "$SECDIR/apex-mok.crt"
-            chmod 600 "$SECDIR"/apex-mok.*
+          if [ -n "${RIME_SB_KEY_B64:-}" ] && [ -n "${RIME_SB_CRT_B64:-}" ]; then
+            printf '%s' "$RIME_SB_KEY_B64" | base64 -d > "$SECDIR/rime-mok.key"
+            printf '%s' "$RIME_SB_CRT_B64" | base64 -d > "$SECDIR/rime-mok.crt"
+            chmod 600 "$SECDIR"/rime-mok.*
             # Fail now rather than ship an unsigned image because a secret was
             # pasted in mangled. Silent degradation is how this shipped unsigned
             # for weeks in the first place.
-            openssl rsa  -in "$SECDIR/apex-mok.key" -noout -check >/dev/null
-            openssl x509 -in "$SECDIR/apex-mok.crt" -noout        >/dev/null
-            k=$(openssl rsa  -in "$SECDIR/apex-mok.key" -noout -modulus | sha256sum)
-            c=$(openssl x509 -in "$SECDIR/apex-mok.crt" -noout -modulus | sha256sum)
-            [ "$k" = "$c" ] || { echo "FATAL: APEX_SB_KEY_B64 and APEX_SB_CRT_B64 are not a pair"; exit 1; }
-            SECRET_ARGS="--secret id=apex_sb_key,src=$SECDIR/apex-mok.key --secret id=apex_sb_crt,src=$SECDIR/apex-mok.crt"
+            openssl rsa  -in "$SECDIR/rime-mok.key" -noout -check >/dev/null
+            openssl x509 -in "$SECDIR/rime-mok.crt" -noout        >/dev/null
+            k=$(openssl rsa  -in "$SECDIR/rime-mok.key" -noout -modulus | sha256sum)
+            c=$(openssl x509 -in "$SECDIR/rime-mok.crt" -noout -modulus | sha256sum)
+            [ "$k" = "$c" ] || { echo "FATAL: RIME_SB_KEY_B64 and RIME_SB_CRT_B64 are not a pair"; exit 1; }
+            SECRET_ARGS="--secret id=rime_sb_key,src=$SECDIR/rime-mok.key --secret id=rime_sb_crt,src=$SECDIR/rime-mok.crt"
             echo "Secure Boot: signing key present — the kernel will be signed"
           else
             echo "Secure Boot: NO signing secret configured — the kernel will be UNSIGNED"
@@ -729,30 +729,30 @@ jobs:
           #
           # Asserted non-empty first, because an empty --build-arg OVERRIDES the
           # default with nothing and reproduces the exact failure this whole
-          # change exists to remove: `FROM ${APEX_KERNEL_IMAGE}` expands empty
+          # change exists to remove: `FROM ${RIME_KERNEL_IMAGE}` expands empty
           # and podman dies with "determining starting point for build: no FROM
           # statement found".
-          case "${APEX_KERNEL_IMAGE:-}" in
-            ghcr.io/andrenijman/apex-os@sha256:*) : ;;
-            *) echo "::error::APEX_KERNEL_IMAGE is '${APEX_KERNEL_IMAGE:-}' — the resolve step did not produce a digest"; exit 1 ;;
+          case "${RIME_KERNEL_IMAGE:-}" in
+            ghcr.io/andrenijman/rime-os@sha256:*) : ;;
+            *) echo "::error::RIME_KERNEL_IMAGE is '${RIME_KERNEL_IMAGE:-}' — the resolve step did not produce a digest"; exit 1 ;;
           esac
 
           sudo podman build --isolation=chroot $NOCACHE \
-            --build-arg APEX_REVISION="${{ github.sha }}" \
+            --build-arg RIME_REVISION="${{ github.sha }}" \
             --build-arg FEDORA_BOOTC_DIGEST="${{ steps.upstream.outputs.digest }}" \
-            --build-arg APEX_KERNEL_IMAGE="$APEX_KERNEL_IMAGE" \
+            --build-arg RIME_KERNEL_IMAGE="$RIME_KERNEL_IMAGE" \
             $SECRET_ARGS \
             -f Containerfile.core \
             -t "$IMAGE:$TAG_CORE-${{ github.sha }}" \
             .
 
-          shred -u "$SECDIR"/apex-mok.* 2>/dev/null || rm -f "$SECDIR"/apex-mok.*
+          shred -u "$SECDIR"/rime-mok.* 2>/dev/null || rm -f "$SECDIR"/rime-mok.*
           rmdir "$SECDIR" 2>/dev/null || true
 
       # Gate the push on the core actually being usable. Everything asserted
       # here has silently shipped broken at least once: hyprland-qtutils was
       # absent for weeks because dnf dropped an unsatisfiable weak dep without
-      # failing the build (apex-logs 47), and the Fedora de-branding regressed
+      # failing the build (rime-logs 47), and the Fedora de-branding regressed
       # the same way. A green `podman build` is not evidence the image is right.
       - name: Verify core image
         run: |
@@ -774,9 +774,9 @@ jobs:
           # it must be the ONLY Fedora string left in os-release.
           N=$(run 'grep -ci fedora /usr/lib/os-release')
           [ "$N" = "1" ] || fail "expected exactly 1 Fedora string in os-release, found $N"
-          run 'grep -q "^PRETTY_NAME=\"APEX-OS\"" /usr/lib/os-release' \
+          run 'grep -q "^PRETTY_NAME=\"Rime OS\"" /usr/lib/os-release' \
             || fail "os-release not branded"
-          run 'grep -q "^APEX-OS release" /etc/system-release' \
+          run 'grep -q "^Rime OS release" /etc/system-release' \
             || fail "/etc/system-release not branded (bootupd derives the EFI label from it)"
 
           # Things the BASE tier can no longer install for itself, because it
@@ -793,7 +793,7 @@ jobs:
           run 'command -v matugen >/dev/null' \
             || fail "matugen missing — the shell cannot theme without it"
           run 'command -v cargo >/dev/null' \
-            || fail "cargo missing — Containerfile.base compiles apexd in a stage FROM this image"
+            || fail "cargo missing — Containerfile.base compiles rimed in a stage FROM this image"
 
           # Secure Boot: if a signing key is configured, the published kernel
           # MUST actually carry the signature. Containerfile.core degrades to
@@ -802,18 +802,18 @@ jobs:
           # people install. Assert both the marker and the real PE certificate
           # table, because the marker is only a claim.
           if [ -n "${{ secrets.APEX_SB_KEY_B64 }}" ]; then
-            state=$(run 'cat /usr/share/apex-os/secureboot/kernel-signed 2>/dev/null || echo missing')
+            state=$(run 'cat /usr/share/rime-os/secureboot/kernel-signed 2>/dev/null || echo missing')
             [ "$state" = signed ] \
               || fail "signing key is configured but the image is stamped '$state' — refusing to publish an unsigned kernel"
-            run 'test -s /usr/share/apex-os/secureboot/apex-mok.der' \
-              || fail "kernel-signed=signed but apex-mok.der is missing — users would have nothing to enrol"
+            run 'test -s /usr/share/rime-os/secureboot/rime-mok.der' \
+              || fail "kernel-signed=signed but rime-mok.der is missing — users would have nothing to enrol"
             sudo podman run --rm --entrypoint /bin/sh "$IMAGE:$TAG_CORE-${{ github.sha }}" -c \
-              'dnf5 -y install -q sbsigntools >/dev/null 2>&1; sbverify --list /usr/lib/modules/$(cat /usr/lib/apex-kver)/vmlinuz' \
-              | grep -qi 'signature certificates\|image signature issuers\|APEX' \
+              'dnf5 -y install -q sbsigntools >/dev/null 2>&1; sbverify --list /usr/lib/modules/$(cat /usr/lib/rime-kver)/vmlinuz' \
+              | grep -qi 'signature certificates\|image signature issuers\|Rime' \
               || fail "sbverify found no signature on the shipped vmlinuz"
-            echo "Secure Boot: verified — the published kernel is signed and apex-mok.der ships with it"
+            echo "Secure Boot: verified — the published kernel is signed and rime-mok.der ships with it"
           else
-            echo "::warning::No APEX_SB_KEY_B64 secret — this image ships an UNSIGNED kernel and cannot be used with Secure Boot"
+            echo "::warning::No RIME_SB_KEY_B64 secret — this image ships an UNSIGNED kernel and cannot be used with Secure Boot"
           fi
 
           echo "core image verified"
@@ -878,15 +878,15 @@ jobs:
       - name: Push core + capture digest
         id: push
         run: |
-          # zstd:chunked instead of the default gzip (apex-logs 16). Two effects,
+          # zstd:chunked instead of the default gzip (rime-logs 16). Two effects,
           # neither of which changes image CONTENT — only how it is packed:
           #   - zstd compresses this tree meaningfully smaller than gzip, and
-          #     decompresses several times faster, so `apex update` spends less
+          #     decompresses several times faster, so `rime update` spends less
           #     time both downloading and unpacking.
           #   - :chunked publishes a per-layer chunk manifest.
           # Requires an OCI manifest (podman already produces one here) and a
           # client that understands zstd; the fleet is bootc 1.16+/ostree 2026.2,
-          # which does. `apex rollback` remains the escape hatch.
+          # which does. `rime rollback` remains the escape hatch.
           /tmp/push-retry.sh "$IMAGE" "$TAG_CORE-${{ github.sha }}" "$TAG_CORE" /tmp/core.digest
           DIGEST="$(cat /tmp/core.digest)"
           echo "digest=$DIGEST" >> "$GITHUB_OUTPUT"
@@ -938,7 +938,7 @@ jobs:
       # Resolve the core digest to build FROM. If the core job ran in this
       # workflow use its output; otherwise resolve the last-good published core.
       # Failing here is FATAL and says so: on the very first run after this
-      # split there is no apex-os-core:latest yet, and silently falling through
+      # split there is no rime-os-core:latest yet, and silently falling through
       # to an unpinned tag (or to fedora-bootc) would produce a wrong image.
       - name: Resolve core digest
         id: core
@@ -1028,7 +1028,7 @@ jobs:
           # to any base file redownloads all ~15 MiB instead of just the layers
           # that moved. That is noise next to the 5.26 GiB core those machines
           # already have and do not re-fetch — the core/base split, which is
-          # what actually keeps `apex update` small, is untouched.
+          # what actually keeps `rime update` small, is untouched.
           #
           # `--cache-from` goes with it: with no intermediate layers there is
           # nothing to look up, so it would be a registry round-trip per build
@@ -1040,7 +1040,7 @@ jobs:
           # fast. It is an optimisation, not the deliverable. podman runs it
           # inside the build command, so its failure exits 125 and takes the
           # build with it — which happened twice in a row on the final image
-          # build, both times AFTER apexd, apex, apex-agentd and apex-aid had
+          # build, both times AFTER rimed, rime, rime-agentd and rime-aid had
           # compiled and been installed:
           #
           #   Error: failed pushing cache ... reading blob sha256:3c29356a...:
@@ -1056,9 +1056,9 @@ jobs:
           set +e
           sudo podman build --isolation=chroot --layers=false \
             --build-arg CORE="$IMAGE@${{ steps.core.outputs.digest }}" \
-            --build-arg APEX_REVISION="${{ github.sha }}" \
-            --build-arg APEX_SHELL_REF="${{ needs.changes.outputs.shell_sha }}" \
-            --build-arg APEX_SHELL_STRICT=1 \
+            --build-arg RIME_REVISION="${{ github.sha }}" \
+            --build-arg RIME_SHELL_REF="${{ needs.changes.outputs.shell_sha }}" \
+            --build-arg RIME_SHELL_STRICT=1 \
             -f Containerfile.base \
             -t "$IMAGE:$TAG_BASE-${{ github.sha }}" \
             .
@@ -1086,12 +1086,12 @@ jobs:
           run() { sudo podman run --rm --entrypoint /bin/sh "$IMAGE:$TAG_BASE-${{ github.sha }}" -c "$1"; }
 
           # M6 + the per-user provisioner race fix.
-          run 'test -x /usr/bin/apexd && test -x /usr/bin/apex' || fail "apexd/apex missing"
-          run 'test -s /usr/share/apex/hypr/hyprland.lua' || fail "APEX hyprland template missing"
-          run 'test -d /usr/share/apex/hypr/apex' || fail "APEX hyprland modules missing"
-          run 'test -x /usr/libexec/apex-hypr-migrate' \
-            || fail "apex-hypr-migrate missing; an upgraded machine would keep its hyprlang config"
-          run 'grep -q CRITICAL /usr/libexec/apex-shell-firstrun' \
+          run 'test -x /usr/bin/rimed && test -x /usr/bin/rime' || fail "rimed/rime missing"
+          run 'test -s /usr/share/rime/hypr/hyprland.lua' || fail "Rime hyprland template missing"
+          run 'test -d /usr/share/rime/hypr/rime' || fail "Rime hyprland modules missing"
+          run 'test -x /usr/libexec/rime-hypr-migrate' \
+            || fail "rime-hypr-migrate missing; an upgraded machine would keep its hyprlang config"
+          run 'grep -q CRITICAL /usr/libexec/rime-shell-firstrun' \
             || fail "provisioner is missing the config-seeding race fix"
 
           # ── no hyprlang compositor config, anywhere ────────────────────
@@ -1104,28 +1104,28 @@ jobs:
           # Scoped to the compositor. hypridle, hyprlock and the other hypr*
           # tools keep hyprlang; upstream said so, and src/config/hyprlock.conf
           # is deliberately untouched.
-          run 'test ! -e /usr/share/apex/hypr/hyprland.conf' \
+          run 'test ! -e /usr/share/rime/hypr/hyprland.conf' \
             || fail "a hyprlang hyprland.conf is back in the image"
           # The generators must not write one either. Their output paths are
           # read out of the scripts rather than assumed, so a rename that
           # skipped this check cannot pass it.
-          run 'grep -q "hypr/apex/input.lua" /usr/libexec/apex-input-apply' \
-            || fail "apex-input-apply no longer writes apex/input.lua"
-          run 'grep -q "hypr/apex/monitors.lua" /usr/libexec/apex-display-apply' \
-            || fail "apex-display-apply no longer writes apex/monitors.lua"
-          run '! grep -qE "hypr/apex-(input|display)\.conf" \
-                 /usr/libexec/apex-input-apply /usr/libexec/apex-display-apply' \
+          run 'grep -q "hypr/rime/input.lua" /usr/libexec/rime-input-apply' \
+            || fail "rime-input-apply no longer writes rime/input.lua"
+          run 'grep -q "hypr/rime/monitors.lua" /usr/libexec/rime-display-apply' \
+            || fail "rime-display-apply no longer writes rime/monitors.lua"
+          run '! grep -qE "hypr/rime-(input|display)\.conf" \
+                 /usr/libexec/rime-input-apply /usr/libexec/rime-display-apply' \
             || fail "a settings generator still writes a legacy hyprlang .conf"
           run 'test ! -e /usr/share/wayland-sessions/hyprland-uwsm.desktop' \
             || fail "hyprland-uwsm.desktop present; it sorts first and bounce-loops"
 
           # ── labwc as a third user session ──────────────────────────────
           # The stock labwc.desktop must stay deleted: it launches labwc bare,
-          # with no APEX Shell and no config, and labwc is simultaneously the
+          # with no Rime Shell and no config, and labwc is simultaneously the
           # greeter's fallback HOST compositor, so offering the stock entry is a
           # login hazard. Ours is a separate file.
-          run 'test -e /usr/share/wayland-sessions/apex-labwc.desktop' \
-            || fail "apex-labwc.desktop missing; labwc session not offered"
+          run 'test -e /usr/share/wayland-sessions/rime-labwc.desktop' \
+            || fail "rime-labwc.desktop missing; labwc session not offered"
           run 'test ! -e /usr/share/wayland-sessions/labwc.desktop' \
             || fail "stock labwc.desktop present; it starts labwc with no shell"
           run 'command -v labwc >/dev/null' \
@@ -1140,29 +1140,29 @@ jobs:
           # everything the compositor does for the shell is declared in rc.xml
           # up front, and a missing or malformed file yields a bare grey screen.
           for f in rc.xml menu.xml autostart environment; do
-            run "test -s /usr/share/apex/labwc/$f" \
+            run "test -s /usr/share/rime/labwc/$f" \
               || fail "labwc template $f missing from the image"
           done
-          run 'xmllint --noout /usr/share/apex/labwc/rc.xml' \
+          run 'xmllint --noout /usr/share/rime/labwc/rc.xml' \
             || fail "labwc rc.xml is not well-formed; labwc would silently use defaults"
-          run 'grep -q apex-shell-autostart /usr/share/apex/labwc/autostart' \
-            || fail "labwc autostart does not start APEX Shell"
-          run 'grep -q "^XDG_CURRENT_DESKTOP=labwc" /usr/share/apex/labwc/environment' \
+          run 'grep -q rime-shell-autostart /usr/share/rime/labwc/autostart' \
+            || fail "labwc autostart does not start Rime Shell"
+          run 'grep -q "^XDG_CURRENT_DESKTOP=labwc" /usr/share/rime/labwc/environment' \
             || fail "labwc environment does not identify the compositor to the shell"
 
-          # ── apex shell wrapper ─────────────────────────────────────────
-          # The labwc keybinds and root menu invoke `apex shell <verb>`. If that
+          # ── rime shell wrapper ─────────────────────────────────────────
+          # The labwc keybinds and root menu invoke `rime shell <verb>`. If that
           # verb is missing, or qs is not installed, every popup binding in the
           # session is a silent no-op that looks like a broken keyboard.
-          run 'apex shell list >/dev/null' \
-            || fail "apex shell is missing; labwc keybinds would silently do nothing"
+          run 'rime shell list >/dev/null' \
+            || fail "rime shell is missing; labwc keybinds would silently do nothing"
           run 'command -v qs >/dev/null' \
-            || fail "qs missing; apex shell has nothing to call"
-          run 'grep -q "apex shell" /usr/share/apex/labwc/rc.xml' \
-            || fail "labwc rc.xml no longer uses apex shell"
+            || fail "qs missing; rime shell has nothing to call"
+          run 'grep -q "rime shell" /usr/share/rime/labwc/rc.xml' \
+            || fail "labwc rc.xml no longer uses rime shell"
           # A read-only session verb must not have become root-only.
-          run 'apex shell list >/dev/null' \
-            || fail "apex shell list requires privileges it should not need"
+          run 'rime shell list >/dev/null' \
+            || fail "rime shell list requires privileges it should not need"
           # labwc is the only authority on whether an action name and its
           # arguments are real: xmllint cannot know that `Focus` takes no
           # `direction`, and labwc answers a bad action by logging it and
@@ -1173,7 +1173,7 @@ jobs:
           # still reports, and a valid config prints nothing at all. The
           # non-zero exit from failing to start a compositor is expected and
           # deliberately ignored; only config diagnostics are inspected.
-          run 'out=$(labwc -C /usr/share/apex/labwc 2>&1 || true); \
+          run 'out=$(labwc -C /usr/share/rime/labwc 2>&1 || true); \
                ! printf "%s\n" "$out" | grep -qiE "invalid argument for action|invalid action|unexpected element"' \
             || fail "labwc rejected something in rc.xml; that binding would be silently dropped"
 
@@ -1181,7 +1181,7 @@ jobs:
           # Screen sharing, file pickers and screenshots all route through
           # portals, so a session whose backends are decided by resolution order
           # is a user-visible failure that looks like flakiness. niri shipped for
-          # three releases with no APEX configuration at all — its packaged
+          # three releases with no Rime configuration at all — its packaged
           # `default=gnome;gtk` handed FileChooser to the GNOME implementation
           # while labwc and Hyprland both reached gtk — and no assertion here
           # could see it, because nothing enumerated the other sessions.
@@ -1194,7 +1194,7 @@ jobs:
               || fail "$d has no portals.conf, or resolves its backends through a wildcard (got: $out)"
             echo "portals: $d -> $out"
           done
-          # The two APEX pins specifically, so a silent revert to the packaged
+          # The two Rime pins specifically, so a silent revert to the packaged
           # file fails rather than passing the loop above.
           run 'grep -qE "^default=gtk$" /etc/xdg-desktop-portal/labwc-portals.conf' \
             || fail "labwc portal config lost its gtk pin"
@@ -1210,58 +1210,58 @@ jobs:
           run 'grep -q "^DesktopNames=niri$" /usr/share/wayland-sessions/niri.desktop' \
             || fail "niri.desktop no longer announces DesktopNames=niri; niri-portals.conf is inert"
 
-          # The power menu and the idle timer both source apex-shell's
+          # The power menu and the idle timer both source rime-shell's
           # src/scripts/compositor.sh and run every action through its
-          # apex_run(). A vendored tree that has the source line but not the
+          # rime_run(). A vendored tree that has the source line but not the
           # file is a power menu where nothing works at all — worse than the
           # labwc no-ops the adapter exists to fix, and silent.
-          run 'P=/usr/share/apex-shell/src/scripts/PowerControl.sh;
+          run 'P=/usr/share/rime-shell/src/scripts/PowerControl.sh;
                grep -qE "^[[:space:]]*\.[[:space:]].*compositor\.sh" "$P" || exit 0;
-               test -s /usr/share/apex-shell/src/scripts/compositor.sh' \
-            || fail "apex-shell sources compositor.sh but the vendored tree has no such file"
+               test -s /usr/share/rime-shell/src/scripts/compositor.sh' \
+            || fail "rime-shell sources compositor.sh but the vendored tree has no such file"
 
           # The greeter must tolerate NVIDIA: sway exits(1) on nvidia-drm without
           # this flag, which means no login at all on a hybrid-graphics machine.
           run 'grep -q -- --unsupported-gpu /etc/greetd/config.toml' \
             || fail "greeter missing --unsupported-gpu"
 
-          # `apex update` must refuse to run unprivileged, with a message that
+          # `rime update` must refuse to run unprivileged, with a message that
           # names sudo. The container runs as root, so assert the refusal by
           # dropping to a non-root uid — testing it as root would prove nothing.
           out=$(sudo podman run --rm --user 1000:1000 --entrypoint /bin/sh \
-                  "$IMAGE:$TAG_BASE-${{ github.sha }}" -c 'apex update --check 2>&1' || true)
-          echo "$out" | grep -q 'sudo apex update --check' \
-            || fail "apex update does not tell an unprivileged caller to use sudo (got: $out)"
+                  "$IMAGE:$TAG_BASE-${{ github.sha }}" -c 'rime update --check 2>&1' || true)
+          echo "$out" | grep -q 'sudo rime update --check' \
+            || fail "rime update does not tell an unprivileged caller to use sudo (got: $out)"
           # …and the verbs the desktop drives as the session user must NOT be gated.
-          run 'apex tier >/dev/null' \
-            || fail "apex tier broke — APEX Shell's power tab calls it as the session user"
+          run 'rime tier >/dev/null' \
+            || fail "rime tier broke — Rime Shell's power tab calls it as the session user"
 
           # The package engine is a shell script, so a broken code path shows up
           # only when a user runs it. These assert, in the image that will
-          # actually ship, that `apex install` advertises the local-.rpm form and
+          # actually ship, that `rime install` advertises the local-.rpm form and
           # enforces it — the advertisement matters because a feature nobody can
           # discover is not shipped, and the refusal matters because it is the
           # step that runs before anything is copied into /var.
-          run 'apex install --help | grep -q "\.rpm"' \
-            || fail "apex install --help does not mention installing a local .rpm file"
-          run 'apex install --help | grep -q allow-unsigned' \
-            || fail "apex install --help does not offer the unverified-RPM opt-in"
-          run '/usr/libexec/apex-pkg --help | grep -q allow-unsigned' \
-            || fail "apex-pkg --help does not mention --allow-unsigned"
+          run 'rime install --help | grep -q "\.rpm"' \
+            || fail "rime install --help does not mention installing a local .rpm file"
+          run 'rime install --help | grep -q allow-unsigned' \
+            || fail "rime install --help does not offer the unverified-RPM opt-in"
+          run '/usr/libexec/rime-pkg --help | grep -q allow-unsigned' \
+            || fail "rime-pkg --help does not mention --allow-unsigned"
           # The container is root, so this reaches the engine's real argument
           # handling. It must refuse by name and exit non-zero without creating
           # any state — a silent success here would mean a rebuild later failing
           # on a cached file that was never written.
-          out=$(run '/usr/libexec/apex-pkg install /nonexistent/apex-ci.rpm 2>&1; echo "rc=$?"')
-          grep -q 'no such file: /nonexistent/apex-ci.rpm' <<<"$out" \
-            || fail "apex-pkg does not refuse a missing .rpm path by name (got: $out)"
+          out=$(run '/usr/libexec/rime-pkg install /nonexistent/rime-ci.rpm 2>&1; echo "rc=$?"')
+          grep -q 'no such file: /nonexistent/rime-ci.rpm' <<<"$out" \
+            || fail "rime-pkg does not refuse a missing .rpm path by name (got: $out)"
           grep -q 'rc=1' <<<"$out" \
-            || fail "apex-pkg exits 0 on a missing .rpm path (got: $out)"
+            || fail "rime-pkg exits 0 on a missing .rpm path (got: $out)"
           # A reverse-DNS id ending in .rpm is a FILE, not a Flatpak. Getting this
           # order wrong sends a file the user pointed at to Flathub.
-          run '/usr/libexec/apex-pkg install org.foo.Bar.rpm 2>&1 | grep -q "no such file"' \
-            || fail "apex-pkg routes org.foo.Bar.rpm to Flatpak instead of treating it as a file"
-          run 'test ! -e /var/lib/apex/pkg/requested' \
+          run '/usr/libexec/rime-pkg install org.foo.Bar.rpm 2>&1 | grep -q "no such file"' \
+            || fail "rime-pkg routes org.foo.Bar.rpm to Flatpak instead of treating it as a file"
+          run 'test ! -e /var/lib/rime/pkg/requested' \
             || fail "a refused install wrote to the requested list"
           # The dependency resolution for a local file is the one thing that is
           # neither rpm nor a shell builtin; losing it would break only that path.
@@ -1272,19 +1272,19 @@ jobs:
           # wiring. This is the fix for "the lock screen keeps the default
           # wallpaper", and every part of it is silently skippable at runtime,
           # so it is asserted at build time instead.
-          run 'test -x /usr/libexec/apex-greet-wallpaper' \
+          run 'test -x /usr/libexec/rime-greet-wallpaper' \
             || fail "greeter wallpaper helper missing"
-          run 'test -f /etc/sudoers.d/030-apex-greet-wallpaper' \
+          run 'test -f /etc/sudoers.d/030-rime-greet-wallpaper' \
             || fail "greeter wallpaper sudoers rule missing"
-          run 'visudo -cf /etc/sudoers.d/030-apex-greet-wallpaper >/dev/null' \
+          run 'visudo -cf /etc/sudoers.d/030-rime-greet-wallpaper >/dev/null' \
             || fail "greeter wallpaper sudoers rule does not parse — sudo would refuse it at runtime"
-          run 'grep -q "apex-greet/wallpapers" /usr/share/apex-greet/GreetContext.qml' \
+          run 'grep -q "rime-greet/wallpapers" /usr/share/rime-greet/GreetContext.qml' \
             || fail "greeter no longer reads the published wallpaper"
-          run '! grep -q "file:///usr/share/backgrounds/apex/default.jpg" /usr/share/apex-greet/GreetSurface.qml' \
+          run '! grep -q "file:///usr/share/backgrounds/rime/default.jpg" /usr/share/rime-greet/GreetSurface.qml' \
             || fail "GreetSurface has gone back to the hardcoded default wallpaper"
-          run 'grep -q apex-greet-wallpaper /usr/share/apex-shell/src/services/WallpaperService.qml' \
-            || fail "vendored apex-shell does not publish the wallpaper on change"
-          run 'grep -q apex-greet-wallpaper /usr/libexec/apex-shell-autostart' \
+          run 'grep -q rime-greet-wallpaper /usr/share/rime-shell/src/services/WallpaperService.qml' \
+            || fail "vendored rime-shell does not publish the wallpaper on change"
+          run 'grep -q rime-greet-wallpaper /usr/libexec/rime-shell-autostart' \
             || fail "session launcher does not publish the wallpaper on login"
 
           # Secure Boot, re-asserted on the tier that inherits it. The core job
@@ -1292,7 +1292,7 @@ jobs:
           # THE LAST PUBLISHED CORE — if that core were unsigned, an unsigned
           # base would ship and core's assertion would never have run.
           if [ -n "${{ secrets.APEX_SB_KEY_B64 }}" ]; then
-            state=$(run 'cat /usr/share/apex-os/secureboot/kernel-signed 2>/dev/null || echo missing')
+            state=$(run 'cat /usr/share/rime-os/secureboot/kernel-signed 2>/dev/null || echo missing')
             [ "$state" = signed ] \
               || fail "base is stamped '$state' — the core it was built from is not signed. Re-run with force_core=true."
           fi
@@ -1390,7 +1390,7 @@ jobs:
     # would silently evaluate to false and never run, which is precisely the
     # class of quietly-skipped check it exists to prevent.
     env:
-      APEX_SB_CONFIGURED: ${{ secrets.APEX_SB_KEY_B64 != '' }}
+      RIME_SB_CONFIGURED: ${{ secrets.APEX_SB_KEY_B64 != '' }}
       GHCR_USER: ${{ github.actor }}
       GHCR_TOKEN: ${{ secrets.GITHUB_TOKEN }}
     steps:
@@ -1417,14 +1417,14 @@ jobs:
         run: |
           # --layers=false for the same reason as the base job: a per-step
           # commit costs minutes on this runner regardless of what the step
-          # changed. Containerfile.apex is only 12 steps so it was survivable
+          # changed. Containerfile.rime is only 12 steps so it was survivable
           # rather than fatal, but it is still minutes of nothing.
           sudo podman build --isolation=chroot --layers=false \
             --build-arg BASE="$IMAGE@${{ needs.base.outputs.digest }}" \
-            --build-arg APEX_REVISION="${{ github.sha }}" \
-            -f Containerfile.apex \
-            -t "$IMAGE:apex" \
-            -t "$IMAGE:apex-${{ github.sha }}" \
+            --build-arg RIME_REVISION="${{ github.sha }}" \
+            -f Containerfile.rime \
+            -t "$IMAGE:rime" \
+            -t "$IMAGE:rime-${{ github.sha }}" \
             .
 
       # Gate the PUSH on the image actually carrying a signed kernel AND signed
@@ -1432,40 +1432,40 @@ jobs:
       #
       # The module half is new, and it closes a real hole: the NVIDIA akmod used
       # to be built in Containerfile.gaming, i.e. in the FLAVOR job — which is
-      # never passed `--secret id=apex_sb_key`, so nothing could have signed it
+      # never passed `--secret id=rime_sb_key`, so nothing could have signed it
       # there and nothing did. This check ran `sbverify` against vmlinuz only, so
       # nothing caught it either. Both halves are now measured against the built
       # artifact: the marker file is read, and then ignored in favour of the
       # signature actually present in the kernel image and in every module.
       - name: Verify the Secure Boot chain (kernel AND modules)
-        if: ${{ env.APEX_SB_CONFIGURED == 'true' }}
+        if: ${{ env.RIME_SB_CONFIGURED == 'true' }}
         run: |
           set -euo pipefail
-          state=$(sudo podman run --rm --entrypoint /bin/sh "$IMAGE:apex" \
-                    -c 'cat /usr/share/apex-os/secureboot/kernel-signed 2>/dev/null || echo missing')
+          state=$(sudo podman run --rm --entrypoint /bin/sh "$IMAGE:rime" \
+                    -c 'cat /usr/share/rime-os/secureboot/kernel-signed 2>/dev/null || echo missing')
           if [ "$state" != signed ]; then
             echo "::error::the image is stamped '$state' — refusing to publish an unsigned kernel."
             echo "::error::The core it was built from is not signed. Re-run with force_core=true."
             exit 1
           fi
-          sudo podman run --rm --entrypoint /bin/sh "$IMAGE:apex" -c \
-            'dnf5 -y install -q sbsigntools >/dev/null 2>&1; sbverify --list /usr/lib/modules/$(cat /usr/lib/apex-kver)/vmlinuz' \
-            | grep -qi 'signature certificates\|image signature issuers\|APEX' \
+          sudo podman run --rm --entrypoint /bin/sh "$IMAGE:rime" -c \
+            'dnf5 -y install -q sbsigntools >/dev/null 2>&1; sbverify --list /usr/lib/modules/$(cat /usr/lib/rime-kver)/vmlinuz' \
+            | grep -qi 'signature certificates\|image signature issuers\|Rime' \
             || { echo "::error::sbverify found no signature on the shipped vmlinuz"; exit 1; }
-          sudo podman run --rm --entrypoint /bin/sh "$IMAGE:apex" \
-            -c 'test -s /usr/share/apex-os/secureboot/apex-mok.der' \
-            || { echo "::error::no apex-mok.der — users would have nothing to enrol"; exit 1; }
+          sudo podman run --rm --entrypoint /bin/sh "$IMAGE:rime" \
+            -c 'test -s /usr/share/rime-os/secureboot/rime-mok.der' \
+            || { echo "::error::no rime-mok.der — users would have nothing to enrol"; exit 1; }
 
           # Out-of-tree modules. Written so it CANNOT pass on an empty set: a
           # loop over zero modules succeeds, and "there were no modules" is the
           # exact failure this exists to catch.
-          sudo podman run --rm --entrypoint /bin/sh "$IMAGE:apex" -c '
+          sudo podman run --rm --entrypoint /bin/sh "$IMAGE:rime" -c '
             set -eu
-            KVER=$(cat /usr/lib/apex-kver)
+            KVER=$(cat /usr/lib/rime-kver)
             MODDIR=/usr/lib/modules/$KVER
-            [ "$(cat /usr/share/apex-os/secureboot/modules-signed 2>/dev/null || echo missing)" = signed ] \
+            [ "$(cat /usr/share/rime-os/secureboot/modules-signed 2>/dev/null || echo missing)" = signed ] \
               || { echo "modules-signed marker is not \"signed\""; exit 1; }
-            SIGNER=$(cat /usr/share/apex-os/secureboot/module-signer)
+            SIGNER=$(cat /usr/share/rime-os/secureboot/module-signer)
             OOT=""
             for d in extra updates; do [ -d "$MODDIR/$d" ] && OOT="$OOT $MODDIR/$d"; done
             [ -n "$OOT" ] || { echo "no out-of-tree module directory"; exit 1; }
@@ -1482,7 +1482,7 @@ jobs:
             done
             echo "modules: $n out-of-tree, all signed by \"$SIGNER\""
           ' || { echo "::error::out-of-tree kernel modules are unsigned, missing, or signed by the wrong key"; exit 1; }
-          echo "kernel and modules signed; apex-mok.der present"
+          echo "kernel and modules signed; rime-mok.der present"
 
       # The payload split is a product promise, so it is checked rather than
       # assumed: the drivers a user cannot install themselves must be present,
@@ -1491,7 +1491,7 @@ jobs:
       - name: Verify the payload split
         run: |
           set -euo pipefail
-          sudo podman run --rm --entrypoint /bin/sh "$IMAGE:apex" -c '
+          sudo podman run --rm --entrypoint /bin/sh "$IMAGE:rime" -c '
             set -eu
             for b in gamescope steam mangohud sunshine obs; do
               ! command -v "$b" >/dev/null 2>&1 || { echo "$b is baked in; it must be on-demand"; exit 1; }
@@ -1501,7 +1501,7 @@ jobs:
             test -e /usr/lib64/libEGL_mesa.so.0   || { echo "mesa EGL missing"; exit 1; }
             owner=$(rpm -qf --qf "%{NAME}" /usr/lib64/libGL.so.1)
             case "$owner" in libglvnd*) ;; *) echo "libGL.so.1 owned by $owner, not libglvnd"; exit 1 ;; esac
-            grep -q "^VARIANT_ID=apex$" /usr/lib/os-release || { echo "VARIANT_ID is not apex"; exit 1; }
+            grep -q "^VARIANT_ID=rime$" /usr/lib/os-release || { echo "VARIANT_ID is not rime"; exit 1; }
             echo "payload split OK: drivers in, gaming userspace out, glvnd intact"
           '
 
@@ -1541,7 +1541,7 @@ jobs:
         run: |
           # zstd:chunked — see the note on the core push. This is the one users
           # actually pull, so it is where the download saving lands.
-          /tmp/push-retry.sh "$IMAGE" "apex-${{ github.sha }}" /tmp/image.digest
+          /tmp/push-retry.sh "$IMAGE" "rime-${{ github.sha }}" /tmp/image.digest
           DIGEST="$(cat /tmp/image.digest)"
           echo "digest=$DIGEST" >> "$GITHUB_OUTPUT"
           echo "image digest: $DIGEST"
@@ -1557,7 +1557,7 @@ jobs:
       # lands: is this machine affected. Until now there was no answer that did
       # not involve booting the image and running rpm.
       #
-      # Attached to `apex` alone rather than to core and base as well. This is
+      # Attached to `rime` alone rather than to core and base as well. This is
       # the digest every machine actually pulls; core and base are build tiers
       # nobody boots, and their contents are a strict subset of this one, so two
       # more SBOMs would be two more things to keep honest for no extra answer.
@@ -1920,10 +1920,10 @@ jobs:
       # `if ! cmd` and not `cmd || ...`: set -e does not apply to an
       # inverted command, and a bare `!` here would swallow a real failure.
       # OFF until the fleet can read it. Set the repository variable
-      # APEX_ATTEST_SBOM=true to turn it back on — no code change needed.
+      # RIME_ATTEST_SBOM=true to turn it back on — no code change needed.
       #
       # The first attested image (9690b65d, 2026-09-23) was refused by every
-      # machine: `apex update` before 0e48a1009 read the signature from the
+      # machine: `rime update` before 0e48a1009 read the signature from the
       # layer annotation cosign leaves EMPTY on a DSSE attestation, so the
       # check failed, and a provenance that is present and fails refuses even
       # under provenance=warn. With no attestation the same client reports
@@ -1932,7 +1932,7 @@ jobs:
       # or later, then set the variable. The image signature is unaffected: it
       # is produced and verified on every build either way.
       - name: Generate and attest the SBOM
-        if: ${{ steps.push.outputs.digest != '' && vars.APEX_ATTEST_SBOM == 'true' }}
+        if: ${{ steps.push.outputs.digest != '' && vars.RIME_ATTEST_SBOM == 'true' }}
         run: |
           set -euo pipefail
           curl -sSfL https://raw.githubusercontent.com/anchore/syft/main/install.sh \
@@ -2066,8 +2066,8 @@ jobs:
             --certificate-identity "$IDENTITY" \
             --certificate-oidc-issuer https://token.actions.githubusercontent.com \
             > /dev/null
-          if [ "${{ vars.APEX_ATTEST_SBOM }}" != "true" ]; then
-            echo "signature verifies against $IDENTITY; SBOM attestation is off (APEX_ATTEST_SBOM)"
+          if [ "${{ vars.RIME_ATTEST_SBOM }}" != "true" ]; then
+            echo "signature verifies against $IDENTITY; SBOM attestation is off (RIME_ATTEST_SBOM)"
             exit 0
           fi
           cosign verify-attestation "$REF" --type spdxjson \
@@ -2078,7 +2078,7 @@ jobs:
 
       # EVERY published name, all pointing at the one digest.
       #
-      #   apex / apex-<sha>              the canonical name going forward
+      #   rime / rime-<sha>              the canonical name going forward
       #   daily / gaming-mesa / gaming-nvidia   MIGRATION. Machines in the field
       #       have bootc pointed at these. If one stops moving, `bootc upgrade`
       #       reports "no update" forever and that machine silently stops getting
@@ -2103,23 +2103,23 @@ jobs:
           # Per-SHA names first. Nothing tracks these, so they are written from
           # any ref: they are what makes a non-main build a real, complete,
           # inspectable build rather than a dry run.
-          for f in apex daily gaming-mesa gaming-nvidia; do
+          for f in rime daily gaming-mesa gaming-nvidia; do
             promote "$f-${{ github.sha }}"
           done
           if [ "${PUBLISH:-false}" != "true" ]; then
             echo "not publishing from ${GITHUB_REF:-unknown}: per-SHA tags written;"
-            echo "  :apex :daily :gaming-mesa :gaming-nvidia :platform-* :edge NOT moved."
+            echo "  :rime :daily :gaming-mesa :gaming-nvidia :platform-* :edge NOT moved."
             echo "  This build is complete; it is simply not a release."
             exit 0
           fi
           # The floating names, and the ones installed machines actually track
           # are moved LAST, so any earlier registry failure leaves the fleet on
           # the previous signed release rather than half-migrated.
-          for f in apex daily gaming-mesa gaming-nvidia; do
+          for f in rime daily gaming-mesa gaming-nvidia; do
             promote "platform-$f-${{ github.sha }}"
             promote "platform-$f"
           done
-          for f in apex daily gaming-mesa gaming-nvidia; do
+          for f in rime daily gaming-mesa gaming-nvidia; do
             promote "$f"
           done
           # §26. `edge` is a NAME for what those four already are: every
@@ -2155,11 +2155,11 @@ jobs:
           # redness means nothing is worse than no run. It checks what it did
           # write instead, so the step still proves something on every ref.
           if [ "${PUBLISH:-false}" = "true" ]; then
-            TAGS="apex daily gaming-mesa gaming-nvidia edge
-                  platform-apex platform-daily platform-gaming-mesa platform-gaming-nvidia
+            TAGS="rime daily gaming-mesa gaming-nvidia edge
+                  platform-rime platform-daily platform-gaming-mesa platform-gaming-nvidia
                   daily-${{ github.sha }}"
           else
-            TAGS="apex-${{ github.sha }} daily-${{ github.sha }}"
+            TAGS="rime-${{ github.sha }} daily-${{ github.sha }}"
           fi
           for t in $TAGS; do
             got="$(skopeo inspect --creds "$creds" --format '{{.Digest}}' "docker://$IMAGE:$t" 2>/dev/null || echo MISSING)"
@@ -2172,10 +2172,10 @@ jobs:
           done
           [ "$fail" = 0 ] || exit 1
 
-      # The rebrand, APEX to Rime OS (2026-09-28). GHCR does not redirect a
+      # The rebrand, Rime to Rime OS (2026-09-28). GHCR does not redirect a
       # renamed package, so an installed machine keeps pulling
-      # ghcr.io/andrenijman/apex-os until `apex update` moves it
-      # (`rename_target` in apexd/apex/src/ops.rs), and it moves a machine only
+      # ghcr.io/andrenijman/rime-os until `rime update` moves it
+      # (`rename_target` in rimed/rime/src/ops.rs), and it moves a machine only
       # once the new name serves that machine's tag. So every published build
       # is ALSO published as ghcr.io/andrenijman/rime-os: the same digest, a
       # signature and an SBOM attestation made under the new name (a cosign
@@ -2186,7 +2186,7 @@ jobs:
       #
       # The first push creates the package, and a new GHCR package is private
       # until someone makes it public in its settings (there is no API for
-      # that). Until then an anonymous pull fails, `apex update`'s probe sees
+      # that). Until then an anonymous pull fails, `rime update`'s probe sees
       # nothing, and no machine moves. That is the intended failure mode.
       - name: Publish under the new name too (rime-os)
         if: ${{ steps.push.outputs.digest != '' && env.PUBLISH == 'true' }}
@@ -2211,16 +2211,16 @@ jobs:
 
           # The bytes first, under a name nothing tracks, and proven to be the
           # same digest before anything is signed or moved.
-          copy_to "apex-${{ github.sha }}"
-          got="$(resolves "apex-${{ github.sha }}")"
+          copy_to "rime-${{ github.sha }}"
+          got="$(resolves "rime-${{ github.sha }}")"
           if [ "$got" != "$digest" ]; then
-            echo "::error::$NEW_IMAGE:apex-${{ github.sha }} is '$got', not $digest: the copy changed the manifest"
+            echo "::error::$NEW_IMAGE:rime-${{ github.sha }} is '$got', not $digest: the copy changed the manifest"
             exit 1
           fi
 
           # Signed and (when attestation is on) attested under the new name.
           cosign sign --yes "$NEW_IMAGE@$digest"
-          if [ "${{ vars.APEX_ATTEST_SBOM }}" = "true" ]; then
+          if [ "${{ vars.RIME_ATTEST_SBOM }}" = "true" ]; then
             if [ ! -s /tmp/sbom.min.json ]; then
               echo "::error::attestation is on but the SBOM step left no /tmp/sbom.min.json to attest under $NEW_IMAGE"
               exit 1
@@ -2235,25 +2235,25 @@ jobs:
           cosign verify "$NEW_IMAGE@$digest" \
             --certificate-identity "$IDENTITY" \
             --certificate-oidc-issuer https://token.actions.githubusercontent.com > /dev/null
-          if [ "${{ vars.APEX_ATTEST_SBOM }}" = "true" ]; then
+          if [ "${{ vars.RIME_ATTEST_SBOM }}" = "true" ]; then
             cosign verify-attestation "$NEW_IMAGE@$digest" --type spdxjson \
               --certificate-identity "$IDENTITY" \
               --certificate-oidc-issuer https://token.actions.githubusercontent.com > /dev/null
           fi
 
           # The same names the old image carries, the tracked ones last.
-          for f in apex daily gaming-mesa gaming-nvidia; do
+          for f in rime daily gaming-mesa gaming-nvidia; do
             copy_to "$f-${{ github.sha }}"
             copy_to "platform-$f-${{ github.sha }}"
             copy_to "platform-$f"
           done
-          for f in apex daily gaming-mesa gaming-nvidia edge; do
+          for f in rime daily gaming-mesa gaming-nvidia edge; do
             copy_to "$f"
           done
 
           fail=0
-          for t in apex daily gaming-mesa gaming-nvidia edge \
-                   platform-apex platform-daily platform-gaming-mesa platform-gaming-nvidia; do
+          for t in rime daily gaming-mesa gaming-nvidia edge \
+                   platform-rime platform-daily platform-gaming-mesa platform-gaming-nvidia; do
             got="$(resolves "$t")"
             if [ "$got" = "$digest" ]; then
               echo "  ok   $NEW_IMAGE:$t -> $got"
@@ -2266,7 +2266,7 @@ jobs:
           # Whether a machine can see it yet. Informational: a private package
           # is the expected state after the very first push.
           if skopeo inspect --no-creds --raw --no-tags "docker://$NEW_IMAGE:daily" > /dev/null 2>&1; then
-            echo "$NEW_IMAGE is public: machines move to it on their next apex update"
+            echo "$NEW_IMAGE is public: machines move to it on their next rime update"
           else
             echo "::notice::$NEW_IMAGE is not publicly pullable yet (a new package starts private); no machine will move until it is made public"
           fi
@@ -2315,7 +2315,7 @@ jobs:
           shared = {l['digest'] for l in core.get('layers', [])}
           fresh = [l for l in nl if l['digest'] not in shared]
           mib = lambda b: b / 2**20
-          print("### `apex` update cost")
+          print("### `rime` update cost")
           print()
           print(f"- total image: **{len(nl)} layers, {mib(sum(l['size'] for l in nl)):.0f} MiB**")
           print(f"- inherited from core (not re-downloaded): "
@@ -2323,7 +2323,7 @@ jobs:
           print(f"- NOT inherited from core: "
                 f"**{len(fresh)} layers, {mib(sum(l['size'] for l in fresh)):.0f} MiB**")
           print()
-          print("The last figure is an UPPER BOUND on what `apex update` downloads: "
+          print("The last figure is an UPPER BOUND on what `rime update` downloads: "
                 "base/image layers that happen to be unchanged since the previous "
                 "push are also reused, but are counted as new here. Before the "
                 "core/base split this number was the whole image (153 layers, 5.3 GB). "
@@ -2357,26 +2357,26 @@ jobs:
       - name: Build the qcow2 via bootc-image-builder
         run: |
           mkdir -p output
-          sudo podman pull "$IMAGE:apex-${{ github.sha }}"
+          sudo podman pull "$IMAGE:rime-${{ github.sha }}"
           sudo podman run --rm --privileged \
             --security-opt label=type:unconfined_t \
             -v "$(pwd)/output":/output \
             -v /var/lib/containers/storage:/var/lib/containers/storage \
             quay.io/centos-bootc/bootc-image-builder:latest \
             --type qcow2 --rootfs xfs --local \
-            "$IMAGE:apex-${{ github.sha }}"
+            "$IMAGE:rime-${{ github.sha }}"
           ls -lh output/qcow2 || ls -lhR output
 
       - name: Upload qcow2 artifact
         uses: actions/upload-artifact@v4
         with:
-          name: apex-os-qcow2
+          name: rime-os-qcow2
           path: output/qcow2/*.qcow2
           if-no-files-found: warn
           retention-days: 7
 
   # ── Job 6: installer ISO (dispatch-gated) ─────────────────────────────────
-  # Builds the APEX-OS installer as an Anaconda ISO (bootc-image-builder --type
+  # Builds the Rime OS installer as an Anaconda ISO (bootc-image-builder --type
   # anaconda-iso) — a bootable USB that installs the signed image to a target
   # disk. The image is pulled into local storage first (each job is a fresh
   # runner; --local needs it present). Uploaded as an artifact for the maintainer
@@ -2400,7 +2400,7 @@ jobs:
             | sudo podman login "$REGISTRY" -u "${{ github.actor }}" --password-stdin
 
       - name: Pull the latest green image into local storage
-        run: sudo podman pull "$IMAGE:apex"
+        run: sudo podman pull "$IMAGE:rime"
 
       # The installer config (installer/bib-config.toml) is mounted at
       # /config.toml so bootc-image-builder applies our INTERACTIVE kickstart
@@ -2418,7 +2418,7 @@ jobs:
             -v /var/lib/containers/storage:/var/lib/containers/storage \
             quay.io/centos-bootc/bootc-image-builder:latest \
             --type anaconda-iso --rootfs btrfs --local \
-            "$IMAGE:apex"
+            "$IMAGE:rime"
           ls -lhR output/bootiso || ls -lhR output
 
       # Guard: extract the embedded kickstart from the built ISO and FAIL the
@@ -2434,7 +2434,7 @@ jobs:
           rm -rf ksdump && mkdir ksdump
           # Extract EVERY kickstart on the ISO (not just the two known names) so a
           # renamed/extra ks carrying a destructive directive can't slip past. List
-          # the ISO tree, pull each *.ks. (apex-logs 36 — hardened after Fable review.)
+          # the ISO tree, pull each *.ks. (rime-logs 36 — hardened after Fable review.)
           xorriso -osirrox on -indev "$iso" -find / -name '*.ks' 2>/dev/null \
             | sed -n "s/^'\(.*\)'.*/\1/p" > ks.list || true
           # Fallback to the known names if -find gave nothing.
@@ -2475,7 +2475,7 @@ jobs:
       - name: Upload installer ISO artifact
         uses: actions/upload-artifact@v4
         with:
-          name: apex-os-installer-iso
+          name: rime-os-installer-iso
           path: output/bootiso/*.iso
           if-no-files-found: warn
           retention-days: 7

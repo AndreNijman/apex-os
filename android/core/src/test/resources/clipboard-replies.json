@@ -2,7 +2,7 @@
   "_comment": [
     "Every `clipboard` reply this phone claims to understand, asserted from",
     "BOTH ends. `Agentd.readClipboard` parses this file in",
-    "AgentdClipboardReplyTest; apexd/apex-agent-core/tests/",
+    "AgentdClipboardReplyTest; rimed/rime-agent-core/tests/",
     "android_clipboard_wire.rs deserializes the same entries into",
     "Response::Clipboard and round-trips them. Neither half alone is worth",
     "much: a Kotlin test reading a string a Kotlin author wrote proves the",

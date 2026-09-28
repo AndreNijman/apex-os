@@ -1,8 +1,8 @@
 #!/usr/bin/env bash
-# Build the APEX-OS installer LIVE ISO from installer/Containerfile.installer.
+# Build the Rime OS installer LIVE ISO from installer/Containerfile.installer.
 #
 #   installer image -> exported rootfs
-#                    + APEX image injected into its /var/lib/containers (host-side skopeo)
+#                    + Rime image injected into its /var/lib/containers (host-side skopeo)
 #                   -> ext4 rootfs.img -> squashfs (classic dmsquash-live layout)
 #                    + dracut dmsquash-live initramfs
 #                   -> xorriso hybrid ISO (UEFI incl. Secure Boot + legacy BIOS)
@@ -17,7 +17,7 @@
 set -euo pipefail
 
 HERE="$(cd "$(dirname "$0")" && pwd)"
-WORK="${WORK:-/var/tmp/apex-iso-build}"
+WORK="${WORK:-/var/tmp/rime-iso-build}"
 # This script `sudo rm -rf`s directories under WORK. A WORK that resolves to a
 # shared directory would make that a recursive delete of somebody else's files.
 WORK="$(realpath -m "$WORK")"
@@ -30,34 +30,34 @@ esac
 # works in WORK only if WORK is new, empty, or carries the marker it wrote on an
 # earlier run. The rm -rf calls below target fixed names (rootfs, sqroot,
 # isoroot, cs-run, grub-i386-pc) that another tool's tree could also contain.
-if [ -d "$WORK" ] && [ -n "$(ls -A "$WORK" 2>/dev/null)" ] && [ ! -e "$WORK/.apex-iso-build" ]; then
-  echo "FATAL: $WORK already holds files this script did not create (no .apex-iso-build marker)." >&2
+if [ -d "$WORK" ] && [ -n "$(ls -A "$WORK" 2>/dev/null)" ] && [ ! -e "$WORK/.rime-iso-build" ]; then
+  echo "FATAL: $WORK already holds files this script did not create (no .rime-iso-build marker)." >&2
   echo "       Point WORK at a new or empty directory; nothing has been touched." >&2
   exit 1
 fi
-mkdir -p "$WORK" && touch "$WORK/.apex-iso-build"
+mkdir -p "$WORK" && touch "$WORK/.rime-iso-build"
 # Which tag this ISO installs. This is NOT cosmetic: it names the embedded
-# storage tag AND is stamped into the live env so apex-install derives its
+# storage tag AND is stamped into the live env so rime-install derives its
 # --target-imgref from it — the origin the installed machine follows on every
-# `bootc upgrade`. The editions converged into one image, `:apex`; the old tags
+# `bootc upgrade`. The editions converged into one image, `:rime`; the old tags
 # are aliases of the same digest, and new media must record the canonical one.
-EDITION="${EDITION:-apex}"
-OCI="$WORK/apex.oci"                       # produced by: sudo skopeo copy containers-storage:localhost/apex-os:$EDITION oci-archive:$OCI:apex-os-$EDITION
-OUT="${OUT:-$WORK/apex-os-installer.iso}"
-LABEL="APEX-INSTALL"
+EDITION="${EDITION:-rime}"
+OCI="$WORK/rime.oci"                       # produced by: sudo skopeo copy containers-storage:localhost/rime-os:$EDITION oci-archive:$OCI:rime-os-$EDITION
+OUT="${OUT:-$WORK/rime-os-installer.iso}"
+LABEL="RIME-INSTALL"
 # Overridable so a throwaway probe image can be built into a bootable ISO
 # without clobbering the real installer tag. The default is the production one.
-IMG="${IMG:-localhost/apex-installer:latest}"
+IMG="${IMG:-localhost/rime-installer:latest}"
 ISOROOT="$WORK/isoroot"
 
 # PRODUCTION=1 (default): the flashed-to-USB build. NO unattended install path —
 # the marker file is not baked and the unattended boot-menu entry is omitted, so
-# `apex.unattended` is inert and nobody can accidentally trigger a disk wipe.
+# `rime.unattended` is inert and nobody can accidentally trigger a disk wipe.
 # PRODUCTION=0: test/CI build — bakes the marker + adds the unattended menu entry
 # so the QEMU boot-test can drive an end-to-end install headlessly.
 PRODUCTION="${PRODUCTION:-1}"
-if [ "$PRODUCTION" = 1 ] && [ "$EDITION" != apex ]; then
-  echo "FATAL: production media must record the canonical :apex origin, not :$EDITION" >&2; exit 1
+if [ "$PRODUCTION" = 1 ] && [ "$EDITION" != rime ]; then
+  echo "FATAL: production media must record the canonical :rime origin, not :$EDITION" >&2; exit 1
 fi
 
 # NETINSTALL=1: build the small ISO. It ships the live environment only and the
@@ -82,16 +82,16 @@ fi
 if [ "$NETINSTALL" = 1 ]; then
   echo "== 0. pin and verify the image this ISO installs =="
   # A netinstall ISO and the image it downloads are one release. Resolving
-  # `:apex` at install time would make every ISO install whatever main pushed
+  # `:rime` at install time would make every ISO install whatever main pushed
   # last — an image nobody has booted from this ISO. So the digest is resolved
-  # ONCE, here, and stamped into the live env; apex-install downloads exactly
-  # that digest and still records `:apex` as the origin, so the machine updates
+  # ONCE, here, and stamped into the live env; rime-install downloads exactly
+  # that digest and still records `:rime` as the origin, so the machine updates
   # normally afterwards.
   #
   # RELEASE_DIGEST is overridable so the PRODUCTION=0 build that gets
   # boot-tested and the PRODUCTION=1 build that gets published pin the SAME
   # image even if main pushes in between. Pass the digest the test build printed.
-  RELEASE_REPO="ghcr.io/andrenijman/apex-os"
+  RELEASE_REPO="ghcr.io/andrenijman/rime-os"
   RELEASE_DIGEST="${RELEASE_DIGEST:-$(sudo skopeo inspect --format '{{.Digest}}' "docker://$RELEASE_REPO:$EDITION")}"
   [[ "$RELEASE_DIGEST" =~ ^sha256:[0-9a-f]{64}$ ]] \
     || { echo "FATAL: could not resolve $RELEASE_REPO:$EDITION to a digest (got '$RELEASE_DIGEST')" >&2; exit 1; }
@@ -101,15 +101,15 @@ if [ "$NETINSTALL" = 1 ]; then
   # TUF trust root; --network host because the default podman network on this
   # build host does not resolve the Sigstore CDN.
   sudo podman run --rm --network host ghcr.io/sigstore/cosign/cosign:v3.1.3 verify \
-    --certificate-identity 'https://github.com/AndreNijman/apex-os/.github/workflows/build-image.yml@refs/heads/main' \
+    --certificate-identity 'https://github.com/AndreNijman/rime-os/.github/workflows/build-image.yml@refs/heads/main' \
     --certificate-oidc-issuer 'https://token.actions.githubusercontent.com' \
     "$RELEASE_IMAGE" >/dev/null \
     || { echo "FATAL: $RELEASE_IMAGE is not signed by main's build-image workflow" >&2; exit 1; }
   echo "signature verified: build-image.yml@refs/heads/main"
   # The encrypted install refuses without the recovery-key helper, and it is
   # the default path. An image without it would turn the default into a refusal.
-  sudo podman run --rm "$RELEASE_IMAGE" test -x /usr/libexec/apex-luks-enroll \
-    || { echo "FATAL: $RELEASE_IMAGE has no /usr/libexec/apex-luks-enroll; the default encrypted install would refuse" >&2; exit 1; }
+  sudo podman run --rm "$RELEASE_IMAGE" test -x /usr/libexec/rime-luks-enroll \
+    || { echo "FATAL: $RELEASE_IMAGE has no /usr/libexec/rime-luks-enroll; the default encrypted install would refuse" >&2; exit 1; }
 fi
 
 echo "== 1. build the installer live-env image =="
@@ -131,37 +131,37 @@ sudo podman rm "$cid" >/dev/null
 KVER=$(sudo ls "$WORK/rootfs/usr/lib/modules" | head -1)
 echo "kernel: $KVER"
 
-echo "== 3. embed the APEX image into the live env's container storage =="
+echo "== 3. embed the Rime image into the live env's container storage =="
 # Host-side (can't be a Containerfile RUN: overlay-on-overlay). The graphroot
 # lands inside the exported rootfs so the live session's default
-# /var/lib/containers/storage already holds localhost/apex-os:daily.
+# /var/lib/containers/storage already holds localhost/rime-os:daily.
 if [ "$NETINSTALL" = 1 ]; then
   echo "  (netinstall: skipping the embed — the installer downloads the OS instead)"
-  sudo install -Dm644 /dev/null "$WORK/rootfs/usr/lib/apex-installer/netinstall"
-  printf '%s\n' "$RELEASE_DIGEST" | sudo tee "$WORK/rootfs/usr/lib/apex-installer/image-digest" >/dev/null
-  grep -qx "$RELEASE_DIGEST" "$WORK/rootfs/usr/lib/apex-installer/image-digest" \
+  sudo install -Dm644 /dev/null "$WORK/rootfs/usr/lib/rime-installer/netinstall"
+  printf '%s\n' "$RELEASE_DIGEST" | sudo tee "$WORK/rootfs/usr/lib/rime-installer/image-digest" >/dev/null
+  grep -qx "$RELEASE_DIGEST" "$WORK/rootfs/usr/lib/rime-installer/image-digest" \
     || { echo "FATAL: image digest stamp not written"; exit 1; }
   echo "image digest stamped: $RELEASE_DIGEST"
 else
   sudo rm -rf "$WORK/cs-run"
   sudo skopeo copy "oci-archive:$OCI" \
-    "containers-storage:[overlay@$WORK/rootfs/var/lib/containers/storage+$WORK/cs-run]localhost/apex-os:${EDITION}"
+    "containers-storage:[overlay@$WORK/rootfs/var/lib/containers/storage+$WORK/cs-run]localhost/rime-os:${EDITION}"
   sudo rm -rf "$WORK/cs-run"
 fi
 
-# Stamp the edition so apex-install derives IMAGE and --target-imgref from it
+# Stamp the edition so rime-install derives IMAGE and --target-imgref from it
 # rather than assuming daily. Asserted below, because a wrong or missing stamp
 # is silent at install time and only bites on the first `bootc upgrade`.
-sudo install -Dm644 /dev/null "$WORK/rootfs/usr/lib/apex-installer/edition"
-printf '%s\n' "$EDITION" | sudo tee "$WORK/rootfs/usr/lib/apex-installer/edition" >/dev/null
-grep -qx "$EDITION" "$WORK/rootfs/usr/lib/apex-installer/edition" \
+sudo install -Dm644 /dev/null "$WORK/rootfs/usr/lib/rime-installer/edition"
+printf '%s\n' "$EDITION" | sudo tee "$WORK/rootfs/usr/lib/rime-installer/edition" >/dev/null
+grep -qx "$EDITION" "$WORK/rootfs/usr/lib/rime-installer/edition" \
   || { echo "FATAL: edition stamp not written"; exit 1; }
 echo "edition stamped: $EDITION"
 
 # Stamp whether the image we are about to install carries a kernel signed with
-# the APEX MOK. The installer needs this BEFORE it installs anything: it decides
+# the Rime MOK. The installer needs this BEFORE it installs anything: it decides
 # whether to offer Secure Boot enrolment, and the marker it would otherwise read
-# (/usr/share/apex-os/secureboot/kernel-signed) only exists inside the image,
+# (/usr/share/rime-os/secureboot/kernel-signed) only exists inside the image,
 # which is not mounted yet when the question has to be asked.
 #
 # Enrolment is offered from the LIVE environment on purpose. `mokutil --import`
@@ -176,14 +176,14 @@ if [ "$NETINSTALL" = 1 ]; then
   # Secure Boot enrolment at all. It knows now: step 0 pinned the exact digest
   # the installer will download, so the answer is read from THAT image.
   KSIGNED=$(sudo podman run --rm "$RELEASE_IMAGE" \
-              cat /usr/share/apex-os/secureboot/kernel-signed 2>/dev/null | tr -d '\n' || true)
+              cat /usr/share/rime-os/secureboot/kernel-signed 2>/dev/null | tr -d '\n' || true)
   [ -n "$KSIGNED" ] || KSIGNED=unknown
 else
-  KSIGNED=$(sudo podman run --rm "localhost/apex-os:${EDITION}" \
-              cat /usr/share/apex-os/secureboot/kernel-signed 2>/dev/null | tr -d '\n' || true)
+  KSIGNED=$(sudo podman run --rm "localhost/rime-os:${EDITION}" \
+              cat /usr/share/rime-os/secureboot/kernel-signed 2>/dev/null | tr -d '\n' || true)
   [ -n "$KSIGNED" ] || KSIGNED=unknown
 fi
-printf '%s\n' "$KSIGNED" | sudo tee "$WORK/rootfs/usr/lib/apex-installer/kernel-signed" >/dev/null
+printf '%s\n' "$KSIGNED" | sudo tee "$WORK/rootfs/usr/lib/rime-installer/kernel-signed" >/dev/null
 echo "kernel-signed stamped: $KSIGNED"
 
 echo "== 4. dracut live initramfs (dmsquash-live) =="
@@ -207,7 +207,7 @@ bytes=$(sudo du -sb --apparent-size "$WORK/rootfs" | cut -f1)
 imgsz=$(( bytes + bytes * 2 / 5 + 1536*1024*1024 ))
 sudo rm -rf "$WORK/sqroot"; sudo mkdir -p "$WORK/sqroot/LiveOS" "$WORK/mnt"
 sudo truncate -s "$imgsz" "$WORK/sqroot/LiveOS/rootfs.img"
-sudo mkfs.ext4 -q -F -L "APEX-LIVE-ROOT" "$WORK/sqroot/LiveOS/rootfs.img"
+sudo mkfs.ext4 -q -F -L "RIME-LIVE-ROOT" "$WORK/sqroot/LiveOS/rootfs.img"
 sudo mount -o loop "$WORK/sqroot/LiveOS/rootfs.img" "$WORK/mnt"
 sudo cp -a "$WORK/rootfs/." "$WORK/mnt/"
 sudo umount "$WORK/mnt"; sudo rmdir "$WORK/mnt"
@@ -221,7 +221,7 @@ sudo cp "$WORK/vmlinuz"    "$ISOROOT/images/pxeboot/vmlinuz"
 sudo cp "$WORK/initrd.img" "$ISOROOT/images/pxeboot/initrd.img"
 
 echo "== 5b. OCI dir on the ISO (bootc install source) =="
-# apex-install passes --source-imgref oci:… pointing here: the oci transport
+# rime-install passes --source-imgref oci:… pointing here: the oci transport
 # streams blobs directly off the ISO. Installing from the embedded
 # containers-storage instead would re-tar every layer into /var/tmp (RAM-backed
 # in the live env) and OOM on 4G machines.
@@ -240,7 +240,7 @@ CMDLINE="root=live:CDLABEL=$LABEL rd.live.image selinux=0"
 # Menu config lives ON THE ISO (editable without regenerating BOOTX64.EFI).
 # serial+console terminals so headless QEMU (and real serial rigs) get the menu.
 cat > "$WORK/grub.cfg" <<EOF
-# Serial is CONDITIONAL (apex-logs 48). Unconditionally running \`serial\` then
+# Serial is CONDITIONAL (rime-logs 48). Unconditionally running \`serial\` then
 # \`terminal_output serial console\` is fine under QEMU but hostile on real
 # laptops with no UART: the command can fail and take the console terminal down
 # with it, and a floating RS-232 line can inject phantom keypresses into the
@@ -302,7 +302,7 @@ set timeout=10
 #
 # console=tty0 LAST so the screen is the primary console; ttyS0 first keeps
 # QEMU/CI serial observability.
-menuentry "Install APEX-OS" {
+menuentry "Install Rime OS" {
     linux /images/pxeboot/vmlinuz $CMDLINE console=ttyS0,115200 console=tty0 \$biosfb
     initrd /images/pxeboot/initrd.img
 }
@@ -328,7 +328,7 @@ menuentry "Install APEX-OS" {
 # This is worth stating because the launcher used to treat "no native KMS" as a
 # reason to give up on the GUI, which was wrong and is what stranded users in
 # the old text installer.
-menuentry "Install APEX-OS (safe graphics — try this if the screen goes black)" {
+menuentry "Install Rime OS (safe graphics — try this if the screen goes black)" {
     linux /images/pxeboot/vmlinuz $CMDLINE console=ttyS0,115200 console=tty0 nomodeset \$biosfb
     initrd /images/pxeboot/initrd.img
 }
@@ -337,18 +337,18 @@ menuentry "Install APEX-OS (safe graphics — try this if the screen goes black)
 # Deliberately does NOT carry the biosfb vga mode: this entry doubles as the
 # escape hatch for a machine whose video BIOS misbehaves on the VESA mode set,
 # so it must stay bootable with the firmware console untouched.
-menuentry "Install APEX-OS (troubleshoot — dracut shell on failure)" {
+menuentry "Install Rime OS (troubleshoot — dracut shell on failure)" {
     linux /images/pxeboot/vmlinuz $CMDLINE console=ttyS0,115200 console=tty0 rd.shell rd.debug
     initrd /images/pxeboot/initrd.img
 }
 EOF
 # TEST/CI builds only: the unattended-install menu entry (auto-wipes /dev/vda).
 # NEVER included in a PRODUCTION build — and even if its cmdline is added by hand,
-# apex-install ignores apex.unattended without the (production-absent) marker.
+# rime-install ignores rime.unattended without the (production-absent) marker.
 if [ "$PRODUCTION" != 1 ]; then
 cat >> "$WORK/grub.cfg" <<EOF
 menuentry "Unattended install to /dev/vda -- WIPES /dev/vda (QEMU/CI only)" {
-    linux /images/pxeboot/vmlinuz $CMDLINE console=ttyS0,115200 apex.unattended apex.disk=/dev/vda apex.user=andre apex.pass=testpass apex.host=apex apex.karg=console=ttyS0,115200 apex.poweroff \$biosfb
+    linux /images/pxeboot/vmlinuz $CMDLINE console=ttyS0,115200 rime.unattended rime.disk=/dev/vda rime.user=andre rime.pass=testpass rime.host=rime rime.karg=console=ttyS0,115200 rime.poweroff \$biosfb
     initrd /images/pxeboot/initrd.img
 }
 EOF
@@ -386,13 +386,13 @@ sudo install -m 0644 "$GRUBEFI" "$WORK/grubx64.efi"
 sudo rm -f "$WORK/mmx64.efi"
 [ -z "$MMEFI" ] || sudo install -m 0644 "$MMEFI" "$WORK/mmx64.efi"
 # mtools runs from the installer image, like xorriso, grub2-mkimage and dracut:
-# an ostree build host (an APEX machine) does not ship mmd/mcopy, and a missing
+# an ostree build host (a Rime machine) does not ship mmd/mcopy, and a missing
 # one used to surface only here, twenty minutes into the build.
 sudo rm -f "$WORK/efiboot.img"
 sudo podman run --rm --security-opt label=disable -v "$WORK":"$WORK" --entrypoint bash "$IMG" -c '
   set -euo pipefail
   W="$1"
-  mkfs.fat -C -n APEXEFI "$W/efiboot.img" 20480
+  mkfs.fat -C -n RIMEEFI "$W/efiboot.img" 20480
   mmd   -i "$W/efiboot.img" ::/EFI ::/EFI/BOOT ::/EFI/fedora
   mcopy -i "$W/efiboot.img" "$W/BOOTX64.EFI" ::/EFI/BOOT/BOOTX64.EFI
   mcopy -i "$W/efiboot.img" "$W/grubx64.efi" ::/EFI/BOOT/grubx64.efi
@@ -461,10 +461,10 @@ for b in clear podman skopeo lsblk useradd chpasswd mount umount blkid udevadm p
          mokutil efibootmgr; do
   _need_bin "$b"
 done
-sudo test -x "$WORK/rootfs/usr/bin/apex-install" \
-  || { echo "BUILD ASSERT FAILED: apex-install missing"; exit 1; }
-sudo bash -n "$WORK/rootfs/usr/bin/apex-install" \
-  || { echo "BUILD ASSERT FAILED: apex-install has a syntax error"; exit 1; }
+sudo test -x "$WORK/rootfs/usr/bin/rime-install" \
+  || { echo "BUILD ASSERT FAILED: rime-install missing"; exit 1; }
+sudo bash -n "$WORK/rootfs/usr/bin/rime-install" \
+  || { echo "BUILD ASSERT FAILED: rime-install has a syntax error"; exit 1; }
 
 # ── The GUI is now the ONLY front end — assert it can actually come up ───────
 # whiptail is deliberately NOT in the list above any more: the text installer is
@@ -475,26 +475,26 @@ sudo bash -n "$WORK/rootfs/usr/bin/apex-install" \
 # a missing seat backend, absent firmware — and each one shipped an ISO that
 # booted to a black screen. If any of these is missing there is no fallback UI
 # left to rescue the user, so the build must stop instead.
-for b in cage seatd Xwayland apex-installer-gui apex-installer-launch \
-         apex-installer-session; do
+for b in cage seatd Xwayland rime-installer-gui rime-installer-launch \
+         rime-installer-session; do
   _need_bin "$b"
 done
 sudo chroot "$WORK/rootfs" python3 -c \
   'import gi; gi.require_version("Gtk","4.0"); gi.require_version("Adw","1"); from gi.repository import Gtk, Adw, Gdk, GLib, Gio, Pango' \
   || { echo "BUILD ASSERT FAILED: the live rootfs cannot import GTK4/libadwaita — the GUI would not start (cairo typelib / gobject-introspection missing again?)"; exit 1; }
-sudo chroot "$WORK/rootfs" python3 -m py_compile /usr/bin/apex-installer-gui \
-  || { echo "BUILD ASSERT FAILED: apex-installer-gui has a Python syntax error"; exit 1; }
+sudo chroot "$WORK/rootfs" python3 -m py_compile /usr/bin/rime-installer-gui \
+  || { echo "BUILD ASSERT FAILED: rime-installer-gui has a Python syntax error"; exit 1; }
 sudo rm -rf "$WORK/rootfs/usr/bin/__pycache__"
-sudo bash -n "$WORK/rootfs/usr/bin/apex-installer-launch" \
-  || { echo "BUILD ASSERT FAILED: apex-installer-launch has a syntax error"; exit 1; }
-sudo bash -n "$WORK/rootfs/usr/bin/apex-installer-session" \
-  || { echo "BUILD ASSERT FAILED: apex-installer-session has a syntax error"; exit 1; }
+sudo bash -n "$WORK/rootfs/usr/bin/rime-installer-launch" \
+  || { echo "BUILD ASSERT FAILED: rime-installer-launch has a syntax error"; exit 1; }
+sudo bash -n "$WORK/rootfs/usr/bin/rime-installer-session" \
+  || { echo "BUILD ASSERT FAILED: rime-installer-session has a syntax error"; exit 1; }
 # The launcher EXECS the session script. A rootfs without it has no installer at
 # all — cage never starts — and that is exactly the class of silent failure this
 # block exists to catch, so resolve the target rather than trusting the list.
-_sess_target=$(grep -oE '^GUI_CMD=\(([^ )]+)' "$WORK/rootfs/usr/bin/apex-installer-launch" | cut -d'(' -f2)
+_sess_target=$(grep -oE '^GUI_CMD=\(([^ )]+)' "$WORK/rootfs/usr/bin/rime-installer-launch" | cut -d'(' -f2)
 sudo test -x "$WORK/rootfs$_sess_target" \
-  || { echo "BUILD ASSERT FAILED: apex-installer-launch execs $_sess_target, absent from the live rootfs"; exit 1; }
+  || { echo "BUILD ASSERT FAILED: rime-installer-launch execs $_sess_target, absent from the live rootfs"; exit 1; }
 # The keyboard page reads its layout list from here. Without it the page falls
 # back to a short built-in list, which is a quietly worse installer.
 sudo test -r "$WORK/rootfs/usr/share/X11/xkb/rules/base.lst" \
@@ -507,7 +507,7 @@ sudo test -r "$WORK/rootfs/usr/share/X11/xkb/rules/base.lst" \
 # live rootfs (/usr/lib/systemd/system/…), and `test -e` FOLLOWS them — which
 # resolves against the build host's root, where those units do not exist. The
 # first version of this assert failed on a rootfs that was in fact correct.
-for u in apex-installer.service seatd.service; do
+for u in rime-installer.service seatd.service; do
   sudo test -L "$WORK/rootfs/etc/systemd/system/multi-user.target.wants/$u" \
     || { echo "BUILD ASSERT FAILED: $u is not enabled in the live rootfs"; exit 1; }
 done
@@ -545,9 +545,9 @@ grep -q 'biosfb=vga=791' "$WORK/grub.cfg" \
 echo "asserts OK: BIOS grub core, isohybrid MBR, shared menu, module tree, vga=791 handoff"
 # Production must NOT carry the unattended marker.
 if [ "$PRODUCTION" = 1 ]; then
-  if sudo test -e "$WORK/rootfs/usr/share/apex-installer/allow-unattended"; then
+  if sudo test -e "$WORK/rootfs/usr/share/rime-installer/allow-unattended"; then
     echo "BUILD ASSERT FAILED: production build contains the unattended marker"; exit 1; fi
-  if grep -qi 'apex.unattended' "$WORK/grub.cfg"; then
+  if grep -qi 'rime.unattended' "$WORK/grub.cfg"; then
     echo "BUILD ASSERT FAILED: production grub.cfg contains an unattended entry"; exit 1; fi
   echo "asserts OK: no unattended marker, no unattended menu entry"
 else
@@ -558,7 +558,7 @@ echo "== 7. xorriso: hybrid BIOS+UEFI ISO (El Torito for CD/QEMU + MBR/GPT for d
 # -appended_part_as_gpt + -partition_offset 16: without these the image carries an
 # MBR-only table whose partition 1 starts at LBA 0, which some UEFI firmwares
 # dislike when booting from USB. Produces a valid GPT with the ESP intact and the
-# APEX-INSTALL label still resolvable from both whole-disk and partition views.
+# RIME-INSTALL label still resolvable from both whole-disk and partition views.
 #
 # BIOS side (everything before -eltorito-alt-boot): -b makes the grub2 core the
 # FIRST El Torito entry, which BIOS firmware picks when booting the ISO as a
@@ -571,7 +571,7 @@ echo "== 7. xorriso: hybrid BIOS+UEFI ISO (El Torito for CD/QEMU + MBR/GPT for d
 # machine (Secure Boot included) sees exactly what it saw before. This exact
 # combination is what Ubuntu's shipping hybrid ISOs use.
 # xorriso runs from the installer image rather than the host: it is not in the
-# APEX image, and an ostree host cannot just dnf install it. Same binary the
+# Rime image, and an ostree host cannot just dnf install it. Same binary the
 # live env carries.
 sudo podman run --rm --security-opt label=disable -v "$WORK":"$WORK" \
     --entrypoint xorriso "$IMG" -as mkisofs \
@@ -609,7 +609,7 @@ sudo sha256sum "$OUT" | sudo tee "$OUT.sha256" >/dev/null
 echo "== DONE: $OUT =="
 ls -lh "$OUT"; cat "$OUT.sha256"
 
-# A netinstall ISO is only as durable as the digest it pins: once :apex moves
+# A netinstall ISO is only as durable as the digest it pins: once :rime moves
 # on, that digest is untagged, and a registry cleanup of untagged versions
 # would break this ISO for everyone who downloads it. Pinning is a release
 # step, run from CI where the token can write packages.

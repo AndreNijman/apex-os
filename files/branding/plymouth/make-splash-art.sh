@@ -1,13 +1,13 @@
 #!/usr/bin/env bash
 # Render the boot splash's image masters for one colourway.
 #
-#   make-splash-art.sh chartreuse     -> apex-os-chartreuse/*.png
-#   make-splash-art.sh gold           -> apex-os-gold/*.png
+#   make-splash-art.sh chartreuse     -> rime-os-chartreuse/*.png
+#   make-splash-art.sh gold           -> rime-os-gold/*.png
 #
 # Then run make-accent-themes.sh, which hue-rotates the chartreuse set into the
 # 24 accent themes. Both outputs are committed; rerun only when the art changes.
 #
-# Every image here is drawn ONCE at splash start (apex-os.script scales each to
+# Every image here is drawn ONCE at splash start (rime-os.script scales each to
 # the screen a single time and never again), so the per-frame work of the
 # splash is opacity changes on fixed images. That is the point of the whole
 # design: plymouth has no vsync, truncates sprite positions to whole pixels, and
@@ -33,7 +33,7 @@ case "$WAY" in
     *) echo "unknown colourway $WAY" >&2; exit 2 ;;
 esac
 LOGOS=../logos/$WAY
-OUT=apex-os-$WAY
+OUT=rime-os-$WAY
 FONT=$(fc-match -f '%{file}' 'JetBrains Mono:medium')
 case "$FONT" in *JetBrainsMono-Medium*) ;; *) echo "JetBrains Mono Medium not found (got $FONT)" >&2; exit 1 ;; esac
 
@@ -47,8 +47,8 @@ mkdir -p "$OUT"
 rm -f "$OUT"/comet.png "$OUT"/glow.png "$OUT"/flash.png
 
 # ── the spark: the brand logo, unchanged, as 8-bit masters ───────────────────
-magick "$LOGOS/apex-spark-$WAY-256.png" -depth 8 "${PNG[@]}" "$OUT/spark.png"
-magick "$LOGOS/apex-spark-$WAY-512.png" -depth 8 "${PNG[@]}" "$OUT/spark-hd.png"
+magick "$LOGOS/rime-spark-$WAY-256.png" -depth 8 "${PNG[@]}" "$OUT/spark.png"
+magick "$LOGOS/rime-spark-$WAY-512.png" -depth 8 "${PNG[@]}" "$OUT/spark-hd.png"
 
 # ── the spark out of focus, at two depths ────────────────────────────────────
 # The logo's alpha, blurred, filled with the logo's own vertical gradient (its
@@ -59,7 +59,7 @@ magick "$LOGOS/apex-spark-$WAY-512.png" -depth 8 "${PNG[@]}" "$OUT/spark-hd.png"
 magick -size 640x348 "gradient:$LIGHT-$DEEP" \( -size 640x146 "xc:$LIGHT" \) +swap \
     \( -size 640x146 "xc:$DEEP" \) -append "$TMP/field.png"
 blur() {   # blur <sigma at 512> <output size> <out>
-    magick "$LOGOS/apex-spark-$WAY-512.png" -background none -gravity center \
+    magick "$LOGOS/rime-spark-$WAY-512.png" -background none -gravity center \
         -extent 640x640 -alpha extract -blur "0x$1" "$TMP/a.png"
     magick "$TMP/field.png" "$TMP/a.png" -alpha off -compose CopyOpacity -composite \
         -resize "$2x$2" -depth 8 "${PNG[@]}" "$3"
@@ -86,10 +86,10 @@ for s in 16:bullet 32:bullet-hd; do
         -resize "${n}x${n}" -depth 8 "${PNG[@]}" "$OUT/$name.png"
 done
 
-# ── the wordmark: APEX OS, tracked out, in the shell's typeface ──────────────
+# ── the wordmark: Rime OS, tracked out, in the shell's typeface ──────────────
 word() {   # word <pointsize> <tracking> <gap> <out>
     magick -background none -fill "$TEXT" -font "$FONT" -pointsize "$1" \
-        -kerning "$2" label:APEX -trim +repage "$TMP/w1.png"
+        -kerning "$2" label:Rime -trim +repage "$TMP/w1.png"
     magick -background none -fill "$TEXT" -font "$FONT" -pointsize "$1" \
         -kerning "$2" label:OS -trim +repage "$TMP/w2.png"
     magick "$TMP/w1.png" \( -size "$3x1" xc:none \) "$TMP/w2.png" \
@@ -112,7 +112,7 @@ done
 # same file with the gold highlight colour.
 if [ "$WAY" = gold ]; then
     sed -E 's|^HI_R = .*|HI_R = 0.992; HI_G = 0.878; HI_B = 0.278;   # #FDE047 (gold highlight)|' \
-        apex-os-chartreuse/apex-os.script > "$OUT/apex-os.script"
+        rime-os-chartreuse/rime-os.script > "$OUT/rime-os.script"
 fi
 
 du -cb "$OUT"/*.png | tail -1 | awk -v o="$OUT" '{ printf "%s: %d bytes of images\n", o, $1 }'

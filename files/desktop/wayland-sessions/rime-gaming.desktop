@@ -1,0 +1,14 @@
+[Desktop Entry]
+Name=Rime Gaming Mode
+Comment=Steam Big Picture in gamescope — no desktop, no compositing over the game
+Exec=/usr/libexec/rime-gaming-session
+# gamescope and Steam are on-demand packages (`rime install gamescope steam`),
+# not image content, so this entry must not be offered on a machine that does
+# not have them: rime-gaming-session would exit straight back to the greeter.
+# TryExec is the desktop-entry spec's own mechanism for that, and rime-greet's
+# session enumeration honours it — the entry is invisible until the binary
+# exists and appears by itself once it does.
+TryExec=/usr/bin/gamescope
+Type=Application
+DesktopNames=gamescope
+Keywords=game;gaming;steam;bigpicture;gamescope;

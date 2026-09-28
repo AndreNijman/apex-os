@@ -5,7 +5,7 @@
 > running, also staying with the vpn — like if i close my laptop at school and
 > codex is running (which needs vpn to work) it keeps working."*
 
-That request is the whole feature. This page describes what APEX does with it
+That request is the whole feature. This page describes what Rime does with it
 on your machine. Roadmap P1-063.
 
 ## The short version
@@ -19,24 +19,24 @@ one says that it fired: the machine got too hot, the battery hit the floor, or
 you told it to. The first two checkpoint your work first.
 
 ```
-apex lid status          # what the policy sees, and what it would do now
-apex lid explain         # the same decision with every input that produced it
-apex lid plan            # what would be powered down. Applies nothing
-apex lid report          # what the last closed period actually did
-apex lid pin             # print the current override
-apex lid pin on          # keep working on a close, whatever is running
-apex lid pin off         # always suspend on a close
-apex lid pin auto        # hand the decision back to the measurement
+rime lid status          # what the policy sees, and what it would do now
+rime lid explain         # the same decision with every input that produced it
+rime lid plan            # what would be powered down. Applies nothing
+rime lid report          # what the last closed period actually did
+rime lid pin             # print the current override
+rime lid pin on          # keep working on a close, whatever is running
+rime lid pin off         # always suspend on a close
+rime lid pin auto        # hand the decision back to the measurement
 ```
 
-`apex lid` on its own runs `apex lid status`.
+`rime lid` on its own runs `rime lid status`.
 
 Each of the reading verbs takes `--json`, which prints the full measurement the
 text output is built from.
 
 ## What "live work" means
 
-An agent session. `apex lid status` counts them, and that count decides an
+An agent session. `rime lid status` counts them, and that count decides an
 automatic close:
 
 * **One or more sessions:** there is work, and the machine stays awake with the
@@ -49,7 +49,7 @@ automatic close:
 The policy keeps the third case apart from the second, and the direction it
 falls matters. A machine that cannot tell whether anything is running
 suspends, because a laptop that stays awake on an unanswered question cooks in
-a bag. `apex lid status` prints the reason, and `apex lid pin on` overrides it
+a bag. `rime lid status` prints the reason, and `rime lid pin on` overrides it
 on a machine where you know better.
 
 Codex runs as an agent session, so the case in the quote at the top needs
@@ -63,7 +63,7 @@ as the policy says to, and drops it as soon as the policy stops saying so.
 Nothing edits `HandleLidSwitch=`. A static `ignore` applies to a machine with
 nothing running as much as to one mid-build, and it survives a crash of
 whatever set it, which is how a laptop bag becomes an oven. The inhibitor is a
-child of `apex-lid.service` and dies with it, so a machine whose driver crashed
+child of `rime-lid.service` and dies with it, so a machine whose driver crashed
 suspends on a lid close as a stock install does. That failure direction does
 not cook a laptop.
 
@@ -114,7 +114,7 @@ The driver stops only units that were running when the lid shut, so the
 restore is exact. It touches nothing interactive, and never the shell or the
 agent runtime.
 
-`apex lid plan` prints that list for your machine and applies nothing. It also
+`rime lid plan` prints that list for your machine and applies nothing. It also
 prints what it *cannot* do and why; read that once before you rely on any of
 it.
 
@@ -128,12 +128,12 @@ Aggressive 802.11 power saving can still drop a long-lived tunnel with no
 suspend involved at all, so the driver turns power save off for the closed
 period.
 
-`apex lid report` records what that costs.
+`rime lid report` records what that costs.
 
 ## After you reopen
 
 ```
-apex lid report
+rime lid report
 ```
 
 The report shows how long the machine stayed up and why, which guard ended the
@@ -141,16 +141,16 @@ period if one did, the peak temperature, what was powered down, what could not
 be done and why, and the VPN timeline sampled across the whole period. Whether
 the tunnel held comes from those samples.
 
-The driver also writes the summary to the journal under `apex-lid`, so the
+The driver also writes the summary to the journal under `rime-lid`, so the
 report is not the only copy:
 
 ```
-journalctl -t apex-lid
+journalctl -t rime-lid
 ```
 
 ### Three answers, and "nothing yet" is only one of them
 
-`apex lid report` tells a machine whose lid has never been shut apart from a
+`rime lid report` tells a machine whose lid has never been shut apart from a
 record it could not read, and the exit status says which:
 
 | what happened | `--json` | exit |
@@ -165,10 +165,10 @@ one a crash had truncated mid-write. Anything that reads this output (the
 shell's Closing the Lid page does) may say "nothing yet" only for exit 0 with
 no `error` key.
 
-You can reach that third case in practice. `apex-lid.service` sets
-`StateDirectory=apex/lid` with no `StateDirectoryMode` and no `UMask`, so
-`/var/lib/apex/lid/last.json` is 0644 and an ordinary user can read it.
-**Adding `UMask=0077` to that unit would make every unprivileged `apex lid
+You can reach that third case in practice. `rime-lid.service` sets
+`StateDirectory=rime/lid` with no `StateDirectoryMode` and no `UMask`, so
+`/var/lib/rime/lid/last.json` is 0644 and an ordinary user can read it.
+**Adding `UMask=0077` to that unit would make every unprivileged `rime lid
 report` answer "could not be read".** That answer is at least honest now;
 before the fix it would have said "nothing has happened".
 
@@ -177,8 +177,8 @@ interrupted write loses the new record and leaves the last good one intact.
 
 ## Configuration
 
-`~/.config/apex/lid.toml` is yours and `/etc/apex/lid.toml` is the machine's.
-Yours wins where both exist, and `apex lid status` names the file it used.
+`~/.config/rime/lid.toml` is yours and `/etc/rime/lid.toml` is the machine's.
+Yours wins where both exist, and `rime lid status` names the file it used.
 
 The pin is **not** root-owned, by design. Taking the inhibitor needs no
 privilege, so a root-owned pin would buy nothing but a password prompt each
@@ -203,7 +203,7 @@ stop_system_units   = ["fwupd-refresh.timer", "dnf-makecache.timer"]
 ```
 
 The example shortens `stop_system_units`. The shipped default stops seven
-system timers: `apex-storage-notice.timer`, `fwupd-refresh.timer`,
+system timers: `rime-storage-notice.timer`, `fwupd-refresh.timer`,
 `dnf-makecache.timer`, `flatpak-system-update.timer`,
 `podman-auto-update.timer`, `raid-check.timer` and `mlocate-updatedb.timer`.
 
@@ -218,31 +218,31 @@ what you asked.
 
 ## The driver
 
-`apex-lid.service` runs `apex lid watch`. The image enables it, and you should
+`rime-lid.service` runs `rime lid watch`. The image enables it, and you should
 not need to touch it.
 
 ```
-systemctl status apex-lid.service
-journalctl -u apex-lid.service
+systemctl status rime-lid.service
+journalctl -u rime-lid.service
 ```
 
 To see what it would decide without letting it act:
 
 ```
-apex lid watch --once --dry-run
+rime lid watch --once --dry-run
 ```
 
 `--once` evaluates and acts once, then exits; the test suite drives that mode.
 `--interval` overrides `poll_secs` for one run.
 
-A desktop has no lid. `apex lid watch` says so on stderr and exits 0, and the
+A desktop has no lid. `rime lid watch` says so on stderr and exits 0, and the
 unit uses `Restart=on-failure` so that systemd does not poll the same answer
 every 30 seconds for the life of the machine.
 
 ## Checking it without a lid
 
-`tests/test-apex-lid.sh` drives the whole driver against a fixture tree. With
-`APEX_LID_ROOT` set, the driver re-roots every path into that tree and
+`tests/test-rime-lid.sh` drives the whole driver against a fixture tree. With
+`RIME_LID_ROOT` set, the driver re-roots every path into that tree and
 **executes no external program at all**: it appends each `systemctl`,
 `rfkill`, `iw`, `nmcli`, `systemd-inhibit` and `runuser` call to a command log,
 argv by argv. The suite asserts the exact argv the driver would have run, and
@@ -271,7 +271,7 @@ The procedure that would close it, on a machine nobody is using:
 
 ```
 # lid open, on battery, idle, pinned so the driver is the only variable
-sudo apex lid pin on
+sudo rime lid pin on
 a=$(cat /sys/class/power_supply/BAT0/energy_now); sleep 600
 b=$(cat /sys/class/power_supply/BAT0/energy_now)   # open baseline: a - b
 
@@ -282,11 +282,11 @@ d=$(cat /sys/class/power_supply/BAT0/energy_now)   # closed: c - d
 
 Use `energy_now` deltas over a fixed window, not an instantaneous `power_now`
 reading: `power_now` swings with whatever the CPU was doing in the second you
-sampled it. `apex lid report` already records the charge at close and the last
+sampled it. `rime lid report` already records the charge at close and the last
 charge seen, so the driver takes the closed half of the measurement itself.
 The open-lid baseline is the missing half.
 
 ## See also
 
-* `docs/agent-runtime.md`: what an agent session is, and `apex agent list`
+* `docs/agent-runtime.md`: what an agent session is, and `rime agent list`
 * `docs/update-cost.md`: the update timers this feature stops for a close

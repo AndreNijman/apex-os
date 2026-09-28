@@ -17,21 +17,21 @@
 #  So this suite makes the two claims that a unit test cannot:
 #
 #    1. PARTITION MODE does not damage the other operating system on the disk.
-#       installer/apex-install:2320 asserts, in a comment, "Proven on a
+#       installer/rime-install:2320 asserts, in a comment, "Proven on a
 #       loopback multi-OS disk: the other partitions and the existing
 #       /EFI/Microsoft entry survive". That proof exists in no committed file.
 #       Here it is: a GPT with a Windows-shaped ESP (\EFI\Microsoft\Boot\
 #       bootmgfw.efi, a BCD, a fallback loader), a data partition full of known
-#       bytes, and a free partition for APEX. The data partition is hashed RAW,
+#       bytes, and a free partition for Rime. The data partition is hashed RAW,
 #       the Microsoft tree is hashed file by file, and `sfdisk -d` is captured
 #       — because a rewritten partition table with identical bytes behind it is
 #       still a Windows that no longer boots, its BCD naming PARTUUIDs that
 #       moved. All three are compared after the install AND AGAIN after the
-#       installed APEX has booted once, since the first boot is when APEX
+#       installed Rime has booted once, since the first boot is when Rime
 #       mounts that shared ESP read-write for the first time.
 #
 #    2. THE WHOLE-DISK STAGING FALLBACK installs and boots. Nothing qualifies
-#       as scratch (APEX_SCRATCH_CANDIDATES points at a path that does not
+#       as scratch (RIME_SCRATCH_CANDIDATES points at a path that does not
 #       exist, which is what the single-internal-disk USB-boot laptop looks
 #       like from inside `pick_scratch`), so the engine partitions the disk
 #       itself, formats it, creates the sparse staging image INSIDE the target
@@ -44,7 +44,7 @@
 #  ═══ WHAT "BOOTS" MEANS ═══
 #
 #  Not "the install command exited 0". The disk image is handed to a qemu
-#  inside the apex-bootlab container, under OVMF, and installer/
+#  inside the rime-bootlab container, under OVMF, and installer/
 #  plain-boot-drive.py reads two things off the guest's own serial console:
 #  dracut's "Switching root", and then a getty prompt or a systemd target that
 #  means a user could log in. Which marker fired is reported, never collapsed.
@@ -55,7 +55,7 @@
 #  system installed with `--karg quiet --karg splash` and no console= says
 #  NOTHING on a serial line and there would be nothing to read. The engine's
 #  own kargs are asserted to be present FIRST and are not removed. The
-#  APEX_LUKS_EXTRA_KARGS seam does the equivalent inside the engine for the
+#  RIME_LUKS_EXTRA_KARGS seam does the equivalent inside the engine for the
 #  encrypted path; it is LUKS-only, and inventing a second seam would have
 #  meant editing the file under test.
 #
@@ -70,7 +70,7 @@
 #  independently on either side of each install and diffed here, because two
 #  measurements that agree are worth more than one that cannot be checked. The
 #  engine passes bootc `--generic-image` for a loop-backed target, which is the
-#  layer that PREVENTS the write (see installer/apex-install:set_nvram_args_for
+#  layer that PREVENTS the write (see installer/rime-install:set_nvram_args_for
 #  and BOOT-BREAKAGE-2026-09-20.md); the guard is what detects it if that is
 #  ever wrong, and it has caught exactly that twice.
 #
@@ -78,9 +78,9 @@
 #
 #  Passwordless root, podman, losetup, sgdisk, /dev/kvm, ~40 GB free on
 #  /var/lab-scratch (the disk path alone rigs a 40 GiB sparse image, which is
-#  the smallest the engine's own staging budget accepts), an APEX-OS image in
+#  the smallest the engine's own staging budget accepts), a Rime OS image in
 #  ROOT podman storage for the partition path, a working route to the registry
-#  for the disk path, and the apex-bootlab container image (built if absent).
+#  for the disk path, and the rime-bootlab container image (built if absent).
 #  A GitHub runner has none of these: this suite is in
 #  tests/suites-not-in-ci.txt.
 #
@@ -90,7 +90,7 @@
 #
 #  The two paths are run STRICTLY IN SEQUENCE and must never be run
 #  concurrently with each other or with any other install suite: the engine's
-#  $TROOT (/run/apex-target) and $LOG (/var/log/apex-install.log) are fixed
+#  $TROOT (/run/rime-target) and $LOG (/var/log/rime-install.log) are fixed
 #  paths, and its preflight `unmount_target` clears "leftovers" that would in
 #  fact be the other run's live target.
 # ─────────────────────────────────────────────────────────────────────────────
@@ -98,15 +98,15 @@ set -uo pipefail
 cd "$(dirname "$0")" || exit 1
 REPO=$(cd .. && pwd)
 
-ENGINE=./apex-install
-IMAGE="${APEX_LIVE_PATHS_IMAGE:-localhost/apex-os:daily}"
-LAB="${APEX_BOOTLAB_IMAGE:-localhost/apex-bootlab}"
+ENGINE=./rime-install
+IMAGE="${RIME_LIVE_PATHS_IMAGE:-localhost/rime-os:daily}"
+LAB="${RIME_BOOTLAB_IMAGE:-localhost/rime-bootlab}"
 NVGUARD="../tests/lab/nvram-guard"
 
 # The registry ref the DISK path downloads from. Left at the engine's own
 # default on purpose: the point of that path is the real netinstall, and
 # swapping in a local image would test a different program.
-NETINSTALL_REF="${APEX_LIVE_PATHS_REF:-ghcr.io/andrenijman/apex-os:daily}"
+NETINSTALL_REF="${RIME_LIVE_PATHS_REF:-ghcr.io/andrenijman/rime-os:daily}"
 
 # TEST-ONLY kargs appended to the installed bootloader entry so the guest can
 # be read at all.
@@ -127,7 +127,7 @@ NETINSTALL_REF="${APEX_LIVE_PATHS_REF:-ghcr.io/andrenijman/apex-os:daily}"
 BOOT_KARGS="console=tty1 console=ttyS0,115200 systemd.log_target=kmsg systemd.show_status=1 loglevel=7 rd.plymouth=0 plymouth.enable=0 rd.timeout=120"
 
 # 24 GiB is comfortably over the engine's 16 GB whole-disk floor and leaves
-# ~21 GiB for APEX beside a 512 MiB ESP and a 2 GiB data partition.
+# ~21 GiB for Rime beside a 512 MiB ESP and a 2 GiB data partition.
 PART_DISK_SIZE=24G
 # 52 GiB clears the STAGING path's floor with a little room: stage_budget_kb
 # wants NEED_SCRATCH_GB (32) + STAGE_RESERVE_GB (15) GiB of free space, and the
@@ -150,7 +150,7 @@ WANT_PATHS="both"
 # The chain, read out of the tools rather than guessed:
 #   * every loopback install in this lab MUST pass bootc `--generic-image` — it
 #     is the one layer that prevents the 2026-09-20 host-NVRAM incident, and
-#     apex-install adds it from set_nvram_args_for for a loop-backed target;
+#     rime-install adds it from set_nvram_args_for for a loop-backed target;
 #   * bootc's own help for that flag: "All bootloader types will be installed";
 #   * so bootc does NOT hand bootupd `--auto`, and bootupd installs the BIOS
 #     component as well as the ESP one;
@@ -214,33 +214,33 @@ case "$WANT_PATHS" in
   partition|both)
     sudo -n podman image exists "$IMAGE" 2>/dev/null \
       || die "$IMAGE is not in ROOT podman storage (the partition path installs from it).
-Build it, or set APEX_LIVE_PATHS_IMAGE." ;;
+Build it, or set RIME_LIVE_PATHS_IMAGE." ;;
 esac
 
 # ── nothing else may be installing ──────────────────────────────────────────
-# $TROOT (/run/apex-target) and $LOG are FIXED paths in the engine, and its
+# $TROOT (/run/rime-target) and $LOG are FIXED paths in the engine, and its
 # preflight `unmount_target` clears "leftovers" that would in fact be another
 # run's live target. Two of these at once destroy each other's install, and the
 # damage reads as a defect in the installer.
 if pgrep -f '[a]pex-install --headless' >/dev/null 2>&1; then
-  die "another apex-install is already running:
+  die "another rime-install is already running:
 $(pgrep -af '[a]pex-install --headless')
-This suite and that run share /run/apex-target and /var/log/apex-install.log."
+This suite and that run share /run/rime-target and /var/log/rime-install.log."
 fi
-if findmnt -rno TARGET /run/apex-target >/dev/null 2>&1; then
-  die "/run/apex-target is mounted — another install is live, or one was interrupted:
-$(findmnt -rno TARGET,SOURCE /run/apex-target)
+if findmnt -rno TARGET /run/rime-target >/dev/null 2>&1; then
+  die "/run/rime-target is mounted — another install is live, or one was interrupted:
+$(findmnt -rno TARGET,SOURCE /run/rime-target)
 Release it before running this suite."
 fi
 
 # ── scratch: a real disk, never RAM ─────────────────────────────────────────
-SCRATCH_ROOT="${APEX_LIVE_PATHS_SCRATCH:-/var/lab-scratch}"
+SCRATCH_ROOT="${RIME_LIVE_PATHS_SCRATCH:-/var/lab-scratch}"
 sudo -n mkdir -p "$SCRATCH_ROOT" 2>/dev/null
 [ -d "$SCRATCH_ROOT" ] || die "$SCRATCH_ROOT does not exist and could not be created."
 case "$(df -PT "$SCRATCH_ROOT" 2>/dev/null | awk 'NR==2{print $2}')" in
   tmpfs|ramfs) die "$SCRATCH_ROOT is a RAM filesystem; a 40 GiB image there would eat the machine." ;;
 esac
-WORK=$(sudo -n mktemp -d "$SCRATCH_ROOT/apex-live-paths.XXXXXX") || die "no scratch directory"
+WORK=$(sudo -n mktemp -d "$SCRATCH_ROOT/rime-live-paths.XXXXXX") || die "no scratch directory"
 # OWNED, not just readable. Nearly every capture in this file is
 # `sudo -n <cmd> > "$WORK/..."`, and a redirect is performed by the SHELL, which
 # is unprivileged — into a root-owned 0755 directory that is EACCES for it. At
@@ -378,7 +378,7 @@ start_sampler() {  # $1 = output file
       losetup -a 2>/dev/null | sed 's/^/loop: /'
       findmnt -t tmpfs,ramfs -no TARGET,SOURCE,USED,AVAIL 2>/dev/null | sed 's/^/tmpfs: /'
       free -m 2>/dev/null | sed -n '2p' | sed 's/^/mem: /'
-      findmnt -no TARGET,SOURCE /run/apex-stage 2>/dev/null | sed 's/^/stage: /'
+      findmnt -no TARGET,SOURCE /run/rime-stage 2>/dev/null | sed 's/^/stage: /'
       sleep 10
     done > '$1' 2>&1" &
   SAMPLER_PID=$!
@@ -417,8 +417,8 @@ run_engine() {  # $1 = label  $2 = answers file  $3 = stdout file  rest = env as
   ENGINE_SECS=$(( $(date +%s) - start ))
   # shellcheck disable=SC2024
   sudo -n efibootmgr -v 2>/dev/null > "$after" || echo "(no efibootmgr)" > "$after"
-  # The WHOLE file, deliberately. apex-install:50 is `: > "$LOG"` — the engine
-  # TRUNCATES /var/log/apex-install.log as its second statement, so the file only
+  # The WHOLE file, deliberately. rime-install:50 is `: > "$LOG"` — the engine
+  # TRUNCATES /var/log/rime-install.log as its second statement, so the file only
   # ever holds the run that is finishing and there is nothing from an earlier run
   # to exclude.
   #
@@ -429,8 +429,8 @@ run_engine() {  # $1 = label  $2 = answers file  $3 = stdout file  rest = env as
   # file — exactly the early lines, which is where the staging DECISION is
   # logged. "[disk] the engine logged the fallback decision" went red against an
   # engine that had logged it perfectly. Verified rather than assumed this time:
-  # `grep -n 'LOG=' installer/apex-install` and the `: > "$LOG"` on the next line.
-  sudo -n cp /var/log/apex-install.log "$WORK/engine-log-$label.txt" 2>/dev/null \
+  # `grep -n 'LOG=' installer/rime-install` and the `: > "$LOG"` on the next line.
+  sudo -n cp /var/log/rime-install.log "$WORK/engine-log-$label.txt" 2>/dev/null \
     || sudo -n sh -c ": > '$WORK/engine-log-$label.txt'"
   sudo -n chmod 644 "$WORK/engine-log-$label.txt" "$before" "$after" 2>/dev/null
   if diff -u "$before" "$after" > "$WORK/efi-diff-$label.txt" 2>&1; then
@@ -472,8 +472,8 @@ engine_protocol_ok() {  # $1 = label  $2 = stdout file
   if [ "$ENGINE_RC" = 0 ]; then ok "[$1] engine exit status" "0 after ${ENGINE_SECS}s"
   else bad "[$1] engine exit status" "$ENGINE_RC after ${ENGINE_SECS}s — see $2"; fi
   lastproto=$(grep -v 'nvram-guard\[' "$2" | grep -v '^[[:space:]]*$' | tail -1)
-  if [ "$lastproto" = "APEX-INSTALL-OK" ]; then ok "[$1] final protocol line is APEX-INSTALL-OK"
-  else bad "[$1] final protocol line is APEX-INSTALL-OK" "got: $lastproto"; fi
+  if [ "$lastproto" = "RIME-INSTALL-OK" ]; then ok "[$1] final protocol line is RIME-INSTALL-OK"
+  else bad "[$1] final protocol line is RIME-INSTALL-OK" "got: $lastproto"; fi
   if grep -q 'Unexpected error on line' "$2"; then bad "[$1] the ERR trap did not fire" "it did"
   else ok "[$1] the ERR trap did not fire"; fi
 }
@@ -525,18 +525,18 @@ add_boot_kargs() {  # $1 = label  $2 = root partition device
 boot_the_disk() {  # $1 = label  $2 = image file
   local bootcmd bootout bootrc verdict switched reached
   if ! sudo -n podman image exists "$LAB" 2>/dev/null; then
-    info "building $LAB — qemu/OVMF are build-time tooling, deliberately not on APEX machines"
+    info "building $LAB — qemu/OVMF are build-time tooling, deliberately not on Rime machines"
     # shellcheck disable=SC2024
     sudo -n podman build -t "$LAB" -f "$REPO/bootlab/Containerfile" "$REPO" \
       > "$WORK/bootlab-build.log" 2>&1 \
-      || { bad "[$1] the apex-bootlab image builds" "see $WORK/bootlab-build.log"; return 1; }
+      || { bad "[$1] the rime-bootlab image builds" "see $WORK/bootlab-build.log"; return 1; }
   fi
   sudo -n install -m 0644 ./plain-boot-drive.py "$WORK/plain-boot-drive.py" \
     || { bad "[$1] plain-boot-drive.py is available"; return 1; }
   sudo -n chmod 644 "$2"
 
   # The firmware pair is converted INSIDE the container: edk2-ovmf lives there
-  # and never on an APEX host. The varstore is Fedora's pristine one — no PK
+  # and never on a Rime host. The varstore is Fedora's pristine one — no PK
   # enrolled, so this is UEFI Setup Mode rather than Secure Boot enforcing, and
   # the only loader the firmware can find is the removable-media fallback.
   bootcmd='set -e
@@ -586,7 +586,7 @@ python3 /w/plain-boot-drive.py --work /w --name '"$1"' \
   fi
   # A greeter that cannot open a compositor in a GPU-less guest exits cleanly
   # and is restarted for as long as the guest runs. That is a property of
-  # running APEX in this lab, not of the install — but it is ALSO the reason
+  # running Rime in this lab, not of the install — but it is ALSO the reason
   # multi-user.target and graphical.target are never announced, so it is
   # reported rather than left for the next reader to rediscover.
   local loops units
@@ -612,7 +612,7 @@ run_partition_path() {
   info "target: $LOOP ($IMG, $PART_DISK_SIZE)"
 
   # ── the fake Windows layout ───────────────────────────────────────────────
-  # p1 ESP, p2 a Microsoft basic data partition, p3 free space for APEX. The
+  # p1 ESP, p2 a Microsoft basic data partition, p3 free space for Rime. The
   # type GUIDs are the real ones: the engine reads p1's to decide whether it is
   # an ESP at all, and a "close enough" GUID would make this suite prove that a
   # guard it never reached was satisfied.
@@ -627,13 +627,13 @@ run_partition_path() {
     sudo -n sgdisk -n1:0:+1M   -t1:21686148-6449-6E6F-744E-656564454649 -c1:BIOS-BOOT \
                    -n2:0:+512M -t2:C12A7328-F81F-11D2-BA4B-00A0C93EC93B -c2:EFI-SYSTEM \
                    -n3:0:+2G   -t3:EBD0A0A2-B9E5-4433-87C0-68B6B72699C7 -c3:WINDATA \
-                   -n4:0:0     -t4:0FC63DAF-8483-4772-8E79-3D69D8477DE4 -c4:APEXROOT \
+                   -n4:0:0     -t4:0FC63DAF-8483-4772-8E79-3D69D8477DE4 -c4:RIMEROOT \
                    "$LOOP" >/dev/null 2>&1 || die "sgdisk could not rig the multi-OS disk"
     I_ESP=2; I_DATA=3; I_ROOT=4
   else
     sudo -n sgdisk -n1:0:+512M -t1:C12A7328-F81F-11D2-BA4B-00A0C93EC93B -c1:EFI-SYSTEM \
                    -n2:0:+2G   -t2:EBD0A0A2-B9E5-4433-87C0-68B6B72699C7 -c2:WINDATA \
-                   -n3:0:0     -t3:0FC63DAF-8483-4772-8E79-3D69D8477DE4 -c3:APEXROOT \
+                   -n3:0:0     -t3:0FC63DAF-8483-4772-8E79-3D69D8477DE4 -c3:RIMEROOT \
                    "$LOOP" >/dev/null 2>&1 || die "sgdisk could not rig the multi-OS disk"
     I_ESP=1; I_DATA=2; I_ROOT=3
     info "fixture=windows (Windows-EXACT: no bios_grub). The install is EXPECTED to fail"
@@ -686,7 +686,7 @@ target=$P_ROOT
 esp=$P_ESP
 username=tester
 password=loginpw123
-hostname=apexpart
+hostname=rimepart
 encrypt=no
 keymap=us
 timezone=Australia/Perth
@@ -702,9 +702,9 @@ EOF"
   # ── the dry run: every guard, on the real nodes, writing nothing ──────────
   hdr "PATH 1 — dry run (all guards, no writes)"
   run_engine partition-dry "$ans" "$WORK/engine-partition-dry.txt" \
-    APEX_IMAGE="$IMAGE" APEX_NETINSTALL=0 APEX_DRY_RUN=1
-  if grep -q '^APEX-INSTALL-DRYRUN-OK' "$WORK/engine-partition-dry.txt"; then
-    ok "[partition] every guard passes against the real loop nodes" "APEX-INSTALL-DRYRUN-OK"
+    RIME_IMAGE="$IMAGE" RIME_NETINSTALL=0 RIME_DRY_RUN=1
+  if grep -q '^RIME-INSTALL-DRYRUN-OK' "$WORK/engine-partition-dry.txt"; then
+    ok "[partition] every guard passes against the real loop nodes" "RIME-INSTALL-DRYRUN-OK"
   else
     bad "[partition] every guard passes against the real loop nodes" \
         "$(grep -v 'nvram-guard\[' "$WORK/engine-partition-dry.txt" | tail -3 | tr '\n' ' ')"
@@ -719,7 +719,7 @@ EOF"
   # ── the install ───────────────────────────────────────────────────────────
   hdr "PATH 1 — the real install (this is the slow part)"
   run_engine partition "$ans" "$WORK/engine-partition.txt" \
-    APEX_IMAGE="$IMAGE" APEX_NETINSTALL=0
+    RIME_IMAGE="$IMAGE" RIME_NETINSTALL=0
   engine_protocol_ok partition "$WORK/engine-partition.txt"
   if [ "$ENGINE_RC" != 0 ]; then
     tail -40 "$WORK/engine-partition.txt" | sed 's/^/    /'
@@ -733,9 +733,9 @@ EOF"
   sudo -n mkdir -p "$ESPMNT"
   if sudo -n mount -o ro "$P_ESP" "$ESPMNT" 2>/dev/null; then
     if sudo -n test -d "$ESPMNT/EFI/fedora"; then
-      ok "[partition] APEX was added under EFI/fedora alongside Microsoft"
+      ok "[partition] Rime was added under EFI/fedora alongside Microsoft"
     else
-      bad "[partition] APEX was added under EFI/fedora alongside Microsoft" "no EFI/fedora"
+      bad "[partition] Rime was added under EFI/fedora alongside Microsoft" "no EFI/fedora"
     fi
     if sudo -n test -f "$ESPMNT/EFI/BOOT/BOOTX64.EFI" || sudo -n test -f "$ESPMNT/EFI/Boot/bootx64.efi"; then
       ok "[partition] the ESP carries a removable-media fallback loader"
@@ -778,8 +778,8 @@ EOF"
     boot_the_disk partition "$IMG"
     # "survived the install" and "survived the first boot" are different
     # claims, and the second is the one a dual-booting owner means: the
-    # installed APEX mounts that shared ESP read-write at every boot.
-    hdr "PATH 1 — what the other operating system looks like after APEX has BOOTED once"
+    # installed Rime mounts that shared ESP read-write at every boot.
+    hdr "PATH 1 — what the other operating system looks like after Rime has BOOTED once"
     attach "$IMG"
     P_ESP=$(part_node "$LOOP" "$I_ESP"); P_DATA=$(part_node "$LOOP" "$I_DATA"); P_ROOT=$(part_node "$LOOP" "$I_ROOT")
     assert_neighbour_intact "after-first-boot"
@@ -834,7 +834,7 @@ assert_neighbour_intact() {  # $1 = when
       diff -u "$WORK/esp-microsoft-before.txt" "$WORK/esp-microsoft-$when.txt" | sed 's/^/    /'
     fi
     # A separate claim from the hashes above, and the one a dual-booter means by
-    # "my other OS is still there": APEX may ADD paths to a shared ESP and must
+    # "my other OS is still there": Rime may ADD paths to a shared ESP and must
     # DELETE none. Hashing EFI/Microsoft cannot see a deletion outside that
     # subtree — an \EFI\Boot or a vendor directory quietly removed reads green.
     local gone
@@ -869,7 +869,7 @@ mode=disk
 disk=$LOOP
 username=tester
 password=loginpw123
-hostname=apexdisk
+hostname=rimedisk
 encrypt=no
 keymap=us
 timezone=Australia/Perth
@@ -878,20 +878,20 @@ EOF"
     "$LOOP" "$(fingerprint "$LOOP")" | sudo -n tee -a "$ans" >/dev/null
   sudo -n chmod 600 "$ans"
 
-  # APEX_SCRATCH_CANDIDATES is the engine's own documented test seam: it
+  # RIME_SCRATCH_CANDIDATES is the engine's own documented test seam: it
   # REPLACES the candidate list and cannot weaken scratch_fs_ok. Pointed at a
   # path that does not exist, pick_scratch sees exactly what it sees on a
   # single-internal-disk laptop booted from a plain USB — nothing — and answers
   # with the @target sentinel. Without this, /var/tmp on THIS machine is a real
   # filesystem with 180 GB free and would win, testing the path that already
   # worked.
-  local NOSCRATCH=/nonexistent/apex-lab-no-scratch-volume
+  local NOSCRATCH=/nonexistent/rime-lab-no-scratch-volume
 
   hdr "PATH 2 — dry run (all guards, the reachability probe, no writes)"
   run_engine disk-dry "$ans" "$WORK/engine-disk-dry.txt" \
-    APEX_NETINSTALL=1 APEX_SCRATCH_CANDIDATES="$NOSCRATCH" APEX_DRY_RUN=1
-  if grep -q '^APEX-INSTALL-DRYRUN-OK' "$WORK/engine-disk-dry.txt"; then
-    ok "[disk] every guard passes against the real loop node" "APEX-INSTALL-DRYRUN-OK"
+    RIME_NETINSTALL=1 RIME_SCRATCH_CANDIDATES="$NOSCRATCH" RIME_DRY_RUN=1
+  if grep -q '^RIME-INSTALL-DRYRUN-OK' "$WORK/engine-disk-dry.txt"; then
+    ok "[disk] every guard passes against the real loop node" "RIME-INSTALL-DRYRUN-OK"
   else
     bad "[disk] every guard passes against the real loop node" \
         "$(grep -v 'nvram-guard\[' "$WORK/engine-disk-dry.txt" | tail -3 | tr '\n' ' ')"
@@ -908,7 +908,7 @@ EOF"
   hdr "PATH 2 — the real install: partition, format, download ~5.8 GB onto the target, install"
   start_sampler "$WORK/sampler-disk.txt"
   run_engine disk "$ans" "$WORK/engine-disk.txt" \
-    APEX_NETINSTALL=1 APEX_SCRATCH_CANDIDATES="$NOSCRATCH"
+    RIME_NETINSTALL=1 RIME_SCRATCH_CANDIDATES="$NOSCRATCH"
   stop_sampler
   engine_protocol_ok disk "$WORK/engine-disk.txt"
   sudo -n chmod 644 "$WORK/sampler-disk.txt" 2>/dev/null
@@ -928,20 +928,20 @@ EOF"
   fi
   # The sampler is an INDEPENDENT observer: the engine's log is the engine's
   # own account of itself, and this is a third party looking at the kernel.
-  if grep -q '\.apex-stage\.img (deleted)' "$WORK/sampler-disk.txt"; then
+  if grep -q '\.rime-stage\.img (deleted)' "$WORK/sampler-disk.txt"; then
     ok "[disk] a sampler saw the staging loop backed by a DELETED file on the target" \
-       "$(grep -m1 -o '/dev/loop[0-9]*:.*apex-stage[^ ]*' "$WORK/sampler-disk.txt" | head -c 90)"
-  elif grep -q 'apex-stage' "$WORK/sampler-disk.txt"; then
+       "$(grep -m1 -o '/dev/loop[0-9]*:.*rime-stage[^ ]*' "$WORK/sampler-disk.txt" | head -c 90)"
+  elif grep -q 'rime-stage' "$WORK/sampler-disk.txt"; then
     bad "[disk] a sampler saw the staging loop backed by a DELETED file on the target" \
         "the backing file was still LINKED — to-filesystem's emptiness check would see it"
   else
     bad "[disk] a sampler saw the staging loop backed by a DELETED file on the target" \
-        "no apex-stage loop in any sample — see $WORK/sampler-disk.txt"
+        "no rime-stage loop in any sample — see $WORK/sampler-disk.txt"
   fi
-  if grep -q '^stage: /run/apex-stage */dev/loop' "$WORK/sampler-disk.txt"; then
-    ok "[disk] /run/apex-stage was the staging loop, not a tmpfs"
+  if grep -q '^stage: /run/rime-stage */dev/loop' "$WORK/sampler-disk.txt"; then
+    ok "[disk] /run/rime-stage was the staging loop, not a tmpfs"
   else
-    bad "[disk] /run/apex-stage was the staging loop, not a tmpfs" \
+    bad "[disk] /run/rime-stage was the staging loop, not a tmpfs" \
         "$(grep -m1 '^stage:' "$WORK/sampler-disk.txt")"
   fi
   # No tmpfs grew. Baseline is the first sample; 300 MB of headroom covers the
@@ -1006,8 +1006,8 @@ EOF"
   # Nothing of the staging may survive on the installed disk.
   sudo -n mkdir -p "$MNT"
   if sudo -n mount "$p3" "$MNT" 2>/dev/null; then
-    if sudo -n test -e "$MNT/.apex-stage.img"; then
-      bad "[disk] the staging image left nothing behind on the target" "/.apex-stage.img still exists"
+    if sudo -n test -e "$MNT/.rime-stage.img"; then
+      bad "[disk] the staging image left nothing behind on the target" "/.rime-stage.img still exists"
     else
       ok "[disk] the staging image left nothing behind on the target"
     fi

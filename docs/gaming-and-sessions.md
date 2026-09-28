@@ -1,7 +1,7 @@
 # Gaming Mode, Safe Graphics and the niri session
 
 This document records what the 2026-09-19 katana hardware qualification found
-in these three sessions, what APEX changed in response, and the commands a
+in these three sessions, what Rime changed in response, and the commands a
 machine has to run to close the rows that a laptop with one GPU cannot answer.
 §5c to §5e and §6.8 follow the sched-ext work on to 2026-09-26.
 
@@ -14,7 +14,7 @@ Section numbers below are that file's.
 
 ### What it did
 
-`apex-gaming-session` passed gamescope no device preference. gamescope took its
+`rime-gaming-session` passed gamescope no device preference. gamescope took its
 default, the first DRM node, which on a hybrid laptop is the integrated GPU.
 On the MSI Katana that is `card1`, an Intel Iris Xe whose only connector is the
 laptop panel. The RTX 3070 driving the user's only external monitor is `card2`,
@@ -53,24 +53,24 @@ well as the Vulkan device.
 
 | | |
 |---|---|
-| the rule | `apexd/apexd-core/src/gpu.rs`, `choose_display` |
-| the tests | `apexd/apexd-core/tests/gpu_parity.rs` |
-| the caller | `apex gaming --gamescope-device-args` |
-| the consumer | `files/system/libexec/apex-gaming-session` |
+| the rule | `rimed/rimed-core/src/gpu.rs`, `choose_display` |
+| the tests | `rimed/rimed-core/tests/gpu_parity.rs` |
+| the caller | `rime gaming --gamescope-device-args` |
+| the consumer | `files/system/libexec/rime-gaming-session` |
 
 ### Failing loudly
 
 A silent fallback to the iGPU is the defect this fixes, so no path is silent.
 Every case that cannot produce a complete answer (no connectors, nothing
 connected, a card with no PCI id, a connector whose `status` could not be read)
-sets a problem string that the session prints and `apex gaming` raises as a
+sets a problem string that the session prints and `rime gaming` raises as a
 warning.
 
 It is **not fatal**, by design. Refusing to start would regress every
 single-GPU machine over a probe that hiccupped, and gamescope's own default is
 correct on those.
 
-The session uses a **partial** answer rather than discarding it. `apex gaming
+The session uses a **partial** answer rather than discarding it. `rime gaming
 --gamescope-device-args` exits non-zero when it could not produce a complete
 answer (a screen *and* the card to drive it with). The commonest cause is a DRM
 node with no PCI device behind it, where `--prefer-output` is good and only
@@ -78,8 +78,8 @@ node with no PCI device behind it, where `--prefer-output` is good and only
 silent regression to the one being fixed. "Fail loudly" requires the session to
 state the gap. It does not require the session to get less than it could have.
 
-`APEX_GAMING_NO_DEVICE_SELECT=1` restores the old behaviour, and says what it
-is giving up. The session appends `APEX_GAMESCOPE_ARGS` after the computed
+`RIME_GAMING_NO_DEVICE_SELECT=1` restores the old behaviour, and says what it
+is giving up. The session appends `RIME_GAMESCOPE_ARGS` after the computed
 flags, so a hand-set preference wins.
 
 ---
@@ -87,7 +87,7 @@ flags, so a hand-set preference wins.
 ## 2. `--rt` is only claimed when it can be granted (§6.2)
 
 gamescope gates its realtime path on **CAP_SYS_NICE**, not on
-`RLIMIT_RTPRIO`. With `/etc/security/limits.d/30-apex-gaming-rtprio.conf`
+`RLIMIT_RTPRIO`. With `/etc/security/limits.d/30-rime-gaming-rtprio.conf`
 installed and working (the soft limit read 20), the session passed `--rt`, and
 gamescope answered
 
@@ -97,13 +97,13 @@ No CAP_SYS_NICE, falling back to regular-priority compute and threads.
 
 on every attempt. The session now checks the capability (its own `CapEff`, or a
 file capability on the gamescope binary) and passes `--rt` only when one holds.
-`apex gaming` gained a `realtime capability` row beside the existing `realtime
+`rime gaming` gained a `realtime capability` row beside the existing `realtime
 limit` one. They are separate warnings because a machine can have the limit and
-not the capability, and every APEX machine is in that state today.
+not the capability, and every Rime machine is in that state today.
 
 ### Why nothing grants it
 
-* **`setcap` cannot work.** APEX's `/usr` is a read-only composefs, and
+* **`setcap` cannot work.** Rime's `/usr` is a read-only composefs, and
   gamescope arrives through a `systemd-sysext` overlay whose lower layers are
   read-only too. There is no writable inode to hang the `security.capability`
   xattr on.
@@ -124,7 +124,7 @@ applies to gamescope's own exec and not to the session that started it.
 
 ## 3. The capability sets are logged, so §6.3 can be attributed next time
 
-`apex-gaming-session` logs `CapEff`, `CapPrm` and `CapAmb` at every start, and
+`rime-gaming-session` logs `CapEff`, `CapPrm` and `CapAmb` at every start, and
 says so when the permitted set is non-empty, naming what that breaks. The
 qualification saw §6.3's bwrap failure without finding its cause. It did
 **not** log in through greetd: it used `systemd-run --property=PAMName=login` on
@@ -170,11 +170,11 @@ holds no DRM logic of its own.
 
 ```sh
 for p in /sys/class/drm/*/vrr_capable; do [ -e "$p" ] && echo "$p = $(cat "$p")"; done
-apex gaming | grep 'adaptive sync'
+rime gaming | grep 'adaptive sync'
 ```
 
 Empty on katana, and on the L16 too: amdgpu does not publish it for `eDP-1`
-there either, so `apex gaming` says `not published` rather than `no`. If VRR
+there either, so `rime gaming` says `not published` rather than `no`. If VRR
 matters for Gaming Mode on NVIDIA, the property has to come from somewhere
 other than this sysfs attribute. That is separate work, and this row stays
 COULD NOT RUN.
@@ -189,7 +189,7 @@ recovery session painted the laptop panel and left the external monitor dark,
 with 60 `Swapchain for output 'HDMI-A-1' failed test` errors against zero for
 `eDP-1`.
 
-`apex-safe-graphics` now:
+`rime-safe-graphics` now:
 
 * names the primary GPU, the outputs it can light and the outputs it cannot,
   in `check` and in its own log, before the compositor starts;
@@ -201,8 +201,8 @@ with 60 `Swapchain for output 'HDMI-A-1' failed test` errors against zero for
   card), because no single device choice can light both, and says which screen
   it is about to leave dark plus the override that recovers on the other one.
 
-`APEX_SAFE_GRAPHICS_DRM_DEVICE=/dev/dri/cardN` forces a device.
-`APEX_SAFE_GRAPHICS_RENDERER=auto` lets wlroots pick a hardware renderer. It is
+`RIME_SAFE_GRAPHICS_DRM_DEVICE=/dev/dri/cardN` forces a device.
+`RIME_SAFE_GRAPHICS_RENDERER=auto` lets wlroots pick a hardware renderer. It is
 an opt-out and warns what it undoes, because "the GPU does not work" is the
 case this session exists for.
 
@@ -212,41 +212,41 @@ case this session exists for.
 
 niri's upstream `default-config.kdl` carries `spawn-at-startup "waybar"`, and
 that file is what lands in `~/.config/niri/config.kdl`, whether niri writes it
-on first run or `apex-shell-firstrun` copies it. firstrun then appended the
-APEX autostarts, which start quickshell, so every login got two bars.
+on first run or `rime-shell-firstrun` copies it. firstrun then appended the
+Rime autostarts, which start quickshell, so every login got two bars.
 
-`apex-shell-firstrun` now disables that one line, matched in full at column 0
+`rime-shell-firstrun` now disables that one line, matched in full at column 0
 and only in upstream's own spelling, guarded by a marker, a backup, `niri
 validate` before and after, and a whole-file hash comparison with that line
 removed.
 
 ### What else the upstream default turns on (recorded, not changed)
 
-APEX left these **alone**. They are user-visible defaults, and changing them is
+Rime left these **alone**. They are user-visible defaults, and changing them is
 Andre's decision rather than a side effect of fixing a bar.
 
 | line | what it does | why it is worth a decision |
 |---|---|---|
-| `hotkey-overlay { // skip-at-startup }` | the "Important Hotkeys" pop-up on every niri start | APEX Shell has its own keybind UI; Hyprland and labwc sessions show nothing equivalent |
-| `Mod+T { spawn "alacritty"; }` | terminal | APEX's own terminal choice is foot-first (see `apex-safe-graphics`) |
-| `Mod+D { spawn "fuzzel"; }` | launcher | APEX Shell has a launcher |
-| `Super+Alt+L { spawn "swaylock"; }` | lock | APEX's lock is compositor-enforced (§5.3); swaylock may not be installed, so this is a bind that does nothing |
-| `Super+Alt+S { spawn-sh "pkill orca \|\| exec orca"; }` | screen reader | APEX ships `apex-screen-reader` |
+| `hotkey-overlay { // skip-at-startup }` | the "Important Hotkeys" pop-up on every niri start | Rime Shell has its own keybind UI; Hyprland and labwc sessions show nothing equivalent |
+| `Mod+T { spawn "alacritty"; }` | terminal | Rime's own terminal choice is foot-first (see `rime-safe-graphics`) |
+| `Mod+D { spawn "fuzzel"; }` | launcher | Rime Shell has a launcher |
+| `Super+Alt+L { spawn "swaylock"; }` | lock | Rime's lock is compositor-enforced (§5.3); swaylock may not be installed, so this is a bind that does nothing |
+| `Super+Alt+S { spawn-sh "pkill orca \|\| exec orca"; }` | screen reader | Rime ships `rime-screen-reader` |
 
-**The binds matter more than they look.** `ApexShellKeybinds.kdl` is created
-*empty* by firstrun and stays empty until APEX Settings writes it, so the
+**The binds matter more than they look.** `RimeShellKeybinds.kdl` is created
+*empty* by firstrun and stays empty until Rime Settings writes it, so the
 `include` that is supposed to override these overrides nothing on a fresh
 machine: the stock binds are the only binds there are.
 
 ---
 
-## 5a. Leaving Gaming Mode is apexd's job, not the session's
+## 5a. Leaving Gaming Mode is rimed's job, not the session's
 
 ### What it did
 
-`apex-gaming-session` released game mode from an `EXIT` trap that ran
-`apex game stop`. On katana 2026-09-19 that worked on a clean gamescope exit
-and did nothing at all when someone restarted greetd underneath it: `apex game
+`rime-gaming-session` released game mode from an `EXIT` trap that ran
+`rime game stop`. On katana 2026-09-19 that worked on a clean gamescope exit
+and did nothing at all when someone restarted greetd underneath it: `rime game
 status` still read `active: true` seventy-five minutes later, with a p-core
 cpuset, steered IRQs and the `performance` tier still in force, and **not one
 line in the session's own log** said so.
@@ -254,12 +254,12 @@ line in the session's own log** said so.
 > **This account first listed `scx_lavd` as a fourth thing left running. That
 > was false, and the correction stays here instead of a silent deletion**
 > (2026-09-20). No sched-ext scheduler was running then, or on any boot between
-> the feature landing and that date. `apex game status` said one was because the
+> the feature landing and that date. `rime game status` said one was because the
 > only sched-ext thing it reported was a sentence copied out of the plan, while
 > `scxctl` had refused every call. See §5c.
 
-The trap has no bug. `apex game stop` goes through polkit action
-`org.apexos.apexd.manage-power`, whose defaults are
+The trap has no bug. `rime game stop` goes through polkit action
+`org.rimeos.rimed.manage-power`, whose defaults are
 
 ```
 allow_any      auth_admin
@@ -272,11 +272,11 @@ switch away, any logind-driven teardown), polkit refuses the session's own
 call. Measured from a session with no seat:
 
 ```
-$ apex game stop
-apex: leaving game mode failed: org.freedesktop.DBus.Error.AccessDenied:
-      not authorized for org.apexos.apexd.manage-power
-$ sudo apex game stop
-apex: game mode OFF
+$ rime game stop
+rime: leaving game mode failed: org.freedesktop.DBus.Error.AccessDenied:
+      not authorized for org.rimeos.rimed.manage-power
+$ sudo rime game stop
+rime: game mode OFF
 ```
 
 The process that is *supposed* to clean up loses the privilege to do it at the
@@ -295,18 +295,18 @@ does nothing about that.
 
 ### The rule, and where it lives
 
-`apexd` is root, holds the session's exit plan in memory, and asks polkit
+`rimed` is root, holds the session's exit plan in memory, and asks polkit
 nothing about itself. It is the only party that still exists after the session
 dies, so it takes the job:
 
 * `GameMode.StartOwnedBy(owner_pid)` enters game mode **and** records the
   process whose death ends the session. It uses the same polkit action as
   before, so *entering* Gaming Mode is as restricted as it was.
-* A 2 s watch in `apexd/src/main.rs` reads `/proc/<pid>/stat`; when the owner is
-  gone, apexd calls the same idempotent `game_exit()` a D-Bus request would,
-  and emits the same signals, so `apex game status` and apex-shell do not keep
+* A 2 s watch in `rimed/src/main.rs` reads `/proc/<pid>/stat`; when the owner is
+  gone, rimed calls the same idempotent `game_exit()` a D-Bus request would,
+  and emits the same signals, so `rime game status` and rime-shell do not keep
   showing a session that is over.
-* `apex-gaming-session` passes `--owner-pid $$`.
+* `rime-gaming-session` passes `--owner-pid $$`.
 
 Three of the details are decisions rather than mechanics:
 
@@ -316,7 +316,7 @@ Three of the details are decisions rather than mechanics:
   `/proc/<pid>/stat`, and read by splitting after the **last** `)`, because
   `comm` may contain spaces and parentheses) is the kernel's own tiebreaker.
 * **An unreadable `/proc` is a third answer, and never a release.** Turning an
-  I/O error into a hardware change is not a fail-safe. apexd logs it once and
+  I/O error into a hardware change is not a fail-safe. rimed logs it once and
   leaves the session alone.
 * **The owner is watched, not pinned.** Putting the session script in the game
   cpuset would put every Steam process on the p-cores, which is a behaviour
@@ -371,15 +371,15 @@ games are worth more than an overlay that has never rendered on this system,
 overlay was costing a crash loop for nothing.
 
 The session gates `--mangoapp` on the flag rather than deleting it, so
-`APEX_GAMING_EXPOSE_WAYLAND=0` brings the overlay back by itself. That is also
+`RIME_GAMING_EXPOSE_WAYLAND=0` brings the overlay back by itself. That is also
 what makes the gate testable in both directions in
-`tests/test-apex-gaming-session.sh`.
+`tests/test-rime-gaming-session.sh`.
 
-Neither half is APEX's to fix: mangoapp should ask GLFW for the X11 platform
+Neither half is Rime's to fix: mangoapp should ask GLFW for the X11 platform
 (or refuse to dereference a NULL `Display`), and `gamescopereaper --respawn`
-has no backoff. APEX records both rather than working around them. APEX *does*
+has no backoff. Rime records both rather than working around them. Rime *does*
 own the risk that a 2 Hz crasher takes `/var` with it, and
-`files/system/coredump/50-apex-coredump-limits.conf` bounds that separately.
+`files/system/coredump/50-rime-coredump-limits.conf` bounds that separately.
 
 ## 5c. Gaming Mode had never loaded a sched-ext scheduler, and status said it had
 
@@ -389,12 +389,12 @@ Three shipped images logged this on every boot, directly above the line the
 status surface quoted:
 
 ```
-apexd: scxctl switch -s scx_lavd failed (exit status: 1):
+rimed: scxctl switch -s scx_lavd failed (exit status: 1):
        error: no scx scheduler running, use 'start' instead of 'switch'
-apexd: game: sched-ext: scx_lavd for the session, kernel scheduler restored on exit
+rimed: game: sched-ext: scx_lavd for the session, kernel scheduler restored on exit
 ```
 
-The second line was `apex game status`'s only sched-ext output. It asserted as
+The second line was `rime game status`'s only sched-ext output. It asserted as
 fact the thing the line above it had reported as failed, because it was a
 sentence lifted out of the *plan*, printed whether or not the plan had done
 anything.
@@ -415,12 +415,12 @@ nothing ever offered one.
 | nothing attached | attaches it | `error: no scx scheduler running, use 'start' instead of 'switch'` |
 | one attached | `error: scx scheduler already running, use 'switch' instead of 'start'` | replaces it |
 
-APEX loads no scheduler at boot, so the first entry into Gaming Mode always
+Rime loads no scheduler at boot, so the first entry into Gaming Mode always
 finds none, and the engine hardcoded `switch`.
 
 ### The rule, and why it is not "use `start` instead"
 
-Swapping one hardcoded verb for the other would work on the machines APEX ships
+Swapping one hardcoded verb for the other would work on the machines Rime ships
 today and fail on any machine that already runs a scheduler. The engine
 therefore **reads the verb off the kernel**: `/sys/kernel/sched_ext/state`
 decides, and a single retry on whichever verb `scx_loader`'s own error names
@@ -443,11 +443,11 @@ After a successful call the daemon waits, bounded at 2 s, for
   absent feature.
 
 `scx_detail` names both halves, so a disagreement between the command and the
-kernel stays visible instead of being resolved in silence. `apex game status`
+kernel stays visible instead of being resolved in silence. `rime game status`
 reports the keys while game mode is **off** as well, so "disabled before,
 disabled during" reads as the non-answer it is rather than as a passing row.
 
-> **`not loaded` was the answer on every APEX image before the APEX kernel
+> **`not loaded` was the answer on every Rime image before the Rime kernel
 > tier, and it was not this fix failing.** The COPR kernel's BTF could not
 > accept a sched-ext scheduler at all. A fourth key, `scx_btf`, says which kind
 > of `not loaded` it is: **read §5d before reading anything into `scx_state` on
@@ -466,7 +466,7 @@ disabled during" reads as the non-answer it is rather than as a passing row.
 
 The defect is "a command whose result is assumed rather than read", so the
 sibling writers got the same check. One more had it: **`gpus_locked` in
-`apex game status` was the list of GPUs the plan MEANT to lock**, while
+`rime game status` was the list of GPUs the plan MEANT to lock**, while
 `run_nvidia_smi` had been returning a valid refusal that nothing read. It now
 reports the GPUs whose locks `nvidia-smi` accepted, with `gpus_lock_attempted`
 beside it. And the **exit** path discarded every outcome
@@ -475,33 +475,33 @@ the machine had been put back.
 
 ### Where it lives
 
-* `apexd/apexd-core/src/syswriter.rs`: `scx_load`, `scx_stop`,
+* `rimed/rimed-core/src/syswriter.rs`: `scx_load`, `scx_stop`,
   `read_scx_state`, and `Outcome::Unknown`, the third answer the writer had
   nowhere to put before.
-* `apexd/apexd/src/game.rs`: `ScxReport`, `GpuLockReport`, and the `scx_*`
+* `rimed/rimed/src/game.rs`: `ScxReport`, `GpuLockReport`, and the `scx_*`
   keys in `Status`.
 * Verified without hardware: 17 tests drive a fixture sysfs and a fake
   `scxctl` that can be honest, refuse either way, or exit 0 and change nothing;
-  10 more pin what `apex game status` says in each state. Nothing in the suite
+  10 more pin what `rime game status` says in each state. Nothing in the suite
   can reach a real scheduler. The fixture constructor is `#[cfg(test)]`, and
   the host-command guard exists because a live writer in a test once reached
   the developer's own.
 
 ## 5d. No sched-ext scheduler could load on the COPR kernel at all
 
-> **Fixed since (2026-09-22).** APEX now builds its own kernel,
-> `7.2.6-cachyos1.apex1` (`Containerfile.kernel`, `kernel-build.yml`), and
+> **Fixed since (2026-09-22).** Rime now builds its own kernel,
+> `7.2.6-cachyos1.rime1` (`Containerfile.kernel`, `kernel-build.yml`), and
 > `Containerfile.core` refuses any kernel whose manifest does not say
 > `btf_scx=usable`, with no fallback to COPR. On that kernel `scx_btf` reads
 > `ok` and schedulers attach: `scx_rustland` by hand
 > (`ROADMAP/evidence/katana-schedext-fixed-20260922.md`) and `scx_lavd` through
-> apexd (§6.8 Row A, `ROADMAP/evidence/katana-final-qual-20260922.md`). The
+> rimed (§6.8 Row A, `ROADMAP/evidence/katana-final-qual-20260922.md`). The
 > account below is the 2026-09-20 one, when every image shipped COPR's
 > `kernel-cachyos`.
 
-§5c fixed the verb and made `apex game status` stop claiming a scheduler the
+§5c fixed the verb and made `rime game status` stop claiming a scheduler the
 kernel says is not there. On hardware, the honest answer it then gave was
-`not loaded`, **on every APEX image up to that date**, for a reason that is
+`not loaded`, **on every Rime image up to that date**, for a reason that is
 neither the verb nor the settle budget.
 
 Measured on katana 2026-09-20, `7.2.6-cachyos1.fc43.x86_64`, from
@@ -533,7 +533,7 @@ every scheduler that references one of the 22, which is all of them.
 because the BPF program will not load. `SCX_SETTLE` is not the cause either:
 `sched_ext/state` never read `enabling`.
 
-**APEX could not fix this on 2026-09-20.** It did not build a kernel then:
+**Rime could not fix this on 2026-09-20.** It did not build a kernel then:
 `Containerfile.core` stage 1 installed the prebuilt `kernel-cachyos` RPM from
 COPR `bieszczaders/kernel-cachyos`. (`kernel/**` in this repository was the M0
 spike that *chose* that kernel, and built nothing that shipped.) The full
@@ -544,7 +544,7 @@ prints is wrong for this kernel and what would have to happen upstream, is at
 ### What the status surface does about it
 
 A fourth key, **`scx_btf`**, reporting a reading of `/sys/kernel/btf/vmlinux`
-taken by `apexd` itself:
+taken by `rimed` itself:
 
 * `ok`: the sched-ext kfunc prototypes are the shape a BPF scheduler expects.
 * `implicit-args`: one or more still carry `struct bpf_prog_aux *`. **No
@@ -556,22 +556,22 @@ taken by `apexd` itself:
   into `absent`**, and it blames nothing: a probe that cannot see has not seen
   a broken kernel.
 
-apexd appends the clause to `scx_detail` only when the probe says loading is
+rimed appends the clause to `scx_detail` only when the probe says loading is
 blocked **and** the kernel did not end up with a scheduler attached. It does
 not argue with a `loaded` session, and a kernel with nothing wrong gets no
 sentence. The keys are reported while game mode is **off** too, so you have the
 answer before you start a session that cannot work.
 
 > **With `scx_btf`, `not loaded` tells you what to do.** `not loaded` on a
-> kernel that could take a scheduler is a bug report about APEX. `not loaded`
+> kernel that could take a scheduler is a bug report about Rime. `not loaded`
 > with `scx_btf : implicit-args` is a kernel to replace, and no amount of
 > retrying, reconfiguring or reinstalling will move it.
 
-`apex game status`'s **daemon-not-running** branch prints `scx` and `scx_btf`
+`rime game status`'s **daemon-not-running** branch prints `scx` and `scx_btf`
 as well. It is a local view assembled by the CLI, not the daemon's `Status`
 map, and it used to say nothing about sched-ext at all.
 
-`apexd/apexd-core/src/kernelbtf.rs` is the reader: a bounded BTF parser with no
+`rimed/rimed-core/src/kernelbtf.rs` is the reader: a bounded BTF parser with no
 dependency, rooted at `sys_root` like `read_scx_state`, so every answer is
 reachable from a temp directory. It was checked against fixtures and against
 **three** real kernels:
@@ -589,17 +589,17 @@ subsets, all broken, all three including `scx_bpf_get_idle_cpumask`. Neither
 looks like.
 
 
-## 5e. Once it could load, COPR's scx_lavd stalled the game, so APEX builds the fixed one (2026-09-26)
+## 5e. Once it could load, COPR's scx_lavd stalled the game, so Rime builds the fixed one (2026-09-26)
 
-With the `apex1` kernel's BTF fixed (§5d), sched-ext attached, and the first
+With the `rime1` kernel's BTF fixed (§5d), sched-ext attached, and the first
 real game session on it froze. Terraria (tModLoader), katana,
-`7.2.6-cachyos1.apex1`, `scx-scheds-1.1.3-3.fc43` from the CachyOS COPR:
+`7.2.6-cachyos1.rime1`, `scx-scheds-1.1.3-3.fc43` from the CachyOS COPR:
 
 | time (AWST) | kernel: "runnable task stall" | starved |
 |---|---|---|
 | 08:03:46 | `fossilize_repla` | 35.3 s |
 | 08:10:58 | `.NET TP Worker` | 34.9 s |
-| 08:12:33 | `apex` | 37.4 s |
+| 08:12:33 | `rime` | 37.4 s |
 | 08:15:11 | `dotnet` | 32.4 s |
 | 08:19:19 | `.NET TP Worker` | 31.5 s; scx_loader gives up, "attempt 5/5" |
 
@@ -621,27 +621,27 @@ fixes it: lavd_enqueue's REENQ path now checks the cached CPU against
 `cpus_ptr`. Arch shipped that as `scx-scheds 1.1.3-2`. COPR's `1.1.3-3` is the
 v1.1.3 tag plus hotfixes for scx_cake and scx_pandemonium, and lacks this one.
 
-**What APEX does:** `Containerfile.core`'s toolbuilder builds scx_lavd from
+**What Rime does:** `Containerfile.core`'s toolbuilder builds scx_lavd from
 the same v1.1.3 tag with the vendored patch
 (`files/system/src/scx/lavd-6d31ddd89-reenq-cpus-ptr.patch`), and the final
 stage installs it over COPR's binary only while COPR is still at 1.1.3. Any
 later scx release already contains the fix, so a newer COPR is kept and the
-log says to drop the rebuild. `/usr/lib/apex-scx-versions` records which
+log says to drop the rebuild. `/usr/lib/rime-scx-versions` records which
 binary shipped. The patched binary's embedded BPF line info carries the fix
 (one more `bpf_cpumask_first(p->cpus_ptr)` than COPR's: 4 against 3).
 
-Gaming Mode keeps sched_ext: apexd still asks for `scx_lavd`
-(`apexd/apexd-core/src/profile.rs`), and the image now ships the fixed build.
+Gaming Mode keeps sched_ext: rimed still asks for `scx_lavd`
+(`rimed/rimed-core/src/profile.rs`), and the image now ships the fixed build.
 
 `scx_loader` restarting lavd after every watchdog exit turned one bug into five
-freezes, and apexd reports "sched-ext loaded" once at entry and never looks
+freezes, and rimed reports "sched-ext loaded" once at entry and never looks
 again. Both are still true, and each needs its own fix.
 
 The Hyprland crash the same day is a different defect. It was an i915 GPU hang
 in the game's own context (`ecode 12:1:84dffffb`, rcs0), which reset Hyprland's
 context too because both ran on the Intel iGPU. It reproduced in daily mode with
-sched-ext off. The cause was APEX Shell's launcher ignoring Steam's
-`PrefersNonDefaultGPU=true`. apex-shell PR #26 fixed it: `DesktopExec` now
+sched-ext off. The cause was Rime Shell's launcher ignoring Steam's
+`PrefersNonDefaultGPU=true`. rime-shell PR #26 fixed it: `DesktopExec` now
 starts such entries through `switcherooctl launch`
 (`src/scripts/desktop-launch.sh`), so Steam and the games it starts run on the
 discrete GPU.
@@ -655,7 +655,7 @@ below. Nothing here was simulated; each row names the command that closes it.
 **Where the rows stand.** §6.1 to §6.5 passed on katana on 2026-09-19
 (§3 of `ROADMAP/evidence/katana-image-qual-20260919.md`), apart from Safe
 Graphics' automatic branch in §6.4, which needs the panel dark. §6.8 ran on
-2026-09-22 on the APEX kernel (`ROADMAP/evidence/katana-final-qual-20260922.md`).
+2026-09-22 on the Rime kernel (`ROADMAP/evidence/katana-final-qual-20260922.md`).
 The commands stay here as the re-check for a new image.
 
 Run everything from a **greetd login**, not from `systemd-run`, so §6.3's
@@ -666,15 +666,15 @@ qualification could not).
 
 ```sh
 # 1. What the selector decides, before rebooting into anything:
-apex gaming
-apex gaming --gamescope-device-args ; echo "rc=$?"
+rime gaming
+rime gaming --gamescope-device-args ; echo "rc=$?"
 #    expect: --prefer-vk-device 10de:249d / --prefer-output HDMI-A-1, rc=0
 #    and the report's "the screen Gaming Mode will use" block naming card2.
 
-# 2. Pick "APEX Gaming Mode" at the greeter, then afterwards:
-journalctl --user -b -o cat | grep -E 'apex-gaming-session|gamescope' | head -40
+# 2. Pick "Rime Gaming Mode" at the greeter, then afterwards:
+journalctl --user -b -o cat | grep -E 'rime-gaming-session|gamescope' | head -40
 #    expect in the session log:
-#      [apex-gaming-session] GPU/output: --prefer-vk-device 10de:249d --prefer-output HDMI-A-1
+#      [rime-gaming-session] GPU/output: --prefer-vk-device 10de:249d --prefer-output HDMI-A-1
 #      [gamescope] vulkan: selecting physical device 'NVIDIA GeForce RTX 3070 Laptop GPU'
 #      [gamescope] drm: opening DRM node '/dev/dri/card2'
 #      [gamescope] drm: selecting connector HDMI-A-1
@@ -690,12 +690,12 @@ nvidia-smi --query-compute-apps=pid,name --format=csv
 ```sh
 grep -E '^Cap(Eff|Prm|Amb):' /proc/self/status     # in the Gaming Mode session
 getcap "$(command -v gamescope)"                    # expect: nothing, today
-apex gaming | grep -E 'realtime (limit|capability)'
+rime gaming | grep -E 'realtime (limit|capability)'
 #    expect: realtime limit yes, realtime capability no
 
 # Whether --rt was passed. Read the session's OWN line, and nothing else:
 grep -m1 'starting: gamescope' <the session log>
-#    expect: no --rt in it, and the apex-gaming-session line above it saying
+#    expect: no --rt in it, and the rime-gaming-session line above it saying
 #            "CAP_SYS_NICE: absent".
 ```
 
@@ -725,12 +725,12 @@ This row passed on katana on 2026-09-19 (§3.3 of
 `ROADMAP/evidence/katana-image-qual-20260919.md`): through a greetd login,
 Steam Big Picture came up inside gamescope on the RTX 3070 and stayed up for
 2 h 11 m. Two independent things had stopped it, and only one of them was
-APEX's. Both are closed:
+Rime's. Both are closed:
 
-* **32-bit Vulkan.** `apex install steam` used to ship no `*_icd.i686.json` at
+* **32-bit Vulkan.** `rime install steam` used to ship no `*_icd.i686.json` at
   all (§6.5), so Steam's 32-bit client had zero ICDs and failed with `BInit -
   Unable to initialize Vulkan!`. Unit **pkg-share** (merge `5de97037`) fixed
-  it in `files/system/libexec/apex-pkg`: the 32-bit pass now keeps the i686
+  it in `files/system/libexec/rime-pkg`: the 32-bit pass now keeps the i686
   manifests, 13 of them on katana, including `nvidia_icd.i686.json`.
 
   ```sh
@@ -756,11 +756,11 @@ APEX's. Both are closed:
 ### 6.4 Safe Graphics on the dGPU output
 
 ```sh
-/usr/libexec/apex-safe-graphics check
+/usr/libexec/rime-safe-graphics check
 #    expect: primary gpu card1 / can light eDP-1 / cannot light HDMI-A-1(card2)
 
 # The real test is the emergency shape. Disable the panel, or just force it:
-APEX_SAFE_GRAPHICS_DRM_DEVICE=/dev/dri/card2 /usr/libexec/apex-safe-graphics
+RIME_SAFE_GRAPHICS_DRM_DEVICE=/dev/dri/card2 /usr/libexec/rime-safe-graphics
 #    expect: the monitor lights, foot appears on it, and the log has no
 #    "Renderer did not support importing DMA-BUFs" for HDMI-A-1.
 ```
@@ -773,7 +773,7 @@ disabled in firmware, start Safe Graphics from the greeter and expect
 ### 6.5 The niri bar
 
 **The precondition is the user manager starting.** A niri login is not
-needed. The transform runs from `apex-shell-firstrun.service`, which is a
+needed. The transform runs from `rime-shell-firstrun.service`, which is a
 **user** unit and starts with `user@<uid>.service`. On a machine with lingering
 or an ssh login, that happens at boot, with no graphical session anywhere.
 Measured on katana 2026-09-19: the line was rewritten at 18:29:35, five minutes
@@ -786,18 +786,18 @@ for a login to do.
 # On a machine that had the old config, after its user manager has started
 # once — a niri login is sufficient but not necessary:
 grep -n 'waybar' ~/.config/niri/config.kdl
-#    expect exactly one line, commented, ending in the APEX marker.
+#    expect exactly one line, commented, ending in the Rime marker.
 pgrep -a -u "$USER" waybar          # expect: nothing
 pgrep -a -u "$USER" quickshell      # expect: one
-ls ~/.config/niri/config.kdl.pre-apex-bar.bak
+ls ~/.config/niri/config.kdl.pre-rime-bar.bak
 niri validate --config ~/.config/niri/config.kdl
 ```
 
 ### 6.6 A Gaming Mode session destroyed *without cooperation*
 
 This is the row §5a exists for, and **it needs an image that carries the
-change**: the owner watch lives in `apexd`, so a machine running an older build
-behaves as before. `apex game status` printing `owner_pid` is how you know the
+change**: the owner watch lives in `rimed`, so a machine running an older build
+behaves as before. `rime game status` printing `owner_pid` is how you know the
 image is new enough.
 
 Arm a Gaming Mode session the way the qualification run did (the greetd
@@ -806,18 +806,18 @@ helpers and the dead-man restore timer are in
 timer first.** Then, from ssh while the session is up:
 
 ```sh
-apex game status
-#    expect: active : true, and owner_pid : <the apex-gaming-session pid>
+rime game status
+#    expect: active : true, and owner_pid : <the rime-gaming-session pid>
 #    owner_pid : 0 means this image predates the watch — stop here, the row
 #    cannot pass and the session log says so too.
-pgrep -f '^/usr/libexec/apex-gaming-session'   # must equal that owner_pid
+pgrep -f '^/usr/libexec/rime-gaming-session'   # must equal that owner_pid
 ```
 
 Record what must come back, **while game mode is on**:
 
 ```sh
-cat /sys/fs/cgroup/apex-game/cpuset.cpus    # the p-core list
-apex game status | grep -E '^(tier|prior_tier|scx_)'
+cat /sys/fs/cgroup/rime-game/cpuset.cpus    # the p-core list
+rime game status | grep -E '^(tier|prior_tier|scx_)'
 #    expect: scx_state : loaded, and scx_detail naming root/ops.
 #    See §5c before reading anything into sched_ext/state by itself.
 ```
@@ -826,29 +826,29 @@ Now destroy the session in a way nothing can cooperate with. **It must be
 `SIGKILL`, and to the session script's own PID.**
 
 ```sh
-sudo kill -9 "$(pgrep -f '^/usr/libexec/apex-gaming-session')"
+sudo kill -9 "$(pgrep -f '^/usr/libexec/rime-gaming-session')"
 ```
 
 > **`sudo systemctl restart greetd` does NOT test this row, and this run-book
 > told you to use it until 2026-09-20.** The qualification found out why: the
 > restart takes the *seat* away, but the session script itself survives long
 > enough to run its own `EXIT` trap, so the ordinary cooperative path releases
-> game mode (`[apex-gaming-session] apexd game mode released`, three times,
+> game mode (`[rime-gaming-session] rimed game mode released`, three times,
 > idempotent). That is a good outcome for a different row. Only killing the
 > owner outright leaves nothing that can cooperate: no trap, no signal handler,
-> no `apex game stop`. Measured: 1.9 s to release, which is the 2 s watch.
+> no `rime game stop`. Measured: 1.9 s to release, which is the 2 s watch.
 
 Within a few seconds, with **nothing having asked**:
 
 ```sh
-apex game status | head -3
+rime game status | head -3
 #    expect: active : false
-test -d /sys/fs/cgroup/apex-game && echo STILL THERE || echo removed
+test -d /sys/fs/cgroup/rime-game && echo STILL THERE || echo removed
 #    expect: removed
-apex game status | grep '^scx_'
+rime game status | grep '^scx_'
 #    expect: scx_state : not loaded  (see §5c)
-sudo journalctl -u apexd -b -o cat | grep -m1 'session owner is gone'
-#    expect: apexd: game: the session owner is gone (/proc/<pid> is gone)
+sudo journalctl -u rimed -b -o cat | grep -m1 'session owner is gone'
+#    expect: rimed: game: the session owner is gone (/proc/<pid> is gone)
 #            — releasing game mode.
 ```
 
@@ -861,13 +861,13 @@ either as evidence produces a row that passes without proving anything.
   whose default tier is `balanced`, `scaling_governor` is a real witness.
 * **`/sys/kernel/sched_ext/state` on its own.** On the 2026-09-20 run it read
   `disabled` during the session as well as after, because Gaming Mode had never
-  loaded a scheduler at all (§5c). On an image with that fix and the APEX
-  kernel (§5d) it moves, and `apex game status`'s `scx_state` is the reading to
+  loaded a scheduler at all (§5c). On an image with that fix and the Rime
+  kernel (§5d) it moves, and `rime game status`'s `scx_state` is the reading to
   record, because it distinguishes `not loaded` from `unknown` where the bare
   file cannot.
 
-On that run the readings that moved were **the cgroup, `active`, and the apexd
-journal line**. Current images carry both the §5c fix and the APEX kernel, so
+On that run the readings that moved were **the cgroup, `active`, and the rimed
+journal line**. Current images carry both the §5c fix and the Rime kernel, so
 record `scx_state` as a fourth, and say which image it came from.
 
 Two more worth taking while you are there:
@@ -875,7 +875,7 @@ Two more worth taking while you are there:
 ```sh
 # The trap's own failure is now visible instead of silent.
 sudo journalctl -b -t <session tag> -o cat | grep -A2 'could not release game mode'
-#    expect polkit's own AccessDenied message, and a line naming apexd as what
+#    expect polkit's own AccessDenied message, and a line naming rimed as what
 #    releases it instead. BOTH lines, or the log is back to hiding the cause.
 
 # And the belt-and-braces path still works: end a session by SIGTERMing
@@ -904,7 +904,7 @@ du -sh /var/lib/systemd/coredump
 ```
 
 To confirm the gate works the other way on real hardware rather than only in
-the suite, arm one session with `APEX_GAMING_EXPOSE_WAYLAND=0` in the Exec
+the suite, arm one session with `RIME_GAMING_EXPOSE_WAYLAND=0` in the Exec
 environment: `--mangoapp` should be back in the `starting:` line,
 `--expose-wayland` gone, and the overlay should render, which no machine here
 has ever seen it do.
@@ -912,21 +912,21 @@ has ever seen it do.
 ### 6.8 sched-ext loads (§5c, §5d)
 
 > **CORRECTED 2026-09-20, after the rows below were run on katana.** Rows A and
-> C as originally written **could not pass on any APEX image built up to then**,
+> C as originally written **could not pass on any Rime image built up to then**,
 > and that was not a failure of §5c's fix. The COPR kernel's BTF gave 22
 > sched-ext kfuncs a prototype `libbpf` refuses, so no `scx_*` scheduler loaded
 > (§5d). The old text expected `scx_state : loaded`, and whoever ran it next
 > would have read the result as a regression. What each row can prove on such a
 > kernel is stated alongside what it was written to prove.
 
-> **UPDATED 2026-09-22: the rows ran on the APEX kernel**
-> (`7.2.6-cachyos1.apex1`, `ROADMAP/evidence/katana-final-qual-20260922.md`).
+> **UPDATED 2026-09-22: the rows ran on the Rime kernel**
+> (`7.2.6-cachyos1.rime1`, `ROADMAP/evidence/katana-final-qual-20260922.md`).
 > Row 0 read `ok`, and Rows A and B passed: Gaming Mode loaded `scx_lavd`
-> through apexd for the first time. Two comments in the block below predate
+> through rimed for the first time. Two comments in the block below predate
 > that run. Row 0's `implicit-args` is what every image *before* the kernel
 > tier gave, and Row A's `root/ops` read
 > `lavd_1.1.3_x86_64_unknown_linux_gnu` rather than `lavd` (see the §5c note).
-> Row C chose `switch` correctly, but `apex game status` then reported
+> Row C chose `switch` correctly, but `rime game status` then reported
 > `not loaded` while `scx_lavd` was running. A `switch` tears down and
 > re-attaches over about 1.4 s, the settle check accepts the scheduler being
 > replaced, and the status read lands in the gap. That status defect is still
@@ -935,17 +935,17 @@ has ever seen it do.
 Everything in §5c is proven against fixtures. **Three rows need the machine**,
 and none can be inferred from a green suite. Run them from an **image that
 carries the fix**. On an older image `scx_state` is absent from
-`apex game status`, which is how you tell.
+`rime game status`, which is how you tell.
 
 **Start with Row 0.** It decides whether Rows A and C can prove anything at
 all, and it takes one command.
 
 ```sh
 # ── Row 0: can this kernel take a scheduler? (§5d) ──────────────────────────
-apex game status | grep '^scx_btf'
+rime game status | grep '^scx_btf'
 #    `ok`            → Rows A and C are runnable as written.
 #    `implicit-args` → they are NOT. Skip to Row A-alt. This is the reading
-#                      every APEX image has given so far.
+#                      every Rime image has given so far.
 #    `absent` / `unreadable` / `no-sched-ext` → the probe could not answer;
 #                      record which one and read §5d before going further.
 #
@@ -953,7 +953,7 @@ apex game status | grep '^scx_btf'
 sudo journalctl -u scx_loader -b -o cat | grep -m1 'func_proto'
 #    On an affected kernel: "extern (func ksym) 'scx_bpf_create_dsq':
 #    func_proto [N] incompatible with vmlinux [M]".
-#    NOTE: scx_loader is bus-activating. Running this after `apex game start`
+#    NOTE: scx_loader is bus-activating. Running this after `rime game start`
 #    reads a journal that exists; running it on an idle machine may find no
 #    unit at all, which is not the same as no error.
 
@@ -961,30 +961,30 @@ sudo journalctl -u scx_loader -b -o cat | grep -m1 'func_proto'
 # With NO session running first, so the starting state is the one that used to
 # break:
 cat /sys/kernel/sched_ext/state          # expect: disabled
-apex game status | grep '^scx_'
+rime game status | grep '^scx_'
 #    expect: scx_requested : scx_lavd / scx_state : not loaded
 
-sudo apex game start
-apex game status | grep '^scx_'
+sudo rime game start
+rime game status | grep '^scx_'
 #    expect: scx_state : loaded
 #            scx_detail : ... sched_ext/state is enabled, root/ops reads '<name>'
 # RECORD THE root/ops STRING VERBATIM. It is expected to be `lavd`, and that
 # expectation has never been checked on hardware — no machine here can load a
 # scheduler to look at it. If it reads something else, scx_ops_matches() wants
 # to know.
-sudo journalctl -u apexd -b -o cat | grep -m1 'scxctl'
+sudo journalctl -u rimed -b -o cat | grep -m1 'scxctl'
 #    expect: NO 'no scx scheduler running' line. Its presence means the verb
 #    selection did not see `disabled`, which is a real failure of this fix.
 
 # ── Row A-alt: the row that IS runnable on an affected kernel. ──────────────
 # It proves the two things §5c and §5d are actually responsible for: that the
 # verb was chosen from the kernel, and that the status names the real reason.
-sudo apex game start
-sudo journalctl -u apexd -b -o cat | grep -c 'no scx scheduler running'
+sudo rime game start
+sudo journalctl -u rimed -b -o cat | grep -c 'no scx scheduler running'
 #    expect: 0. The verb was read off sched_ext/state, saw `disabled`, and
 #    chose `start`. The old hardcoded `switch` produced that refusal on every
 #    boot of three images.
-apex game status | grep '^scx_'
+rime game status | grep '^scx_'
 #    expect: scx_state : not loaded
 #            scx_btf   : implicit-args
 #            scx_detail: ... — kernel BTF: N of M sched-ext kfuncs still carry
@@ -995,14 +995,14 @@ apex game status | grep '^scx_'
 # scx_detail must be drawn from the same set scx_loader printed above. They
 # matched exactly on katana (22 of 68) and a disagreement is a defect in
 # kernelbtf.rs, not in the kernel.
-sudo apex game stop
+sudo rime game stop
 
 # ── Row B: it goes away again. ──────────────────────────────────────────────
 # Runnable either way: nothing attached is the state `stop` is for.
-sudo apex game stop
+sudo rime game stop
 cat /sys/kernel/sched_ext/state          # expect: disabled
-apex game status | grep '^scx_state'     # expect: not loaded
-sudo journalctl -u apexd -b -o cat | grep -m1 'sched-ext after exit'
+rime game status | grep '^scx_state'     # expect: not loaded
+sudo journalctl -u rimed -b -o cat | grep -m1 'sched-ext after exit'
 #    expect: a line, and it must say disabled. Before this fix the exit path
 #    discarded every outcome but a hard error, so a refused stop was silent.
 
@@ -1015,33 +1015,33 @@ cat /sys/kernel/sched_ext/state          # expect: enabled
 #    On an affected kernel this reads `disabled` and `scxctl get` will
 #    nevertheless claim a scheduler is running. That disagreement is
 #    scx_loader's bookkeeping, not the kernel's, and it is the exact lie §5c
-#    exists to stop APEX repeating. Do not proceed; the row cannot run.
-sudo apex game start
-sudo journalctl -u apexd -b -o cat | grep -m1 'scxctl'
+#    exists to stop Rime repeating. Do not proceed; the row cannot run.
+sudo rime game start
+sudo journalctl -u rimed -b -o cat | grep -m1 'scxctl'
 #    expect: no refusal. The engine must have chosen `switch`, not `start`.
-apex game status | grep '^scx_'
+rime game status | grep '^scx_'
 #    expect: scx_state : loaded, root/ops now naming lavd rather than rusty.
-sudo apex game stop
+sudo rime game stop
 #    EXPECT A NAMED LINE, not a silent restore:
 #    "sched-ext was already running before this session (rusty) and exit
 #     STOPPED it rather than putting it back"
 #    That is a KNOWN LIMITATION, not a failure of the run: game mode stops the
 #    scheduler it found rather than restoring it. `scxctl restore` exists and
-#    would be the fix; it is not done here because no APEX image loads a
+#    would be the fix; it is not done here because no Rime image loads a
 #    scheduler at boot, so nothing has ever reached it.
 sudo scxctl stop
-#    expect: it REFUSES — `apex game stop` already stopped it, and nothing is
+#    expect: it REFUSES — `rime game stop` already stopped it, and nothing is
 #    running. That refusal is the row passing, not a loose end.
 ```
 
 **Row C's retry branch was reached anyway on 2026-09-20**, through a condition
 better than the scripted one: after a failed attempt on an affected kernel,
 `scx_loader`'s own bookkeeping believed a scheduler was running while the
-kernel said none was, so APEX chose `start`, was refused with
+kernel said none was, so Rime chose `start`, was refused with
 `already running, use 'switch'`, and took the single retry. Both verbs ran,
 and the status still refused to claim a scheduler. Row C's *other* half, the
 named "stopped it rather than restoring it" line on exit, stayed unreached
-until Row C on the APEX kernel printed it on 2026-09-22.
+until Row C on the Rime kernel printed it on 2026-09-22.
 
 **On the timing.** `scx_load` waits up to 2 s (`SCX_SETTLE`) for the scheduler
 to attach before reporting. If Row A comes back `unknown` with a `state` of
@@ -1049,7 +1049,7 @@ to attach before reporting. If Row A comes back `unknown` with a `state` of
 raising. Record the number rather than re-running until it passes.
 
 **Left out on purpose:** `scx_loader` has *modes* (`Gaming`, `LowLatency`,
-`PowerSave`, `Server`) that `scxctl start -m` selects and that APEX does not
+`PowerSave`, `Server`) that `scxctl start -m` selects and that Rime does not
 use. Whether `-m gaming` beats a bare `-s scx_lavd` is a tuning question for a
 machine with a game on it. It does not belong in the row that proves the
 scheduler loads at all.

@@ -1,14 +1,14 @@
-// The APEX Remote relay: a Worker, and one Durable Object per rendezvous.
+// The Rime Remote relay: a Worker, and one Durable Object per rendezvous.
 //
 // ## What it does, and the short list of what it is trusted with
 //
 // It copies bytes between two WebSockets that both dialled it. That is all.
 // It terminates no encryption, holds no key, and stores nothing: the Noise
-// channel from `apex_remote_core::noise` is established end to end *through*
+// channel from `rime_remote_core::noise` is established end to end *through*
 // it, so every binary frame it moves is ciphertext whose keys it never sees.
 //
 // What its operator can see is written out in full in
-// `apexd/apex-remote-core/src/rendezvous.rs` and is repeated in the disclosure
+// `rimed/rime-remote-core/src/rendezvous.rs` and is repeated in the disclosure
 // the desktop shows the owner before they turn a relay on: the rendezvous id,
 // both IP addresses, and the timing and volume of traffic. Not nothing. An
 // owner who is not willing to give that up should run LAN-only, which is a
@@ -57,7 +57,7 @@ export default {
     // A health check that is not a room. Useful for `wrangler dev` and for
     // an uptime probe, and deliberately says nothing about who is connected.
     if (url.pathname === "/" || url.pathname === "/health") {
-      return new Response("apex-remote-relay\n", {
+      return new Response("rime-remote-relay\n", {
         headers: { "content-type": "text/plain; charset=utf-8" },
       });
     }
@@ -194,7 +194,7 @@ export class RelayRoom extends DurableObject {
    * written down. A relay that remembered a waiting host whose socket had
    * died would answer that desktop's every later dial with 409, and the
    * machine would be unreachable until its daemon restarted. That is not
-   * hypothetical: the local double in `apexd/apex-remoted/tests/relay.rs`
+   * hypothetical: the local double in `rimed/rime-remoted/tests/relay.rs`
    * made exactly that mistake, and the reconnect suite caught it as "the
    * desktop did not re-arm".
    */

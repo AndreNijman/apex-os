@@ -1,15 +1,15 @@
 # The Android app: how it ships and how it updates
 
-APEX Remote is the phone half of APEX-OS. This page covers its
+Rime Remote is the phone half of Rime OS. This page covers its
 *distribution*: where the file comes from, what signs it, how it updates itself,
 and what happens when the phone and the machine stop agreeing. What the app does
 once installed is in `docs/remote.md`.
 
 ## Where a user gets it
 
-The [Releases page](https://github.com/AndreNijman/apex-os/releases), which is
+The [Releases page](https://github.com/AndreNijman/rime-os/releases), which is
 already where `README.md` sends people for the netinstall ISO. The APK is the
-same kind of artefact as the ISO, the thing you fetch *before* you have an APEX
+same kind of artefact as the ISO, the thing you fetch *before* you have a Rime
 machine to fetch it from, so it goes to the same place instead of to a registry
 a phone cannot read.
 
@@ -17,11 +17,11 @@ A release carries five files:
 
 | file | what it is |
 |---|---|
-| `apex-remote-<version>.apk` | the app |
-| `apex-remote-<version>.apk.sha256` | what you check it against |
-| `apex-remote-<version>.json` | what the in-app updater reads |
-| `apex-remote-<version>.apk.sig` | a Sigstore signature over the APK |
-| `apex-remote-<version>.apk.pem` | the certificate for that signature |
+| `rime-remote-<version>.apk` | the app |
+| `rime-remote-<version>.apk.sha256` | what you check it against |
+| `rime-remote-<version>.json` | what the in-app updater reads |
+| `rime-remote-<version>.apk.sig` | a Sigstore signature over the APK |
+| `rime-remote-<version>.apk.pem` | the certificate for that signature |
 
 There is no Play Store listing and no F-Droid repository. The release build
 produces an AAB as well as an APK, and `verifyReleaseSigning` checks both,
@@ -40,8 +40,8 @@ no registry and no channel tag, so it cannot move what a booted machine tracks.
 **The APK signing key** is what Android cares about. Android refuses an update
 signed by a different key than the installed app, so this key is the identity
 of the app on every phone that has it. It lives in four repository secrets
-(`APEX_KEYSTORE_BASE64`, `APEX_KEYSTORE_PASSWORD`, `APEX_KEY_ALIAS`,
-`APEX_KEY_PASSWORD`), and nothing about it is in this repository. The workflow
+(`RIME_KEYSTORE_BASE64`, `RIME_KEYSTORE_PASSWORD`, `RIME_KEY_ALIAS`,
+`RIME_KEY_PASSWORD`), and nothing about it is in this repository. The workflow
 materialises it into a `0700` directory under `$RUNNER_TEMP`, `0600` on the
 file, validates it with `keytool -list` before starting the build, and `shred`s
 it afterwards in an `if: always()` step. That is the ritual `build-image.yml`
@@ -106,7 +106,7 @@ would put a second, different APK behind a code already installed, and Android
 refuses that as surely as it refuses a lower one.
 
 The local default is `1`, the lowest legal code, so a real release always
-installs over a developer build and never the reverse. An `APEX_VERSION_CODE`
+installs over a developer build and never the reverse. An `RIME_VERSION_CODE`
 that is *present and malformed* is a hard failure, never a fallback: a fallback
 is how a release ships as versionCode 1 and makes every later release
 uninstallable.
@@ -117,12 +117,12 @@ repository with real tags and a real remote.
 ## Why THIS app self-updates when the desktop AI apps must not
 
 On 2026-09-11 Andre ruled that the ChatGPT and Claude **desktop** apps must not
-self-update: they are baked into the image and `sudo apex update` already moves
+self-update: they are baked into the image and `sudo rime update` already moves
 them, so a second updater would compete with a working one and the fleet would
 have two answers to "what version am I on".
 
 **None of that reasoning reaches a phone, and this app breaks the rule on
-purpose.** The phone is not running APEX-OS. The APK is in no image. `apex
+purpose.** The phone is not running Rime OS. The APK is in no image. `rime
 update` has no path to it, and there is no store in this picture either. The
 choice here is between an updater and an app that moves only when its owner
 remembers to go and look. A client that drifts away from the OS it talks to is
@@ -164,14 +164,14 @@ releases out of the full listing by their `android-v<code>` tag instead, and
 
 ## When the app and the machine disagree about the protocol
 
-`REMOTE_PROTOCOL_VERSION` versions the Android↔`apex-remoted` wire, and it is
+`REMOTE_PROTOCOL_VERSION` versions the Android↔`rime-remoted` wire, and it is
 **1**. (It is not the `PROTOCOL_VERSION = 11` in
-`apexd/apex-agent-core/src/protocol.rs`. That one travels *inside* the Noise
+`rimed/rime-agent-core/src/protocol.rs`. That one travels *inside* the Noise
 tunnel, the app already parses it leniently and never compares it, and it needs
 nothing.)
 
 The version is hashed into the Noise prologue and **never transmitted**
-(`apex-remote-core/src/noise.rs`). The daemon never inspects a version: it
+(`rime-remote-core/src/noise.rs`). The daemon never inspects a version: it
 builds the responder with its own constant, the AEAD tag fails, and it drops the
 socket with one journald line. It treats a device that has been revoked
 byte-for-byte the same way.
@@ -194,7 +194,7 @@ Two things fix it, and tests assert both:
   desktop's**, not at its own preferred one.
 * **A message that names both causes.** When every revision is refused, the app
   says the device may have been unpaired *or* the two may no longer speak the
-  same protocol, prints its own window, and points at `apex remote status` for
+  same protocol, prints its own window, and points at `rime remote status` for
   the machine's. It never asserts the revocation, because from the phone the two
   are indistinguishable.
 
@@ -291,9 +291,9 @@ download:
 ## The signing key
 
 **The key exists.** Checked, not assumed, on 2026-09-28: `gh secret list -R
-AndreNijman/apex-os` lists `APEX_KEYSTORE_BASE64`, `APEX_KEYSTORE_PASSWORD`,
-`APEX_KEY_ALIAS` and `APEX_KEY_PASSWORD`, all set on 2026-09-20, beside
-`APEX_SB_CRT_B64` and `APEX_SB_KEY_B64`. Its certificate fingerprint is
+AndreNijman/rime-os` lists `RIME_KEYSTORE_BASE64`, `RIME_KEYSTORE_PASSWORD`,
+`RIME_KEY_ALIAS` and `RIME_KEY_PASSWORD`, all set on 2026-09-20, beside
+`RIME_SB_CRT_B64` and `RIME_SB_KEY_B64`. Its certificate fingerprint is
 published in `android/signing-certificate.sha256`, in `README.md` and in
 android-signing.md.
 

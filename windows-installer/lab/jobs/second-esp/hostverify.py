@@ -108,10 +108,10 @@ off, ln = esp['start'] * SEC, (esp['end'] - esp['start'] + 1) * SEC
 n = diffs(SY, SYP, off, ln)
 note(f"Windows' ESP content: {n} of {ln} bytes differ from pristine "
      f"({100.0*n/ln:.3f}%) — the guest attributes this to Windows' own BCD "
-     f"writes (BCD, BCD.LOG, BOOTSTAT.DAT, Recovery\\BCD), not to anything APEX did")
+     f"writes (BCD, BCD.LOG, BOOTSTAT.DAT, Recovery\\BCD), not to anything Rime did")
 check(n > 0, 'Windows wrote its OWN ESP during this run',
       f'{n} bytes changed — so "Windows\' ESP is never written" is a rule about '
-      f'what APEX does, not a description of what the partition experiences')
+      f'what Rime does, not a description of what the partition experiences')
 
 print()
 bad = [r for r in results if not r[0]]

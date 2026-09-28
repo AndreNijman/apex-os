@@ -1,8 +1,8 @@
-# APEX Remote: `apex remote`
+# Rime Remote: `rime remote`
 
 Pairing a phone with this machine, and taking it away again.
 
-The phone talks to `apex-remoted`, a **per-user, unprivileged** service that is
+The phone talks to `rime-remoted`, a **per-user, unprivileged** service that is
 a *client* of the agent runtime and not a part of it. Everything it forwards
 reaches the runtime under the origin `claude-remote-control`, so a remote
 request can edit a project, run tests and push, and cannot approve a root
@@ -10,44 +10,44 @@ operation or start a break-glass session, whichever device asks. That boundary i
 rests on: what somebody can do with your phone is bounded by what the origin
 `claude-remote-control` may do, whoever is holding the phone.
 
-Reading and revoking need no privilege. **Pairing needs you**: `apex-remoted`
-refuses `apex remote pair` for any caller that does not classify as a §7 local
+Reading and revoking need no privilege. **Pairing needs you**: `rime-remoted`
+refuses `rime remote pair` for any caller that does not classify as a §7 local
 origin, and an agent inside a managed session never does. An agent cannot pair
 a device on your behalf.
 
 Five verbs.
 
-## `apex remote enable`
+## `rime remote enable`
 
-APEX Remote is **on by default** for every person's account (since
-2026-09-23). The image enables `apex-remoted` for all user managers, so pairing
+Rime Remote is **on by default** for every person's account (since
+2026-09-23). The image enables `rime-remoted` for all user managers, so pairing
 from Settings needs no setup step, and the unit's `ConditionUser=!@system`
 keeps it off system accounts (the login screen's `greetd` user, and a lingering
 root). The service pulls in the agent runtime through
-`Wants=apex-agentd.service`. It uses APEX's relay,
-`wss://apex-relay.andrenijman.com`, so a paired phone reaches the machine from
+`Wants=rime-agentd.service`. It uses Rime's relay,
+`wss://rime-relay.andrenijman.com`, so a paired phone reaches the machine from
 any network. The relay carries encrypted bytes it cannot read, and sees both
-addresses and when and how much data moves (`apex remote status` prints this).
-For LAN-only, override `ExecStart=` with `systemctl --user edit apex-remoted`
+addresses and when and how much data moves (`rime remote status` prints this).
+For LAN-only, override `ExecStart=` with `systemctl --user edit rime-remoted`
 and drop `--relay`.
 
 This verb turns the service back on for an account where it was switched off:
-it runs `systemctl --user enable --now apex-remoted`, the same shape as
-`apex agent enable`, and waits for the service to answer. When the service
+it runs `systemctl --user enable --now rime-remoted`, the same shape as
+`rime agent enable`, and waits for the service to answer. When the service
 does not come up, it prints the service's own last log line.
-`systemctl --user disable --now apex-remoted` turns it off.
+`systemctl --user disable --now rime-remoted` turns it off.
 
 It does **not** open the firewall, and says so. LAN access needs
 
 ```
-sudo apex firewall allow apex-remote
+sudo rime firewall allow rime-remote
 ```
 
 which is root, and is a separate decision because the relay path works without
 it. A machine with the port shut is still reachable through a relay; a machine
 with it open is reachable directly on the LAN, which is faster.
 
-## `apex remote pair`
+## `rime remote pair`
 
 Shows a pairing code. The code is good for three minutes, pairs exactly **one**
 device, and carries this machine's public key, so the device that scans it can
@@ -56,9 +56,9 @@ never be talked into trusting a different machine.
 **The terminal prints no QR code.** No encoder is vendored in the CLI, and a
 wrong QR is worse than none: a phone scans it, fails, and the person concludes
 their camera is broken. The terminal prints the payload itself, an
-`apex-remote:` URI whose body is base64url of the compact-JSON offer, and a
-line pointing at APEX Settings → Pair a device, which draws the QR code. You
-can also paste the line into APEX Remote on the phone.
+`rime-remote:` URI whose body is base64url of the compact-JSON offer, and a
+line pointing at Rime Settings → Pair a device, which draws the QR code. You
+can also paste the line into Rime Remote on the phone.
 
 If the service is not answering, `pair` starts it first (clearing a start limit
 left by an earlier crash), so a unit that went down once does not block
@@ -69,18 +69,18 @@ the code is good for, and the sentence about the public key) goes to stderr.
 So
 
 ```
-apex remote pair --text > offer.txt
+rime remote pair --text > offer.txt
 ```
 
-leaves `offer.txt` holding exactly one line, the `apex-remote:` URI, with the
+leaves `offer.txt` holding exactly one line, the `rime-remote:` URI, with the
 explanation still on the terminal. That split makes the verb scriptable
 without a second output mode.
 
-There is **no `apex remote pair --json`**. The payload is already a single
+There is **no `rime remote pair --json`**. The payload is already a single
 self-describing string. Wrapping it in an object would add a second shape to
 keep in step with the phone, and no reader needs it.
 
-## `apex remote devices`
+## `rime remote devices`
 
 Lists every device this machine has paired, and which of them are revoked:
 
@@ -112,16 +112,16 @@ buys is that the device holds its key in a keystore that will not sign without
 a biometric or device credential. That is the **device's own claim**, and a
 tick in a table would read as a fact this machine had verified.
 
-## `apex remote revoke <device>`
+## `rime remote revoke <device>`
 
 Takes a device's access away. The argument is a device id, or its name when
 that names exactly one device.
 
-Revocation is immediate: `apex-remoted` drops a connection the device already
+Revocation is immediate: `rime-remoted` drops a connection the device already
 holds instead of only refusing the next one. It keeps the record, so the
 listing can still show that the device was revoked and when.
 
-## `apex remote status`
+## `rime remote status`
 
 Shows whether the service is running, and how a device would reach it: the
 machine name, the protocol revision, this machine's identity key, how many
@@ -135,25 +135,25 @@ whether your terminal is going to feel wrong. A relay path prints its
 disclosure — what the relay can and cannot see — rather than leaving the reader
 to assume.
 
-`--json` is how APEX Settings reads the same measurement: `machine`,
+`--json` is how Rime Settings reads the same measurement: `machine`,
 `protocol`, `identity`, `paired`, `lan`, `relay`, `rendezvous`,
 `offer_ms_left`, and `connections[]` with `device_id`, `device_name`, `path`,
 `since_ms`, `rtt_ms`, `quality` and `disclosure`.
 
 ## When the service is not running
 
-`apex remote pair` tries to start the service itself, as above. Every other
-verb that talks to `apex-remoted` fails with the remedy instead of a bare
+`rime remote pair` tries to start the service itself, as above. Every other
+verb that talks to `rime-remoted` fails with the remedy instead of a bare
 connection error: it names the socket it tried and tells you to run
-`systemctl --user enable --now apex-remoted`, which is what `apex remote
+`systemctl --user enable --now rime-remoted`, which is what `rime remote
 enable` does for you.
 
 ## What a paired device may ask, and the one thing it may not
 
-`apex-remoted` forwards and does not filter. Its `control()` refuses exactly
+`rime-remoted` forwards and does not filter. Its `control()` refuses exactly
 two verbs on the control channel, `attach` and `receive`, because both take the
-connection over and would wedge it. It hands everything else to `apex-agentd`
-under the origin `claude-remote-control`. So `apex-agentd`'s own per-verb rules
+connection over and would wedge it. It hands everything else to `rime-agentd`
+under the origin `claude-remote-control`. So `rime-agentd`'s own per-verb rules
 decide what a phone can do, in one place, and no denylist here can drift from
 them.
 
@@ -171,11 +171,11 @@ project the user chose. That split is why they are separate verbs.
 `projects` and `profiles` carry **counts and paths the machine already
 publishes through `worktrees`, and no content**. A profile row never carries
 the configured model, a plugin, a marketplace, an MCP server, a skill or a
-credential. `apex agent profile doctor` has all of that, and none of it crosses
+credential. `rime agent profile doctor` has all of that, and none of it crosses
 this wire. `secret` is a count of credential-class entries that exist, never a
 name and never a value.
 
-**`apex-agentd` refuses `decide` from any origin that is not local, by
+**`rime-agentd` refuses `decide` from any origin that is not local, by
 design.** Every verb in the privilege vocabulary is a root capability
 (`request.rs`'s `Verb::capability`, all eight), so §7's row for both columns
 ends at a human at this machine. The check sits *before* the pending lookup, so
@@ -188,7 +188,7 @@ revocation only ever removes authority.
 The one exception is a different verb with a different shape.
 `renew_system_grant` accepts a non-local caller when the owner has written
 `origin = remote_elevation_allowed`, and that opt-in costs a `second_factor`: a
-WebAuthn assertion from a key the owner enrolled with `apex agent key add`,
+WebAuthn assertion from a key the owner enrolled with `rime agent key add`,
 over a nonce the daemon issued and bound to that one session, grant kind and
 window. If remote approval of a root operation is ever built, it has to take
 that shape; a relaxed origin check would not do.
@@ -201,19 +201,19 @@ could not: the app derived alerts from a poll loop inside itself, so the app
 had to be running for an alert to exist.
 
 Two paths now raise the same alerts. The poll loop still does it while the app
-is open. When the app is closed, `apex-remoted` watches the runtime itself and
+is open. When the app is closed, `rime-remoted` watches the runtime itself and
 posts an **encrypted 51-byte envelope** to a push server, which a UnifiedPush
 distributor on the phone turns into a notification.
 
 ### What you have to do: one thing
 
 **Install a UnifiedPush distributor on the phone.** [ntfy][ntfy] is the usual
-choice, is free, and needs no account: install it, and APEX Remote finds it on
+choice, is free, and needs no account: install it, and Rime Remote finds it on
 the next connection to a machine.
 
 Nothing else. In particular:
 
-* **nothing to stand up, deploy or configure on the desktop.** `apex-remoted`
+* **nothing to stand up, deploy or configure on the desktop.** `rime-remoted`
   already runs, and the watcher is part of it.
 * **no account anywhere**: not with Google, not with Anthropic, not with ntfy.
   `ntfy.sh` accepts anonymous subscriptions.
@@ -230,7 +230,7 @@ treats the endpoint as opaque and accepts a private-network address. It refuses
 only `http://`, because the endpoint URL *is* the capability to notify the
 phone.
 
-**With more than one distributor installed, APEX Remote uses the first by
+**With more than one distributor installed, Rime Remote uses the first by
 package name and does not ask.** The app has no chooser. Every distributor sees
 the same thing (the timing of an alert and nothing else), so the choice matters
 little. If it is the wrong one for you, uninstall the distributor you do not
@@ -260,7 +260,7 @@ the project, the adapter, or what the agent was doing. The request carries no
 
 The phone renders the notification *text* from fixed strings plus the machine
 name you chose at pairing and the adapter name. It never uses the session's
-`detail`, which is where APEX records command lines, paths, grep patterns and
+`detail`, which is where Rime records command lines, paths, grep patterns and
 task descriptions.
 
 ### What stops a hostile app faking one

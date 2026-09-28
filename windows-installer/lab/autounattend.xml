@@ -1,6 +1,6 @@
 <?xml version="1.0" encoding="utf-8"?>
 <!--
-  Unattended answer file for the APEX Windows installer lab.
+  Unattended answer file for the Rime Windows installer lab.
 
   WHY THE NUMBERS ARE WHAT THEY ARE
 
@@ -13,7 +13,7 @@
 
   The ESP is 100 MB. That is not a convenience: it is the constraint the whole
   architecture has to survive. Windows' own default system partition is 100 MB,
-  and the shared-ESP rule means APEX has to fit its boot files into whatever
+  and the shared-ESP rule means Rime has to fit its boot files into whatever
   Windows left over. Sizing it generously here would have hidden the single most
   important fact the lab exists to measure.
 
@@ -91,8 +91,8 @@
 
       <UserData>
         <AcceptEula>true</AcceptEula>
-        <FullName>APEX lab</FullName>
-        <Organization>APEX</Organization>
+        <FullName>Rime lab</FullName>
+        <Organization>Rime</Organization>
       </UserData>
     </component>
   </settings>
@@ -101,7 +101,7 @@
     <component name="Microsoft-Windows-Shell-Setup"
                processorArchitecture="amd64" publicKeyToken="31bf3856ad364e35"
                language="neutral" versionScope="nonSxS">
-      <ComputerName>APEXWINLAB</ComputerName>
+      <ComputerName>RIMEWINLAB</ComputerName>
       <TimeZone>UTC</TimeZone>
     </component>
   </settings>
@@ -116,7 +116,7 @@
                network device attached. It is written here in the open on
                purpose: nothing about this guest is a secret, and a lab whose
                password lives somewhere else is a lab nobody else can run. -->
-          <Value>ApexLab!2026</Value>
+          <Value>RimeLab!2026</Value>
           <PlainText>true</PlainText>
         </AdministratorPassword>
       </UserAccounts>
@@ -131,7 +131,7 @@
         <Username>Administrator</Username>
         <LogonCount>1</LogonCount>
         <Password>
-          <Value>ApexLab!2026</Value>
+          <Value>RimeLab!2026</Value>
           <PlainText>true</PlainText>
         </Password>
       </AutoLogon>
@@ -147,12 +147,12 @@
       <FirstLogonCommands>
         <SynchronousCommand wcm:action="add" xmlns:wcm="http://schemas.microsoft.com/WMIConfig/2002/State">
           <Order>1</Order>
-          <CommandLine>cmd /c md C:\apexlab</CommandLine>
+          <CommandLine>cmd /c md C:\rimelab</CommandLine>
           <Description>lab directory</Description>
         </SynchronousCommand>
         <SynchronousCommand wcm:action="add" xmlns:wcm="http://schemas.microsoft.com/WMIConfig/2002/State">
           <Order>2</Order>
-          <!-- The agent is fetched from the APEXLAB transport volume, by
+          <!-- The agent is fetched from the RIMELAB transport volume, by
                LABEL, not from the install media and not by walking drive
                letters. Both of the obvious alternatives were wrong: the
                install CD is detached after Setup's first phase, so a copy
@@ -161,22 +161,22 @@
                perfectly and then does nothing at all, with no error anywhere.
                A drive-letter loop has the same failure whenever the letters
                land somewhere the loop did not guess. -->
-          <CommandLine>powershell -NoProfile -ExecutionPolicy Bypass -Command "$v = Get-Volume | Where-Object { $_.FileSystemLabel -eq 'APEXLAB' -and $_.DriveLetter }; if ($v) { Copy-Item -Force ($v[0].DriveLetter + ':\apexlab-agent.ps1') 'C:\apexlab\agent.ps1' }"</CommandLine>
-          <Description>copy the lab agent off the APEXLAB transport volume</Description>
+          <CommandLine>powershell -NoProfile -ExecutionPolicy Bypass -Command "$v = Get-Volume | Where-Object { $_.FileSystemLabel -eq 'RIMELAB' -and $_.DriveLetter }; if ($v) { Copy-Item -Force ($v[0].DriveLetter + ':\rimelab-agent.ps1') 'C:\rimelab\agent.ps1' }"</CommandLine>
+          <Description>copy the lab agent off the RIMELAB transport volume</Description>
         </SynchronousCommand>
         <SynchronousCommand wcm:action="add" xmlns:wcm="http://schemas.microsoft.com/WMIConfig/2002/State">
           <Order>3</Order>
-          <CommandLine>cmd /c schtasks /create /tn ApexLabAgent /tr "powershell -NoProfile -ExecutionPolicy Bypass -File C:\apexlab\agent.ps1" /sc onstart /ru SYSTEM /rl highest /f</CommandLine>
+          <CommandLine>cmd /c schtasks /create /tn RimeLabAgent /tr "powershell -NoProfile -ExecutionPolicy Bypass -File C:\rimelab\agent.ps1" /sc onstart /ru SYSTEM /rl highest /f</CommandLine>
           <Description>register the on-start lab agent</Description>
         </SynchronousCommand>
         <SynchronousCommand wcm:action="add" xmlns:wcm="http://schemas.microsoft.com/WMIConfig/2002/State">
           <Order>4</Order>
-          <!-- The completion marker goes on the APEXLAB transport volume, not
+          <!-- The completion marker goes on the RIMELAB transport volume, not
                on C:. The harness reads it from outside with mtools between
                boots; reading it out of NTFS would mean parsing NTFS from the
                host to answer "did Setup finish", which is a lot of machinery
                for a yes/no. -->
-          <CommandLine>powershell -NoProfile -ExecutionPolicy Bypass -Command "$v = Get-Volume | Where-Object { $_.FileSystemLabel -eq 'APEXLAB' -and $_.DriveLetter }; if ($v) { Set-Content -Path ($v[0].DriveLetter + ':\golden.txt') -Value $(if (Test-Path 'C:\apexlab\agent.ps1') { 'GOLDEN-READY' } else { 'GOLDEN-BROKEN-NO-AGENT' }) }"</CommandLine>
+          <CommandLine>powershell -NoProfile -ExecutionPolicy Bypass -Command "$v = Get-Volume | Where-Object { $_.FileSystemLabel -eq 'RIMELAB' -and $_.DriveLetter }; if ($v) { Set-Content -Path ($v[0].DriveLetter + ':\golden.txt') -Value $(if (Test-Path 'C:\rimelab\agent.ps1') { 'GOLDEN-READY' } else { 'GOLDEN-BROKEN-NO-AGENT' }) }"</CommandLine>
           <Description>mark the golden image complete</Description>
         </SynchronousCommand>
         <SynchronousCommand wcm:action="add" xmlns:wcm="http://schemas.microsoft.com/WMIConfig/2002/State">

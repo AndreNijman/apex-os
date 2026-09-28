@@ -2,7 +2,7 @@
 # ─────────────────────────────────────────────────────────────────────────────
 #  Terminal layout templates, in a real tmux and a real zellij.
 #
-#  The unit tests in apex-agent-core cover which pane runs what, the editor and
+#  The unit tests in rime-agent-core cover which pane runs what, the editor and
 #  backend choice, and the wire format. What they cannot cover is the half that
 #  only a running multiplexer can answer: that the panes come out in the right
 #  ORDER with the right titles, that reopening attaches instead of rebuilding,
@@ -14,7 +14,7 @@
 #  killed.
 #
 #  Nothing here reaches the agent runtime either. XDG_RUNTIME_DIR is a fixture
-#  with no control socket, so `apex agent list` finds no daemon, and `apex` on
+#  with no control socket, so `rime agent list` finds no daemon, and `rime` on
 #  PATH inside the panes is a stub. An earlier version of this file did not do
 #  the second, and a pane genuinely started a claude session on the developer's
 #  own daemon.
@@ -43,7 +43,7 @@ for tool in cargo git; do
     }
 done
 
-MUX="${ROOT}/files/system/libexec/apex-mux"
+MUX="${ROOT}/files/system/libexec/rime-mux"
 [ -x "$MUX" ] || { echo "FATAL: ${MUX} is missing or not executable" >&2; exit 2; }
 
 # ── isolation ────────────────────────────────────────────────────────────────
@@ -54,7 +54,7 @@ export XDG_DATA_HOME="${WORK}/data"
 export XDG_CACHE_HOME="${WORK}/cache"
 export XDG_STATE_HOME="${WORK}/state"
 # No control socket lives here, so the CLI finds no agent runtime and every
-# agent pane resolves to `apex agent run`. Deterministic, and it means this
+# agent pane resolves to `rime agent run`. Deterministic, and it means this
 # suite cannot start or attach to a session on the developer's daemon.
 export XDG_RUNTIME_DIR="${WORK}/run"
 mkdir -p "$TMUX_TMPDIR" "$ZELLIJ_SOCKET_DIR" "$XDG_CONFIG_HOME" "$XDG_DATA_HOME" \
@@ -73,23 +73,23 @@ cleanup() {
 }
 trap cleanup EXIT
 
-# A stub `apex` for anything a PANE runs. The panes are real processes; without
+# A stub `rime` for anything a PANE runs. The panes are real processes; without
 # this the agent panes would call the real CLI and reach the real daemon.
 BIN="${WORK}/bin"; mkdir -p "$BIN"
-cat > "${BIN}/apex" <<'EOF'
+cat > "${BIN}/rime" <<'EOF'
 #!/bin/sh
-echo "stub apex: $*"
+echo "stub rime: $*"
 sleep 600
 EOF
-chmod +x "${BIN}/apex"
+chmod +x "${BIN}/rime"
 # A predictable editor, so the assertions do not depend on what is installed.
-cat > "${BIN}/apexed" <<'EOF'
+cat > "${BIN}/rimeed" <<'EOF'
 #!/bin/sh
 sleep 600
 EOF
-chmod +x "${BIN}/apexed"
+chmod +x "${BIN}/rimeed"
 export PATH="${BIN}:${PATH}"
-export VISUAL=apexed
+export VISUAL=rimeed
 
 PROJ="${WORK}/demo"
 mkdir -p "$PROJ"
@@ -97,14 +97,14 @@ git -C "$PROJ" init -q 2>/dev/null
 git -C "$PROJ" -c user.email=t@t -c user.name=t commit -q --allow-empty -m init 2>/dev/null
 
 PLAN="${WORK}/plan.tsv"
-printf 'editor\t%s\tapexed\nagent\t%s\tapex\tagent\trun\nterminal\t%s\n' \
+printf 'editor\t%s\trimeed\nagent\t%s\trime\tagent\trun\nterminal\t%s\n' \
     "$PROJ" "$PROJ" "$PROJ" > "$PLAN"
 
 # ─────────────────────────────────────────────────────────────────────────────
 section "the adapter refuses what it does not understand"
 sections_run=$((sections_run + 1))
 
-sh -n "$MUX" && ok "apex-mux parses" || bad "apex-mux parses"
+sh -n "$MUX" && ok "rime-mux parses" || bad "rime-mux parses"
 
 out="$("$MUX" nonsense 2>&1)"; rc=$?
 [ "$rc" -eq 2 ] && printf '%s' "$out" | grep -q 'usage:' \
@@ -142,7 +142,7 @@ if ! command -v tmux >/dev/null 2>&1; then
     skipped "tmux integration" "tmux is not installed on this machine"
 else
     sections_run=$((sections_run + 1))
-    S="apex-demo-test"
+    S="rime-demo-test"
 
     "$MUX" has tmux "$S" 2>/dev/null \
         && bad "a session that does not exist is reported as absent" \
@@ -158,7 +158,7 @@ else
     # caught a real defect: `split-window` renumbers the panes it pushes along,
     # so addressing panes by index put every title one place out.
     got="$(tmux list-panes -t "$S:0" -F '#{pane_index}:#{pane_title}:#{pane_start_command}' | tr '\n' ' ')"
-    [ "$got" = "0:editor:apexed 1:agent:apex agent run 2:terminal: " ] \
+    [ "$got" = "0:editor:rimeed 1:agent:rime agent run 2:terminal: " ] \
         && ok "the panes are in template order with their own commands" \
         || { bad "the panes are in template order with their own commands"; printf '      %s\n' "$got"; }
 
@@ -200,9 +200,9 @@ else
 
     # A pane command is passed as argv and never through a shell.
     SHPLAN="${WORK}/shellish.tsv"
-    printf 'trick\t%s\tapexed\t;\ttouch\t%s/pwned\n' "$PROJ" "$WORK" > "$SHPLAN"
+    printf 'trick\t%s\trimeed\t;\ttouch\t%s/pwned\n' "$PROJ" "$WORK" > "$SHPLAN"
     tmux kill-session -t "=$S" >/dev/null 2>&1
-    "$MUX" build tmux "apex-shellish" tiled "$SHPLAN" >/dev/null 2>&1
+    "$MUX" build tmux "rime-shellish" tiled "$SHPLAN" >/dev/null 2>&1
     sleep 0.5
     [ ! -e "${WORK}/pwned" ] \
         && ok "a pane command is argv, never a shell string" \
@@ -216,7 +216,7 @@ if ! command -v zellij >/dev/null 2>&1; then
     skipped "zellij integration" "zellij is not installed on this machine"
 else
     sections_run=$((sections_run + 1))
-    Z="apex-demo-zellij"
+    Z="rime-demo-zellij"
 
     "$MUX" has zellij "$Z" 2>/dev/null \
         && bad "a zellij session that does not exist is reported as absent" \
@@ -228,10 +228,10 @@ else
     # tenth of a second would not have, and hid a real defect behind a flake.
     # `build` now returns 0 only after it has SEEN the tab, so the assertions
     # below are an independent second opinion rather than a wait.
-    # apex-mux exits 3 when every send was ACCEPTED (rc=0, no stderr) and every
+    # rime-mux exits 3 when every send was ACCEPTED (rc=0, no stderr) and every
     # one was DISCARDED — the signature of a zellij that cannot do what it
     # documents, measured on a GitHub runner over twelve sends and 42 seconds.
-    # That is not a defect in apex-mux and must not be reported as one: the
+    # That is not a defect in rime-mux and must not be reported as one: the
     # same reds appeared against a byte-identical engine and a byte-identical
     # suite. Anything else non-zero is a real failure and stays one.
     zbuild_rc=0
@@ -242,7 +242,7 @@ else
     elif [ "$zbuild_rc" = 3 ]; then
         zenv_bad=1
         skipped "build creates the zellij session" \
-            "zellij on this machine accepted all twelve sends and discarded every one; apex-mux is not what failed"
+            "zellij on this machine accepted all twelve sends and discarded every one; rime-mux is not what failed"
     else
         bad "build creates the zellij session (rc=$zbuild_rc)"
     fi
@@ -266,7 +266,7 @@ else
     }
 
     dump="$(zdump "$Z")"
-    printf '%s' "$dump" | grep -q 'tab name="apex"' \
+    printf '%s' "$dump" | grep -q 'tab name="rime"' \
         && ok "the layout landed as a tab zellij can describe" \
         || { if [ "$zenv_bad" = 1 ]; then
                  skipped "the layout landed as a tab zellij can describe" \
@@ -278,21 +278,21 @@ else
 
     # Exactly one. `build` verifies the tab and re-sends when it was dropped, so
     # a send that was merely slow rather than lost would show up here as two
-    # `apex` tabs — the one failure the retry could introduce, and the one thing
+    # `rime` tabs — the one failure the retry could introduce, and the one thing
     # a "did it land" check on its own cannot see.
-    napex="$(printf '%s' "$dump" | grep -c 'tab name="apex"')"
-    [ "$napex" -eq 1 ] \
+    nrime="$(printf '%s' "$dump" | grep -c 'tab name="rime"')"
+    [ "$nrime" -eq 1 ] \
         && ok "the layout landed exactly once" \
         || { if [ "$zenv_bad" = 1 ]; then
                  skipped "the layout landed exactly once" \
                    "zellij discards tab requests on this machine — see the build verdict above"
              else
-                 bad "the layout landed exactly once (${napex} apex tabs)"
+                 bad "the layout landed exactly once (${nrime} rime tabs)"
              fi; }
 
-    # The commands are genuinely running, not declared and suspended. `apexed`
+    # The commands are genuinely running, not declared and suspended. `rimeed`
     # is the fixture editor, so a live process with that name is the proof.
-    pgrep -f 'apexed' >/dev/null 2>&1 \
+    pgrep -f 'rimeed' >/dev/null 2>&1 \
         && ok "the pane commands are actually running" \
         || bad "the pane commands are actually running"
 
@@ -316,7 +316,7 @@ else
     # before zellij ever tries to take over the tty.
     for arr in main-vertical tiled; do
         kdl="$("$MUX" kdl "$arr" "$PLAN")"
-        printf '%s' "$kdl" | grep -q 'tab name="apex"' \
+        printf '%s' "$kdl" | grep -q 'tab name="rime"' \
             && ok "the ${arr} layout is generated" || bad "the ${arr} layout is generated"
         # Handed straight back to zellij's own parser. No terminal is needed:
         # zellij parses the layout before it tries to take over the tty, so a
@@ -332,64 +332,64 @@ else
 fi
 
 # ─────────────────────────────────────────────────────────────────────────────
-section "apex project layout templates / open"
-if ! cargo build --manifest-path "${ROOT}/apexd/Cargo.toml" --bin apex >/dev/null 2>&1; then
-    bad "apex builds"
+section "rime project layout templates / open"
+if ! cargo build --manifest-path "${ROOT}/rimed/Cargo.toml" --bin rime >/dev/null 2>&1; then
+    bad "rime builds"
 else
     sections_run=$((sections_run + 1))
-    ok "apex builds"
-    APEX="${CARGO_TARGET_DIR:-${ROOT}/apexd/target}/debug/apex"
-    export APEX_MUX_ADAPTER="$MUX"
+    ok "rime builds"
+    Rime="${CARGO_TARGET_DIR:-${ROOT}/rimed/target}/debug/rime"
+    export RIME_MUX_ADAPTER="$MUX"
 
-    out="$(cd "$PROJ" && "$APEX" project layout templates 2>&1)"
+    out="$(cd "$PROJ" && "$Rime" project layout templates 2>&1)"
     for t in dev review agents; do
         printf '%s' "$out" | grep -q "^${t} " \
             && ok "the ${t} template is listed" || bad "the ${t} template is listed"
     done
 
-    out="$(cd "$PROJ" && "$APEX" project layout open --mux tmux --dry-run 2>&1)"
-    printf '%s' "$out" | grep -q 'editor *apexed' \
+    out="$(cd "$PROJ" && "$Rime" project layout open --mux tmux --dry-run 2>&1)"
+    printf '%s' "$out" | grep -q 'editor *rimeed' \
         && ok "dev opens the editor from \$VISUAL" \
         || { bad "dev opens the editor from \$VISUAL"; printf '      %s\n' "$out"; }
-    printf '%s' "$out" | grep -q 'agent *apex agent run' \
+    printf '%s' "$out" | grep -q 'agent *rime agent run' \
         && ok "with no runtime reachable, the agent pane starts a session" \
         || bad "with no runtime reachable, the agent pane starts a session"
     printf '%s' "$out" | grep -q 'terminal *<shell>' \
         && ok "the terminal pane runs the shell rather than a named one" \
         || bad "the terminal pane runs the shell rather than a named one"
 
-    out="$(cd "$PROJ" && "$APEX" project layout open review --mux tmux --dry-run 2>&1)"
-    printf '%s' "$out" | grep -q 'diff *apex agent diff' \
+    out="$(cd "$PROJ" && "$Rime" project layout open review --mux tmux --dry-run 2>&1)"
+    printf '%s' "$out" | grep -q 'diff *rime agent diff' \
         && ok "review points its third pane at the diff" || bad "review points its third pane at the diff"
 
-    out="$(cd "$PROJ" && "$APEX" project layout open agents --mux tmux --agents 3 --dry-run 2>&1)"
-    [ "$(printf '%s' "$out" | grep -c 'agent  *apex agent run')" = "3" ] \
+    out="$(cd "$PROJ" && "$Rime" project layout open agents --mux tmux --agents 3 --dry-run 2>&1)"
+    [ "$(printf '%s' "$out" | grep -c 'agent  *rime agent run')" = "3" ] \
         && ok "the multi-agent template opens the agents asked for" \
         || { bad "the multi-agent template opens the agents asked for"; printf '      %s\n' "$out"; }
 
-    out="$(cd "$PROJ" && "$APEX" project layout open agents --mux tmux --agents 400 --dry-run 2>&1)"
-    [ "$(printf '%s' "$out" | grep -c 'agent  *apex agent run')" = "8" ] \
+    out="$(cd "$PROJ" && "$Rime" project layout open agents --mux tmux --agents 400 --dry-run 2>&1)"
+    [ "$(printf '%s' "$out" | grep -c 'agent  *rime agent run')" = "8" ] \
         && ok "the agent count is bounded rather than obeyed" \
         || bad "the agent count is bounded rather than obeyed"
 
-    out="$(cd "$PROJ" && "$APEX" project layout open nope --mux tmux --dry-run 2>&1)"
+    out="$(cd "$PROJ" && "$Rime" project layout open nope --mux tmux --dry-run 2>&1)"
     printf '%s' "$out" | grep -q 'no template called nope' \
         && ok "an unknown template names the command that lists them" \
         || bad "an unknown template names the command that lists them"
 
-    out="$(cd "$PROJ" && "$APEX" project layout open --mux screen --dry-run 2>&1)"
+    out="$(cd "$PROJ" && "$Rime" project layout open --mux screen --dry-run 2>&1)"
     printf '%s' "$out" | grep -q 'not a multiplexer' \
-        && ok "a multiplexer APEX does not drive is refused" \
-        || bad "a multiplexer APEX does not drive is refused"
+        && ok "a multiplexer Rime does not drive is refused" \
+        || bad "a multiplexer Rime does not drive is refused"
 
-    out="$(cd "${WORK}" && "$APEX" project layout open --dry-run 2>&1)"
+    out="$(cd "${WORK}" && "$Rime" project layout open --dry-run 2>&1)"
     printf '%s' "$out" | grep -q 'not inside a git repository' \
         && ok "outside a project it says so" || bad "outside a project it says so"
 
     # A dry run starts nothing at all.
     if command -v tmux >/dev/null 2>&1; then
         tmux kill-server >/dev/null 2>&1
-        (cd "$PROJ" && "$APEX" project layout open --mux tmux --dry-run >/dev/null 2>&1)
+        (cd "$PROJ" && "$Rime" project layout open --mux tmux --dry-run >/dev/null 2>&1)
         tmux list-sessions >/dev/null 2>&1 \
             && bad "a dry run starts no multiplexer session" \
             || ok "a dry run starts no multiplexer session"
@@ -397,10 +397,10 @@ else
         # The real thing. `open` ends by handing the terminal to tmux, which has
         # no terminal here — so the attach fails and the BUILD is what is
         # asserted, which is the part this owns.
-        (cd "$PROJ" && "$APEX" project layout open --mux tmux </dev/null >/dev/null 2>&1)
+        (cd "$PROJ" && "$Rime" project layout open --mux tmux </dev/null >/dev/null 2>&1)
         name="$(tmux list-sessions -F '#{session_name}' 2>/dev/null | head -1)"
         case "$name" in
-            apex-demo-*) ok "the session is named after the project" ;;
+            rime-demo-*) ok "the session is named after the project" ;;
             *) bad "the session is named after the project (got '${name}')" ;;
         esac
         got="$(tmux list-panes -a -F '#{pane_title}' 2>/dev/null | tr '\n' ' ')"
@@ -410,19 +410,19 @@ else
 
         # The template is remembered on the project's ONE layout record, so
         # reopening needs no argument — and `layout show` reports it.
-        out="$(cd "$PROJ" && "$APEX" project layout show 2>&1)"
+        out="$(cd "$PROJ" && "$Rime" project layout show 2>&1)"
         printf '%s' "$out" | grep -q 'terminal template: dev in tmux' \
             && ok "the template is remembered on the project's layout record" \
             || { bad "the template is remembered on the project's layout record"; printf '      %s\n' "$out"; }
 
-        out="$(cd "$PROJ" && "$APEX" project layout open </dev/null 2>&1)"
+        out="$(cd "$PROJ" && "$Rime" project layout open </dev/null 2>&1)"
         printf '%s' "$out" | grep -q 'is already open — attaching' \
             && ok "reopening attaches instead of rebuilding" \
             || { bad "reopening attaches instead of rebuilding"; printf '      %s\n' "$out"; }
 
         # A record with a template and no captured windows is not "restore
         # nothing and call it success".
-        out="$(cd "$PROJ" && "$APEX" project layout restore --dry-run 2>&1)"
+        out="$(cd "$PROJ" && "$Rime" project layout restore --dry-run 2>&1)"
         printf '%s' "$out" | grep -q 'no windows are saved' \
             && ok "restoring a template-only record explains what is missing" \
             || { bad "restoring a template-only record explains what is missing"; printf '      %s\n' "$out"; }

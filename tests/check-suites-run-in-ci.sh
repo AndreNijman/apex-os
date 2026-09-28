@@ -5,7 +5,7 @@
 #  CI invokes suites BY NAME. Writing tests/test-foo.sh, landing it, and never
 #  adding a line to a workflow leaves a file that looks like coverage, passes
 #  review, and gates nothing. Measured 2026-09-12: 70 test-*.sh suites existed
-#  and 13 were named in no workflow — among them tests/test-apex-lid.sh, sixty
+#  and 13 were named in no workflow — among them tests/test-rime-lid.sh, sixty
 #  assertions for a feature the owner had asked for by name, which no CI run
 #  had ever executed.
 #
@@ -51,7 +51,7 @@ is_exempt() { local n; for n in ${exempt[@]+"${exempt[@]}"}; do [ "$n" = "$1" ] 
 # directory — this file included — was invisible to it. Measured 2026-09-21:
 # 8 check-*.sh existed and `tests/check-no-conflict-markers.sh` was named in no
 # workflow, having been landed after a merge replay shipped `<<<<<<<` markers
-# into `src/state/IpcManager.qml` on the apex-shell tip. That is a QML parse
+# into `src/state/IpcManager.qml` on the rime-shell tip. That is a QML parse
 # error, so IpcManager failed to load, so every singleton importing `src/`
 # failed with it and the shell did not start at all. The gate written to stop
 # that recurring was itself never run. A gate this file cannot see is exactly
@@ -62,7 +62,7 @@ for s in tests/test-*.sh tests/check-*.sh installer/test-*.sh installer/check-*.
     base="${s##*/}"
     # A COMMENT naming a suite is not an invocation of it. This file's own
     # step in pr-validation.yml describes the defect by naming
-    # tests/test-apex-lid.sh, and a bare `grep -F` read that prose as proof the
+    # tests/test-rime-lid.sh, and a bare `grep -F` read that prose as proof the
     # suite runs — the same shape as the forbid-check this repository once
     # shipped that matched the comment explaining what it forbade. Lines whose
     # first non-blank character is `#` are dropped, which covers both YAML

@@ -36,7 +36,7 @@ annotate() {
 }
 
 missing=()
-for var in APEX_KEYSTORE_BASE64 APEX_KEYSTORE_PASSWORD APEX_KEY_ALIAS APEX_KEY_PASSWORD; do
+for var in RIME_KEYSTORE_BASE64 RIME_KEYSTORE_PASSWORD RIME_KEY_ALIAS RIME_KEY_PASSWORD; do
     eval "value=\${$var:-}"
     [ -n "$value" ] || missing+=("$var")
 done
@@ -60,8 +60,8 @@ fi
 #   "Different store and key passwords not supported for PKCS12 KeyStores."
 # So for the keystore generate-signing-key.sh produces, these two secrets hold
 # the same value, and differing ones mean one of them was pasted wrong.
-if [ "${APEX_KEYSTORE_PASSWORD}" != "${APEX_KEY_PASSWORD}" ]; then
-    msg="APEX_KEY_PASSWORD differs from APEX_KEYSTORE_PASSWORD. A PKCS12 keystore cannot have separate passwords, so unless the keystore is an old-style JKS one of the two was pasted wrong and the build will fail later, inside Gradle, with a message about the keystore."
+if [ "${RIME_KEYSTORE_PASSWORD}" != "${RIME_KEY_PASSWORD}" ]; then
+    msg="RIME_KEY_PASSWORD differs from RIME_KEYSTORE_PASSWORD. A PKCS12 keystore cannot have separate passwords, so unless the keystore is an old-style JKS one of the two was pasted wrong and the build will fail later, inside Gradle, with a message about the keystore."
     if [ "${GITHUB_ACTIONS:-}" = "true" ]; then echo "::warning::$msg"; fi
     echo "warning: $msg" >&2
 fi
@@ -71,7 +71,7 @@ fi
 # the keystore then refuses to open with a password that looks correct in every
 # password manager. Checked without printing anything: only whether the value
 # has whitespace at either end.
-for var in APEX_KEYSTORE_PASSWORD APEX_KEY_ALIAS APEX_KEY_PASSWORD; do
+for var in RIME_KEYSTORE_PASSWORD RIME_KEY_ALIAS RIME_KEY_PASSWORD; do
     eval "value=\${$var}"
     trimmed="${value#"${value%%[![:space:]]*}"}"
     trimmed="${trimmed%"${trimmed##*[![:space:]]}"}"

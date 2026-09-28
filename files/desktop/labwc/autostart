@@ -1,5 +1,5 @@
 # ─────────────────────────────────────────────────────────────────────────────
-#  APEX-OS — labwc autostart (seeded per-user by apex-shell-firstrun; @HOME@ is
+#  Rime OS — labwc autostart (seeded per-user by rime-shell-firstrun; @HOME@ is
 #  substituted with the user's home at seed time).
 #
 #  This is the labwc equivalent of the `exec-once` block in hyprland.conf and is
@@ -18,11 +18,11 @@ export PATH
 # timing, exactly as the Hyprland session does.
 awww-daemon &
 
-# hypridle + APEX Shell. The helper resolves hypridle's config and is idempotent,
+# hypridle + Rime Shell. The helper resolves hypridle's config and is idempotent,
 # so it is also safe to run by hand to repair a live session. It is shared with
 # the Hyprland and niri sessions — the shell does not care which compositor
 # started it.
-/usr/libexec/apex-shell-autostart &
+/usr/libexec/rime-shell-autostart &
 
 /usr/libexec/polkit-mate-authentication-agent-1 &
 

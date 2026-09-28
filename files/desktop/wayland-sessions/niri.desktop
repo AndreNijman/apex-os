@@ -1,13 +1,13 @@
 [Desktop Entry]
-Name=APEX Scrolling
+Name=Rime Scrolling
 Comment=Windows sit side by side in one endless strip you scroll (niri)
-# See apex-labwc.desktop for why `Name=` is a product name here. ROADMAP.md:91
+# See rime-labwc.desktop for why `Name=` is a product name here. ROADMAP.md:91
 # calls this presentation "a niri scrolling workstation". `DesktopNames=niri`
 # below is an id, is what niri-portals.conf keys off, and is asserted by CI —
 # it must not be renamed with this line.
 # `niri --session` also imports the environment into the systemd user manager
 # and D-Bus (the supported way to start a niri session), matching how the
-# greeter execs it: apex-greet runs the Exec line via `sh -lc "<Exec>"`.
+# greeter execs it: rime-greet runs the Exec line via `sh -lc "<Exec>"`.
 Exec=niri --session
 Type=Application
 DesktopNames=niri

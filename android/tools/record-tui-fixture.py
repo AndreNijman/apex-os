@@ -47,7 +47,7 @@ def answers(chunk):
     for _ in DA2.finditer(chunk):
         out += b"\x1b[>0;10;1c"
     for _ in XTVER.finditer(chunk):
-        out += b"\x1bP>|apex-remote(1)\x1b\\"
+        out += b"\x1bP>|rime-remote(1)\x1b\\"
     for _ in OSC_FG.finditer(chunk):
         out += b"\x1b]10;rgb:cdcd/d6d6/f4f4\x1b\\"
     for _ in OSC_BG.finditer(chunk):

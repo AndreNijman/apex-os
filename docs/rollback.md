@@ -1,12 +1,12 @@
-# APEX-OS rollback & recovery drill
+# Rime OS rollback & recovery drill
 
-APEX-OS makes two promises: nothing you install or tune can leave you unable to
+Rime OS makes two promises: nothing you install or tune can leave you unable to
 boot, and OS state maps 1:1 to a git commit. This drill tests both. Two layers
 roll back independently: the **image/deployment** (bootc) and the **source**
 (git). CI ties them together by stamping the source SHA on every image it builds
 (`org.opencontainers.image.revision`).
 
-## 1. Deployment rollback (on a running APEX-OS machine)
+## 1. Deployment rollback (on a running Rime OS machine)
 
 bootc keeps the booted deployment and the previous one. To undo a bad update (a
 tuning change that tanked FPS, a kernel that won't finish booting, a broken
@@ -35,7 +35,7 @@ sudo ostree admin pin 0          # pin the current (index-0) deployment
 sudo ostree admin pin --unpin 2
 ```
 
-`apex pin` (M3, the CLI over apexd and bootc) wraps this. `sudo apex channel set`
+`rime pin` (M3, the CLI over rimed and bootc) wraps this. `sudo rime channel set`
 pins automatically when the move is toward `stable`, which usually deploys an
 older image: bootc keeps the booted deployment and one more, so a switch
 backwards followed by one update can evict the deployment you would return to.
@@ -46,7 +46,7 @@ Before §26 nothing pinned automatically, although this line said it did.
 Every image CI publishes carries the exact commit it was built from:
 
 ```bash
-skopeo inspect docker://ghcr.io/andrenijman/apex-os:daily \
+skopeo inspect docker://ghcr.io/andrenijman/rime-os:daily \
   | jq -r '.Labels["org.opencontainers.image.revision"]'
 ```
 
@@ -70,24 +70,24 @@ a bootable image, or to reproduce a build as a contributor:
 ```bash
 git checkout <good-sha-or-tag>
 podman build -f Containerfile.daily \
-  --build-arg BASE=ghcr.io/andrenijman/apex-os-base:latest \
-  -t localhost/apex-os:daily-local .
+  --build-arg BASE=ghcr.io/andrenijman/rime-os-base:latest \
+  -t localhost/rime-os:daily-local .
 # switch a machine onto the local build without a registry round-trip:
-sudo bootc switch --transport containers-storage localhost/apex-os:daily-local
+sudo bootc switch --transport containers-storage localhost/rime-os:daily-local
 sudo systemctl reboot
 ```
 
 The block above predates the single image. `Containerfile.daily` and the
-`apex-os-base` repository no longer exist: the image is `Containerfile.apex`,
-built on the `:base` tag of `ghcr.io/andrenijman/apex-os`. Today
-`./build-local.sh --allow-unsigned base apex` builds `base` and the image on a
+`rime-os-base` repository no longer exist: the image is `Containerfile.rime`,
+built on the `:base` tag of `ghcr.io/andrenijman/rime-os`. Today
+`./build-local.sh --allow-unsigned base rime` builds `base` and the image on a
 local core (pull one first, as `docs/local-builds.md` shows) and tags the result
-`localhost/apex-os:apex`; switch to that name instead.
+`localhost/rime-os:rime`; switch to that name instead.
 
 ## 4. Factory reset, and what it preserves
 
-`apex recover reset` (§19; `docs/recovery.md` is the reference) has two scopes.
-`--scope desktop` removes APEX Shell's settings, keybinds and caches for the
+`rime recover reset` (§19; `docs/recovery.md` is the reference) has two scopes.
+`--scope desktop` removes Rime Shell's settings, keybinds and caches for the
 invoking account; `--scope user` adds the blueprint, per-game profiles,
 trusted-device registry, local-model settings and recorded agent sessions.
 Neither touches a document, a checkout, a credential, a capsule, an installed
@@ -95,11 +95,11 @@ package or the booted deployment.
 
 It stays a **dry run** unless you pass both `--commit` and a `--confirm` token
 derived from the plan it printed. It refuses to run as root, and it first copies
-everything it removes, caches excepted, to `~/apex-reset-backup-<timestamp>`.
+everything it removes, caches excepted, to `~/rime-reset-backup-<timestamp>`.
 
 ```bash
-apex recover reset --scope desktop          # prints the loss list, changes nothing
-apex recover reset --scope user             # a wider one, still a dry run
+rime recover reset --scope desktop          # prints the loss list, changes nothing
+rime recover reset --scope user             # a wider one, still a dry run
 ```
 
 A **full** factory reset (user accounts removed, `/etc` restored to image state,
@@ -108,7 +108,7 @@ it, and `docs/recovery.md` says why: `/etc` holds `passwd`, `fstab` and
 `crypttab`, ostree three-way-merges it against the deployment, and no runtime
 operation restores it without deploying.
 
-An earlier version of this document claimed `apex reset --keep-home` shipped in
+An earlier version of this document claimed `rime reset --keep-home` shipped in
 M3. It never did; the verb above is what exists.
 
 ## Status of this drill

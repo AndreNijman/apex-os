@@ -1,6 +1,6 @@
-# APEX-OS system-wide default applications.
+# Rime OS system-wide default applications.
 # Firefox is the only browser baked into the base, and the plan makes it the
-# default (Chrome is not shipped on APEX-OS). Setting the handlers here means any
+# default (Chrome is not shipped on Rime OS). Setting the handlers here means any
 # "open this URL" resolves to Firefox without a per-user round-trip.
 [Default Applications]
 x-scheme-handler/http=firefox.desktop

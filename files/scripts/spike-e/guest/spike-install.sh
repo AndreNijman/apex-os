@@ -6,7 +6,7 @@
 # hand-prepared partitions + shared ESP, containerized bootc install.
 #
 # Target layout prepared here (non-LUKS variant):
-#   /dev/vda3 (empty btrfs)  ->  /target            (new APEX-OS root)
+#   /dev/vda3 (empty btrfs)  ->  /target            (new Rime OS root)
 #   /dev/vda1 (shared ESP)   ->  /target/boot/efi   (shared with the incumbent)
 # bootc puts /boot on the root fs (no separate /boot). For the LUKS variant see
 # docs/m0-results.md (needs a separate unencrypted /boot + --boot-mount-spec).
@@ -20,7 +20,7 @@ BOOTC_TAR="$PAYLOAD/fedora-bootc-43.tar"
 echo "=== spike-install: environment ==="
 uname -a
 podman --version
-echo "APEX_UUID=$APEX_UUID  INC_UUID=$INC_UUID  ESP_UUID=$ESP_UUID"
+echo "RIME_UUID=$RIME_UUID  INC_UUID=$INC_UUID  ESP_UUID=$ESP_UUID"
 
 echo "=== ensuring cgroup v2 (unified) is mounted for podman/crun ==="
 # The Alpine minirootfs does not mount cgroups by default; podman v5 + crun
@@ -60,9 +60,9 @@ mount /dev/vda1 /target/boot/efi
 findmnt /target
 findmnt /target/boot/efi
 
-# Kernel args for the installed system. root= points at the apex btrfs; serial
+# Kernel args for the installed system. root= points at the rime btrfs; serial
 # console so the host can see the bootc OS come up during the boot-test.
-KARGS="--karg=root=UUID=$APEX_UUID --karg=rw --karg=console=tty0 --karg=console=ttyS0,115200"
+KARGS="--karg=root=UUID=$RIME_UUID --karg=rw --karg=console=tty0 --karg=console=ttyS0,115200"
 
 run_install() {
   echo "=== bootc install to-filesystem (attempt: $1) ==="
@@ -95,7 +95,7 @@ if [ "$rc" -ne 0 ]; then
   umount /target/boot/efi 2>/dev/null || true
   umount /target 2>/dev/null || true
   wipefs -a /dev/vda3 2>/dev/null || true
-  mkfs.btrfs -q -f -L apexroot /dev/vda3
+  mkfs.btrfs -q -f -L rimeroot /dev/vda3
   mount /dev/vda3 /target
   mkdir -p /target/boot/efi
   mount /dev/vda1 /target/boot/efi

@@ -12,7 +12,7 @@
 #      e24cd244  nft -c could not reach netlink in a build container at all
 #      43d98f10  ! grep 'mouse = true' matched the three comment lines that
 #                explain why `{ mouse = true }` is wrong
-#      2e33c1a6  grep 'ApexShellKeybinds.${_variant}' — a draft spelling of a
+#      2e33c1a6  grep 'RimeShellKeybinds.${_variant}' — a draft spelling of a
 #                variable that appears nowhere in the file it greps
 #
 #  All four are the same defect: an assertion nobody has ever watched go red.
@@ -22,7 +22,7 @@
 #  file in this repo that becomes it, and runs it here.
 #
 #  It is honest about what it cannot reach. Many stanzas grep a path that only
-#  exists after a `sed`, or inside the vendored apex-shell clone, or through a
+#  exists after a `sed`, or inside the vendored rime-shell clone, or through a
 #  variable built at build time. Those are reported as UNRESOLVED and counted
 #  separately — never as passes. "Could not check" is not "fine".
 # ─────────────────────────────────────────────────────────────────────────────
@@ -53,8 +53,8 @@ for path in sys.argv[1:]:
     # Join continuation lines FIRST. This file writes any COPY whose two paths
     # are long across two physical lines:
     #
-    #     COPY files/system/NetworkManager/20-apex-wifi-powersave.conf \\
-    #          /etc/NetworkManager/conf.d/20-apex-wifi-powersave.conf
+    #     COPY files/system/NetworkManager/20-rime-wifi-powersave.conf \\
+    #          /etc/NetworkManager/conf.d/20-rime-wifi-powersave.conf
     #
     # A single-line regex sees neither half, so the destination looked like a
     # path nothing copies and EVERY assertion against it was written off as
@@ -82,7 +82,7 @@ for path in sys.argv[1:]:
         """Every repo path that becomes `img` in the built image.
 
         A grep target can be a directory ABOVE the COPY destinations that fill
-        it -- `/usr/share/apex/hypr/` is filled by two separate COPY lines --
+        it -- `/usr/share/rime/hypr/` is filled by two separate COPY lines --
         and that is exactly the shape 43d98f10 had, so resolving only the
         exact and inside-a-COPY cases would miss the defect this file exists
         to catch."""
@@ -98,10 +98,10 @@ for path in sys.argv[1:]:
             return [best[1]]
         # A COPY of a DIRECTORY whose destination carries no trailing slash:
         #
-        #     COPY files/desktop/apex-greet /usr/share/apex-greet
+        #     COPY files/desktop/rime-greet /usr/share/rime-greet
         #
         # Docker fills the destination from the source's CONTENTS, so
-        # /usr/share/apex-greet/GreetContext.qml is a real image path — but the
+        # /usr/share/rime-greet/GreetContext.qml is a real image path — but the
         # two branches above only match an exact destination or one spelled
         # with a trailing slash, so every assertion against a file inside such a
         # tree resolved to None and was written off as UNRESOLVED. The greeter
@@ -144,7 +144,7 @@ for path in sys.argv[1:]:
         absolute IMAGE paths, and the two places this runs disagree about
         whether those paths exist.
 
-        On an APEX machine `/etc/firefox/policies/policies.json` EXISTS. With
+        On a Rime machine `/etc/firefox/policies/policies.json` EXISTS. With
         the rewrite removed and the repository's own `policies.json` replaced
         by `{ "policies": }`, this file reports "193 checked, 0 failed" and
         exits 0: it parsed the LIVE file and learned nothing about the repo.
@@ -220,7 +220,7 @@ for path in sys.argv[1:]:
         r = subprocess.run(['python3', '-c', rewritten] + rargv,
                            capture_output=True, text=True)
         checked += 1
-        if os.environ.get('APEX_CF_VERBOSE'):
+        if os.environ.get('RIME_CF_VERBOSE'):
             print(f"  check {path}:{lineno} python3 -c over {' '.join(wanted)} -> "
                   f"{'ok' if r.returncode == 0 else 'FAILED'}")
         if r.returncode != 0:
@@ -266,7 +266,7 @@ for path in sys.argv[1:]:
         i = j + 1
 
         env = {}
-        # `for m in hyprland niri labwc; do ... grep "^apex(\"${m}\")" ...` --
+        # `for m in hyprland niri labwc; do ... grep "^rime(\"${m}\")" ...` --
         # a pattern built from a loop variable is not a literal and cannot be
         # checked from here. It is UNRESOLVED, not a failure: reporting it as a
         # defect would be this file making the same mistake it exists to catch.
@@ -426,7 +426,7 @@ for path in sys.argv[1:]:
                 # A grep at the tail of a pipe reads the command's output, which
                 # only the build can produce. This used to `continue` SILENTLY --
                 # the worst of the three outcomes: not checked, and not counted
-                # as unchecked either. `apex-vm --help | grep -q 'no viewer'`
+                # as unchecked either. `rime-vm --help | grep -q 'no viewer'`
                 # could never pass, because that help went to stderr so the pipe
                 # carried nothing, and it cost a 50-minute build to find out
                 # while this file reported "0 failed" throughout.
@@ -473,7 +473,7 @@ for path in sys.argv[1:]:
             r = subprocess.run(['grep'] + gflags + [pattern] + repos, capture_output=True)
             matched = (r.returncode == 0)
             checked += 1
-            if os.environ.get('APEX_CF_VERBOSE'):
+            if os.environ.get('RIME_CF_VERBOSE'):
                 print(f"  check {path}:{lineno} {'if ' if is_if else ''}{'!' if negated else ''}grep {pattern!r} -> "
                       f"{'match' if matched else 'no match'} in {' '.join(repos)}")
             # `grep X` asserts a match; `! grep X` and `if grep X; then exit 1`
@@ -500,7 +500,7 @@ print(f"containerfile assertions: {checked} checked, {failures} failed, {unresol
 if unresolved:
     print("  UNRESOLVED (not checked, and not a pass — these run only inside the build):")
     # A bare total says how much is unchecked but not where the risk is. The
-    # apex-vm `--help | grep` that failed base at step 120/165 was a pipe, and
+    # rime-vm `--help | grep` that failed base at step 120/165 was a pipe, and
     # a pipe is the category the build alone can settle -- so the breakdown is
     # the part worth reading.
     import collections as _c

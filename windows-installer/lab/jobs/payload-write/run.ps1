@@ -1,7 +1,7 @@
 # ─────────────────────────────────────────────────────────────────────────────
 #  jobs/payload-write — priority 4, payload deployment, SYNTHETIC payload only.
 #
-#  Nothing in apex-windows-installer.exe writes to a disk: tests/test-
+#  Nothing in rime-windows-installer.exe writes to a disk: tests/test-
 #  windows-installer.sh section 0 denylists WriteFile/GENERIC_WRITE/etc. by
 #  name across windows-installer/src/ and allowlists every declared IOCTL/
 #  FSCTL constant. That gate is deliberate, not a gap to work around, so this
@@ -20,7 +20,7 @@
 #
 #  Three writes are attempted through \\.\PhysicalDriveN at verified offsets:
 #
-#    1. into the eligible Linux-filesystem partition (APEX-TARGET-A) -- MUST
+#    1. into the eligible Linux-filesystem partition (RIME-TARGET-A) -- MUST
 #       succeed, and MUST land exactly at the verified offset and nowhere
 #       else. Verified twice: read back in this same guest session, and
 #       independently from the HOST afterwards by reading the qcow2 overlay
@@ -41,7 +41,7 @@
 #  FileStream for the same reason; sizes come from Get-Partition instead.
 # ─────────────────────────────────────────────────────────────────────────────
 $ErrorActionPreference = 'Continue'
-$exe = Join-Path $PSScriptRoot 'apex-windows-installer.exe'
+$exe = Join-Path $PSScriptRoot 'rime-windows-installer.exe'
 if (-not (Test-Path $exe)) { "FATAL: no installer at $exe"; exit 2 }
 
 $LINUX_GUID = '{0fc63daf-8483-4772-8e79-3d69d8477de4}'
@@ -120,8 +120,8 @@ function Write-DrRegion {
 }
 
 '=== disk lookup ==='
-$disk = Get-Disk | Where-Object FriendlyName -eq 'APEX-FIXTURE-A' | Select-Object -First 1
-if (-not $disk) { "FATAL: no disk named APEX-FIXTURE-A"; exit 2 }
+$disk = Get-Disk | Where-Object FriendlyName -eq 'RIME-FIXTURE-A' | Select-Object -First 1
+if (-not $disk) { "FATAL: no disk named RIME-FIXTURE-A"; exit 2 }
 $drPath = "\\.\PhysicalDrive$($disk.Number)"
 "fixture-a is disk $($disk.Number), reached as $drPath"
 
@@ -131,7 +131,7 @@ $p3 = Get-Partition -DiskNumber $disk.Number | Where-Object { $_.GptType -eq $BA
 if (-not $p1) { "FATAL: no eligible (Linux filesystem, >15GB) partition found"; exit 2 }
 if (-not $p2) { "FATAL: no NTFS-sized Windows-data partition found"; exit 2 }
 if (-not $p3) { "FATAL: no Blank-basic partition found"; exit 2 }
-"p1 (APEX-TARGET-A, eligible)  offset=$($p1.Offset) size=$($p1.Size)"
+"p1 (RIME-TARGET-A, eligible)  offset=$($p1.Offset) size=$($p1.Size)"
 "p2 (Windows data, NTFS)       offset=$($p2.Offset) size=$($p2.Size) letter=$($p2.DriveLetter)"
 "p3 (Blank basic, RAW+lettered) offset=$($p3.Offset) size=$($p3.Size) letter=$($p3.DriveLetter)"
 

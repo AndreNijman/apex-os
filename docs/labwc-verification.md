@@ -1,4 +1,4 @@
-# Verifying APEX Floating (labwc)
+# Verifying Rime Floating (labwc)
 
 The roadmap's labwc test matrix, split into what a script can check and what
 needs a person.
@@ -7,7 +7,7 @@ needs a person.
 nested labwc using the shipped config. 18 checks. Run it before you touch
 anything in `files/desktop/labwc/`.
 
-**Also automated, elsewhere:** `tests/test-apex-firstrun.sh` covers config
+**Also automated, elsewhere:** `tests/test-rime-firstrun.sh` covers config
 seeding, XML validity, the window-chrome theme keys and keybind parity against
 the shell's own defaults.
 
@@ -35,7 +35,7 @@ you have not walked a checklist, treat it as unwalked.
 ## Screen sharing and portals
 
 The automated test proves the config names installed backends. It cannot prove
-that a video call gets a picture. Log into **APEX Floating** (the session
+that a video call gets a picture. Log into **Rime Floating** (the session
 picker's name for labwc) and check:
 
 - [ ] **Firefox:** screen share in a Jitsi/Meet call. Whole screen, then a
@@ -64,7 +64,7 @@ echo "$XDG_CURRENT_DESKTOP"     # must be labwc:wlroots
 
 ## Application grid
 
-Launch each one. Confirm it opens, draws its own decorations or takes APEX's
+Launch each one. Confirm it opens, draws its own decorations or takes Rime's
 without glitches, resizes, and closes.
 
 - [ ] Firefox
@@ -93,17 +93,17 @@ scaling, and windows you cannot drag.
 - [ ] Several windows of the same application
 - [ ] The thumbnail window switcher (`alt-tab`): previews render, and the OSD
       appears only on the focused output
-- [ ] Desktop right-click opens the APEX context menu, not the Openbox one
+- [ ] Desktop right-click opens the Rime context menu, not the Openbox one
 - [ ] With the shell killed, a plain right-click **restarts it** and then opens
-      the APEX menu, which `apex-desktop-menu` tries before giving up
+      the Rime menu, which `rime-desktop-menu` tries before giving up
 - [ ] With the shell killed and unable to start (e.g. rename
-      `/usr/libexec/apex-shell-autostart`), a plain right-click shows a
+      `/usr/libexec/rime-shell-autostart`), a plain right-click shows a
       notification naming the fallback, and **SUPER+right-click** opens the
       `menu.xml` emergency menu
 
   A plain right-click does *not* fall back to `menu.xml` on its own. A labwc
   mousebind is a fixed action and cannot branch, so the fallback sits on a
-  modifier instead of replacing the APEX menu without a word.
+  modifier instead of replacing the Rime menu without a word.
 
 ---
 
@@ -112,7 +112,7 @@ scaling, and windows you cannot drag.
 Needs a second display.
 
 - [ ] Hotplug: plug and unplug while logged in; windows should not vanish
-- [ ] Arrangement, resolution and refresh via APEX Settings → Display
+- [ ] Arrangement, resolution and refresh via Rime Settings → Display
 - [ ] Per-output scale, including a fractional value
 - [ ] Rotation
 - [ ] VRR, if the panel supports it
@@ -130,12 +130,12 @@ gamma-capable outputs whatever the compositor supports.
 - [ ] Night light warms the screen and returns to normal when disabled
 - [ ] The screen locks on idle
 - [ ] Unlock works, including after a suspend/resume cycle
-- [ ] `apex shell lock` locks at once
+- [ ] `rime shell lock` locks at once
 
 ---
 
 ## Recording a run
 
-After you walk a checklist, record the result in `apexlogs/` with the image
+After you walk a checklist, record the result in `rimelogs/` with the image
 digest and the date. Nobody can tell an unrecorded pass from a checklist nobody
 walked.

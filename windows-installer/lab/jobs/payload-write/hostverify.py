@@ -18,7 +18,7 @@ DISK_BYTES = 38654705664
 SECTOR     = 512
 
 # Partition extents, from the guest's own survey in payload-write.log.
-P1 = (1048576,     18254659584)   # APEX-TARGET-A, Linux filesystem, eligible
+P1 = (1048576,     18254659584)   # RIME-TARGET-A, Linux filesystem, eligible
 P2 = (18254659584, 19328401408)   # "Windows data", NTFS, mounted at E:
 P3 = (19328401408, 37582012416)   # "Blank basic", RAW, lettered F:
 GPT_PRI = (0, 34 * SECTOR)                       # protective MBR + hdr + entries

@@ -1,10 +1,10 @@
-# APEX Fleet: a design, and nothing else yet
+# Rime Fleet: a design, and nothing else yet
 
 Roadmap P2-019. This document is the deliverable: an architecture for managing
-many APEX machines that scales down to one, written against what the system
+many Rime machines that scales down to one, written against what the system
 already does instead of the shape a fleet product usually takes.
 
-**No code here exists.** There is no `apex fleet` verb, no enrolment record, no
+**No code here exists.** There is no `rime fleet` verb, no enrolment record, no
 server. Every mechanism named below either already ships and is cited, or is
 marked as not built. Every section keeps that distinction, because a design
 document that reads as a feature list is how a roadmap item gets recorded as
@@ -21,7 +21,7 @@ exists to prevent, and this design nearly reached it by accident.
 
 ## The rule that comes before the architecture
 
-> Enterprise/fleet support remains optional and does not turn personal APEX
+> Enterprise/fleet support remains optional and does not turn personal Rime
 > installs into managed devices by default.
 
 That is the third acceptance criterion, and it comes first on purpose: it
@@ -32,10 +32,10 @@ machine joins a fleet by an explicit, authenticated act that writes one record.
 With no record, the client is inert: it starts no timer, opens no socket, and
 contacts nothing. "Inert" has to be measurable, and this repository measures
 that kind of claim with a test that asserts the absence.
-`tests/test-apex-channel.sh` already proves `apex channel report` sends nothing,
+`tests/test-rime-channel.sh` already proves `rime channel report` sends nothing,
 by printing the payload and asserting nothing left the machine, and
 `docs/update-channels.md` puts it in the plainest sentence in the tree:
-*"Nothing, to nobody. APEX operates no telemetry service."* A fleet client must
+*"Nothing, to nobody. Rime operates no telemetry service."* A fleet client must
 keep that sentence true for an unenrolled machine, and its test must fail if
 the sentence stops being true.
 
@@ -51,19 +51,19 @@ claim is that a fleet is a distribution problem on top of it, not a new agent.
 
 | need | what ships today | where |
 | --- | --- | --- |
-| declarative state | `apex blueprint diff/apply`, idempotent, secrets never in the bundle | `apexd-core/src/blueprint.rs`, BASE-007 |
-| update rings | `edge`/`beta`/`candidate`/`stable`, promotion gated in CI on a cosign signature | `apex channel`, P1-046 |
-| staged rollout | a stable slot 0–99 per machine, and a signed rollout document in the registry that says how far the ramp has got | `apex channel rollout`, P1-046 |
+| declarative state | `rime blueprint diff/apply`, idempotent, secrets never in the bundle | `rimed-core/src/blueprint.rs`, BASE-007 |
+| update rings | `edge`/`beta`/`candidate`/`stable`, promotion gated in CI on a cosign signature | `rime channel`, P1-046 |
+| staged rollout | a stable slot 0–99 per machine, and a signed rollout document in the registry that says how far the ramp has got | `rime channel rollout`, P1-046 |
 | a health verdict | four rows that count, measured by the same probes as recovery | `ops::update`'s rollout stop |
-| inventory facts | channel, tag, digest, healthy, reasons | `apex channel report` |
-| device identity | a long-lived key, and paired devices | `apex-remote-core::identity`, `apex remote` |
-| credentials | root-owned per-uid store, no verb returns a value | `apex-secretd`, P0-002 |
+| inventory facts | channel, tag, digest, healthy, reasons | `rime channel report` |
+| device identity | a long-lived key, and paired devices | `rime-remote-core::identity`, `rime remote` |
+| credentials | root-owned per-uid store, no verb returns a value | `rime-secretd`, P0-002 |
 | capability grants | per project, per operation, spendable by the daemon only | P1-001 |
-| supply chain | SBOM, provenance, cosign verification | `apex provenance`, `apex trust`, P1-047 |
-| recovery | previous deployment, rollback, doctor, Safe Graphics | `apex recover`, `docs/recovery.md`, P2-018 |
-| privilege | seven request origins, `cloud-job` among them, declared not observed | `apex-agent-core::origin`, §7 |
+| supply chain | SBOM, provenance, cosign verification | `rime provenance`, `rime trust`, P1-047 |
+| recovery | previous deployment, rollback, doctor, Safe Graphics | `rime recover`, `docs/recovery.md`, P2-018 |
+| privilege | seven request origins, `cloud-job` among them, declared not observed | `rime-agent-core::origin`, §7 |
 
-Fleet designs most often get the last row wrong. APEX already has a vocabulary
+Fleet designs most often get the last row wrong. Rime already has a vocabulary
 for "this request came from somewhere other than a human at this keyboard", and
 `cloud-job` is one of its values. A fleet is a *remote origin*. It needs no new
 privilege model; it needs to declare which origin it is.
@@ -73,15 +73,15 @@ privilege model; it needs to declare which origin it is.
 **Not built.** The shape:
 
 ```
-apex fleet status                 # unenrolled, and what that means
-sudo apex fleet join <token>      # the one act that changes anything
-sudo apex fleet leave             # from this keyboard, always
+rime fleet status                 # unenrolled, and what that means
+sudo rime fleet join <token>      # the one act that changes anything
+sudo rime fleet leave             # from this keyboard, always
 ```
 
 A join token carries the fleet's identity and an endpoint. It is single-use and
 short-lived. The machine already has a long-lived key pair
-(`apex-remote-core::identity::Identity::load_or_create`), and the enrolment
-exchange should be the pairing exchange APEX already performs for a phone: the
+(`rime-remote-core::identity::Identity::load_or_create`), and the enrolment
+exchange should be the pairing exchange Rime already performs for a phone: the
 same Noise handshake, the same store, a different peer role. A second
 device-identity mechanism would be a second place for a key to be wrong.
 
@@ -91,21 +91,21 @@ repository:
 * **The token proves who the operator is, as well as where to connect.** An
   attacker can mint a token that only says where to connect by standing up a
   server.
-* **Enrolment is refused from inside a managed agent session.** `apex-secretd`
+* **Enrolment is refused from inside a managed agent session.** `rime-secretd`
   already refuses `Add`, `Remove`, `Grant` and `Approve` from a caller whose
-  cgroup or process ancestry says it is inside `apex-agentd`
-  (`apex-secretd/src/main.rs::refuse_a_session`). Joining a fleet is a larger
+  cgroup or process ancestry says it is inside `rime-agentd`
+  (`rime-secretd/src/main.rs::refuse_a_session`). Joining a fleet is a larger
   act than granting a capability and gets at least the same gate.
 * **Every verb is checked, including the dull ones.** P2-016 found
-  `apex-remoted` checking the caller's identity for `Pair` and for nothing else,
+  `rime-remoted` checking the caller's identity for `Pair` and for nothing else,
   so a second local account read the owner's machine key out of `Status`, the
   paired-device list out of `Devices`, and reached the device store through
   `Revoke`. A fleet client has more verbs than that and the same failure mode.
   Authorisation belongs in a `match` over every request variant, with a
   table-driven test that names each one;
-  `apex-remoted/src/control.rs::authorized` is the pattern.
+  `rime-remoted/src/control.rs::authorized` is the pattern.
 
-Enrolment writes one record under `/var/lib/apex-fleet/`, root-owned, `0700`:
+Enrolment writes one record under `/var/lib/rime-fleet/`, root-owned, `0700`:
 the fleet id, the endpoint, the operator's public key, and the time. Nothing
 else in this design runs unless that file exists.
 
@@ -137,7 +137,7 @@ The machine's own timer sets when it talks, and nothing reaches it in between.
 
 ### What a poll is
 
-A poll has the shape of `apex channel report`, which already composes a payload
+A poll has the shape of `rime channel report`, which already composes a payload
 the machine sends and can print instead. Out goes the inventory row; back comes
 a **document, never a command**: channel, ring ceiling, a hold flag, a policy
 body. Everything the client may do with it is something a local verb already
@@ -146,7 +146,7 @@ data channel: item 1 of the list this design refuses, wearing a different hat.
 
 ### When a poll happens
 
-On a jittered interval derived from the **stable slot 0–99** that `apex channel
+On a jittered interval derived from the **stable slot 0–99** that `rime channel
 status` already computes from `/etc/machine-id`. The reuse is deliberate:
 staging a rollout and staggering a poll both need a stable per-machine number in
 the same range that nobody has to configure, and ten thousand machines polling
@@ -180,7 +180,7 @@ itself:
 
 ## Inventory
 
-**Partly built.** `apex channel report` already computes the payload and already
+**Partly built.** `rime channel report` already computes the payload and already
 refuses to send it. A fleet's inventory report is that payload plus what an
 operator cannot get any other way:
 
@@ -201,7 +201,7 @@ operator cannot get any other way:
 Two decisions in that object:
 
 **The machine id sent is not `/etc/machine-id`.** The rollout slot comes from
-it, and `apex channel status` already says the slot "is derived from this
+it, and `rime channel status` already says the slot "is derived from this
 machine's id and is never sent anywhere". A fleet needs a stable handle, but not
 that one: sending it would turn a value the machine keeps to itself into a
 fleet-wide correlator.
@@ -216,16 +216,16 @@ per-user facts, they get their own consent surface and their own section.
 
 **Partly built. This section has the least new work in it.**
 
-APEX already computes, on the machine, everything a compliance check would ask
+Rime already computes, on the machine, everything a compliance check would ask
 for, in a form with stable identifiers:
 
-* `apex recover status --json`: eight rows with stable ids
+* `rime recover status --json`: eight rows with stable ids
   (`current-deployment`, `previous-deployment`, `secure-boot`, `filesystem`,
-  `gpu-driver`, `apex-shell`, `network`, `package-extensions`). The ids are
-  already a compatibility surface: apex-shell's `RecoveryService` keys on them.
-* `apex doctor --json`: the full health report.
-* `apex trust` and `apex provenance`: signature and SBOM state.
-* `apex channel status`: which ring, and whether this machine is behind it.
+  `gpu-driver`, `rime-shell`, `network`, `package-extensions`). The ids are
+  already a compatibility surface: rime-shell's `RecoveryService` keys on them.
+* `rime doctor --json`: the full health report.
+* `rime trust` and `rime provenance`: signature and SBOM state.
+* `rime channel status`: which ring, and whether this machine is behind it.
 
 A compliance policy is therefore a **predicate over facts that already have
 names**, not a new agent that re-measures the machine. A second measurement path
@@ -234,8 +234,8 @@ can run.
 
 A policy must never be a *remediation with root*. A fleet may say a machine is
 out of compliance and may refuse it a resource; it may not repair it behind the
-user's back. Repair is `sudo apex …` run by somebody who can answer for it, and
-APEX's polkit actions are `auth_admin` with `allow_inactive=no` so that somebody
+user's back. Repair is `sudo rime …` run by somebody who can answer for it, and
+Rime's polkit actions are `auth_admin` with `allow_inactive=no` so that somebody
 has to be at the keyboard (`docs/multi-user.md`).
 
 ## Update rings
@@ -243,7 +243,7 @@ has to be at the keyboard (`docs/multi-user.md`).
 **Mostly built, and the missing piece is already written down.**
 
 A ring is a pair: a channel, and a ceiling on the rollout slot. The channel half
-ships (`apex channel set`, promotion gated in CI on a cosign signature from this
+ships (`rime channel set`, promotion gated in CI on a cosign signature from this
 repository's `main` workflow). The slot half ships (`0–99`, stable across
 reboots, derived from `/etc/machine-id`).
 
@@ -265,7 +265,7 @@ The pointer went somewhere else: a **signed rollout document**, published at
 number moves. It is mutable, it needs no server, and a personal machine reads it
 with the cosign verification it already performs on the image. It ships:
 `docs/update-channels.md` describes it, and
-`apexd_core::channel::decide_rollout` is everything a machine does with one.
+`rimed_core::channel::decide_rollout` is everything a machine does with one.
 
 The ring is therefore:
 
@@ -278,7 +278,7 @@ the other two:
 
 | part | who serves it | to whom |
 | --- | --- | --- |
-| channel | the tag in the machine's bootc origin | everybody; `apex channel set` |
+| channel | the tag in the machine's bootc origin | everybody; `rime channel set` |
 | the ramp | the signed rollout document | everybody, per channel |
 | `halt` | the same document | everybody, per channel |
 | `max_slot` | a fleet | its enrolled machines only |
@@ -309,13 +309,13 @@ machine: a fleet may hold a rollout, and may not force one past a local refusal.
 
 **Not built, and the hardest section.**
 
-`apex-secretd`'s store is **per uid** (`/var/lib/apex-secretd/users/<uid>/`),
+`rime-secretd`'s store is **per uid** (`/var/lib/rime-secretd/users/<uid>/`),
 and authorisation depends on that: it is `SO_PEERCRED`'s uid, and no verb names
 another account. A fleet secret belongs to the machine, not to a uid.
 
 The design is a second namespace under the same daemon, not a second daemon:
 
-* `/var/lib/apex-secretd/machine/`: root-owned, `0700`, alongside `users/`.
+* `/var/lib/rime-secretd/machine/`: root-owned, `0700`, alongside `users/`.
 * **No local account can read** a machine credential. The daemon spends it as
   it spends a user's, and the same compile-time property holds: `SecretValue`
   has no `Serialize` impl and no `Response` variant can carry a credential.
@@ -328,7 +328,7 @@ A fleet's CA bundle and its 802.1X client certificates are files with owners and
 expiry dates, not brokered operations. They belong in the image's trust
 configuration with a fleet-managed drop-in. The property to preserve: a machine
 that leaves a fleet stops trusting the fleet's anchors, so the anchors go in a
-directory `apex fleet leave` empties, not in the base trust store.
+directory `rime fleet leave` empties, not in the base trust store.
 
 The need is real. An 802.1X profile that validates no CA certificate
 authenticates the client to the network and the network to nobody, and profiles
@@ -339,15 +339,15 @@ hand. A fleet that distributed an anchor and pinned it would close a real hole.
 
 **Partly built.** The pieces:
 
-* `apex blueprint` describes desired apps and applies idempotently, and
+* `rime blueprint` describes desired apps and applies idempotently, and
   BASE-007 proved its sync bundle carries no secrets (a sentinel token planted
   in the old broker's store, absent from the exported bundle).
-* `apex-perm-core` reports what an application holds (portals, Flatpak context,
+* `rime-perm-core` reports what an application holds (portals, Flatpak context,
   device ACLs) without inventing a second enforcement layer (P1-061).
 * Plugin trust decides whether third-party code may run at all (P1-025).
 
 A fleet app policy is a blueprint the machine did not write, plus a deny list,
-plus the rule `apex-perm-core` already follows: **report what is true, and do
+plus the rule `rime-perm-core` already follows: **report what is true, and do
 not claim what is not enforced.** A policy that says "the camera is disabled"
 when the mechanism is a Flatpak override a user can remove lies to the
 operator. The crate reports and adds no enforcement of its own, and the fleet
@@ -358,8 +358,8 @@ layer should follow the same rule.
 **Partly built.** An unwell machine is the one least able to tell anybody, which
 is why the recovery work sits under P2-018 and this section is short.
 
-* The per-machine half exists: `apex recover status`, `apex doctor`,
-  `sudo apex rollback`, and APEX Safe Graphics, which comes up on the CPU with
+* The per-machine half exists: `rime recover status`, `rime doctor`,
+  `sudo rime rollback`, and Rime Safe Graphics, which comes up on the CPU with
   its own compositor configuration when the normal desktop does not paint.
 * The fleet half *reports* that state and does not drive it. An operator can
   see that a machine rolled back and why. An operator cannot roll a machine back
@@ -373,7 +373,7 @@ operator wants in the hour after a bad release.
 
 ## The server side
 
-**Not built, and not part of APEX by design.** APEX ships a client and a
+**Not built, and not part of Rime by design.** Rime ships a client and a
 protocol. A fleet that worked only against one hosted server would make
 "optional" untrue for anybody who cannot or will not use it, so the server is a
 separate deliverable, and this section describes what it has to be, not what it
@@ -407,7 +407,7 @@ machine's half:
 * **More than one human, and a record of who signed what.** The machine
   therefore records the fleet's **root** key at enrolment and accepts a document
   signed by a delegated key whose delegation chains to that root: the shape
-  `apex trust` and P1-047's cosign verification already use, not a second one.
+  `rime trust` and P1-047's cosign verification already use, not a second one.
 * **Revoking a signer without re-enrolling every machine.** This is the same
   requirement from the other end, and the reason enrolment pins the root key.
 
@@ -425,10 +425,10 @@ that can do both, makes the console the whole security boundary.
 Inventory rows are the machine's claim about itself, and the server keeps them.
 Retention is the operator's decision, and this design does not get to make it.
 The *machine's* half is not negotiable, and a test can hold it: the client must
-be able to print exactly what it would send without sending it, the way `apex
-channel report` does today. `apex fleet report --dry-run` is that verb, and the
+be able to print exactly what it would send without sending it, the way `rime
+channel report` does today. `rime fleet report --dry-run` is that verb, and the
 suite that proves it asserts an absence, the pattern
-`tests/test-apex-channel.sh` already uses.
+`tests/test-rime-channel.sh` already uses.
 
 ### What the server must not be able to do
 
@@ -442,9 +442,9 @@ any of them.
 ## What must never be built
 
 Each item is something a fleet product normally ships, and each would break
-something APEX already guarantees.
+something Rime already guarantees.
 
-1. **A remote root shell, or any remote exec.** `apex-agentd` is unprivileged
+1. **A remote root shell, or any remote exec.** `rime-agentd` is unprivileged
    and per-user, and `AGENTS.md` requires it to stay that way: no polkit
    action, no system-bus name, no setuid helper. A fleet channel with exec is
    that helper by another name.
@@ -456,7 +456,7 @@ something APEX already guarantees.
    plugin, or an MCP server. One verb, run by somebody who can answer for it.
 4. **Telemetry from unenrolled machines.** Including "anonymous" counts. The
    sentence in `docs/update-channels.md` is the contract.
-5. **Fleet-owned user accounts.** `apex user` owns account creation
+5. **Fleet-owned user accounts.** `rime user` owns account creation
    (`docs/multi-user.md`), and a second write path into account state is the
    defect class P2-016 spent a round on.
 
@@ -471,13 +471,13 @@ of a gap list gets built wrong.
   whether the freshness bound is an expiry in the document or a maximum age the
   client enforces. The rollout document answered the second question for itself
   with both: it carries its own `expires`, and the client caps any document's
-  age at 30 days (`MAX_DOCUMENT_AGE` in `apexd_core::channel`). Neither
+  age at 30 days (`MAX_DOCUMENT_AGE` in `rimed_core::channel`). Neither
   question changes the threat model; the direction of the connection was the
   part that did.
 * ~~**Multi-tenancy on the operator side.**~~ **Settled above: tenancy is key
   separation, read is a server permission and write is a cryptographic one.**
   The delegation format remains open (whether the chain from the root key
-  reuses `apex trust`'s cosign machinery verbatim or only its shape), and it
+  reuses `rime trust`'s cosign machinery verbatim or only its shape), and it
   cannot be settled without a server to try it against.
 * **`relay/` is not in the fleet path.** It is deployed and serving the
   phone-to-desktop pairing it was written for (its README records that
@@ -491,7 +491,7 @@ of a gap list gets built wrong.
   move takes, which is a saving for the site and nothing for the registry.
   Serving the ceiling itself is negligible, written down here so nobody
   re-derives it: the rollout document is a few hundred bytes, fetched once per
-  `apex update` alongside a manifest the machine was fetching anyway, four or
+  `rime update` alongside a manifest the machine was fetching anyway, four or
   five orders of magnitude under the image pull it gates. **The real cost runs
   the other way:** a ramp makes a bad build take *longer* to reach everybody,
   and therefore longer to be noticed, so the fleet's own reporting has to be at
@@ -517,7 +517,7 @@ of a gap list gets built wrong.
     the ramp: two unrelated operations wired together, and nobody would find
     that by reading either one.
 * **The evidence standard for compliance.** Still open, for the same reason as
-  before. A row from `apex doctor --json` is a claim by the machine about
+  before. A row from `rime doctor --json` is a claim by the machine about
   itself; a fleet that treats it as proof has outsourced its trust to the
   device it is checking. Attestation is the answer, and it depends on L-001's
   TPM work, which is `partial`. This design can already say which rows would

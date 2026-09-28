@@ -1,5 +1,5 @@
 # ─────────────────────────────────────────────────────────────────────────────
-#  APEX-OS — labwc environment (seeded per-user by apex-shell-firstrun;
+#  Rime OS — labwc environment (seeded per-user by rime-shell-firstrun;
 #  @KB_LAYOUT@ / @KB_VARIANT@ are substituted at seed time).
 #
 #  labwc reads this file BEFORE starting, as KEY=VALUE pairs — no `export`, no

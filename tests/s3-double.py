@@ -1,10 +1,10 @@
 #!/usr/bin/env python3
 """A loopback S3 that verifies SigV4 with an implementation of its own.
 
-Used by tests/test-apex-backup-s3.sh. It is the third implementation of the
+Used by tests/test-rime-backup-s3.sh. It is the third implementation of the
 signature in this repository, and that is the whole reason it exists:
 
-  * `apexd/apex-secretd/src/providers/s3/sigv4.rs` is the one under test;
+  * `rimed/rime-secretd/src/providers/s3/sigv4.rs` is the one under test;
   * its known-answer tests are botocore's numbers, pinned;
   * this recomputes the signature from *what actually arrived on the socket*
     with nothing but `hmac` and `hashlib`, and answers 403 when it does not
@@ -87,7 +87,7 @@ def object_path(bucket, key):
 #: Spelled here rather than in the suite so the two cannot drift: a suite that
 #: asked for some other name would get a plain 404 and the assertion would be
 #: measuring a missing object instead of an aborted transfer.
-OVERSIZE_KEY = "apex-oversize-probe.bin"
+OVERSIZE_KEY = "rime-oversize-probe.bin"
 
 
 def safe(segment):

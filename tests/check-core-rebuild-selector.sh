@@ -219,8 +219,8 @@ R="$WORK/repo"
 (
     set -e
     git init -q -b main "$R"
-    git -C "$R" config user.email 'ci@apex.test'
-    git -C "$R" config user.name 'apex ci'
+    git -C "$R" config user.email 'ci@rime.test'
+    git -C "$R" config user.name 'rime ci'
     git -C "$R" config commit.gpgsign false
     mkdir -p "$R/kernel" "$R/tests" "$R/docs"
     echo 'FROM x'  > "$R/Containerfile.core"
@@ -264,7 +264,7 @@ json.dump({
     'steps.filter.outputs.core': filt,
     'github.event_name': event,
     'github.sha': sha,
-    'github.actor': 'apex-ci',
+    'github.actor': 'rime-ci',
     'secrets.GITHUB_TOKEN': 'not-a-token',
 }, open(w + '/ctx.json', 'w'))
 PY
@@ -275,7 +275,7 @@ PY
         PATH="$WORK/bin:$PATH" GITHUB_OUTPUT="$out" RUNNER_TEMP="$WORK" \
         FAKE_LOG="$WORK/skopeo.log" FAKE_CORE="$FAKE_CORE" FAKE_LEGACY="$FAKE_LEGACY" \
         FAKE_UPSTREAM="$FAKE_UPSTREAM" INSPECT_BACKOFF=0 \
-        IMAGE=ghcr.io/test/apex-os TAG_CORE=core LEGACY_CORE=ghcr.io/test/apex-os-core \
+        IMAGE=ghcr.io/test/rime-os TAG_CORE=core LEGACY_CORE=ghcr.io/test/rime-os-core \
         UPSTREAM_BASE=quay.io/test/fedora-bootc:43 \
         bash "$WORK/gate.sh"
     ) > "$WORK/log" 2>&1

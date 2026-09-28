@@ -1,32 +1,32 @@
-# The signature gate: what APEX refuses to deploy, and why it might refuse yours
+# The signature gate: what Rime refuses to deploy, and why it might refuse yours
 
 Roadmap §27, the enforcement half.
 
 ## What changed
 
-CI has cosign-signed every APEX image it ever published, under a keyless GitHub
+CI has cosign-signed every Rime image it ever published, under a keyless GitHub
 identity, and it verifies its own signature before it moves a tag. Until the
-gate, none of that reached your machine. `apex trust` (the readout half) could
-tell you nobody had checked, and `apex update` then deployed the image anyway.
+gate, none of that reached your machine. `rime trust` (the readout half) could
+tell you nobody had checked, and `rime update` then deployed the image anyway.
 
-Now `apex update` checks the signature of the image it is about to deploy, and
+Now `rime update` checks the signature of the image it is about to deploy, and
 refuses to deploy one it cannot verify.
 
 ## Seeing what your machine will do, before it does it
 
 ```bash
-apex trust --gate
+rime trust --gate
 ```
 
 It needs no root, writes nothing to the network and stages nothing. It resolves
 the tag your machine follows, fetches the signature the registry holds for
 whatever that tag points at *now*, verifies it, and prints the decision
-`apex update` would reach. Both run the same code, so the two cannot drift. The
+`rime update` would reach. Both run the same code, so the two cannot drift. The
 exit status is 1 if the update would be refused.
 
 ```
   Digest            sha256:daf8c8eb2928ab995a67ea9df43aa78116f638278bd0e7d32135a8b272e4ebec
-  Signature         verified — signed by https://github.com/AndreNijman/apex-os/.github/workflows/build-image.yml@refs/heads/main
+  Signature         verified — signed by https://github.com/AndreNijman/rime-os/.github/workflows/build-image.yml@refs/heads/main
                     (the transparency log was not checked)
   Provenance        none published — the registry holds no SBOM attestation for this digest
   Enforcement       signature enforce, provenance warn
@@ -34,16 +34,16 @@ exit status is 1 if the update would be refused.
                     this image has no provenance: the registry holds no SBOM attestation for this digest
 ```
 
-`apex trust --verify` answers a different question: is the image you are
-already **running** signed? The two answers often disagree, because `apex`,
+`rime trust --verify` answers a different question: is the image you are
+already **running** signed? The two answers often disagree, because `rime`,
 `daily`, `gaming-mesa`, `gaming-nvidia` and `edge` all name one digest, and CI
 moves it on every successful build of `main` (see
 [update-channels.md](update-channels.md)). Your machine runs the digest from
 your last update, and the tag has moved since. Only the image you have not
 deployed yet can be refused, so that is the one the gate checks.
 
-`apex update --check` does **not** run the gate. It asks bootc whether an update
-exists, which is a third question; `apex trust --gate` is the readout for the
+`rime update --check` does **not** run the gate. It asks bootc whether an update
+exists, which is a third question; `rime trust --gate` is the readout for the
 gate.
 
 ## What "verify" means here
@@ -54,7 +54,7 @@ For the digest the registry serves now, all of these must hold:
 2. the ECDSA signature verifies over that payload under the public key in the
    signing certificate;
 3. that certificate chains to the **pinned** Sigstore root the image ships at
-   `/usr/share/apex-os/trust/fulcio-root.pem`. Pinned, and not taken from the
+   `/usr/share/rime-os/trust/fulcio-root.pem`. Pinned, and not taken from the
    signature: a cosign signature carries Fulcio's intermediate *and* root, and
    checking a certificate against a root the certificate handed you proves
    nothing;
@@ -77,19 +77,19 @@ log was not checked" instead of an unqualified "verified".
 **cosign is not used, and is not installed.** Fedora does not package it
 (`dnf5 repoquery cosign 'cosign*' 'sigstore*'` returns nothing across every
 configured repository), so a gate built on it would have been dead code on every
-machine APEX ships to. The gate verifies with `skopeo` and `openssl`, which the
+machine Rime ships to. The gate verifies with `skopeo` and `openssl`, which the
 image already carries.
 
 ## What the SBOM attestation contains
 
 The provenance half of the gate checks an SBOM that CI attaches to the image as
-a signed attestation. "SBOM" names two different artefacts and APEX publishes
+a signed attestation. "SBOM" names two different artefacts and Rime publishes
 the smaller one, so this section spells out what the document covers.
 
 **History:** the step is in `build-image.yml` on `main` and runs only when the
-repository variable `APEX_ATTEST_SBOM` is `true`. The first attested image,
+repository variable `RIME_ATTEST_SBOM` is `true`. The first attested image,
 9690b65d (the merge of PR #42, 2026-09-23), was refused by every machine:
-`apex update` before 0e48a1009 read the attestation's signature from a layer
+`rime update` before 0e48a1009 read the attestation's signature from a layer
 annotation that cosign leaves empty on a DSSE attestation, and a provenance
 check that is present and fails refuses even under `provenance=warn`. CI then
 published unattested images until the fleet ran 0e48a1009 or later, which is
@@ -97,7 +97,7 @@ why `provenance` defaults to `warn` further down. On 2026-09-28, with the L16
 and katana both on images that carry the fix, the variable was set to `true`,
 and every build since attaches the attestation. A machine still on an image
 older than 0e48a1009 (built before 2026-09-23) refuses these updates; it needs
-`provenance=off` in `/etc/apex/trust.conf` for one update, which brings the
+`provenance=off` in `/etc/rime/trust.conf` for one update, which brings the
 fixed verifier.
 
 **What is in it.** Every package syft finds in the image (9,830 of them), with
@@ -138,14 +138,14 @@ publishes. The headroom is thin, and the package count drives it: the Electron
 bundles are the part that moves.
 
 The choice was between a fuller SBOM that is signed but **not** in any public
-log, and the package inventory that is. APEX takes the second. A transparency
+log, and the package inventory that is. Rime takes the second. A transparency
 log that covers only the artefacts small enough to fit guarantees little, and
 the dropped parts are *structure*: anyone can reproduce them from the same
 bytes, and nobody can reproduce identity that way. For the full document, the
 image is public and its digest is in the signature:
 
 ```bash
-syft "registry:ghcr.io/andrenijman/apex-os@sha256:..." -o spdx-json
+syft "registry:ghcr.io/andrenijman/rime-os@sha256:..." -o spdx-json
 ```
 
 That reproduces the full file-level document, with the dependency graph, from
@@ -156,15 +156,15 @@ minutes.
 
 ```bash
 cosign verify-attestation \
-  ghcr.io/andrenijman/apex-os@sha256:... \
+  ghcr.io/andrenijman/rime-os@sha256:... \
   --type spdxjson \
-  --certificate-identity-regexp '^https://github\.com/AndreNijman/apex-os/\.github/workflows/build-image\.yml@' \
+  --certificate-identity-regexp '^https://github\.com/AndreNijman/rime-os/\.github/workflows/build-image\.yml@' \
   --certificate-oidc-issuer https://token.actions.githubusercontent.com \
   | jq -r '.payload | @base64d | fromjson | .predicate.packages[] | "\(.name) \(.versionInfo)"'
 ```
 
 Your machine does less than this, and says so (see the transparency-log note
-above). APEX does not install `cosign` and Fedora does not package it; run the
+above). Rime does not install `cosign` and Fedora does not package it; run the
 command above on a workstation that has it.
 
 ## What is enforced, and how to change it
@@ -183,26 +183,26 @@ verifies **wrongly** is the signature of an attack, and a flaky network does not
 explain it away. A signature that is missing, or that could not be fetched, is
 a gap, and a warning is the proportionate answer to a gap.
 
-The image's defaults are in `/usr/share/apex-os/trust/enforcement.conf`:
+The image's defaults are in `/usr/share/rime-os/trust/enforcement.conf`:
 
 ```
 signature=enforce
 provenance=warn
 ```
 
-`signature=enforce` because every published APEX image is signed, so refusing an
+`signature=enforce` because every published Rime image is signed, so refusing an
 unsigned one costs nothing. `provenance=warn` because the images CI publishes
 now carry no SBOM attestation (the step is off; see *Tense* above), so `enforce`
 would refuse every update on every machine until the publisher turns it back
 on. That would be an outage posing as a security control.
 
 To change it on your machine, write only the keys you want to change to
-`/etc/apex/trust.conf`. APEX reads it after the image's file and it wins per
+`/etc/rime/trust.conf`. Rime reads it after the image's file and it wins per
 key, so a one-line file is enough:
 
 ```bash
 # stop warning about the SBOM attestation nobody publishes yet
-printf 'provenance=off\n' | sudo tee /etc/apex/trust.conf
+printf 'provenance=off\n' | sudo tee /etc/rime/trust.conf
 ```
 
 A value that is not one of the three leaves the setting where it was, and the
@@ -210,7 +210,7 @@ note names the file and line. A typo must not turn a machine that checks
 signatures into one that does not:
 
 ```
-  note              /etc/apex/trust.conf:1: enfore is not one of enforce, warn, off — leaving signature as it was
+  note              /etc/rime/trust.conf:1: enfore is not one of enforce, warn, off — leaving signature as it was
 ```
 
 A file that exists but cannot be read also produces a note, and the built-in
@@ -219,20 +219,20 @@ default applies. An unreadable policy file never turns into a permissive one.
 ## When it refuses
 
 ```
-apex: this update is being held. The image it would deploy does not verify.
+rime: this update is being held. The image it would deploy does not verify.
   the signature for sha256:daf8c8eb...
   the signature does not verify: the signature covers sha256:1234abcd..., not the sha256:daf8c8eb... being deployed
 
 This machine enforces: signature enforce, provenance warn.
 
-APEX publishes a cosign signature for every image, and this machine checks it before deploying.
+Rime publishes a cosign signature for every image, and this machine checks it before deploying.
 A refusal means this machine could not establish that the image the registry is serving
 is the one it was told to expect — see the line above for whether that is because the
 signature was wrong or because the check could not be made. Either way the update
 stops before anything is downloaded.
 
-If you know why and want it anyway: `sudo apex update --allow-unverified`.
-To change what is enforced permanently, edit /etc/apex/trust.conf — see docs/trust-enforcement.md.
+If you know why and want it anyway: `sudo rime update --allow-unverified`.
+To change what is enforced permanently, edit /etc/rime/trust.conf — see docs/trust-enforcement.md.
 ```
 
 Read the middle line. **"does not verify" and "could not be checked" are
@@ -261,15 +261,15 @@ and `signature=warn` does the same for the other half.
 
 **`/etc/containers/policy.json` is a separate mechanism, and the gate leaves it
 alone.** It ships as a single `insecureAcceptAnything` and is what `bootc`
-itself consults; `apex trust` reports it under "next update". If you ever
+itself consults; `rime trust` reports it under "next update". If you ever
 tighten it, mind the interaction: the gate fetches signatures with `skopeo
 copy`, which honours the same policy, so a `sigstoreSigned` scope covering this
 repository would start requiring signatures on the `.sig` artifacts themselves,
 and the gate would report "could not be checked".
 
-**Running `bootc upgrade` yourself bypasses the gate.** `apex update` is the
+**Running `bootc upgrade` yourself bypasses the gate.** `rime update` is the
 only path in this project that consults it. That boundary is by design: the gate
-is a policy APEX applies to its own update verb, and it does not restrain bootc
+is a policy Rime applies to its own update verb, and it does not restrain bootc
 or the kernel.
 
 **Rotating the pinned root** takes an image build. The build checks the root's
@@ -278,18 +278,18 @@ refusing every machine's next update.
 
 ## The rename to Rime OS
 
-APEX becomes Rime OS, and the repository moves from `AndreNijman/apex-os` to
+Rime becomes Rime OS, and the repository moves from `AndreNijman/rime-os` to
 `AndreNijman/rime-os`. A Sigstore identity names the repository, so every image
-built after the rename carries a new signer. `apex` accepts both identities by
-default (`EXPECTED_SIGNER` and `RENAMED_SIGNER` in `apexd/apex/src/trust.rs`),
+built after the rename carries a new signer. `rime` accepts both identities by
+default (`EXPECTED_SIGNER` and `RENAMED_SIGNER` in `rimed/rime/src/trust.rs`),
 and it learned the new one a release before the rename. A machine that updated
 to that release keeps updating across the rename. An image signed before it,
 and a rollback to one, still verifies.
 
 The image name moves too, and GHCR does not redirect a renamed package. Every
-published build goes out under both `ghcr.io/andrenijman/apex-os` and
+published build goes out under both `ghcr.io/andrenijman/rime-os` and
 `ghcr.io/andrenijman/rime-os`, with the same digest, a signature and attestation
-made under each name, and the same tags. On `apex update`, a machine that tracks
+made under each name, and the same tags. On `rime update`, a machine that tracks
 a tag of the old name checks whether the new name serves that tag. If it does,
 the update runs `bootc switch` to it after the gate verifies the new name. If
 the switch fails, the update checks the old name and upgrades under it instead.
@@ -297,7 +297,7 @@ A digest pin or a fork's image never moves.
 
 ## A fork that publishes its own images
 
-Three optional image-owned files, all under `/usr/share/apex-os/trust/`:
+Three optional image-owned files, all under `/usr/share/rime-os/trust/`:
 
 | file | replaces |
 |---|---|
