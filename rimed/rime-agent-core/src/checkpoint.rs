@@ -41,10 +41,10 @@ use serde::{Deserialize, Serialize};
 use crate::git;
 use crate::paths;
 
-/// Ref namespace for checkpoint commits. Under `refs/rime/` rather than
+/// Ref namespace for checkpoint commits. Under `refs/apex/` rather than  // rime-rename: keep
 /// `refs/heads/` so checkpoints never appear as branches, are never pushed by
 /// a default `git push`, and cannot collide with the user's own refs.
-pub const REF_PREFIX: &str = "refs/rime/checkpoints";
+pub const REF_PREFIX: &str = "refs/apex/checkpoints";  // rime-rename: keep (git ref namespace existing checkpoints live under)
 
 /// The package set the engine builds from.
 const PKG_REQUESTED: &str = "/var/lib/rime/pkg/requested";
@@ -678,7 +678,7 @@ mod tests {
     fn checkpoint_refs_live_outside_refs_heads() {
         // A checkpoint that appeared as a branch would be pushed by a default
         // `git push` and would clutter every branch listing.
-        assert!(REF_PREFIX.starts_with("refs/rime/"));
+        assert!(REF_PREFIX.starts_with("refs/apex/"));  // rime-rename: keep (REF_PREFIX)
         assert!(!REF_PREFIX.starts_with("refs/heads/"));
     }
 
@@ -697,7 +697,7 @@ mod tests {
             packages: vec![],
             dirty: true,
         };
-        assert_eq!(cp.git_ref(), "refs/rime/checkpoints/1756800000000-abc12345");
+        assert_eq!(cp.git_ref(), "refs/apex/checkpoints/1756800000000-abc12345");  // rime-rename: keep (REF_PREFIX)
         assert_eq!(cp.short_commit(), "abc12345def6");
     }
 

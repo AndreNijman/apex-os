@@ -521,7 +521,7 @@ pub const MAX_OUTSTANDING_CHALLENGES: usize = 8;
 /// Present so that these bytes can never be mistaken for, or replayed as, some
 /// other thing Rime asks a key to sign. The version is in it because the
 /// binding below is a wire format between this daemon and a future one.
-pub const CHALLENGE_CONTEXT: &str = "rime-agent/remote-elevation/v1";
+pub const CHALLENGE_CONTEXT: &str = "apex-agent/remote-elevation/v1";  // rime-rename: keep (domain label inside every signed challenge; crypto labels do not move)
 
 /// One outstanding request for a touch.
 ///
