@@ -112,6 +112,9 @@ wifi.powersave=2'
     mkfile "$R/etc/$O/guest-accounts"        'guest1'
     mkfile "$R/etc/$O/lid.toml"              'policy = "stay-awake"'
     mkfile "$R/etc/$O/firewall.d/ipp.conf"   'tcp 631'
+    mkfile "$R/etc/$O/firewall.d/$O-remote.conf" 'tcp 7717'
+    mkfile "$R/usr/share/rime/firewall/services" 'ipp          tcp 631   printer
+rime-remote  tcp 7717  Rime Remote'
     mkfile "$R/etc/$O-greet/edition"         'gaming'
     mkfile "$R/etc/NetworkManager/conf.d/20-rime-wifi-powersave.conf" '[connection]
 wifi.powersave=2'
@@ -179,6 +182,8 @@ check_migrated() {
     no_ "…and the default is not kept aside (/usr/etc has it)" "[ -e '$R/etc/rime/guest-accounts.rime-migrate-displaced' ]"
     is  "the user's lid.toml moved"                          'policy = "stay-awake"' "$(cat "$R/etc/rime/lid.toml" 2>/dev/null)"
     is  "the user's firewall exception moved"                'tcp 631' "$(cat "$R/etc/rime/firewall.d/ipp.conf" 2>/dev/null)"
+    is  "the apex-remote exception carries the catalogue's new name" 'tcp 7717' "$(cat "$R/etc/rime/firewall.d/rime-remote.conf" 2>/dev/null)"
+    no_ "…and is not left to be applied twice"              "[ -e '$R/etc/rime/firewall.d/$O-remote.conf' ]"
     is  "the greeter's edition override moved"               gaming "$(cat "$R/etc/rime-greet/edition" 2>/dev/null)"
     is  "/etc/apex is a link to rime"                        rime "$(readlink "$R/etc/$O" 2>/dev/null)"
     yes_ "the edited NetworkManager drop-in took the new name" "grep -q 'wifi.powersave=3' '$R/etc/NetworkManager/conf.d/20-rime-wifi-powersave.conf'"

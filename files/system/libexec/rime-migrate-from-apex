@@ -308,12 +308,33 @@ migrate_last_session() {
 
 # ── /etc ─────────────────────────────────────────────────────────────────────
 migrate_etc() {
-    local etc="$ROOT/etc" p
+    local etc="$ROOT/etc" p d f b n
     [ -d "$etc" ] || return 0
     for p in "$etc/$OLD"*; do
         exists "$p" || continue
         migrate_tree "$p" "$etc/$(new_name "$(basename -- "$p")")" etc
     done
+
+    # A firewall exception is a file named after its catalogue entry, and one
+    # entry was renamed: `apex firewall allow apex-remote` left
+    # firewall.d/apex-remote.conf, which still opens the port (the rules come
+    # from the file's contents) but names nothing the catalogue knows, so
+    # `rime firewall deny rime-remote` would say it was never allowed. Renamed
+    # only when the image's catalogue has the new name.  (rime-rename: keep)
+    local fw="$etc/$NEW/firewall.d" cat="$ROOT/usr/share/$NEW/firewall/services" c
+    if [ -d "$fw" ] && [ ! -L "$fw" ] && [ -r "$cat" ]; then
+        for c in "$fw/$OLD"-*.conf; do
+            [ -f "$c" ] && [ ! -L "$c" ] || continue
+            n="$(new_name "$(basename -- "$c" .conf)")"
+            awk -v n="$n" '$1 == n { found = 1 } END { exit !found }' "$cat" || continue
+            if exists "$fw/$n.conf"; then
+                displace "$c" "$fw/$n.conf" etc
+                case $? in 0) [ "$DRY" = 1 ] || move "$c" "$fw/$n.conf" ;; esac
+            else
+                move "$c" "$fw/$n.conf"
+            fi
+        done
+    fi
 
     # Drop-ins the image ships under a name that changed. An edited copy of the
     # old one is still here (the ostree merge keeps edits); the image's new one
@@ -323,7 +344,6 @@ migrate_etc() {
     # actually ships the new name: a file of the user's own that happens to
     # contain the word is not ours. No link is left: a drop-in directory reads
     # every name in it, and a link would load the same file twice.
-    local d f b n
     for d in sudoers.d profile.d NetworkManager/conf.d security/limits.d \
              dconf/db/local.d fastfetch; do
         [ -d "$etc/$d" ] || continue
