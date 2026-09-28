@@ -19,7 +19,8 @@
 #    /var/usrlocal/lib/apex-appimage -> rime-appimage (installed AppImages)
 #    /var/lib/flatpak/.apex-flathub-added, .apex-flatpaks-installed
 #                                                 -> the .rime- markers
-#    /etc/apex*              -> /etc/rime*          (apex, apex-greet, ...)
+#    /etc/apex, /etc/apex-greet -> /etc/rime, /etc/rime-greet (only these two;
+#                               an owner's own /etc/apex-* is left alone)
 #    an edited copy of an image drop-in whose name changed (sudoers.d,
 #    profile.d, NetworkManager/conf.d, security/limits.d, dconf, fastfetch)
 #                            -> the new name
@@ -310,7 +311,12 @@ migrate_last_session() {
 migrate_etc() {
     local etc="$ROOT/etc" p d f b n
     [ -d "$etc" ] || return 0
-    for p in "$etc/$OLD"*; do
+    # The two /etc trees the old image read (795a1face): its own settings and
+    # the greeter's edition override. An explicit list, unlike /var/lib: an
+    # owner's own /etc/apex-something (katana's /etc/apex-runner, the GitHub
+    # runner's token, read by a unit this image knows nothing about) is not ours
+    # to move.
+    for p in "$etc/$OLD" "$etc/$OLD-greet"; do
         exists "$p" || continue
         migrate_tree "$p" "$etc/$(new_name "$(basename -- "$p")")" etc
     done

@@ -116,6 +116,8 @@ wifi.powersave=2'
     mkfile "$R/usr/share/rime/firewall/services" 'ipp          tcp 631   printer
 rime-remote  tcp 7717  Rime Remote'
     mkfile "$R/etc/$O-greet/edition"         'gaming'
+    # The owner's own: katana's GitHub runner keeps its token here.
+    mkfile "$R/etc/$O-runner/gh-token"       'token'
     mkfile "$R/etc/NetworkManager/conf.d/20-rime-wifi-powersave.conf" '[connection]
 wifi.powersave=2'
     mkfile "$R/etc/NetworkManager/conf.d/20-$O-wifi-powersave.conf" '[connection]
@@ -186,6 +188,7 @@ check_migrated() {
     no_ "…and is not left to be applied twice"              "[ -e '$R/etc/rime/firewall.d/$O-remote.conf' ]"
     is  "the greeter's edition override moved"               gaming "$(cat "$R/etc/rime-greet/edition" 2>/dev/null)"
     is  "/etc/apex is a link to rime"                        rime "$(readlink "$R/etc/$O" 2>/dev/null)"
+    yes_ "an owner's own /etc/apex-runner is not touched"    "[ -d '$R/etc/$O-runner' ] && [ ! -L '$R/etc/$O-runner' ] && [ ! -e '$R/etc/rime-runner' ]"
     yes_ "the edited NetworkManager drop-in took the new name" "grep -q 'wifi.powersave=3' '$R/etc/NetworkManager/conf.d/20-rime-wifi-powersave.conf'"
     no_ "…and no old-name copy is left to be read twice"     "[ -e '$R/etc/NetworkManager/conf.d/20-$O-wifi-powersave.conf' ]"
     is  "an unedited sudoers rule is left alone"             'default rule' "$(cat "$R/etc/sudoers.d/040-rime-session-select" 2>/dev/null)"
