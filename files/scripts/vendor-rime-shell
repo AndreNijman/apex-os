@@ -4,7 +4,8 @@ set -euo pipefail
 ref="${1:?usage: vendor-rime-shell REF [DEST] [STRICT]}"
 dest="${2:-/usr/share/rime-shell}"
 strict="${3:-0}"
-repo="https://github.com/AndreNijman/rime-shell"
+# The old repository name resolves before the GitHub rename and redirects after it.
+repo="https://github.com/AndreNijman/apex-shell"  # rime-rename: keep
 
 [[ "${strict}" = 0 || "${strict}" = 1 ]] || {
     echo "strict must be 0 or 1" >&2

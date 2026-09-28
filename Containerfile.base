@@ -94,12 +94,14 @@ ARG RIME_SHELL_REF=main
 RUN set -eux; \
     dnf5 -y install qt6-linguist; \
     rm -rf /b; \
+    # rime-rename: keep. The shell repository's old name resolves before the
+    # GitHub rename and redirects after it; the new one resolves only after.
     if git clone --depth 1 --branch "${RIME_SHELL_REF}" \
-         https://github.com/AndreNijman/rime-shell /b 2>/dev/null; then \
+         https://github.com/AndreNijman/apex-shell /b 2>/dev/null; then \
         echo "catalogue: cloned rime-shell at ${RIME_SHELL_REF}"; \
     else \
         rm -rf /b; \
-        git clone https://github.com/AndreNijman/rime-shell /b; \
+        git clone https://github.com/AndreNijman/apex-shell /b; : 'rime-rename: keep (see above)'; \
         git -C /b checkout --detach "${RIME_SHELL_REF}"; \
     fi; \
     mkdir -p /out; \
@@ -787,12 +789,14 @@ RUN set -eux; \
     # matters: a failed clone can leave a partial directory behind, and the second
     # clone would then fail on "destination path already exists" — turning a
     # recoverable case into a hard build failure.
+    # rime-rename: keep. The shell repository's old name resolves before the
+    # GitHub rename and redirects after it; the new one resolves only after.
     if git clone --depth 1 --branch "${RIME_SHELL_REF}" \
-         https://github.com/AndreNijman/rime-shell /usr/share/rime-shell 2>/dev/null; then \
+         https://github.com/AndreNijman/apex-shell /usr/share/rime-shell 2>/dev/null; then \
         echo "cloned rime-shell at ref ${RIME_SHELL_REF}"; \
     else \
         rm -rf /usr/share/rime-shell; \
-        git clone https://github.com/AndreNijman/rime-shell /usr/share/rime-shell; \
+        git clone https://github.com/AndreNijman/apex-shell /usr/share/rime-shell; : 'rime-rename: keep (see above)'; \
         git -C /usr/share/rime-shell checkout --detach "${RIME_SHELL_REF}"; \
         echo "cloned rime-shell and checked out ${RIME_SHELL_REF}"; \
     fi; \
