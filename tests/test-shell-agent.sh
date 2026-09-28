@@ -87,6 +87,24 @@ exit 1
 EOF
 chmod +x "${DOWN}/rime"
 
+# The pre-rename CLI name, stubbed on BOTH fixture PATHs, and it only records.
+# On a machine still running APEX, /usr/share/fish/vendor_conf.d/apex-agent.fish
+# (rime-rename: keep — the host's file name) is the host's copy of the
+# pre-rename integration, and it defines `a` as `apex agent run`. Its name no
+# longer matches the file under test, so fish sourced both, the host's `a` won,
+# and `a --agent claude "fix the tests"` reached the real /usr/bin/apex: a live
+# agent session on the developer's machine, measured. The fixture's vendor dir
+# now shadows that name (below); this stub is the second wall, and the fish
+# section fails if anything ever reaches it.
+for d in "$BIN" "$DOWN"; do
+    cat > "${d}/apex" <<EOF
+#!/bin/sh
+printf 'APEX-STUB %s\n' "\$*" >> "${WORK}/apex-stub.log"
+exit 1
+EOF
+    chmod +x "${d}/apex"
+done
+
 # A PATH with no `rime` at all — a partial image, a container. Symlinks rather
 # than the real /usr/bin, because that is where `rime` lives on a developer
 # machine and including it would test nothing.
@@ -157,6 +175,22 @@ bash_prompt() { # cwd state_home
         ". '${ROOT}/files/desktop/shell/agent.sh'; rime_agent_prompt" 2>/dev/null)
 }
 
+# ── the bash/zsh opt-out, under both of its names ────────────────────────────
+# APEX_NO_AGENT_ALIASES is what a user set before the rename (rime-rename: keep),
+# in a ~/.zshrc.local or ~/.bashrc that no image rewrites. Honouring only the new
+# name would hand them back shortcuts that shadow their own `a`.
+section "bash opt-out"
+sh_has_a() { # extra-env…
+    env -i PATH="${BIN}:/usr/bin:/bin" HOME="${WORK}/home" "$@" bash --noprofile --norc -c \
+        ". '${ROOT}/files/desktop/shell/agent.sh'; type a >/dev/null 2>&1 && echo has-a || echo no-a" 2>/dev/null
+}
+[ "$(sh_has_a)" = has-a ] \
+    && ok "bash gets the shortcuts by default" || bad "bash gets the shortcuts by default"
+for v in RIME_NO_AGENT_ALIASES APEX_NO_AGENT_ALIASES; do
+    [ "$(sh_has_a "$v=1")" = no-a ] \
+        && ok "$v=1 drops the bash shortcuts" || bad "$v=1 drops the bash shortcuts"
+done
+
 # ─────────────────────────────────────────────────────────────────────────────
 #  fish
 # ─────────────────────────────────────────────────────────────────────────────
@@ -175,6 +209,9 @@ else
     FD="${WORK}/fishdata"
     mkdir -p "${FD}/fish/vendor_conf.d" "${FD}/fish/vendor_completions.d"
     cp "$FISH_CONF" "${FD}/fish/vendor_conf.d/"
+    # Shadows a host's pre-rename copy: fish sources the first file of each
+    # name across its vendor directories, and this directory comes first.
+    : > "${FD}/fish/vendor_conf.d/apex-agent.fish"  # rime-rename: keep — the host file it shadows
     cp "${FISH_COMP}"/*.fish "${FD}/fish/vendor_completions.d/"
 
     # Every shipped file must parse. A syntax error in a vendor_conf.d file is a
@@ -244,6 +281,12 @@ functions -q rime_agent_prompt; and echo prompt-kept; or echo BAD-PROMPT')"
     printf '%s' "$out" | grep -q '^gone$' && printf '%s' "$out" | grep -q 'prompt-kept' \
         && ok "RIME_NO_AGENT_ALIASES drops the shortcuts and keeps the prompt" \
         || { bad "RIME_NO_AGENT_ALIASES drops the shortcuts and keeps the prompt"; printf '      %s\n' "$out"; }
+
+    # …and under its pre-rename name (rime-rename: keep — what users already set).
+    out="$(fishrun "$PROJ" APEX_NO_AGENT_ALIASES=1 -- 'functions -q a; and echo BAD; or echo gone')"
+    printf '%s' "$out" | grep -q '^gone$' \
+        && ok "APEX_NO_AGENT_ALIASES, the pre-rename name, drops them too" \
+        || { bad "APEX_NO_AGENT_ALIASES, the pre-rename name, drops them too"; printf '      %s\n' "$out"; }
 
     out="$(fishrun "$PROJ" RIME_NO_AGENT_ALIASES=1 -- 'complete -C "rime agent attach "')"
     printf '%s' "$out" | grep -q '^4' \
@@ -355,6 +398,13 @@ functions -q rime_agent_prompt; and echo prompt-kept; or echo BAD-PROMPT')"
         'complete -C "rime agent attach "' 2>&1) )"
     [ -z "$out" ] && ok "completion with the runtime down prints nothing at all" \
                   || { bad "completion with the runtime down prints nothing at all"; printf '      %s\n' "$out"; }
+fi
+
+# Nothing in any section may have reached the pre-rename CLI (see the stub).
+if [ -s "${WORK}/apex-stub.log" ]; then
+    bad "no shortcut reached the pre-rename apex CLI"; sed 's/^/      /' "${WORK}/apex-stub.log"
+else
+    ok "no shortcut reached the pre-rename apex CLI"
 fi
 
 # ─────────────────────────────────────────────────────────────────────────────

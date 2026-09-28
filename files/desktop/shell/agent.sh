@@ -36,7 +36,9 @@ if [ -n "${_RIME_AGENT_SH_SOURCED}" ]; then
 fi
 _RIME_AGENT_SH_SOURCED=1
 
-if [ -z "${RIME_NO_AGENT_ALIASES}" ]; then
+# APEX_NO_AGENT_ALIASES is the same opt-out under the name a user set before
+# the rename, in a ~/.zshrc.local or ~/.bashrc this image never rewrites.
+if [ -z "${RIME_NO_AGENT_ALIASES}${APEX_NO_AGENT_ALIASES:-}" ]; then  # rime-rename: keep — opt-out users already set
     # Start an agent here. `a` with no arguments opens the agent interactively;
     # `a "fix the tests"` gives it an opening instruction.
     a() { rime agent run "$@"; }

@@ -29,6 +29,8 @@ _rime_greet=1
 
 # Explicit user opt-out.
 [ -n "${RIME_NO_GREETING:-}" ] && _rime_greet=0
+# …under the name it had before the rename, set in a file this image never rewrites.
+[ -n "${APEX_NO_GREETING:-}" ] && _rime_greet=0  # rime-rename: keep — opt-out users already set
 
 # Interactive only. Printing a 20-line logo into a non-interactive shell corrupts
 # scp/sftp/rsync sessions and anything parsing command output.

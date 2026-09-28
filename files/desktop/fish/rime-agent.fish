@@ -99,7 +99,8 @@ if command -q rime
             rime request verbs 2>/dev/null | string match -rg '^  ([a-z][^ ]*)'
         end
 
-        if not set -q RIME_NO_AGENT_ALIASES
+        # APEX_NO_AGENT_ALIASES: the same opt-out under its pre-rename name.
+        if not set -q RIME_NO_AGENT_ALIASES; and not set -q APEX_NO_AGENT_ALIASES  # rime-rename: keep — opt-out users already set
             # Start an agent here. `a` with no arguments opens the agent
             # interactively; `a "fix the tests"` gives it an opening
             # instruction.
