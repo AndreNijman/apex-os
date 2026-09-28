@@ -682,6 +682,10 @@ pub enum RequestOrigin {
     #[default]
     LocalTerminal,
     /// The desktop shell's Agent Center.
+    ///
+    /// `apex-shell` is what every record written before the rename says, and
+    /// what an older peer still sends; it reads as this origin.
+    #[serde(alias = "apex-shell")]  // rime-rename: keep (records and peers written before the rename)
     RimeShell,
     /// Claude Remote Control, driving a session from elsewhere.
     ///
@@ -728,7 +732,7 @@ impl RequestOrigin {
     pub fn parse(s: &str) -> Option<RequestOrigin> {
         match s {
             "local-terminal" => Some(RequestOrigin::LocalTerminal),
-            "rime-shell" => Some(RequestOrigin::RimeShell),
+            "rime-shell" | "apex-shell" => Some(RequestOrigin::RimeShell),  // rime-rename: keep (the origin's name before the rename)
             "claude-remote-control" | "remote-control" => Some(RequestOrigin::RemoteControl),
             "scheduled-job" => Some(RequestOrigin::ScheduledJob),
             "mcp" => Some(RequestOrigin::Mcp),
@@ -1242,6 +1246,18 @@ mod tests {
         for v in PolicyPreset::ALL {
             assert_eq!(PolicyPreset::parse(v.as_str()), Some(*v), "{v}");
         }
+    }
+
+    #[test]
+    fn the_shell_origin_written_before_the_rename_still_reads() {
+        // Audit records, grants and requests on disk say `apex-shell`, and so
+        // does a peer that has not been updated yet.
+        assert_eq!(RequestOrigin::parse("apex-shell"), Some(RequestOrigin::RimeShell));  // rime-rename: keep
+        let old: RequestOrigin = serde_json::from_str(r#""apex-shell""#).unwrap();  // rime-rename: keep
+        assert_eq!(old, RequestOrigin::RimeShell);
+        // Written under the new name only.
+        assert_eq!(serde_json::to_string(&old).unwrap(), r#""rime-shell""#);
+        assert_eq!(RequestOrigin::RimeShell.as_str(), "rime-shell");
     }
 
     #[test]

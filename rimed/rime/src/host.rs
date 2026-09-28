@@ -379,17 +379,24 @@ fn ssh_capture(host: &Host, name: &str, command: &str) -> Result<(bool, String)>
     Ok((out.status.success(), stdout))
 }
 
+/// The names a peer's CLI can have, asked in this order: the current one, then
+/// the one every machine had before the rename to Rime OS.
+const PEER_CLIS: [&str; 2] = ["rime", "apex"];  // rime-rename: keep (the CLI on peers not yet updated)
+
 /// Probe a host: ask its `rime` first, fall back to the shell probe.
 fn probe(name: &str, host: &Host) -> Result<HostCaps> {
     let now = unix_now();
 
     // Path 1: a Rime peer describes itself. `--json` output is the same struct
-    // this deserialises.
-    let describe = remote_sh(&["rime", "host", "describe", "--json"]);
-    if let Ok((ok, out)) = ssh_capture(host, name, &describe) {
-        if ok {
-            if let Some(caps) = parse_describe(&out, now) {
-                return Ok(caps);
+    // this deserialises. A peer not yet updated past the rename has the CLI
+    // under its old name, and describes itself just as well.
+    for cli in PEER_CLIS {
+        let describe = remote_sh(&[cli, "host", "describe", "--json"]);
+        if let Ok((ok, out)) = ssh_capture(host, name, &describe) {
+            if ok {
+                if let Some(caps) = parse_describe(&out, now) {
+                    return Ok(caps);
+                }
             }
         }
     }
@@ -927,14 +934,15 @@ mod tests {
 
     // ── the join between the two ends ────────────────────────────────────────
 
-    /// Exactly what `rime host describe --json` printed on the katana — a Rime
-    /// gaming box with an RTX 3070 and an Alder Lake iGPU — captured from a real
-    /// ssh run rather than written by hand.
+    /// Exactly what `apex host describe --json` printed on the katana — an
+    /// APEX gaming box with an RTX 3070 and an Alder Lake iGPU — captured from
+    /// a real ssh run rather than written by hand, and kept as it was printed:
+    /// it is also what a peer not yet updated past the rename still sends.  // rime-rename: keep
     ///
     /// A fixture I invented would prove that `parse_describe` accepts what I
     /// imagine `describe_self` emits. This proves it accepts what the other
     /// machine actually sent.
-    const KATANA_DESCRIBE: &str = r#"{"probed_at":1788439662,"rime_version":"0.1.0","variant":"gaming","os":"Rime OS","cpus":20,"memory_mib":63997,"gpus":["i915","nvidia"],"accel":["cuda","vulkan"],"agentd":false,"ai":false,"podman":true}"#;
+    const KATANA_DESCRIBE: &str = r#"{"probed_at":1788439662,"apex_version":"0.1.0","variant":"gaming","os":"APEX-OS","cpus":20,"memory_mib":63997,"gpus":["i915","nvidia"],"accel":["cuda","vulkan"],"agentd":false,"ai":false,"podman":true}"#;  // rime-rename: keep (captured verbatim from an APEX peer)
 
     #[test]
     fn a_real_peers_describe_output_parses_into_every_field() {
@@ -969,7 +977,7 @@ mod tests {
         // What an `rime` predating this verb actually prints. Observed: the
         // katana's installed 0.1.0 did exactly this, which is why the live
         // probe took the shell path.
-        let clap_err = "error: unrecognized subcommand 'host'\n\nUsage: rime <COMMAND>\n";
+        let clap_err = "error: unrecognized subcommand 'host'\n\nUsage: apex <COMMAND>\n";  // rime-rename: keep (captured verbatim from an APEX peer)
         assert!(parse_describe(clap_err, 0).is_none());
     }
 

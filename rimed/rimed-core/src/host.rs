@@ -491,7 +491,10 @@ pub struct HostCaps {
     #[serde(default)]
     pub probed_at: i64,
     /// `rime --version`'s version, when `rime` is installed at all.
-    #[serde(default, skip_serializing_if = "Option::is_none")]
+    ///
+    /// `apex_version` is the key an APEX peer prints and every probe cached
+    /// before the rename carries, so it reads into this field.
+    #[serde(default, alias = "apex_version", skip_serializing_if = "Option::is_none")]  // rime-rename: keep (peers and caches written before the rename)
     pub rime_version: Option<String>,
     /// `VARIANT_ID` from the remote `/etc/os-release` — `daily`, `gaming`, …
     #[serde(default, skip_serializing_if = "Option::is_none")]
@@ -808,6 +811,23 @@ mod tests {
     }
 
     // ── capabilities ─────────────────────────────────────────────────────────
+
+    #[test]
+    fn caps_an_apex_peer_or_an_old_cache_wrote_still_name_the_version() {
+        // `apex_version` is what an APEX peer prints and what every cached
+        // probe from before the rename says. With `unknown` flattened beside
+        // it, the alias has to be proven rather than assumed: a miss would
+        // file the key under `unknown` and read the host as not Rime at all.
+        let c: HostCaps =
+            serde_json::from_str(r#"{"apex_version":"0.1.0","cpus":4}"#).unwrap();  // rime-rename: keep
+        assert_eq!(c.rime_version.as_deref(), Some("0.1.0"));
+        assert!(c.unknown.is_empty(), "{:?}", c.unknown);
+        assert!(c.is_rime());
+        // And it is written back under the new name only.
+        let text = serde_json::to_string(&c).unwrap();
+        assert!(text.contains(r#""rime_version":"0.1.0""#), "{text}");
+        assert!(!text.contains("apex_version"), "{text}");  // rime-rename: keep
+    }
 
     #[test]
     fn caps_keep_fields_a_newer_rime_reported() {
