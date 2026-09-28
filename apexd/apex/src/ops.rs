@@ -662,7 +662,7 @@ fn has_appimages() -> bool {
 ///   working around a health stop silently stopped checking signatures too,
 ///   and the two have nothing to do with each other. `--allow-unverified` is
 ///   long on purpose.
-fn trust_gate(allow_unverified: bool) -> Option<i32> {
+fn trust_gate(allow_unverified: bool, target: Option<&str>) -> Option<i32> {
     let roots = crate::trust::Roots::from_env();
     let report = crate::trust::offline_report(&roots);
     // The origin read is handed to the gate rather than unwrapped here. An
@@ -670,12 +670,18 @@ fn trust_gate(allow_unverified: bool) -> Option<i32> {
     // deploy an image nobody checked, under `signature=enforce`, while
     // printing a single line about it — the EACCES class this repository
     // swept fourteen readers for, one layer up.
+    //
+    // `target` is the image this update will MOVE to instead of the one the
+    // machine tracks (the rename, see `rename_target`). The gate has to answer
+    // for what is about to be deployed, so it verifies that name when there is
+    // one.
     let g = crate::verify::gate(
         &roots,
-        match (&report.image, &report.image_error) {
-            (Some(r), _) => Ok(Some(r.as_str())),
-            (None, Some(e)) => Err(e.as_str()),
-            (None, None) => Ok(None),
+        match (target, &report.image, &report.image_error) {
+            (Some(t), _, _) => Ok(Some(t)),
+            (None, Some(r), _) => Ok(Some(r.as_str())),
+            (None, None, Some(e)) => Err(e.as_str()),
+            (None, None, None) => Ok(None),
         },
     );
     let refusal = crate::verify::refusal(
@@ -792,6 +798,58 @@ fn finish_update(started: Instant, mut worst: i32, opts: &UpdateOptions) -> i32 
     worst
 }
 
+/// The image name every APEX machine was installed tracking, and the one it
+/// moves to with the rebrand to Rime OS (2026-09-28).
+///
+/// GHCR does not redirect a renamed package, so a machine keeps pulling the
+/// name in its origin until something moves it. The workflow publishes every
+/// build under both names for the transition; this is the something. It moves
+/// a machine on its next update once the new name serves the machine's tag,
+/// and until then it does nothing at all.
+const OLD_IMAGE: &str = "ghcr.io/andrenijman/apex-os";
+const NEW_IMAGE: &str = "ghcr.io/andrenijman/rime-os";
+
+/// The reference a machine following `current` should move to, if any.
+///
+/// Only a TAG of the old name moves. A digest pin stays: whoever pinned a
+/// digest chose that exact image. A fork's image, or a machine already on the
+/// new name, is left alone.
+fn renamed_reference(current: &str) -> Option<String> {
+    if current.contains('@') {
+        return None;
+    }
+    let tag = current.strip_prefix(OLD_IMAGE)?.strip_prefix(':')?;
+    if tag.is_empty() || tag.contains('/') {
+        return None;
+    }
+    Some(format!("{NEW_IMAGE}:{tag}"))
+}
+
+/// Whether the registry already serves `reference`.
+///
+/// Asked before every move, so a machine never switches to a name nothing has
+/// been published under. Until the repository is renamed that is every machine
+/// on every update, and the answer costs one manifest request. A fixture root
+/// answers from a file instead of the network.
+fn published(reference: &str) -> bool {
+    let roots = crate::trust::Roots::from_env();
+    if let Some(root) = &roots.fixture {
+        return root.join("registry/renamed-published").exists();
+    }
+    capture(
+        "skopeo",
+        &["inspect", "--raw", "--no-tags", &format!("docker://{reference}")],
+    )
+    .is_some()
+}
+
+/// The image this update moves the machine to, or `None` to update in place.
+fn rename_target() -> Option<String> {
+    let current = crate::channel::booted_reference().ok()?;
+    let target = renamed_reference(&current)?;
+    published(&target).then_some(target)
+}
+
 pub fn update(opts: UpdateOptions) -> i32 {
     let started = Instant::now();
     let mut worst = 0;
@@ -804,6 +862,9 @@ pub fn update(opts: UpdateOptions) -> i32 {
                     eprintln!("apex: cannot check for an OS update: {e}");
                     worst = 1;
                 }
+            }
+            if let Some(t) = rename_target() {
+                println!("apex: APEX is now Rime OS: the next update moves this machine to {t}");
             }
         }
         if !opts.skip_firmware {
@@ -836,8 +897,12 @@ pub fn update(opts: UpdateOptions) -> i32 {
     // §27's signature gate. Deliberately after §26's stop, which is a local
     // file read and costs nothing, and deliberately before `record_update`
     // and `FsyncGuard::disable` below, which both write. See `trust_gate`.
+    // Decided once, before the gate, so the gate verifies the image that will
+    // actually be deployed and the image step deploys the image that was
+    // verified.
+    let target = if opts.firmware_only { None } else { rename_target() };
     if !opts.firmware_only {
-        if let Some(code) = trust_gate(opts.allow_unverified) {
+        if let Some(code) = trust_gate(opts.allow_unverified, target.as_deref()) {
             return code;
         }
     }
@@ -897,6 +962,34 @@ pub fn update(opts: UpdateOptions) -> i32 {
                 "apex: the boot path was migrated. Reboot when you like; this update did not\n\
                  apex: change the OS image, and the next one will come through the new path."
             );
+            return finish_update(started, worst, &opts);
+        }
+
+        // The rename. `bootc switch` stages the new name's image exactly as an
+        // upgrade stages the old one's, and rewrites the origin, so every update
+        // after this one is an ordinary `bootc upgrade` under the new name.
+        let mut moved = false;
+        if let Some(t) = &target {
+            println!("apex: APEX is now Rime OS: moving this machine to {t}");
+            match run("bootc", &["switch", t]) {
+                Ok(0) => moved = true,
+                Ok(code) => eprintln!(
+                    "apex: could not move to {t} (bootc switch exited {code}); updating under {OLD_IMAGE} instead"
+                ),
+                Err(e) => eprintln!(
+                    "apex: could not move to {t} ({e}); updating under {OLD_IMAGE} instead"
+                ),
+            }
+            // The gate above verified the NEW name. Falling back deploys from
+            // the old one, so that has to pass the same gate first; a refusal
+            // here skips the image and still lets the rest of the update run.
+            if !moved {
+                if let Some(code) = trust_gate(opts.allow_unverified, None) {
+                    return finish_update(started, worst.max(code), &opts);
+                }
+            }
+        }
+        if moved {
             return finish_update(started, worst, &opts);
         }
 
@@ -1216,6 +1309,32 @@ impl LocalView {
 // subtly wrong is invisible: one would let a privileged verb through (or block
 // an unprivileged one), the other would make a completely successful update
 // report failure. Both are pure functions precisely so they can be pinned here.
+#[cfg(test)]
+mod rename_tests {
+    use super::renamed_reference;
+
+    #[test]
+    fn a_tag_of_the_old_name_moves_to_the_same_tag_of_the_new_one() {
+        for tag in ["apex", "daily", "gaming-mesa", "gaming-nvidia", "edge"] {
+            assert_eq!(
+                renamed_reference(&format!("ghcr.io/andrenijman/apex-os:{tag}")).as_deref(),
+                Some(format!("ghcr.io/andrenijman/rime-os:{tag}").as_str())
+            );
+        }
+    }
+
+    #[test]
+    fn a_digest_pin_a_fork_and_the_new_name_stay_where_they_are() {
+        assert_eq!(renamed_reference("ghcr.io/andrenijman/apex-os@sha256:abc"), None);
+        assert_eq!(renamed_reference("ghcr.io/andrenijman/apex-os:daily@sha256:abc"), None);
+        assert_eq!(renamed_reference("ghcr.io/someone/apex-os:daily"), None);
+        assert_eq!(renamed_reference("ghcr.io/andrenijman/rime-os:daily"), None);
+        assert_eq!(renamed_reference("ghcr.io/andrenijman/apex-os-core:latest"), None);
+        assert_eq!(renamed_reference("ghcr.io/andrenijman/apex-os"), None);
+        assert_eq!(renamed_reference("ghcr.io/andrenijman/apex-os:"), None);
+    }
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;

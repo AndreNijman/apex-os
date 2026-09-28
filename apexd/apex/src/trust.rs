@@ -57,7 +57,8 @@ use std::process::Command;
 use clap::Args;
 use serde_json::{json, Map, Value};
 
-/// The keyless Sigstore identity `build-image.yml` signs under.
+/// The keyless Sigstore identity `build-image.yml` has signed every image
+/// under so far.
 ///
 /// It is a constant because it is a fact about this repository's release
 /// pipeline, not a setting: `.github/workflows/build-image.yml` computes
@@ -68,12 +69,29 @@ use serde_json::{json, Map, Value};
 const EXPECTED_SIGNER: &str =
     "https://github.com/AndreNijman/apex-os/.github/workflows/build-image.yml@refs/heads/main";
 
+/// The same identity after the repository is renamed to `AndreNijman/rime-os`.
+///
+/// A Sigstore identity names the repository, so the rename changes the signer
+/// of every image built after it. A machine that knew only [`EXPECTED_SIGNER`]
+/// would refuse all of them under `signature=enforce` and could never update
+/// again, which is also how it would miss the fix. So the fleet learns the new
+/// name one release BEFORE the rename (2026-09-28), and keeps the old one so an
+/// image signed before the rename, and a rollback to one, still verifies.
+const RENAMED_SIGNER: &str =
+    "https://github.com/AndreNijman/rime-os/.github/workflows/build-image.yml@refs/heads/main";
+
+/// Every identity this machine accepts an image from when no override names one.
+fn default_signers() -> Vec<String> {
+    vec![EXPECTED_SIGNER.to_string(), RENAMED_SIGNER.to_string()]
+}
+
 /// The OIDC issuer behind that identity. GitHub Actions' token endpoint.
 pub const EXPECTED_ISSUER: &str = "https://token.actions.githubusercontent.com";
 
-/// An image-owned file that replaces [`EXPECTED_SIGNER`] when present.
+/// An image-owned file that replaces [`default_signers`] when present.
 ///
-/// One line, the Sigstore certificate identity to expect. A downstream that
+/// One Sigstore certificate identity per line (blank lines and `#` comments are
+/// ignored), any of which is accepted. A downstream that
 /// rebuilds APEX under its own workflow has a different signer and every other
 /// word in this report stays true, so the identity is the one thing worth
 /// making a file.
@@ -548,24 +566,34 @@ pub fn booted_digest(roots: &Roots) -> Result<String, String> {
         .ok_or_else(|| "the booted deployment records no manifest digest".to_string())
 }
 
-/// The identity this machine expects, and where that expectation came from.
-pub(crate) fn expected_signer(roots: &Roots) -> String {
+/// The identities in an override file: one per line, blanks and `#` comments
+/// skipped.
+fn identity_lines(text: &str) -> Vec<String> {
+    text.lines()
+        .map(str::trim)
+        .filter(|l| !l.is_empty() && !l.starts_with('#'))
+        .map(str::to_string)
+        .collect()
+}
+
+/// The identities this machine accepts, and where that expectation came from.
+pub(crate) fn expected_signers(roots: &Roots) -> Vec<String> {
     match roots.read(SIGNER_OVERRIDE) {
         Ok(s) => {
-            let t = s.trim().to_string();
-            if t.is_empty() {
-                EXPECTED_SIGNER.to_string()
+            let v = identity_lines(&s);
+            if v.is_empty() {
+                default_signers()
             } else {
-                t
+                v
             }
         }
-        Err(_) => EXPECTED_SIGNER.to_string(),
+        Err(_) => default_signers(),
     }
 }
 
 /// The identity this machine expects on a rollout document.
 ///
-/// Derived from [`expected_signer`] by swapping the workflow file, rather than
+/// Derived from [`expected_signers`] by swapping the workflow file, rather than
 /// being a second constant. The two identities are the same repository and the
 /// same ref and differ only in which workflow signs; a downstream that
 /// overrides one and forgets the other would get a rollout document that never
@@ -575,21 +603,27 @@ pub(crate) fn expected_signer(roots: &Roots) -> String {
 /// [`ROLLOUT_SIGNER_OVERRIDE`] exists anyway for the case the derivation cannot
 /// cover: a downstream that signs its documents from a differently NAMED
 /// workflow.
-pub(crate) fn expected_rollout_signer(roots: &Roots) -> String {
+pub(crate) fn expected_rollout_signers(roots: &Roots) -> Vec<String> {
     if let Ok(s) = roots.read(ROLLOUT_SIGNER_OVERRIDE) {
-        let t = s.trim().to_string();
-        if !t.is_empty() {
-            return t;
+        let v = identity_lines(&s);
+        if !v.is_empty() {
+            return v;
         }
     }
-    let image = expected_signer(roots);
     // Only when the base identity really does name the build workflow. An
     // override that names something else entirely is left alone rather than
     // rewritten into a path nobody publishes under.
-    match image.rfind(BUILD_WORKFLOW) {
-        Some(at) => format!("{}{ROLLOUT_WORKFLOW}{}", &image[..at], &image[at + BUILD_WORKFLOW.len()..]),
-        None => image,
-    }
+    expected_signers(roots)
+        .into_iter()
+        .map(|image| match image.rfind(BUILD_WORKFLOW) {
+            Some(at) => format!(
+                "{}{ROLLOUT_WORKFLOW}{}",
+                &image[..at],
+                &image[at + BUILD_WORKFLOW.len()..]
+            ),
+            None => image,
+        })
+        .collect()
 }
 
 /// The registry half, under `--verify`.
@@ -649,7 +683,7 @@ pub struct Report {
     pub image_error: Option<String>,
     pub pull: Pull,
     pub policy: Policy,
-    pub expected_signer: String,
+    pub expected_signers: Vec<String>,
     /// What this machine refuses to deploy. A file read, so `apex status` can
     /// print it without touching the network — and it must, because a machine
     /// that enforces nothing and a machine that enforces everything look
@@ -687,7 +721,7 @@ pub fn offline_report(roots: &Roots) -> Report {
         image_error,
         pull,
         policy,
-        expected_signer: expected_signer(roots),
+        expected_signers: expected_signers(roots),
         enforcement: crate::verify::enforcement(roots),
         registry: None,
     }
@@ -738,7 +772,13 @@ pub fn to_json(r: &Report) -> Value {
         _ => {}
     }
     root.insert("nextPullPolicy".into(), Value::Object(pol));
-    root.insert("expectedSigner".into(), Value::from(r.expected_signer.clone()));
+    // `expectedSigner` stays, as the first identity, for anything that read the
+    // single-identity report; `expectedSigners` is the whole set.
+    root.insert(
+        "expectedSigner".into(),
+        Value::from(r.expected_signers.first().cloned().unwrap_or_default()),
+    );
+    root.insert("expectedSigners".into(), Value::from(r.expected_signers.clone()));
 
     root.insert(
         "enforcement".into(),
@@ -895,7 +935,7 @@ pub fn render(r: &Report) -> String {
         // Without `--verify` the full report is the status block: there is
         // nothing more to say, and inventing a section would suggest there is.
         let mut s = render_block(r);
-        s.push_str(&format!("\nExpected signer\n  {}\n", r.expected_signer));
+        s.push_str(&signer_block(&r.expected_signers));
         return s;
     };
     let mut s = render_offline(r);
@@ -918,13 +958,26 @@ pub fn render(r: &Report) -> String {
             s.push_str("  signature     : not checked — nothing was verified\n");
         }
     }
-    if r.expected_signer != EXPECTED_SIGNER
+    if r.expected_signers != default_signers()
         || !matches!(
             reg.verification.as_ref().map(|v| &v.signature),
             Some(crate::verify::Verdict::Verified { .. })
         )
     {
-        s.push_str(&format!("\nExpected signer\n  {}\n", r.expected_signer));
+        s.push_str(&signer_block(&r.expected_signers));
+    }
+    s
+}
+
+/// The "Expected signer" section: every accepted identity, one per line.
+fn signer_block(signers: &[String]) -> String {
+    let mut s = String::from(if signers.len() == 1 {
+        "\nExpected signer\n"
+    } else {
+        "\nExpected signer (any of)\n"
+    });
+    for id in signers {
+        s.push_str(&format!("  {id}\n"));
     }
     s
 }
@@ -1188,7 +1241,7 @@ mod tests {
             image_error: None,
             pull: Pull::Unverified,
             policy: Policy::AcceptsAnything,
-            expected_signer: EXPECTED_SIGNER.to_string(),
+            expected_signers: default_signers(),
             enforcement: e,
             registry: Some(Registry {
                 digest: Some("sha256:abc".into()),
@@ -1210,13 +1263,18 @@ mod tests {
         // reports as "no rollout is staged".
         let none = Roots { fixture: Some(PathBuf::from("/nonexistent-fixture-root")) };
         assert_eq!(
-            expected_rollout_signer(&none),
-            "https://github.com/AndreNijman/apex-os/.github/workflows/promote-channel.yml@refs/heads/main"
+            expected_rollout_signers(&none),
+            vec![
+                "https://github.com/AndreNijman/apex-os/.github/workflows/promote-channel.yml@refs/heads/main",
+                "https://github.com/AndreNijman/rime-os/.github/workflows/promote-channel.yml@refs/heads/main",
+            ]
         );
         // And it is NOT the image identity, which is the mistake worth failing
         // on: both live in the same repository and are signed by the same
         // account, so "same signer" is the plausible wrong answer.
-        assert_ne!(expected_rollout_signer(&none), expected_signer(&none));
+        for id in expected_rollout_signers(&none) {
+            assert!(!expected_signers(&none).contains(&id), "{id}");
+        }
 
         // A downstream that overrides the image signer is followed.
         let dir = std::env::temp_dir().join(format!("apex-rollout-signer-{}", std::process::id()));
@@ -1229,16 +1287,16 @@ mod tests {
         .unwrap();
         let forked = Roots { fixture: Some(dir.clone()) };
         assert_eq!(
-            expected_rollout_signer(&forked),
-            "https://github.com/acme/apex-os/.github/workflows/promote-channel.yml@refs/heads/release"
+            expected_rollout_signers(&forked),
+            vec!["https://github.com/acme/apex-os/.github/workflows/promote-channel.yml@refs/heads/release"]
         );
         // An override that names something else entirely is left alone rather
         // than rewritten into a path nobody publishes under.
         std::fs::write(trust.join("expected-signer"), "https://example.invalid/whoever\n").unwrap();
-        assert_eq!(expected_rollout_signer(&forked), "https://example.invalid/whoever");
+        assert_eq!(expected_rollout_signers(&forked), vec!["https://example.invalid/whoever"]);
         // And the explicit override wins over the derivation.
         std::fs::write(trust.join("expected-rollout-signer"), "https://example.invalid/ramp\n").unwrap();
-        assert_eq!(expected_rollout_signer(&forked), "https://example.invalid/ramp");
+        assert_eq!(expected_rollout_signers(&forked), vec!["https://example.invalid/ramp"]);
         let _ = std::fs::remove_dir_all(&dir);
     }
 
@@ -1326,7 +1384,7 @@ mod tests {
             image_error: None,
             pull: Pull::Unverified,
             policy: Policy::AcceptsAnything,
-            expected_signer: EXPECTED_SIGNER.to_string(),
+            expected_signers: default_signers(),
             enforcement: crate::verify::Enforcement::default(),
             registry: None,
         };
@@ -1342,7 +1400,7 @@ mod tests {
             image_error: Some("/proc/cmdline: Permission denied".into()),
             pull: Pull::Unavailable("/proc/cmdline: Permission denied".into()),
             policy: Policy::Unavailable("/etc/containers/policy.json: Permission denied".into()),
-            expected_signer: EXPECTED_SIGNER.to_string(),
+            expected_signers: default_signers(),
             enforcement: crate::verify::Enforcement::default(),
             registry: None,
         };
@@ -1384,7 +1442,7 @@ mod tests {
             image_error: None,
             pull: Pull::Unverified,
             policy: Policy::AcceptsAnything,
-            expected_signer: EXPECTED_SIGNER.to_string(),
+            expected_signers: default_signers(),
             enforcement: crate::verify::Enforcement::default(),
             registry: None,
         };

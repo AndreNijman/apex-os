@@ -147,7 +147,7 @@ fn parse_channel(s: &str) -> Result<Channel, String> {
 /// Shares `trust`'s reader rather than growing a second one: it is the same
 /// file, read the same unprivileged way, and two decoders of it would disagree
 /// the first time one was corrected.
-fn booted_reference() -> Result<String, String> {
+pub(crate) fn booted_reference() -> Result<String, String> {
     let roots = crate::trust::Roots::from_env();
     let origin = crate::trust::booted_origin(&roots)?;
     let reference = crate::trust::origin_image_reference(&origin)

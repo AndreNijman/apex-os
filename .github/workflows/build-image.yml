@@ -2172,6 +2172,105 @@ jobs:
           done
           [ "$fail" = 0 ] || exit 1
 
+      # The rebrand, APEX to Rime OS (2026-09-28). GHCR does not redirect a
+      # renamed package, so an installed machine keeps pulling
+      # ghcr.io/andrenijman/apex-os until `apex update` moves it
+      # (`rename_target` in apexd/apex/src/ops.rs), and it moves a machine only
+      # once the new name serves that machine's tag. So every published build
+      # is ALSO published as ghcr.io/andrenijman/rime-os: the same digest, a
+      # signature and an SBOM attestation made under the new name (a cosign
+      # signature names its repository, so the old name's cannot be reused),
+      # and the same tags. It runs LAST, after the old name is published and
+      # asserted, so a failure here leaves every machine updating under the old
+      # name exactly as before.
+      #
+      # The first push creates the package, and a new GHCR package is private
+      # until someone makes it public in its settings (there is no API for
+      # that). Until then an anonymous pull fails, `apex update`'s probe sees
+      # nothing, and no machine moves. That is the intended failure mode.
+      - name: Publish under the new name too (rime-os)
+        if: ${{ steps.push.outputs.digest != '' && env.PUBLISH == 'true' }}
+        env:
+          NEW_IMAGE: ghcr.io/andrenijman/rime-os
+        run: |
+          set -euo pipefail
+          command -v skopeo >/dev/null || { sudo apt-get update -qq && sudo apt-get install -y -qq skopeo; }
+          export REGISTRY_AUTH_FILE="$RUNNER_TEMP/skopeo-auth.json"
+          echo '{}' > "$REGISTRY_AUTH_FILE"
+          creds="$GHCR_USER:$GHCR_TOKEN"
+          digest="${{ steps.push.outputs.digest }}"
+          IDENTITY="https://github.com/${{ github.repository }}/.github/workflows/build-image.yml@${{ github.ref }}"
+          copy_to() {
+            skopeo copy --retry-times 3 --preserve-digests \
+              --src-creds "$creds" --dest-creds "$creds" \
+              "docker://$IMAGE@$digest" "docker://$NEW_IMAGE:$1"
+          }
+          resolves() {
+            skopeo inspect --creds "$creds" --format '{{.Digest}}' "docker://$NEW_IMAGE:$1" 2>/dev/null || echo MISSING
+          }
+
+          # The bytes first, under a name nothing tracks, and proven to be the
+          # same digest before anything is signed or moved.
+          copy_to "apex-${{ github.sha }}"
+          got="$(resolves "apex-${{ github.sha }}")"
+          if [ "$got" != "$digest" ]; then
+            echo "::error::$NEW_IMAGE:apex-${{ github.sha }} is '$got', not $digest: the copy changed the manifest"
+            exit 1
+          fi
+
+          # Signed and (when attestation is on) attested under the new name.
+          cosign sign --yes "$NEW_IMAGE@$digest"
+          if [ "${{ vars.APEX_ATTEST_SBOM }}" = "true" ]; then
+            if [ ! -s /tmp/sbom.min.json ]; then
+              echo "::error::attestation is on but the SBOM step left no /tmp/sbom.min.json to attest under $NEW_IMAGE"
+              exit 1
+            fi
+            if ! cosign attest --yes --predicate /tmp/sbom.min.json \
+                 --type spdxjson "$NEW_IMAGE@$digest" > /tmp/attest-new.log 2>&1; then
+              cat /tmp/attest-new.log
+              echo "::error::cosign attest failed for $NEW_IMAGE@$digest"
+              exit 1
+            fi
+          fi
+          cosign verify "$NEW_IMAGE@$digest" \
+            --certificate-identity "$IDENTITY" \
+            --certificate-oidc-issuer https://token.actions.githubusercontent.com > /dev/null
+          if [ "${{ vars.APEX_ATTEST_SBOM }}" = "true" ]; then
+            cosign verify-attestation "$NEW_IMAGE@$digest" --type spdxjson \
+              --certificate-identity "$IDENTITY" \
+              --certificate-oidc-issuer https://token.actions.githubusercontent.com > /dev/null
+          fi
+
+          # The same names the old image carries, the tracked ones last.
+          for f in apex daily gaming-mesa gaming-nvidia; do
+            copy_to "$f-${{ github.sha }}"
+            copy_to "platform-$f-${{ github.sha }}"
+            copy_to "platform-$f"
+          done
+          for f in apex daily gaming-mesa gaming-nvidia edge; do
+            copy_to "$f"
+          done
+
+          fail=0
+          for t in apex daily gaming-mesa gaming-nvidia edge \
+                   platform-apex platform-daily platform-gaming-mesa platform-gaming-nvidia; do
+            got="$(resolves "$t")"
+            if [ "$got" = "$digest" ]; then
+              echo "  ok   $NEW_IMAGE:$t -> $got"
+            else
+              echo "::error::$NEW_IMAGE:$t resolves to '$got', expected '$digest'"
+              fail=1
+            fi
+          done
+          [ "$fail" = 0 ] || exit 1
+          # Whether a machine can see it yet. Informational: a private package
+          # is the expected state after the very first push.
+          if skopeo inspect --no-creds --raw --no-tags "docker://$NEW_IMAGE:daily" > /dev/null 2>&1; then
+            echo "$NEW_IMAGE is public: machines move to it on their next apex update"
+          else
+            echo "::notice::$NEW_IMAGE is not publicly pullable yet (a new package starts private); no machine will move until it is made public"
+          fi
+
       # How much this push actually costs the fleet. The point of the core tier
       # is that this number is small; printing it into the run summary is what
       # turns "it should be small" into something anyone can check at a glance,
