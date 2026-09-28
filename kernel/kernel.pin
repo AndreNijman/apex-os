@@ -1,8 +1,8 @@
-# kernel.pin — every input that decides what Rime's kernel IS.
+# kernel.pin — every input that decides what APEX's kernel IS.
 #
 # "What kernel are we on, and what built its BTF?" must be a `cat`, not an
 # archaeology exercise through a COPR build log. That question took the
-# kernel-btf-scx unit a full round to answer for a kernel Rime did not build.
+# kernel-btf-scx unit a full round to answer for a kernel APEX did not build.
 #
 # Changing any line here is what makes the kernel tier rebuild. Nothing else
 # does, and nothing else should: an unrelated Containerfile.core edit must not
@@ -68,12 +68,12 @@ LIBDWARVES_RPM_SHA256=271c6d36bc4030ef883527abcf51a0468826f52e2b484f51a23ac15952
 PAHOLE_VERSION_EXPECTED=132
 
 # ── Release identity ────────────────────────────────────────────────────────
-# `rpm -qa` must distinguish a Rime-built kernel from the COPR's. Upstream's
-# release is `cachyos1.fc43`; ours becomes `cachyos1.rime<N>.fc43`. Bump
-# RIME_KERNEL_BUILD when a rebuild's inputs change but the kernel version does
+# `rpm -qa` must distinguish an APEX-built kernel from the COPR's. Upstream's
+# release is `cachyos1.fc43`; ours becomes `cachyos1.apex<N>.fc43`. Bump
+# APEX_KERNEL_BUILD when a rebuild's inputs change but the kernel version does
 # not. The string still contains `cachyos`, which Containerfile.core's
 # `ls -d /usr/lib/modules/*cachyos*` kver glob depends on.
-RIME_KERNEL_BUILD=1
+APEX_KERNEL_BUILD=1
 
 # ── Builder base ────────────────────────────────────────────────────────────
 # Fedora 43, matching the buildroot the COPR uses, so GCC stays 15.3.x and the
