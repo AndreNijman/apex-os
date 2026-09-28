@@ -782,7 +782,7 @@ machine and on a machine with nothing staged.
 | --- | --- | --- |
 | UKI builder | `files/scripts/boot-v2/rime-mkuki` | kernel + initramfs + signed cmdline + microcode + `.rimeinf` metadata in one PE image |
 | stage a Rime root | `files/scripts/boot-v2/rime-stage-root` | copies kernel/initramfs/os-release out of a booted deployment or image |
-| ESP authoring | `files/scripts/boot-v2/rime-mkesp` | systemd-boot at `/EFI/APEX/`, UKIs at `/EFI/Linux/apex-<id>+N-M.efi` |
+| ESP authoring | `files/scripts/boot-v2/rime-mkesp` | systemd-boot at `/EFI/APEX/`, UKIs at `/EFI/Linux/rime-<id>+N-M.efi` |
 | ephemeral keys | `files/scripts/boot-v2/rime-sb-keys` | Secure Boot, PCR-policy and deliberately-untrusted keypairs |
 | SB firmware vars | `files/scripts/boot-v2/rime-sb-vars` | an OVMF varstore with the Rime certificate as the only `db` entry |
 | LUKS2 + TPM, shipped | `files/system/libexec/rime-luks-enroll` | the enrolment path a machine uses: a recovery key always, and a TPM slot bound to whichever policy this machine can enforce |
@@ -804,7 +804,7 @@ prohibits, and the build box is a real Rime machine.
 ```
 /EFI/APEX/systemd-bootx64.efi        the loader, at a Rime-owned path
 /EFI/BOOT/BOOTX64.EFI                the removable-media fallback
-/EFI/Linux/apex-<deployment>+N-M.efi the UKIs
+/EFI/Linux/rime-<deployment>+N-M.efi the UKIs
 /loader/loader.conf                  timeout 0, editor no
 ```
 
@@ -818,9 +818,9 @@ choice. Measured with systemd-boot 258.10-1.fc43:
 
 | entry | boot counter applied? |
 | --- | --- |
-| type #2, `/EFI/Linux/apex-t2+3-0.efi` | **yes** → `+2-1` |
-| type #1 `.conf` with `efi /EFI/APEX/uki/apex-t1.efi` | **no** (the entry booted fine) |
-| type #1 `.conf` with `linux /EFI/APEX/uki/apex-t3.efi` | **yes** → `+2-1` |
+| type #2, `/EFI/Linux/rime-t2+3-0.efi` | **yes** → `+2-1` |
+| type #1 `.conf` with `efi /EFI/APEX/uki/rime-t1.efi` | **no** (the entry booted fine) |
+| type #1 `.conf` with `linux /EFI/APEX/uki/rime-t3.efi` | **yes** → `+2-1` |
 
 So the entry type does not decide the tally: systemd-boot skips it for entries
 named with the `efi` key. Type #2 is the default anyway, because `bootctl`
@@ -1430,7 +1430,7 @@ sudo bootctl install
 sudo mkdir -p /boot/efi/EFI/Linux
 #   +3-0 is the boot counter: three tries, none used.
 sudo cp ~/bootlab-work/rime-<deployment>.efi \
-        /boot/efi/EFI/Linux/apex-<deployment>+3-0.efi
+        /boot/efi/EFI/Linux/rime-<deployment>+3-0.efi
 sudo bootctl list                   # the entry must appear, with 3 tries left
 
 #   Per-machine settings go beside the UKI as credentials, because a signed
@@ -1560,7 +1560,7 @@ matching `.pcrsig`. The policy refuses a UKI without one, by design.
 | --- | --- |
 | the new deployment will not boot | do nothing for three attempts; systemd-boot selects the previous blessed entry itself. `rime boot status` then shows the failed entry as `OUT OF TRIES` and announces the rollback. |
 | the machine boots but the desktop does not | `rime-boot-health.service` fails, the entry is never blessed, and the same automatic rollback happens. `journalctl -u rime-boot-health` names the unit that was not active. |
-| you want GRUB back | GRUB was never removed. Select it from the firmware boot menu, then `sudo efibootmgr` (as yourself, deliberately) to put it back at the front of `BootOrder`. Delete `/boot/efi/EFI/Linux/apex-*.efi` to stop offering the UKI path. |
+| you want GRUB back | GRUB was never removed. Select it from the firmware boot menu, then `sudo efibootmgr` (as yourself, deliberately) to put it back at the front of `BootOrder`. Delete `/boot/efi/EFI/Linux/rime-*.efi` to stop offering the UKI path. |
 | TPM unlock stops working after a firmware update | the recovery key. Then re-check: with a **signed** PCR 11 policy a firmware update should not break unlock, because the keyslot is bound to the signing key and PCR 11 measures the UKI, not the firmware. The lab has now measured both halves of a firmware change and neither breaks it: the Secure Boot policy register (`luks-firmware-change`, a real `DBXUpdate`) and the firmware code register (`luks-firmware-code`, two edk2 revisions). Nobody has tried it on silicon with a vendor capsule yet: katana was asked on 2026-09-19 and `fwupdmgr get-updates` offers nothing for its System Firmware, so there was no capsule to apply. What katana *did* show is the half that matters: re-signing for a moved PCR 11 restores unlock on real Intel PTT. If a vendor capsule ever breaks it, record that finding here. |
 | TPM unlock stops working after a kernel update | this should not happen: it is the property the policy was chosen for, and the `luks-tpm` scenario measures it. Use the recovery key, then check that the new UKI carries a `.pcrsig` signed by the enrolled key: `python3 files/scripts/boot-v2/pe-section.py <uki> .pcrsig`. |
 | you rotated the PCR signing key | every existing keyslot is bound to the old public key. Enroll the new one with `systemd-cryptenroll --tpm2-public-key=<new>` **before** removing the old, and keep the recovery key usable throughout. |

@@ -435,7 +435,7 @@ grep -q 'boot counting is not in effect' "$TMP/out-a" \
 # (b) Counting in effect, everything healthy.
 mkdir -p "$TMP/efivars-sd" "$TMP/state-good"
 printf '\x07\x00\x00\x00' > "$TMP/efivars-sd/LoaderBootCountPath-$LOADER_GUID"
-printf '\x07\x00\x00\x00a\0p\0e\0x\0-\0n\0e\0w\0.\0e\0f\0i\0' \
+printf '\x07\x00\x00\x00r\0i\0m\0e\0-\0n\0e\0w\0.\0e\0f\0i\0' \
     > "$TMP/efivars-sd/LoaderEntrySelected-$LOADER_GUID"
 mkfake "$TMP/bin-b" "$ALL_GOOD"
 rc=0
@@ -484,32 +484,32 @@ sec "the rollback notice, and the missing-key trap it would otherwise hit"
 # `bootctl list --json` run against an ESP a VM had actually booted.
 cat > "$TMP/entries-rolledback.json" <<'JSON'
 [
-  {"type":"type2","id":"rime-good.efi","path":"/boot/EFI/Linux/apex-good.efi",
+  {"type":"type2","id":"rime-good.efi","path":"/boot/EFI/Linux/rime-good.efi",
    "title":"Rime OS","isDefault":true},
-  {"type":"type2","id":"rime-new.efi","path":"/boot/EFI/Linux/apex-new+0-3.efi",
+  {"type":"type2","id":"rime-new.efi","path":"/boot/EFI/Linux/rime-new+0-3.efi",
    "title":"Rime OS","triesLeft":0,"triesDone":3,"isDefault":false}
 ]
 JSON
 cat > "$TMP/entries-allgood.json" <<'JSON'
 [
-  {"type":"type2","id":"rime-good.efi","path":"/boot/EFI/Linux/apex-good.efi",
+  {"type":"type2","id":"rime-good.efi","path":"/boot/EFI/Linux/rime-good.efi",
    "title":"Rime OS","isDefault":true},
-  {"type":"type2","id":"rime-new.efi","path":"/boot/EFI/Linux/apex-new.efi",
+  {"type":"type2","id":"rime-new.efi","path":"/boot/EFI/Linux/rime-new.efi",
    "title":"Rime OS","isDefault":false}
 ]
 JSON
 cat > "$TMP/entries-ontrial.json" <<'JSON'
 [
-  {"type":"type2","id":"rime-good.efi","path":"/boot/EFI/Linux/apex-good.efi",
+  {"type":"type2","id":"rime-good.efi","path":"/boot/EFI/Linux/rime-good.efi",
    "title":"Rime OS","isDefault":true},
-  {"type":"type2","id":"rime-new.efi","path":"/boot/EFI/Linux/apex-new+2-1.efi",
+  {"type":"type2","id":"rime-new.efi","path":"/boot/EFI/Linux/rime-new+2-1.efi",
    "title":"Rime OS","triesLeft":2,"triesDone":1,"isDefault":false}
 ]
 JSON
 
 mkdir -p "$TMP/efivars-good" "$TMP/state-n"
 printf '\x07\x00\x00\x00' > "$TMP/efivars-good/LoaderBootCountPath-$LOADER_GUID"
-printf '\x07\x00\x00\x00a\0p\0e\0x\0-\0g\0o\0o\0d\0.\0e\0f\0i\0' \
+printf '\x07\x00\x00\x00r\0i\0m\0e\0-\0g\0o\0o\0d\0.\0e\0f\0i\0' \
     > "$TMP/efivars-good/LoaderEntrySelected-$LOADER_GUID"
 
 run_notice() {
@@ -1097,7 +1097,7 @@ printf '\x07\x00\x00\x00s\0y\0s\0t\0e\0m\0d\0-\0b\0o\0o\0t\0 \x002\x005\x008\0' 
     > "$E/LoaderInfo-$LOADER_GUID"
 printf '\x07\x00\x00\x00s\0y\0s\0t\0e\0m\0d\0-\0s\0t\0u\0b\0' > "$E/StubInfo-$LOADER_GUID"
 printf '\x07\x00\x00\x00\\\0E\0F\0I\0' > "$E/LoaderBootCountPath-$LOADER_GUID"
-printf '\x07\x00\x00\x00a\0p\0e\0x\0-\0g\0o\0o\0d\0.\0e\0f\0i\0' \
+printf '\x07\x00\x00\x00r\0i\0m\0e\0-\0g\0o\0o\0d\0.\0e\0f\0i\0' \
     > "$E/LoaderEntrySelected-$LOADER_GUID"
 printf '\x06\x00\x00\x00\x01' > "$E/SecureBoot-8be4df61-93ca-11d2-aa0d-00e098032b8c"
 : > "$S/run/systemd/tpm2-pcr-signature.json"

@@ -379,11 +379,11 @@ scenario_entry_layout() {
     # as implementing §22 while removing its step 4.
     #
     # MEASURED, systemd-boot 258.10-1.fc43, OVMF secboot, 2026-09-03:
-    #   type #2  /EFI/Linux/apex-t2+3-0.efi         -> renamed to +2-1   ✓
+    #   type #2  /EFI/Linux/rime-t2+3-0.efi         -> renamed to +2-1   ✓
     #   type #1  /loader/entries/rime-t1+3-0.conf   -> NOT renamed
-    #            with `efi /EFI/APEX/uki/apex-t1.efi`  (the entry booted fine)
+    #            with `efi /EFI/APEX/uki/rime-t1.efi`  (the entry booted fine)
     #   type #1  /loader/entries/rime-t3+3-0.conf   -> renamed to +2-1   ✓
-    #            with `linux /EFI/APEX/uki/apex-t3.efi`
+    #            with `linux /EFI/APEX/uki/rime-t3.efi`
     #
     # So the tally is not a property of the entry type: it is skipped for
     # entries whose target is named with the `efi` key, and applied for `linux`

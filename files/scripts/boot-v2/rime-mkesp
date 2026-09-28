@@ -11,9 +11,9 @@
 #  tested rather than assumed; scenario `entry-layout` in run-scenarios is the
 #  measurement, and it found something more specific:
 #
-#    type #2  /EFI/Linux/apex-<id>+3-0.efi                  counted
-#    type #1  .conf with `efi /EFI/APEX/uki/apex-<id>.efi`   NOT counted
-#    type #1  .conf with `linux /EFI/APEX/uki/apex-<id>.efi` counted
+#    type #2  /EFI/Linux/rime-<id>+3-0.efi                  counted
+#    type #1  .conf with `efi /EFI/APEX/uki/rime-<id>.efi`   NOT counted
+#    type #1  .conf with `linux /EFI/APEX/uki/rime-<id>.efi` counted
 #
 #  So a fully Rime-named UKI path IS available, with the `linux` key. It is not
 #  the default here, and the reason is not aesthetics:
@@ -41,7 +41,7 @@
 #                                    this is what OVMF boots, because creating
 #                                    an NVRAM entry would mean efibootmgr and
 #                                    AGENTS.md forbids that near a real machine.
-#    /EFI/Linux/apex-<id>+N-M.efi    the UKIs. \EFI\Linux is the systemd-boot
+#    /EFI/Linux/rime-<id>+N-M.efi    the UKIs. \EFI\Linux is the systemd-boot
 #                                    interface — a spec path, not a vendor
 #                                    name, unlike the \EFI\fedora that §22 is
 #                                    reacting to. Rime owns the FILENAMES,
@@ -160,7 +160,7 @@ place_type1() {
     IFS=: read -r id tries path <<<"$spec"
     [[ -f "$path" ]] || die "no such UKI: $path"
     esp_mkdir_p "$ESP" /EFI/APEX/uki
-    mcopy -o -i "$ESP" "$path" "::/EFI/APEX/uki/apex-$id.efi"
+    mcopy -o -i "$ESP" "$path" "::/EFI/APEX/uki/rime-$id.efi"
     conf="rime-$id"
     [[ "$tries" != "0" && -n "$tries" ]] && conf="rime-$id+$tries-0"
     {
@@ -170,10 +170,10 @@ place_type1() {
         # comes from inside the image. No `options` line: sd-stub ignores a
         # bootloader-supplied cmdline under Secure Boot anyway, so writing one
         # here would document a lie.
-        printf '%s /EFI/APEX/uki/apex-%s.efi\n' "$key" "$id"
+        printf '%s /EFI/APEX/uki/rime-%s.efi\n' "$key" "$id"
     } > "$WORK/$conf.conf"
     mcopy -o -i "$ESP" "$WORK/$conf.conf" "::/loader/entries/$conf.conf"
-    info "type #1 ($key)  /loader/entries/$conf.conf -> /EFI/APEX/uki/apex-$id.efi"
+    info "type #1 ($key)  /loader/entries/$conf.conf -> /EFI/APEX/uki/rime-$id.efi"
 }
 
 for spec in "${TYPE1[@]}";       do place_type1 "$spec" efi;   done
