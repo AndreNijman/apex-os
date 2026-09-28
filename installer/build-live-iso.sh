@@ -100,8 +100,11 @@ if [ "$NETINSTALL" = 1 ]; then
   # Signed by main's build-image workflow, or it does not go on an ISO. Default
   # TUF trust root; --network host because the default podman network on this
   # build host does not resolve the Sigstore CDN.
+  # This repository under either name: a build signed before the GitHub rename
+  # names apex-os, one signed after it rime-os. Anchored both ends. (rime-rename: keep)
+  signer_re='^https://github\.com/AndreNijman/(apex|rime)-os/\.github/workflows/build-image\.yml@refs/heads/main$'  # rime-rename: keep (accepts the pre-rename repository)
   sudo podman run --rm --network host ghcr.io/sigstore/cosign/cosign:v3.1.3 verify \
-    --certificate-identity 'https://github.com/AndreNijman/rime-os/.github/workflows/build-image.yml@refs/heads/main' \
+    --certificate-identity-regexp "$signer_re" \
     --certificate-oidc-issuer 'https://token.actions.githubusercontent.com' \
     "$RELEASE_IMAGE" >/dev/null \
     || { echo "FATAL: $RELEASE_IMAGE is not signed by main's build-image workflow" >&2; exit 1; }

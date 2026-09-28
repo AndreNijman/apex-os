@@ -349,6 +349,13 @@ stage_budget_kb() {   # $1 = available KB on the target root
 # The mount point is OUTSIDE $TROOT on purpose — see detail 1.
 STAGE_MNT=""; STAGE_LOOP=""; STAGE_TMPDIR=""
 STAGE_DIR=/run/rime-stage
+# Where the neighbour's \EFI\fedora boot files are backed up on a shared ESP.
+# It kept its APEX name through the rebrand, on purpose: an earlier APEX (rime-rename: keep)
+# install on that ESP already put the TRUE originals there, and the `cp -n`
+# that fills it is what keeps a later install from overwriting them with files
+# an install has already rewritten. A new name would start an empty directory
+# and "back up" the rewritten files as the originals.
+ESP_BACKUP_DIR=EFI/fedora/apex-backup  # rime-rename: keep (an ESP path earlier installs wrote)
 # --skip-finalize, and ONLY when staging on the target. bootc finishes a
 # to-filesystem install by remounting the target read-only, and the staging loop
 # device holds a WRITABLE fd on that same filesystem — so the remount fails with
@@ -2078,7 +2085,7 @@ printf '%s' "$USERNAME" | grep -Eq '^[a-z_][a-z0-9_-]{0,31}$' \
 # above, so without this list the disk is wiped and `useradd` then fails on a
 # name that was always going to collide.
 case "$USERNAME" in
-  root|bin|daemon|adm|sys|sync|shutdown|halt|mail|operator|games|ftp|lp|news|uucp|man|proxy|backup|list|irc|gnats|nobody|systemd*|dbus|polkitd|sshd|chrony|tss|sssd|greetd|gdm|sddm|lightdm|colord|geoclue|rtkit|pipewire|flatpak|avahi|rime|rimed)
+  root|bin|daemon|adm|sys|sync|shutdown|halt|mail|operator|games|ftp|lp|news|uucp|man|proxy|backup|list|irc|gnats|nobody|systemd*|dbus|polkitd|sshd|chrony|tss|sssd|greetd|gdm|sddm|lightdm|colord|geoclue|rtkit|pipewire|flatpak|avahi|rime|rimed|apex|apexd)  # rime-rename: keep (the pre-rebrand account names too)
     die "'$USERNAME' is a reserved system account name — pick another. Nothing has been erased." ;;
 esac
 printf '%s' "$HOSTNAME" | grep -Eq '^[a-zA-Z0-9]([a-zA-Z0-9-]{0,61}[a-zA-Z0-9])?$' \
@@ -2209,7 +2216,7 @@ Only filesystems with tooling present can be used (btrfs is the default)."
   # and the neighbour's unchanged grub.cfg resolves its prefix from that file.
   # Net effect: the neighbour's data survives untouched, but its existing
   # firmware entry starts booting Rime. Detect it here so the install step
-  # backs the originals up to \EFI\fedora\rime-backup\, and say so plainly
+  # backs the originals up to \EFI\fedora\apex-backup\, and say so plainly  (rime-rename: keep)
   # instead of claiming "your existing OS entries stay".
   ESP_SHARED_FEDORA=0
   _probe=$(mktemp -d 2>/dev/null || echo /tmp/rime-esp-probe); mkdir -p "$_probe"
@@ -2221,7 +2228,7 @@ Rime uses that same directory. Its boot files will be UPDATED to point at
 Rime, so the existing \"Fedora\" entry in your firmware menu will boot
 Rime OS after this. The other install's DATA is not touched, but you will
 need to re-add a boot entry for it (its files stay in place, and the
-originals are backed up to \\EFI\\fedora\\rime-backup\\)."
+originals are backed up to \\${ESP_BACKUP_DIR//\//\\}\\)."
     fi
     umount "$_probe" 2>/dev/null || true
   fi
@@ -2584,14 +2591,14 @@ if [ "$INSTALL_MODE" = partition ]; then
     # "Fedora" firmware entry at Rime. Keeping the originals makes that
     # recoverable instead of permanent.
     if [ "${ESP_SHARED_FEDORA:-0}" = 1 ] && [ -d "$TROOT/boot/efi/EFI/fedora" ]; then
-      mkdir -p "$TROOT/boot/efi/EFI/fedora/rime-backup" 2>/dev/null || true
+      mkdir -p "$TROOT/boot/efi/$ESP_BACKUP_DIR" 2>/dev/null || true
       for f in bootuuid.cfg grub.cfg BOOTX64.CSV; do
         [ -e "$TROOT/boot/efi/EFI/fedora/$f" ] \
-          && cp -n "$TROOT/boot/efi/EFI/fedora/$f" "$TROOT/boot/efi/EFI/fedora/rime-backup/$f" 2>/dev/null
+          && cp -n "$TROOT/boot/efi/EFI/fedora/$f" "$TROOT/boot/efi/$ESP_BACKUP_DIR/$f" 2>/dev/null
       done
-      cp -n "$TROOT/boot/efi/EFI/BOOT/BOOTX64.EFI" "$TROOT/boot/efi/EFI/fedora/rime-backup/BOOTX64.EFI.orig" 2>/dev/null || true
-      { echo "--- backed up neighbour EFI files to EFI/fedora/rime-backup ---"
-        ls -l "$TROOT/boot/efi/EFI/fedora/rime-backup" 2>/dev/null; } >>"$LOG" 2>&1 || true
+      cp -n "$TROOT/boot/efi/EFI/BOOT/BOOTX64.EFI" "$TROOT/boot/efi/$ESP_BACKUP_DIR/BOOTX64.EFI.orig" 2>/dev/null || true
+      { echo "--- backed up neighbour EFI files to $ESP_BACKUP_DIR ---"
+        ls -l "$TROOT/boot/efi/$ESP_BACKUP_DIR" 2>/dev/null; } >>"$LOG" 2>&1 || true
     fi
   fi
   # ── Nowhere else to stage: the download goes onto the target we just made ──

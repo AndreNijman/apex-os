@@ -182,7 +182,9 @@ KERNEL_IMG=localhost/rime-kernel:local
 # RIME_SHELL_REMOTE exists so tests/test-build-local-shell-ref.sh can point this
 # at local fixture repositories and drive every rung offline. Nothing else
 # should set it.
-SHELL_REMOTE="${RIME_SHELL_REMOTE:-https://github.com/AndreNijman/rime-shell}"
+# The shell repository under its pre-rebrand name: GitHub redirects a renamed
+# repository's old name, and the new one resolves only once the rename is done.
+SHELL_REMOTE="${RIME_SHELL_REMOTE:-https://github.com/AndreNijman/apex-shell}"  # rime-rename: keep (works before and after the GitHub rename)
 
 # Resolve ONE branch on the rime-shell remote.
 #   0 -> found; the sha is in SHELL_REF_OUT
@@ -380,7 +382,7 @@ build_base() {
 build_image() {  # $1 = rime (or a legacy tag name, which maps to it)
     local f=$1
     case "$f" in
-        rime|daily|gaming-mesa|gaming-nvidia) ;;
+        rime|apex|daily|gaming-mesa|gaming-nvidia) ;;  # rime-rename: keep (apex is a published tag)
         *) echo "unknown target: $f" >&2; exit 2 ;;
     esac
     [ "$f" = rime ] || echo "note: '$f' is a published TAG, not a build target — building the one image"
@@ -391,7 +393,8 @@ build_image() {  # $1 = rime (or a legacy tag name, which maps to it)
         -f Containerfile.rime -t localhost/rime-os:rime .
     # The three published names all resolve to this one image in the registry;
     # tag them locally too so a local `bootc switch` against any of them works.
-    for t in daily gaming-mesa gaming-nvidia; do
+    # `apex` is the tag machines installed before the rebrand track. (rime-rename: keep)
+    for t in apex daily gaming-mesa gaming-nvidia; do  # rime-rename: keep (apex is a published tag)
         sudo podman tag localhost/rime-os:rime "localhost/rime-os:$t"
     done
 
@@ -404,15 +407,15 @@ build_image() {  # $1 = rime (or a legacy tag name, which maps to it)
     # only run on a real publish.
     want="$(sudo podman image inspect --format '{{.Id}}' localhost/rime-os:rime)"
     [ -n "$want" ] || { echo "FATAL: localhost/rime-os:rime has no image ID" >&2; exit 1; }
-    for t in rime daily gaming-mesa gaming-nvidia; do
+    for t in rime apex daily gaming-mesa gaming-nvidia; do  # rime-rename: keep (apex is a published tag)
         got="$(sudo podman image inspect --format '{{.Id}}' "localhost/rime-os:$t" 2>/dev/null || echo MISSING)"
         [ "$got" = "$want" ] || {
             echo "FATAL: localhost/rime-os:$t resolves to '$got', expected '$want'" >&2
-            echo "       the four names must be ONE image; see docs/ci-release-tiers.md" >&2
+            echo "       the five names must be ONE image; see docs/ci-release-tiers.md" >&2
             exit 1
         }
     done
-    echo "tags: rime, daily, gaming-mesa, gaming-nvidia all resolve to $want"
+    echo "tags: rime, apex, daily, gaming-mesa, gaming-nvidia all resolve to $want"  # rime-rename: keep
 
     # The image inherits signing from core via the base, so this catches building
     # on top of a stale or unsigned tier — the same hole the CI job covers.
