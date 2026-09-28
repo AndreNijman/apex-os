@@ -1,4 +1,4 @@
-# rime-remote-relay
+# The Rime Remote relay (`apex-remote-relay`) <!-- rime-rename: keep: the deployed Worker's name -->
 
 The meeting point for Rime Remote when a device is not on the same network as
 the desktop. A Cloudflare Worker and one Durable Object per rendezvous id.
@@ -8,13 +8,19 @@ encryption, holds no key, stores nothing, and nothing trusts it: the `Noise_IK`
 channel runs end to end through it, so every binary frame it moves is
 ciphertext whose keys it never sees.
 
-**It is deployed** at `wss://rime-relay.andrenijman.com`, a custom domain on a
+**It is deployed** at `wss://apex-relay.andrenijman.com`, a custom domain on a <!-- rime-rename: keep: the live endpoint -->
 zone this account owns instead of the shared `*.workers.dev` name.
 `wrangler.jsonc` says why. `ROADMAP/design/P1-052-relay.md` records what it
 cost and what it exposes. It is rate-limited (60 WebSocket upgrades per
 client IP per minute, answered 429 before a Durable Object wakes), caps a room
 at 16 live sockets, and accepts only binary frames up to 256 KiB. It is still
 unauthenticated on a public name.
+
+The Worker's name (`apex-remote-relay`) and its domain kept their APEX names <!-- rime-rename: keep -->
+through the rebrand to Rime OS. Both are what the deployed Worker answers to and
+what every paired desktop and phone dials; renaming them here would make the
+next `wrangler deploy` create a second Worker beside the live one. They change
+only with a new deployment, a new domain, and a desktop release that dials it.
 
 Both clients dial it. The desktop is `rime-remoted --relay <url>`, which holds
 a rendezvous outbound and opens no inbound port. The phone is

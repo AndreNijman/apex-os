@@ -4,7 +4,10 @@
   // still open there is that this relay is unauthenticated and unrate-limited,
   // and it now answers on a public name.
   "$schema": "node_modules/wrangler/config-schema.json",
-  "name": "rime-remote-relay",
+  // The DEPLOYED Worker's name, kept through the rebrand: wrangler deploys by
+  // this name, so a new one would create a second Worker instead of updating
+  // the live one, and every paired desktop and phone dials the live one.
+  "name": "apex-remote-relay",  // rime-rename: keep (the deployed Worker)
   "main": "src/index.js",
 
   // A custom domain rather than the account's workers.dev name.
@@ -22,7 +25,7 @@
   // because the TLS the client now speaks is what keeps the rendezvous id off
   // the wire for an on-path observer.
   "routes": [
-    { "pattern": "rime-relay.andrenijman.com", "custom_domain": true }
+    { "pattern": "apex-relay.andrenijman.com", "custom_domain": true }  // rime-rename: keep (the deployed custom domain)
   ],
 
   // Pinned, not "today". A compatibility date is the one setting that
@@ -49,9 +52,9 @@
 
   "observability": { "enabled": true },
 
-  // `rime secret use cloudflare cloudflare.wrangler.deploy rime-remote-relay`
+  // `rime secret use cloudflare cloudflare.wrangler.deploy apex-remote-relay`  rime-rename: keep (the Worker's name)
   // always passes `--env production`. Without this section that deployed a NEW
-  // worker, "rime-remote-relay-production" (2026-09-23, since removed by hand);
+  // worker, "apex-remote-relay-production" (2026-09-23, since removed by hand);  rime-rename: keep
   // this names the live one. Bindings are not inherited by an environment, so
   // they are restated; `routes: []` keeps the custom domain where it is (the
   // brokered token cannot manage the zone's routes, and does not need to);
@@ -59,11 +62,11 @@
   //
   // The broker runs wrangler in the PROJECT ROOT, so deploying this way needs
   // this file mirrored at the repo root with "main": "relay/src/index.js" —
-  // kept local and untracked, alongside the untracked rime.toml that binds the
+  // kept local and untracked, alongside the untracked apex.toml that binds the  (rime-rename: keep: the file's real name today)
   // account. See README.md.
   "env": {
     "production": {
-      "name": "rime-remote-relay",
+      "name": "apex-remote-relay",  // rime-rename: keep (the deployed Worker)
       "workers_dev": false,
       "routes": [],
       "durable_objects": { "bindings": [{ "name": "ROOM", "class_name": "RelayRoom" }] },
