@@ -319,18 +319,20 @@ def mode_firstboot(a):
     proc, ser, qmp = start(a, name, cmd)
     facts = {}
     try:
-        if not ser.wait(r"login: $|login:\s*$", a.timeout, proc=proc):
-            if not ser.wait(r"\blogin:", 5, proc=proc):
-                return report(a, name, "fail", reason="no login prompt on the serial console",
-                              tail=ser.text()[-3000:])
-        time.sleep(3)
+        # "<hostname> login: " is the getty's prompt; nothing earlier in a boot
+        # prints that shape. Kernel and unit messages can follow it, so it is
+        # searched for, not expected at the end of the log.
+        if not ser.wait(r"\S+ login: ", a.timeout, proc=proc):
+            return report(a, name, "fail", reason="no login prompt on the serial console",
+                          tail=ser.text()[-3000:])
+        time.sleep(5)
         at = ser.mark()
         ser.send(a.user + "\n")
         if not ser.wait(r"[Pp]assword:", 60, since=at):
             return report(a, name, "fail", reason="no password prompt")
         at = ser.mark()
         ser.send(a.password + "\n")
-        if not ser.wait(r"[$#>] ?$|\$ |> ", 90, since=at):
+        if not ser.wait(r"\$ |# |> ", 90, since=at):
             return report(a, name, "fail", reason="login did not give a shell", tail=ser.text()[-2000:])
         time.sleep(5)
         # Whatever the account's login shell is, the checks run in a plain bash.
