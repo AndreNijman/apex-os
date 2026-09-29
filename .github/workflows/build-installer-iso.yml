@@ -1,0 +1,276 @@
+# Build the Rime OS installer ISO, prove it boots, and draft its release.
+#
+# Until this workflow the published ISOs were built by hand on a developer
+# machine (installer/build-live-iso.sh needs root) and boot-tested there. The
+# script is unchanged; this runs it on a GitHub runner, where root is normal,
+# and then boots what it produced — the file that gets published, untouched —
+# in qemu before any of it can become a release:
+#
+#   from a USB stick with Secure Boot on (OVMF with Microsoft's keys),
+#   from a USB stick on legacy BIOS (SeaBIOS),
+#   from a CD on plain UEFI.
+#
+# Each boot must reach the installer's first page, read off the screen by OCR:
+# a page that names Rime and never APEX. installer/iso-qualify.py makes those
+# observations off the guest itself.
+#
+# NOT TESTED HERE: an install. The install path (disk, encryption, recovery key,
+# Secure Boot enrolment, first boot, the first update's trust gate) is driven by
+# hand in a VM for each release, and the release notes say so. The ISO's
+# unattended menu entry cannot stand in for it: nothing on the live ISO runs the
+# engine's unattended mode any more (the launcher only starts the GUI; measured,
+# no line of an unattended install reached the console in 37 minutes), and that
+# mode never reached the Secure Boot step anyway.
+#
+# Release, main only, on request: the ISO gets a build-provenance attestation
+# (`gh attestation verify rime-os-netinstall-x86_64.iso -R AndreNijman/rime-os`)
+# and a DRAFT release is created with it. Publishing the draft stays a person's
+# decision. The digest must already carry its write-once netinstall-<release>
+# tag (pin-netinstall-image.yml), or the draft is refused: an ISO in the wild
+# whose image a registry cleanup can delete fails on someone else's machine.
+#
+#   gh workflow run pin-netinstall-image.yml -f digest=sha256:… -f release=v3.0.0
+#   gh workflow run build-installer-iso.yml -f release=v3.0.0 -f digest=sha256:… -f draft_release=true
+name: Build the installer ISO
+
+on:
+  workflow_dispatch:
+    inputs:
+      release:
+        description: "The release this ISO ships in, e.g. v3.0.0"
+        type: string
+        required: true
+      digest:
+        description: "Image digest to pin (sha256:…). Blank = whatever :rime is now"
+        type: string
+        default: ""
+      draft_release:
+        description: "Attest the ISO and create a DRAFT release (main only; the digest must be pinned first)"
+        type: boolean
+        default: false
+
+concurrency:
+  group: installer-iso-${{ github.ref }}
+  cancel-in-progress: false
+
+permissions:
+  contents: read
+
+env:
+  IMAGE: ghcr.io/andrenijman/rime-os
+  ISO: rime-os-netinstall-x86_64.iso
+
+jobs:
+  build:
+    name: Build the ISO
+    runs-on: ubuntu-24.04
+    timeout-minutes: 150
+    outputs:
+      release: ${{ steps.inputs.outputs.release }}
+      digest: ${{ steps.inputs.outputs.digest }}
+      sha256: ${{ steps.sum.outputs.sha256 }}
+      bytes: ${{ steps.sum.outputs.bytes }}
+    steps:
+      - name: Checkout
+        uses: actions/checkout@v4
+
+      - name: Free disk space
+        uses: ./.github/actions/free-disk-space
+
+      - name: Check the inputs and pin the digest
+        id: inputs
+        env:
+          RELEASE: ${{ inputs.release }}
+          DIGEST: ${{ inputs.digest }}
+        run: |
+          set -euo pipefail
+          if ! printf '%s' "$RELEASE" | grep -qE '^v[0-9]+\.[0-9]+\.[0-9]+$'; then
+            echo "::error::'$RELEASE' is not a release name like v3.0.0"; exit 1
+          fi
+          if [ -z "$DIGEST" ]; then
+            DIGEST="$(skopeo inspect --retry-times 3 --no-creds --format '{{.Digest}}' "docker://$IMAGE:rime")"
+            echo "::notice::no digest given; :rime is $DIGEST"
+          fi
+          if ! printf '%s' "$DIGEST" | grep -qE '^sha256:[0-9a-f]{64}$'; then
+            echo "::error::'$DIGEST' is not a sha256 digest"; exit 1
+          fi
+          {
+            echo "release=$RELEASE"
+            echo "digest=$DIGEST"
+          } >> "$GITHUB_OUTPUT"
+
+      - name: Install the build tools the runner lacks
+        run: |
+          set -euo pipefail
+          # Everything else the script runs either ships on ubuntu-24.04
+          # (podman, skopeo, e2fsprogs, rsync) or runs inside the installer
+          # image it builds (dracut, grub2-mkimage, mtools, xorriso).
+          sudo apt-get update -qq
+          sudo apt-get install -y -qq --no-install-recommends squashfs-tools
+          mksquashfs -version | head -1
+          sudo podman --version
+
+      - name: Build the production ISO
+        env:
+          RELEASE: ${{ steps.inputs.outputs.release }}
+          RELEASE_DIGEST: ${{ steps.inputs.outputs.digest }}
+        run: |
+          set -euo pipefail
+          cd installer
+          NETINSTALL=1 EDITION=rime PRODUCTION=1 WORK=/var/tmp/rime-iso-prod \
+            OUT="/var/tmp/rime-iso-prod/$ISO" bash build-live-iso.sh 2>&1 | tee "$RUNNER_TEMP/build-prod.log"
+
+      - name: Checksum file, size limit
+        id: sum
+        env:
+          DIGEST: ${{ steps.inputs.outputs.digest }}
+        run: |
+          set -euo pipefail
+          # build-live-iso.sh's .sha256 names the file by its absolute build
+          # path, which makes `sha256sum -c` fail for everyone who downloads it.
+          # The published one names the file as it is downloaded.
+          mkdir -p "$RUNNER_TEMP/prod"
+          sudo mv "/var/tmp/rime-iso-prod/$ISO" "$RUNNER_TEMP/prod/"
+          sudo chown "$(id -u):$(id -g)" "$RUNNER_TEMP/prod/$ISO"
+          cp /var/tmp/rime-iso-prod/grub.cfg "$RUNNER_TEMP/prod/grub.cfg"
+          cp "$RUNNER_TEMP/build-prod.log" "$RUNNER_TEMP/prod/"
+          cd "$RUNNER_TEMP/prod"
+          sha256sum "$ISO" > "$ISO.sha256"
+          sha256sum -c "$ISO.sha256"
+          bytes="$(stat -c%s "$ISO")"
+          # GitHub refuses release assets of 2 GiB and over.
+          [ "$bytes" -lt 2147483648 ] || { echo "::error::$ISO is $bytes bytes, over GitHub's 2 GiB asset limit"; exit 1; }
+          sha="$(cut -d' ' -f1 "$ISO.sha256")"
+          echo "sha256=$sha" >> "$GITHUB_OUTPUT"
+          echo "bytes=$bytes" >> "$GITHUB_OUTPUT"
+          {
+            echo "### $ISO"
+            echo "- sha256 \`$sha\`, $bytes bytes"
+            echo "- installs \`$IMAGE@$DIGEST\`"
+            echo "- built from \`$GITHUB_SHA\`"
+          } >> "$GITHUB_STEP_SUMMARY"
+
+      - name: Upload the production ISO
+        uses: actions/upload-artifact@v4
+        with:
+          name: iso-production
+          path: ${{ runner.temp }}/prod/
+          compression-level: 0
+          retention-days: 14
+
+  boot:
+    name: Boot ${{ matrix.firmware }} from ${{ matrix.media }}
+    needs: build
+    runs-on: ubuntu-24.04
+    timeout-minutes: 30
+    strategy:
+      fail-fast: false
+      matrix:
+        include:
+          - { firmware: uefi-sb, media: usb }
+          - { firmware: bios, media: usb }
+          - { firmware: uefi, media: cdrom }
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/download-artifact@v4
+        with:
+          name: iso-production
+          path: iso
+      - name: Qemu, firmware and OCR
+        run: |
+          set -euo pipefail
+          sudo chmod 0666 /dev/kvm
+          podman build -t localhost/rime-isoq -f - . <<'EOF'
+          FROM registry.fedoraproject.org/fedora:43
+          RUN dnf -y install --setopt=install_weak_deps=False \
+                qemu-system-x86-core edk2-ovmf python3 tesseract tesseract-langpack-eng \
+              && dnf clean all
+          EOF
+      - name: Boot the ISO to the installer
+        env:
+          FIRMWARE: ${{ matrix.firmware }}
+          MEDIA: ${{ matrix.media }}
+        run: |
+          set -euo pipefail
+          mkdir -p out
+          podman run --rm --device /dev/kvm -v "$PWD:/w:z" -w /w localhost/rime-isoq \
+            python3 installer/iso-qualify.py live --work out --name "$FIRMWARE-$MEDIA" \
+              --iso "iso/$ISO" --firmware "$FIRMWARE" --media "$MEDIA" --timeout 300
+      - if: always()
+        uses: actions/upload-artifact@v4
+        with:
+          name: boot-${{ matrix.firmware }}-${{ matrix.media }}
+          path: |
+            out/*.png
+            out/*.json
+            out/*.log
+            out/*.err
+
+  release:
+    name: Attest and draft the release
+    needs: [build, boot]
+    if: inputs.draft_release && github.ref == 'refs/heads/main'
+    runs-on: ubuntu-24.04
+    timeout-minutes: 30
+    permissions:
+      contents: write
+      id-token: write
+      attestations: write
+    steps:
+      - uses: actions/download-artifact@v4
+        with:
+          name: iso-production
+          path: iso
+      - name: The digest must already be pinned
+        env:
+          RELEASE: ${{ needs.build.outputs.release }}
+          DIGEST: ${{ needs.build.outputs.digest }}
+        run: |
+          set -euo pipefail
+          got="$(skopeo inspect --retry-times 3 --no-creds --format '{{.Digest}}' "docker://$IMAGE:netinstall-$RELEASE" 2>/dev/null || echo MISSING)"
+          if [ "$got" != "$DIGEST" ]; then
+            echo "::error::$IMAGE:netinstall-$RELEASE is '$got', not $DIGEST. Pin it first: gh workflow run pin-netinstall-image.yml -f digest=$DIGEST -f release=$RELEASE"
+            exit 1
+          fi
+          cd iso && sha256sum -c "$ISO.sha256"
+      - name: Build provenance for the ISO
+        uses: actions/attest-build-provenance@v2
+        with:
+          subject-path: iso/${{ env.ISO }}
+      - name: Draft the release
+        env:
+          GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+          RELEASE: ${{ needs.build.outputs.release }}
+          DIGEST: ${{ needs.build.outputs.digest }}
+          SHA: ${{ needs.build.outputs.sha256 }}
+          BYTES: ${{ needs.build.outputs.bytes }}
+        run: |
+          set -euo pipefail
+          if gh release view "$RELEASE" -R "$GITHUB_REPOSITORY" >/dev/null 2>&1; then
+            echo "::error::a release named $RELEASE already exists; releases are never replaced"; exit 1
+          fi
+          # The phrase "installs image `…`, pinned as `…`" is read by the
+          # website's scripts/fetch-downloads.mjs. Keep it when editing the draft.
+          cat > notes.md <<EOF
+          DRAFT written by build-installer-iso.yml run $GITHUB_RUN_ID. Edit before publishing.
+
+          ## Download
+
+          Download \`$ISO\` and \`$ISO.sha256\`, then check the download:
+
+          \`\`\`sh
+          sha256sum -c $ISO.sha256
+          \`\`\`
+
+          \`$SHA\`, $BYTES bytes. The ISO was built by GitHub Actions from \`$GITHUB_SHA\`, and GitHub signed where it came from:
+
+          \`\`\`sh
+          gh attestation verify $ISO -R $GITHUB_REPOSITORY
+          \`\`\`
+
+          The ISO installs image \`$DIGEST\`, pinned as \`netinstall-$RELEASE\`.
+          EOF
+          gh release create "$RELEASE" -R "$GITHUB_REPOSITORY" --draft --target "$GITHUB_SHA" \
+            --title "Rime OS $RELEASE" --notes-file notes.md \
+            "iso/$ISO" "iso/$ISO.sha256"
+          echo "::notice::draft release $RELEASE created; publish it by hand after reading it"
