@@ -1531,7 +1531,10 @@ class Installer(Adw.Application):
         body = Gtk.Box(orientation=Gtk.Orientation.VERTICAL, spacing=SP * 3)
         grid = Gtk.Box(orientation=Gtk.Orientation.VERTICAL, spacing=SP * 3)
 
-        self.e_user = Gtk.Entry(text=self.answers.get("username", "andre"))
+        # No default username: this is the published installer, and whatever
+        # name sat here would be offered to every stranger who boots it.
+        self.e_user = Gtk.Entry(text=self.answers.get("username", ""))
+        self.e_user.set_property("placeholder-text", "Lowercase, for example alex")
         self.e_host = Gtk.Entry(text=self.answers.get("hostname", "rime"))
         self.e_pw1 = Gtk.PasswordEntry(show_peek_icon=True)
         self.e_pw2 = Gtk.PasswordEntry(show_peek_icon=True)
