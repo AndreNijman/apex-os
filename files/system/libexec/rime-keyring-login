@@ -1,0 +1,298 @@
+#!/usr/bin/python3
+# rime-keyring-login — make the login password the master of the user's keyring.
+#
+# Run by pam_exec in greetd's auth stack (Containerfile.base puts it there),
+# with the password the user just typed on stdin:
+#
+#   auth  optional  pam_exec.so quiet expose_authtok /usr/libexec/rime-keyring-login
+#
+# ── Why ─────────────────────────────────────────────────────────────────────
+# pam_gnome_keyring unlocks — or creates — the keyring called `login`, and no
+# other. Until 2026.09.29.2 the module was not installed at all, so no Rime
+# machine ever had a login keyring: the first app that stored a secret got a
+# gcr prompt ("choose a password for the new keyring"), and that made
+# `Default_Keyring.keyring`, with `default` pointing at it. The L16's is from
+# 2026-08-06. With the module installed, PAM would now make a second, empty
+# `login` keyring beside it, the user's secrets would stay in the locked
+# default one, and every login would still end in a password prompt (on
+# 2026-09-29, Zen opening the release notes).
+#
+# So before PAM gets there: if the default keyring opens with the password
+# that just logged in, it BECOMES the login keyring — renamed, not copied or
+# re-encrypted, so every secret in it is kept as it was. From then on the login
+# unlocks it. A keyring with a different password is not touched: the next
+# time it asks, the prompt's "Automatically unlock this keyring whenever I'm
+# logged in" box stores its password in the login keyring, and it opens with
+# the login from then on.
+#
+# ── What it will not do ─────────────────────────────────────────────────────
+# Act on a password that did not log in (checked with unix_chkpwd), act as
+# root on the user's files (it drops to the user first), replace a login
+# keyring that holds anything, touch the files under a running keyring daemon,
+# write the password anywhere, or ever fail a login: every path exits 0, and a
+# hard alarm stops it if anything hangs. The verdict goes to the journal:
+#
+#   journalctl -t rime-keyring-login
+import ctypes
+import hashlib
+import os
+import pwd
+import signal
+import struct
+import subprocess
+import sys
+import syslog
+import time
+
+TAG = "rime-keyring-login"
+MAGIC = b"GnomeKeyring\n\r\0\n"
+MAX_PASSWORD = 512           # PAM_MAX_RESP_SIZE: all pam_exec will ever send
+CHKPWD = "/usr/sbin/unix_chkpwd"
+DEADLINE_SECS = 5            # pam_exec waits for us; a login must not
+
+
+class Keyring:
+    """The clear header of a gnome-keyring binary file, and a way to try a
+    password against its encrypted part. Mirrors gkm-secret-binary.c."""
+
+    def __init__(self, data):
+        self.ok = False
+        if not data.startswith(MAGIC) or len(data) < len(MAGIC) + 4:
+            return  # not a binary keyring (a textual one is stored unlocked)
+        off = len(MAGIC)
+        if data[off:off + 4] != b"\0\0\0\0":  # version 0.0, AES, MD5
+            return
+        off += 4
+        try:
+            _, off = _string(data, off)        # display name
+            off += 16                          # ctime, mtime (2 × hi/lo)
+            off += 8                           # flags, lock timeout
+            self.iterations, = struct.unpack_from(">I", data, off); off += 4
+            self.salt = data[off:off + 8]; off += 8
+            off += 16                          # reserved
+            self.items, = struct.unpack_from(">I", data, off); off += 4
+            for _ in range(self.items):
+                off += 8                       # id, type
+                count, = struct.unpack_from(">I", data, off); off += 4
+                for _ in range(count):
+                    _, off = _string(data, off)                   # name
+                    kind, = struct.unpack_from(">I", data, off); off += 4
+                    if kind == 0:
+                        _, off = _string(data, off)               # hashed value
+                    elif kind == 1:
+                        off += 4
+                    else:
+                        return
+            size, = struct.unpack_from(">I", data, off); off += 4
+        except (struct.error, ValueError):
+            return
+        blob = data[off:off + size]
+        if size == 0 or size % 16 or len(blob) != size or len(self.salt) != 8:
+            return
+        self.blob = blob
+        self.ok = True
+
+    def opens_with(self, password):
+        """True when `password` decrypts this keyring: egg_symkey_generate_simple
+        (SHA-256, AES-128) for the key and IV, and the first 16 plaintext bytes
+        are the MD5 of the rest."""
+        if not self.ok or self.iterations < 1:
+            return False
+        digest = hashlib.sha256(password + self.salt).digest()
+        for _ in range(self.iterations - 1):
+            digest = hashlib.sha256(digest).digest()
+        plain = _aes128_cbc_decrypt(digest[:16], digest[16:32], self.blob)
+        return plain is not None and hashlib.md5(plain[16:], usedforsecurity=False).digest() == plain[:16]
+
+
+def _string(data, off):
+    n, = struct.unpack_from(">I", data, off)
+    off += 4
+    if n == 0xFFFFFFFF:
+        return None, off
+    if off + n > len(data):
+        raise ValueError("string runs past the end")
+    return data[off:off + n], off + n
+
+
+def _aes128_cbc_decrypt(key, iv, blob):
+    # libcrypto through ctypes: no key on anybody's argv, and no Python
+    # package the image would have to carry for one function.
+    lib = ctypes.CDLL("libcrypto.so.3")
+    lib.EVP_CIPHER_CTX_new.restype = ctypes.c_void_p
+    lib.EVP_aes_128_cbc.restype = ctypes.c_void_p
+    lib.EVP_DecryptInit_ex.argtypes = [ctypes.c_void_p, ctypes.c_void_p, ctypes.c_void_p,
+                                       ctypes.c_char_p, ctypes.c_char_p]
+    lib.EVP_CIPHER_CTX_set_padding.argtypes = [ctypes.c_void_p, ctypes.c_int]
+    lib.EVP_DecryptUpdate.argtypes = [ctypes.c_void_p, ctypes.c_char_p,
+                                      ctypes.POINTER(ctypes.c_int), ctypes.c_char_p, ctypes.c_int]
+    lib.EVP_DecryptFinal_ex.argtypes = [ctypes.c_void_p, ctypes.c_char_p,
+                                        ctypes.POINTER(ctypes.c_int)]
+    lib.EVP_CIPHER_CTX_free.argtypes = [ctypes.c_void_p]
+    ctx = lib.EVP_CIPHER_CTX_new()
+    if not ctx:
+        return None
+    try:
+        out = ctypes.create_string_buffer(len(blob) + 16)
+        rest = ctypes.create_string_buffer(32)  # padding is off: Final writes nothing
+        n, tail = ctypes.c_int(0), ctypes.c_int(0)
+        if (lib.EVP_DecryptInit_ex(ctx, lib.EVP_aes_128_cbc(), None, key, iv) != 1
+                or lib.EVP_CIPHER_CTX_set_padding(ctx, 0) != 1
+                or lib.EVP_DecryptUpdate(ctx, out, ctypes.byref(n), blob, len(blob)) != 1
+                or lib.EVP_DecryptFinal_ex(ctx, rest, ctypes.byref(tail)) != 1
+                or tail.value != 0):
+            return None
+        return out.raw[:n.value]
+    finally:
+        lib.EVP_CIPHER_CTX_free(ctx)
+
+
+def _read_keyring(path):
+    try:
+        fd = os.open(path, os.O_RDONLY | os.O_NOFOLLOW | os.O_CLOEXEC)
+    except OSError:
+        return None
+    try:
+        with os.fdopen(fd, "rb") as f:
+            return Keyring(f.read(4 * 1024 * 1024))
+    except OSError:
+        return None
+
+
+_libc = ctypes.CDLL(None, use_errno=True)
+
+
+def _rename_noreplace(src, dst):
+    """rename(2) that refuses to overwrite: two keyrings must never become one."""
+    AT_FDCWD, RENAME_NOREPLACE = -100, 1
+    if _libc.renameat2(AT_FDCWD, os.fsencode(src), AT_FDCWD, os.fsencode(dst), RENAME_NOREPLACE) != 0:
+        err = ctypes.get_errno()
+        raise OSError(err, os.strerror(err), dst)
+
+
+def _write_default(keyrings, name):
+    tmp = os.path.join(keyrings, ".default.rime-tmp")
+    fd = os.open(tmp, os.O_WRONLY | os.O_CREAT | os.O_TRUNC | os.O_NOFOLLOW | os.O_CLOEXEC, 0o600)
+    with os.fdopen(fd, "wb") as f:
+        f.write(name.encode())  # gnome-keyring writes it with no newline
+        f.flush()
+        os.fsync(f.fileno())
+    os.rename(tmp, os.path.join(keyrings, "default"))
+
+
+def adopt(keyrings, password, now=None):
+    """Make the default keyring the login keyring when `password` opens it.
+    Returns (changed, verdict). Never raises for a state it can meet."""
+    if not os.path.isdir(keyrings):
+        return False, "no keyrings yet; the login creates its own"
+    try:
+        with open(os.path.join(keyrings, "default"), "rb") as f:
+            default = f.read(256).strip().decode("utf-8", "replace")
+    except FileNotFoundError:
+        default = None
+    names = sorted(n[:-len(".keyring")] for n in os.listdir(keyrings)
+                   if n.endswith(".keyring") and not n.startswith("."))
+    if default is None:
+        # No alias at all: only an unambiguous single keyring is a candidate.
+        others = [n for n in names if n != "login"]
+        if "login" in names or len(others) != 1:
+            return False, "no default keyring to move over"
+        default = others[0]
+    if default in ("", "login"):
+        return False, "the default keyring is already the login keyring"
+    if "/" in default or default.startswith("."):
+        return False, "the default keyring's name is not a plain file name; left alone"
+
+    target_path = os.path.join(keyrings, default + ".keyring")
+    target = _read_keyring(target_path)
+    if target is None or not target.ok:
+        return False, "the default keyring '%s' is not an encrypted keyring file; left alone" % default
+    if not target.opens_with(password):
+        return False, ("the default keyring '%s' has a different password; it asks once more, and "
+                       "ticking 'Automatically unlock' then lets the login open it" % default)
+
+    login_path = os.path.join(keyrings, "login.keyring")
+    aside = None
+    if os.path.lexists(login_path):
+        login = _read_keyring(login_path)
+        # Only the empty keyring PAM makes on its own (release 2026.09.29.2
+        # did, on a machine that logged in before this helper existed) may be
+        # moved out of the way, and only when this password opens it too,
+        # which is what proves PAM made it at this account's login.
+        if login is None or not login.ok or login.items != 0 or not login.opens_with(password):
+            return False, "a login keyring with its own contents already exists; left alone"
+        aside = "%s.rime-empty-%d" % (login_path, int(now if now is not None else time.time()))
+        _rename_noreplace(login_path, aside)
+    try:
+        _rename_noreplace(target_path, login_path)
+    except OSError:
+        if aside:
+            _rename_noreplace(aside, login_path)
+        raise
+    _write_default(keyrings, "login")
+    extra = " (an empty login keyring was moved to %s)" % os.path.basename(aside) if aside else ""
+    return True, "the '%s' keyring is now the login keyring and opens at login%s" % (default, extra)
+
+
+def _password_is_the_accounts(user, password):
+    # pam_exec runs this whether or not the login succeeded, and a keyring's
+    # own password typed at the login screen by mistake must not rename it into
+    # a login keyring the real password cannot open.
+    try:
+        r = subprocess.run([CHKPWD, user, "nullok"], input=password + b"\0",
+                           stdout=subprocess.DEVNULL, stderr=subprocess.DEVNULL,
+                           timeout=3, close_fds=True)
+    except (OSError, subprocess.TimeoutExpired):
+        return False
+    return r.returncode == 0
+
+
+def _daemon_running(uid):
+    for pid in os.listdir("/proc"):
+        if not pid.isdigit():
+            continue
+        try:
+            with open("/proc/%s/comm" % pid) as f:
+                comm = f.read().strip()
+            if comm != "gnome-keyring-d":
+                continue
+            if os.stat("/proc/%s" % pid).st_uid == uid:
+                return True
+        except OSError:
+            continue
+    return False
+
+
+def main():
+    signal.alarm(DEADLINE_SECS)  # the default action ends us; login goes on
+    syslog.openlog(TAG, 0, syslog.LOG_AUTHPRIV)
+    try:
+        if os.environ.get("PAM_TYPE") != "auth":
+            return 0
+        user = os.environ.get("PAM_USER") or ""
+        password = sys.stdin.buffer.read(MAX_PASSWORD + 1).split(b"\0", 1)[0]
+        try:
+            pw = pwd.getpwnam(user)
+        except KeyError:
+            return 0
+        if pw.pw_uid < 1000 or not password:
+            return 0
+        if not _password_is_the_accounts(user, password):
+            return 0
+        os.setgroups([])
+        os.setresgid(pw.pw_gid, pw.pw_gid, pw.pw_gid)
+        os.setresuid(pw.pw_uid, pw.pw_uid, pw.pw_uid)
+        os.umask(0o077)
+        if _daemon_running(pw.pw_uid):
+            syslog.syslog(syslog.LOG_INFO, "%s: a keyring daemon is already running; "
+                          "nothing moved, the next login tries again" % user)
+            return 0
+        changed, verdict = adopt(os.path.join(pw.pw_dir, ".local/share/keyrings"), password)
+        syslog.syslog(syslog.LOG_NOTICE if changed else syslog.LOG_INFO, "%s: %s" % (user, verdict))
+    except Exception as e:  # the type only: a message could quote a path
+        syslog.syslog(syslog.LOG_WARNING, "stopped without changing anything: %s" % type(e).__name__)
+    return 0
+
+
+if __name__ == "__main__":
+    sys.exit(main())
