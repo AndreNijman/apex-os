@@ -164,7 +164,7 @@ jobs:
             || { echo "::error::the twin's /usr/share/rime-installer holds '$only', expected only allow-unattended"; exit 1; }
           for f in etc/shadow etc/shadow-; do
             sudo test -e "$P/$f" || continue
-            sudo diff <(sudo cut -d: -f1,3- "$P/$f") <(sudo cut -d: -f1,3- "$T/$f") \
+            diff <(sudo cut -d: -f1,3- "$P/$f") <(sudo cut -d: -f1,3- "$T/$f") \
               || { echo "::error::/$f differs beyond the password salt"; exit 1; }
           done
           # The menus: the twin's is the production one plus its one appended entry.
