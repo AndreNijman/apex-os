@@ -1,0 +1,421 @@
+#!/usr/bin/env python3
+# ─────────────────────────────────────────────────────────────────────────────
+#  iso-qualify.py — boot a built installer ISO in qemu and read the verdict
+#  off the guest itself. Run by .github/workflows/build-installer-iso.yml
+#  before any ISO becomes a release; runs the same way on a developer machine
+#  inside the bootlab container (--device /dev/kvm, no root needed).
+#
+#  THREE MODES, EACH ONE A CLAIM A RELEASE NOTE MAKES:
+#
+#    live        "The stick boots and the installer appears." Boots the
+#                PRODUCTION ISO — the file that gets published, untouched — on
+#                one firmware (uefi, uefi-sb = Secure Boot on with Microsoft's
+#                keys, bios) from one medium (usb = the ISO as a disk, which is
+#                what a dd'd or Rufus'd stick is; cdrom). The boot menu is read
+#                off the serial line (GRUB draws it there), the default entry
+#                is left to boot on its own, and the installer's first page is
+#                screenshotted until OCR reads "Rime" on it. A kernel that boots
+#                to a text console, a GUI that never paints, or a page that
+#                still says APEX all fail here.
+#
+#    unattended  "It installs." Boots the TEST twin (PRODUCTION=0: the same
+#                live env plus the unattended marker and one extra menu entry)
+#                with a blank virtio disk, picks that entry, and waits for the
+#                engine's RIME-INSTALL-UNATTENDED-OK and the poweroff. The image
+#                comes over the network from the digest stamped into the ISO,
+#                exactly as a user's install does.
+#
+#    firstboot   "It boots, and its first update is not refused." Boots the
+#                disk the unattended run wrote, logs in on the serial getty the
+#                install's rime.karg=console=ttyS0 gives it, and reads, as the
+#                user: the booted image and digest (bootc status), the release
+#                it says it is, and `rime trust --gate`, which is the exact
+#                decision `rime update` would make. The APEX-OS v2.x ISOs fail
+#                this step; that is the reason this release exists.
+#
+#  WHAT THIS NEVER DOES: touch the host's firmware or a real disk. Two pflash
+#  files, one sparse disk image and the ISO, all under --work, read by an
+#  ordinary qemu process.
+# ─────────────────────────────────────────────────────────────────────────────
+import argparse
+import json
+import os
+import re
+import shutil
+import socket
+import subprocess
+import sys
+import threading
+import time
+
+OVMF = "/usr/share/edk2/ovmf"
+
+
+class Serial:
+    """The guest's ttyS0 over a unix socket: logged to a file, readable, writable."""
+
+    def __init__(self, path, log):
+        self.path, self.log = path, log
+        self.buf = ""
+        self.lock = threading.Lock()
+        self.sock = None
+        self.closed = False
+        threading.Thread(target=self._pump, daemon=True).start()
+
+    def _pump(self):
+        deadline = time.time() + 30
+        while self.sock is None and time.time() < deadline:
+            try:
+                s = socket.socket(socket.AF_UNIX, socket.SOCK_STREAM)
+                s.connect(self.path)
+                self.sock = s
+            except OSError:
+                time.sleep(0.2)
+        if self.sock is None:
+            self.closed = True
+            return
+        with open(self.log, "ab") as out:
+            while True:
+                try:
+                    data = self.sock.recv(65536)
+                except OSError:
+                    data = b""
+                if not data:
+                    self.closed = True
+                    return
+                out.write(data)
+                out.flush()
+                with self.lock:
+                    self.buf += data.decode("utf-8", "replace")
+
+    def text(self):
+        with self.lock:
+            return self.buf
+
+    def mark(self):
+        return len(self.text())
+
+    def wait(self, pattern, timeout, since=0, proc=None):
+        rx = re.compile(pattern)
+        deadline = time.time() + timeout
+        while time.time() < deadline:
+            m = rx.search(self.text(), since)
+            if m:
+                return m
+            if proc is not None and proc.poll() is not None:
+                return None
+            time.sleep(0.5)
+        return None
+
+    def send(self, s):
+        self.sock.sendall(s.encode())
+
+
+class Qmp:
+    def __init__(self, path, deadline):
+        while True:
+            try:
+                s = socket.socket(socket.AF_UNIX, socket.SOCK_STREAM)
+                s.connect(path)
+                break
+            except OSError:
+                if time.time() > deadline:
+                    raise
+                time.sleep(0.2)
+        self.f = s.makefile("rwb")
+        self.f.readline()
+        self.cmd("qmp_capabilities")
+
+    def cmd(self, name, **args):
+        msg = {"execute": name}
+        if args:
+            msg["arguments"] = args
+        self.f.write((json.dumps(msg) + "\n").encode())
+        self.f.flush()
+        while True:
+            line = self.f.readline()
+            if not line:
+                raise RuntimeError("qmp closed")
+            d = json.loads(line)
+            if "event" not in d:
+                return d
+
+    def key(self, qcode):
+        self.cmd("send-key", keys=[{"type": "qcode", "data": qcode}], **{"hold-time": 80})
+        time.sleep(0.25)
+
+    def screendump(self, path):
+        r = self.cmd("screendump", filename=path, format="png")
+        return "error" not in r
+
+
+def qemu_cmd(a, name, iso=None, media="cdrom", disk=None, firmware="uefi", display=True):
+    work = a.work
+    cmd = ["qemu-system-x86_64", "-accel", a.accel, "-m", str(a.mem), "-smp", str(a.smp),
+           "-nodefaults", "-no-user-config", "-display", "none",
+           "-chardev", "socket,id=ser0,path=%s/%s.serial.sock,server=on,wait=off" % (work, name),
+           "-serial", "chardev:ser0",
+           "-qmp", "unix:%s/%s.qmp.sock,server=on,wait=off" % (work, name),
+           "-netdev", "user,id=net0", "-device", "virtio-net-pci,netdev=net0"]
+    if firmware == "bios":
+        cmd += ["-machine", "q35"]
+    else:
+        vars_src = "OVMF_VARS.secboot.fd" if firmware == "uefi-sb" else "OVMF_VARS.fd"
+        myvars = os.path.join(work, "%s.vars.fd" % name)
+        shutil.copyfile(os.path.join(OVMF, vars_src), myvars)
+        cmd += ["-machine", "q35,smm=on",
+                "-global", "driver=cfi.pflash01,property=secure,value=on",
+                "-drive", "if=pflash,unit=0,format=raw,readonly=on,file=%s/OVMF_CODE.secboot.fd" % OVMF,
+                "-drive", "if=pflash,unit=1,format=raw,file=%s" % myvars]
+    if display:
+        # bochs: the GPU with a native kernel driver, as build-live-iso.sh's
+        # BIOS note says. 1280x800 is the smallest size the GUI is laid out for.
+        cmd += ["-device", "VGA,edid=on,xres=1280,yres=800"]
+    if iso:
+        if media == "usb":
+            cmd += ["-device", "qemu-xhci,id=xhci",
+                    "-drive", "if=none,id=stick,format=raw,readonly=on,file=%s" % iso,
+                    "-device", "usb-storage,bus=xhci.0,drive=stick,removable=on,bootindex=0"]
+        else:
+            cmd += ["-drive", "if=none,id=cd,format=raw,readonly=on,media=cdrom,file=%s" % iso,
+                    "-device", "ide-cd,drive=cd,bootindex=0"]
+    if disk:
+        cmd += ["-drive", "if=none,id=d0,format=raw,file=%s" % disk,
+                "-device", "virtio-blk-pci,drive=d0,bootindex=1"]
+    return cmd
+
+
+def start(a, name, cmd):
+    for suffix in (".serial.sock", ".qmp.sock", ".serial.log"):
+        p = os.path.join(a.work, name + suffix)
+        if os.path.exists(p):
+            os.unlink(p)
+    err = open(os.path.join(a.work, name + ".qemu.err"), "wb")
+    proc = subprocess.Popen(cmd, stdout=err, stderr=subprocess.STDOUT)
+    ser = Serial(os.path.join(a.work, name + ".serial.sock"), os.path.join(a.work, name + ".serial.log"))
+    qmp = Qmp(os.path.join(a.work, name + ".qmp.sock"), time.time() + 30)
+    return proc, ser, qmp
+
+
+def stop(proc, qmp):
+    if proc.poll() is None:
+        try:
+            qmp.cmd("quit")
+        except Exception:
+            pass
+        try:
+            proc.wait(15)
+        except subprocess.TimeoutExpired:
+            proc.kill()
+
+
+def ocr(png):
+    if not shutil.which("tesseract"):
+        return None
+    r = subprocess.run(["tesseract", png, "-", "--psm", "3"], capture_output=True, text=True)
+    return r.stdout
+
+
+def report(a, name, verdict, **facts):
+    facts.update(name=name, verdict=verdict)
+    with open(os.path.join(a.work, name + ".json"), "w") as f:
+        json.dump(facts, f, indent=2)
+    print(json.dumps(facts, indent=2))
+    return 0 if verdict == "pass" else 1
+
+
+def mode_live(a):
+    name = a.name
+    cmd = qemu_cmd(a, name, iso=a.iso, media=a.media, firmware=a.firmware)
+    proc, ser, qmp = start(a, name, cmd)
+    facts = {"firmware": a.firmware, "media": a.media}
+    try:
+        # GRUB draws its menu on the serial line too (the ISO's grub.cfg turns
+        # the serial terminal on when a UART answers).
+        m = ser.wait(r"Install Rime OS", 180, proc=proc)
+        facts["menu"] = bool(m)
+        if not m:
+            return report(a, name, "fail", reason="no boot menu on serial", **facts)
+        # The default entry, on its own: this is what a user who presses nothing gets.
+        m = ser.wait(r"Linux version \S+", 120, proc=proc)
+        facts["kernel"] = m.group(0) if m else None
+        if not m:
+            return report(a, name, "fail", reason="the kernel never started", **facts)
+        if re.search(r"(?i)apex", ser.text()[:m.start()]):
+            return report(a, name, "fail", reason="the boot menu says APEX", **facts)
+        if a.firmware == "uefi-sb":
+            facts["secure_boot"] = bool(re.search(r"Secure boot enabled", ser.text()))
+            if not facts["secure_boot"]:
+                return report(a, name, "fail", reason="kernel did not report Secure Boot on", **facts)
+        png = os.path.join(a.work, name + ".png")
+        deadline = time.time() + a.timeout
+        text = ""
+        while time.time() < deadline and proc.poll() is None:
+            time.sleep(5)
+            if not qmp.screendump(png) or not os.path.exists(png):
+                continue
+            text = ocr(png)
+            if text is None:
+                return report(a, name, "fail", reason="tesseract is not installed", **facts)
+            if re.search(r"(?i)\brime\b", text):
+                break
+        facts["ocr"] = " ".join(text.split())[:600]
+        if not re.search(r"(?i)\brime\b", text):
+            return report(a, name, "fail", reason="the installer never showed a page naming Rime", **facts)
+        if re.search(r"(?i)apex", text):
+            return report(a, name, "fail", reason="the installer's page says APEX", **facts)
+        return report(a, name, "pass", screenshot=png, **facts)
+    finally:
+        stop(proc, qmp)
+
+
+def mode_unattended(a):
+    name = a.name
+    if not os.path.exists(a.disk):
+        with open(a.disk, "wb") as f:
+            f.truncate(a.disk_gb * 1024 ** 3)
+    cmd = qemu_cmd(a, name, iso=a.iso, media="cdrom", disk=a.disk, firmware="uefi")
+    proc, ser, qmp = start(a, name, cmd)
+    t0 = time.time()
+    try:
+        if not ser.wait(r"Unattended install to /dev/vda", 180, proc=proc):
+            return report(a, name, "fail", reason="no unattended entry in the menu (not a PRODUCTION=0 ISO?)")
+        # Entries: Install, safe graphics, troubleshoot, then the unattended one.
+        # The first key press also stops GRUB's 10 s countdown.
+        for _ in range(3):
+            qmp.key("down")
+        qmp.key("ret")
+        m = ser.wait(r"Command line: .*", 120, proc=proc)
+        if not m or "rime.unattended" not in m.group(0):
+            return report(a, name, "fail", reason="the unattended entry did not boot",
+                          cmdline=m.group(0) if m else None)
+        digest = ser.wait(r"sha256:[0-9a-f]{64}", 600, proc=proc)
+        m = ser.wait(r"RIME-INSTALL-UNATTENDED-OK", a.timeout, proc=proc)
+        if not m:
+            tail = ser.text()[-3000:]
+            return report(a, name, "fail", reason="the install did not finish", tail=tail)
+        try:
+            proc.wait(180)
+        except subprocess.TimeoutExpired:
+            return report(a, name, "fail", reason="installed, but rime.poweroff never powered off")
+        return report(a, name, "pass", minutes=round((time.time() - t0) / 60, 1),
+                      first_digest_on_console=digest.group(0) if digest else None)
+    finally:
+        stop(proc, qmp)
+
+
+def mode_firstboot(a):
+    name = a.name
+    cmd = qemu_cmd(a, name, disk=a.disk, firmware="uefi", display=False)
+    proc, ser, qmp = start(a, name, cmd)
+    facts = {}
+    try:
+        if not ser.wait(r"login: $|login:\s*$", a.timeout, proc=proc):
+            if not ser.wait(r"\blogin:", 5, proc=proc):
+                return report(a, name, "fail", reason="no login prompt on the serial console",
+                              tail=ser.text()[-3000:])
+        time.sleep(3)
+        at = ser.mark()
+        ser.send(a.user + "\n")
+        if not ser.wait(r"[Pp]assword:", 60, since=at):
+            return report(a, name, "fail", reason="no password prompt")
+        at = ser.mark()
+        ser.send(a.password + "\n")
+        if not ser.wait(r"[$#>] ?$|\$ |> ", 90, since=at):
+            return report(a, name, "fail", reason="login did not give a shell", tail=ser.text()[-2000:])
+        time.sleep(5)
+        # Whatever the account's login shell is, the checks run in a plain bash.
+        ser.send("exec bash --norc --noprofile\n")
+        time.sleep(2)
+        ser.send("stty -echo; export TERM=dumb PS1='$ '\n")
+        time.sleep(1)
+        at = ser.mark()
+        # Markers are printed with printf so the echoed command never matches them.
+        script = (
+            "printf '__RQ_%s__\\n' BEGIN; "
+            "printf '__RQ_%s__\\n' HOST; hostnamectl --static; "
+            "printf '__RQ_%s__\\n' RELEASE; cat /usr/share/rime/release.json | tr -d '\\n'; echo; "
+            "printf '__RQ_%s__\\n' BOOTC; echo '" + a.password + "' | sudo -S -p '' bootc status --format json 2>/dev/null | tr -d '\\n'; echo; "
+            "printf '__RQ_%s__\\n' GATE; rime trust --gate 2>&1; printf '__RQ_GATE_RC=%s__\\n' $?; "
+            "printf '__RQ_%s__\\n' END\n"
+        )
+        ser.send(script)
+        if not ser.wait(r"__RQ_END__", 600, since=at):
+            return report(a, name, "fail", reason="the checks never finished", tail=ser.text()[-4000:])
+        out = ser.text()[at:]
+        out = out[out.index("__RQ_BEGIN__"):]
+
+        def section(tag, nxt):
+            m = re.search(r"__RQ_%s__\r?\n(.*?)__RQ_%s" % (tag, nxt), out, re.S)
+            return m.group(1).strip() if m else ""
+
+        facts["hostname"] = section("HOST", "RELEASE")
+        def obj(text):
+            # Only the JSON object: a first sudo prints its lecture on the tty.
+            return json.loads(text[text.index("{"):text.rindex("}") + 1])
+
+        try:
+            facts["release"] = obj(section("RELEASE", "BOOTC"))
+        except ValueError:
+            facts["release"] = None
+        try:
+            st = obj(section("BOOTC", "GATE"))
+            booted = st["status"]["booted"]["image"]
+            facts["booted_image"] = booted["image"]["image"]
+            facts["booted_transport"] = booted["image"].get("transport")
+            facts["booted_digest"] = booted.get("imageDigest")
+        except (ValueError, KeyError, TypeError) as e:
+            facts["bootc_error"] = repr(e)
+        gate = section("GATE", "GATE_RC")
+        facts["gate"] = gate
+        m = re.search(r"__RQ_GATE_RC=(\d+)__", out)
+        facts["gate_rc"] = int(m.group(1)) if m else None
+
+        problems = []
+        if facts.get("booted_image") != a.expect_image:
+            problems.append("booted image is %r, expected %r" % (facts.get("booted_image"), a.expect_image))
+        if a.expect_digest and facts.get("booted_digest") != a.expect_digest:
+            problems.append("booted digest is %r, expected %r" % (facts.get("booted_digest"), a.expect_digest))
+        if not re.search(r"Deploying this\s+yes", gate):
+            problems.append("rime trust --gate did not say it would deploy")
+        if facts.get("release") is None:
+            problems.append("no /usr/share/rime/release.json")
+        if problems:
+            return report(a, name, "fail", reason="; ".join(problems), **facts)
+        return report(a, name, "pass", **facts)
+    finally:
+        try:
+            ser.send("echo '%s' | sudo -S -p '' systemctl poweroff\n" % a.password)
+            proc.wait(60)
+        except Exception:
+            pass
+        stop(proc, qmp)
+
+
+def main():
+    ap = argparse.ArgumentParser(description=__doc__)
+    ap.add_argument("mode", choices=["live", "unattended", "firstboot"])
+    ap.add_argument("--work", required=True)
+    ap.add_argument("--name", required=True)
+    ap.add_argument("--iso")
+    ap.add_argument("--disk")
+    ap.add_argument("--disk-gb", type=int, default=64,
+                    help="sparse size; the whole-disk staging floor is ~53 GB")
+    ap.add_argument("--firmware", choices=["uefi", "uefi-sb", "bios"], default="uefi")
+    ap.add_argument("--media", choices=["usb", "cdrom"], default="usb")
+    ap.add_argument("--timeout", type=int, default=240)
+    ap.add_argument("--mem", type=int, default=6144)
+    ap.add_argument("--smp", type=int, default=4)
+    ap.add_argument("--accel", default="kvm:tcg")
+    ap.add_argument("--user", default="andre")
+    ap.add_argument("--password", default="testpass")
+    ap.add_argument("--expect-image", default="ghcr.io/andrenijman/rime-os:rime")
+    ap.add_argument("--expect-digest")
+    a = ap.parse_args()
+    os.makedirs(a.work, exist_ok=True)
+    a.work = os.path.abspath(a.work)
+    return {"live": mode_live, "unattended": mode_unattended, "firstboot": mode_firstboot}[a.mode](a)
+
+
+if __name__ == "__main__":
+    sys.exit(main())
