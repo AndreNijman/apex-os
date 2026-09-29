@@ -1,0 +1,49 @@
+#!/usr/bin/env bash
+# ─────────────────────────────────────────────────────────────────────────────
+# stamp-release — write /usr/share/rime/release.json into an image root.
+#
+#   stamp-release <release-id> <os-revision> [root]
+#
+# The file Rime Shell's ReleaseService reads on the first desktop session after
+# an update, to open that release's page on rimeos.com once (rimeos.com master
+# spec §7.2 and §7.6):
+#
+#   { "schema": 1, "id": "2026.09.29", "version": "2026.09.29",
+#     "revision": "<rime-os sha>", "shellRevision": "<rime-shell sha>",
+#     "notes": "https://rimeos.com/updates/2026.09.29", "built": "<UTC>" }
+#
+# Two fields of the spec's example are left out on purpose: `imageDigest` (an
+# image cannot contain its own digest — writing it changes it) and `channel`
+# (one digest is published under every channel tag at once). The OCI labels
+# and the site's release record carry both.
+#
+# <release-id> is files/scripts/next-release-id's answer, or "dev" (and empty
+# means "dev") for a build that is not a release: a local build, a branch
+# test image. A "dev" file has no notes URL, and the Shell opens nothing for it.
+# The Shell revision is read from the vendored tree itself, never passed in, so
+# the file says what the image actually carries.
+# ─────────────────────────────────────────────────────────────────────────────
+set -euo pipefail
+
+id="${1:-}"; rev="${2:-dev}"; root="${3:-}"
+[ -n "$id" ] || id=dev
+
+if [ "$id" != dev ] && ! [[ "$id" =~ ^[0-9]{4}\.[0-9]{2}\.[0-9]{2}(\.([2-9]|[1-9][0-9]+))?$ ]]; then
+    echo "stamp-release: '$id' is not a release ID (YYYY.MM.DD or YYYY.MM.DD.N, N >= 2)" >&2
+    exit 1
+fi
+[ "$rev" = dev ] || [[ "$rev" =~ ^[0-9a-f]{40}$ ]] || { echo "stamp-release: bad revision '$rev'" >&2; exit 1; }
+
+shell_rev="$(cat "${root}/usr/share/rime-shell/.rime-shell-commit" 2>/dev/null || true)"
+[[ "$shell_rev" =~ ^[0-9a-f]{40}$ ]] || { echo "stamp-release: no vendored Rime Shell commit under ${root}/usr/share/rime-shell" >&2; exit 1; }
+
+notes=""
+[ "$id" = dev ] || notes="https://rimeos.com/updates/${id}"
+
+mkdir -p "${root}/usr/share/rime"
+# Every value is validated above to a fixed character set, so none needs JSON
+# escaping.
+printf '{\n  "schema": 1,\n  "id": "%s",\n  "version": "%s",\n  "revision": "%s",\n  "shellRevision": "%s",\n  "notes": "%s",\n  "built": "%s"\n}\n' \
+    "$id" "$id" "$rev" "$shell_rev" "$notes" "$(date -u +%Y-%m-%dT%H:%M:%SZ)" \
+    > "${root}/usr/share/rime/release.json"
+chmod 0644 "${root}/usr/share/rime/release.json"

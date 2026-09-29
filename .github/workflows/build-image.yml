@@ -116,6 +116,10 @@ on:
         description: "Force a full, cache-bypassing CORE rebuild (~45 min; makes the next update a full download for every user)"
         type: boolean
         default: false
+      release_id:
+        description: "Release ID to publish as (YYYY.MM.DD or YYYY.MM.DD.N); blank computes it (files/scripts/next-release-id). Must match the page on rimeos.com."
+        type: string
+        default: ""
   schedule:
     # Weekly (Mon 06:00 UTC) to pick up upstream fedora-bootc / COPR / RPMFusion
     # security updates. This only rebuilds core when the upstream base image has
@@ -203,6 +207,7 @@ jobs:
       core: ${{ steps.gate.outputs.core }}
       base: ${{ steps.filter.outputs.base }}
       shell_sha: ${{ steps.shell.outputs.sha }}
+      release_id: ${{ steps.release.outputs.id }}
     steps:
       - name: Checkout
         uses: actions/checkout@v4
@@ -297,6 +302,55 @@ jobs:
           [[ "$sha" =~ ^[0-9a-f]{40}$ ]] || { echo "::error::Could not resolve rime-shell ${used}"; exit 1; }
           echo "sha=$sha" >> "$GITHUB_OUTPUT"
           echo "Pinned rime-shell ${used}: $sha"
+
+      # ── The release this build publishes as ──────────────────────────────
+      # Baked into the image as /usr/share/rime/release.json and the label
+      # org.rimeos.release.id (Containerfile.rime). Rime Shell opens
+      # https://rimeos.com/updates/<id> once after the update, so this is the ID
+      # the site must publish the release's page under. The rule is
+      # files/scripts/next-release-id (tests/test-release-stamp.sh): YYYY.MM.DD
+      # by AWST promotion date, .2 .3 … the same day, and the SAME ID when the
+      # OS and Shell revisions are the ones already published (the weekly
+      # reissue). Only main publishes a release; any other ref is "dev", which
+      # opens nothing. The concurrency group serialises this read against every
+      # other publisher.
+      - name: Release ID
+        id: release
+        env:
+          REGISTRY_CREDS: ${{ github.actor }}:${{ secrets.GITHUB_TOKEN }}
+          OVERRIDE: ${{ github.event_name == 'workflow_dispatch' && inputs.release_id || '' }}
+          SHELL_SHA: ${{ steps.shell.outputs.sha }}
+        run: |
+          set -euo pipefail
+          if [ "$GITHUB_REF" != refs/heads/main ]; then
+            echo "id=dev" >> "$GITHUB_OUTPUT"; echo "Release ID: dev (not main)"; exit 0
+          fi
+          if [ -n "$OVERRIDE" ]; then
+            [[ "$OVERRIDE" =~ ^[0-9]{4}\.[0-9]{2}\.[0-9]{2}(\.([2-9]|[1-9][0-9]+))?$ ]] \
+              || { echo "::error::release_id '$OVERRIDE' is not YYYY.MM.DD or YYYY.MM.DD.N (N >= 2)"; exit 1; }
+            echo "id=$OVERRIDE" >> "$GITHUB_OUTPUT"; echo "Release ID: $OVERRIDE (dispatch input)"; exit 0
+          fi
+          today="$(TZ=Australia/Perth date +%Y.%m.%d)"
+          fmt='{{ index .Labels "org.rimeos.release.id" }}|{{ index .Labels "org.opencontainers.image.revision" }}|{{ index .Labels "org.rimeos.rime-shell.ref" }}'
+          pub=""
+          for try in 1 2 3; do
+            if pub="$(skopeo inspect --creds "$REGISTRY_CREDS" --format "$fmt" "docker://$IMAGE:daily" 2>/dev/null)"; then break; fi
+            pub=""; [ "$try" -lt 3 ] && sleep $(( try * 5 ))
+          done
+          [ -n "$pub" ] || echo "::warning::could not read the published image's labels; numbering from today's date alone"
+          IFS='|' read -r pid prev pshell <<<"${pub:-||}"
+          # A missing label reads as the template's "<no value>".
+          [ "$pid" = "<no value>" ] && pid=""
+          [ "$prev" = "<no value>" ] && prev=""
+          [ "$pshell" = "<no value>" ] && pshell=""
+          id="$(bash files/scripts/next-release-id "$today" "$GITHUB_SHA" "$SHELL_SHA" "$pid" "$prev" "$pshell")"
+          echo "id=$id" >> "$GITHUB_OUTPUT"
+          echo "Release ID: $id (today $today; published id='${pid}' revision='${prev:0:9}' shell='${pshell:0:9}')"
+          {
+            echo "### Release ID: \`$id\`"
+            echo
+            echo "Rime Shell opens https://rimeos.com/updates/$id after this update. Publish \`content/updates/$id/release.yaml\` on the site."
+          } >> "$GITHUB_STEP_SUMMARY"
 
       - name: Path filter
         id: filter
@@ -1422,7 +1476,8 @@ jobs:
   # image now, so there is one job, and the three old names are applied to its
   # digest as tags in the promotion step below.
   image:
-    needs: [base]
+    # changes: for the release ID (Containerfile.rime bakes it).
+    needs: [changes, base]
     if: >-
       ${{
         always() && !cancelled()
@@ -1470,6 +1525,7 @@ jobs:
           sudo podman build --isolation=chroot --layers=false \
             --build-arg BASE="$IMAGE@${{ needs.base.outputs.digest }}" \
             --build-arg RIME_REVISION="${{ github.sha }}" \
+            --build-arg RIME_RELEASE_ID="${{ needs.changes.outputs.release_id || 'dev' }}" \
             -f Containerfile.rime \
             -t "$IMAGE:rime" \
             -t "$IMAGE:rime-${{ github.sha }}" \
@@ -2389,6 +2445,22 @@ jobs:
                 "The NVIDIA driver and the controller modules are in `core`, so they "
                 "are inside the inherited figure and are downloaded once, ever.")
           PY
+
+      # Rime Shell opens this release's page after the update, and holds it
+      # until the page answers, so a missing page delays the "what's new" rather
+      # than breaking anything. Warn, do not fail: the site publishes on its own
+      # schedule (rimeos.com master spec §9.2 wants the page FIRST; this says
+      # when it is not).
+      - name: The release page is live (warning only)
+        if: ${{ steps.push.outputs.digest != '' && github.ref == 'refs/heads/main' && needs.changes.outputs.release_id != 'dev' && needs.changes.outputs.release_id != '' }}
+        run: |
+          url="https://rimeos.com/updates/${{ needs.changes.outputs.release_id }}"
+          code="$(curl -s -o /dev/null -w '%{http_code}' --max-time 20 "$url" || echo 000)"
+          if [ "$code" = 200 ]; then
+            echo "release page live: $url"
+          else
+            echo "::warning::$url answers $code. Publish content/updates/${{ needs.changes.outputs.release_id }}/release.yaml on rimeos.com; Rime Shell opens that page once it answers."
+          fi
 
   # ── Job 5: qcow2 (stretch, dispatch-gated, non-blocking) ─────────────────
   # Proves bootc-image-builder produces a bootable disk from the published image.
