@@ -45,6 +45,8 @@ on:
         description: "Attest the ISO and create a DRAFT release (main only; the digest must be pinned first)"
         type: boolean
         default: false
+  push:
+    branches: [feat/installer-iso-ci]  # TEMPORARY while the workflow is developed
 
 concurrency:
   group: installer-iso-${{ github.ref }}
@@ -78,7 +80,7 @@ jobs:
       - name: Check the inputs and pin the digest
         id: inputs
         env:
-          RELEASE: ${{ inputs.release }}
+          RELEASE: ${{ inputs.release || 'v0.0.0' }}
           DIGEST: ${{ inputs.digest }}
         run: |
           set -euo pipefail
