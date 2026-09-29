@@ -3489,6 +3489,31 @@ RUN set -eux; \
         ; then echo "FATAL: the shipped greetd config IS the shared-machine kiosk recipe"; exit 1; fi; \
     echo "login config: no auto-login, and not the kiosk recipe"
 
+# ── The login unlocks the keyring ──────────────────────────────────────────
+# Fedora's /etc/pam.d/greetd already asks for pam_gnome_keyring.so in its auth
+# and session stacks, but with a leading `-`, which means "skip it if the
+# module is missing" — and it was missing: gnome-keyring (core) does not pull
+# in gnome-keyring-pam. So a password typed at the login screen never reached
+# the keyring. The daemon was started later by D-Bus activation, locked, and
+# the first application to ask for a secret opened a password prompt. On
+# 2026-09-29 that was Zen, opened at login by the Shell to show the release
+# notes, so the first thing after an update was a keyring dialog.
+#
+# Here and not beside gnome-keyring in Containerfile.core, so the fix does not
+# cost a core rebuild; dnf pins it to the installed gnome-keyring's version.
+# The login keyring still has to share the account's password to open this way.
+RUN dnf5 -y install gnome-keyring-pam && dnf5 clean all && rm -rf /var/cache/libdnf5
+RUN set -eux; \
+    test -f /usr/lib64/security/pam_gnome_keyring.so; \
+    test "$(rpm -q --qf '%{VERSION}-%{RELEASE}' gnome-keyring-pam)" \
+       = "$(rpm -q --qf '%{VERSION}-%{RELEASE}' gnome-keyring)"; \
+    : 'The module is only useful where the login stack names it: the auth'; \
+    : 'half takes the password, the session half starts and unlocks the'; \
+    : 'daemon with it.'; \
+    grep -qE '^-?auth[[:space:]]+optional[[:space:]]+pam_gnome_keyring\.so' /etc/pam.d/greetd; \
+    grep -qE '^-?session[[:space:]]+optional[[:space:]]+pam_gnome_keyring\.so[[:space:]]+auto_start' /etc/pam.d/greetd; \
+    echo "login: greetd hands the password to pam_gnome_keyring, so the keyring opens at login"
+
 # ── The login screen's session bus ─────────────────────────────────────────
 # greetd's command is this wrapper, not the compositor directly. It gives the
 # greet session a D-Bus session bus and an accessibility bus and then EXECS the
