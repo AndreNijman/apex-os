@@ -2177,6 +2177,10 @@ jobs:
         if: ${{ !cancelled() }}
         run: ./tests/test-rime-rename-compat.sh
 
+      - name: Run the release ID and the release.json an image bakes
+        if: ${{ !cancelled() }}
+        run: ./tests/test-release-stamp.sh
+
       # The .deb route. Anthropic publishes Claude Desktop for Linux as a .deb
       # and nothing else, so this is how it stops being hand-unpacked into
       # /usr/local with a per-app update timer. The suite builds its own .deb

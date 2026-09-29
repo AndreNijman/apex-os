@@ -1,0 +1,53 @@
+#!/usr/bin/env bash
+# ─────────────────────────────────────────────────────────────────────────────
+# next-release-id — the release ID this build publishes as.
+#
+#   next-release-id <today> <revision> <shell-revision> <published-id> \
+#                   <published-revision> <published-shell-revision>
+#
+# prints one ID and nothing else. <today> is the promotion date in AWST as
+# YYYY.MM.DD (the workflow passes `TZ=Australia/Perth date +%Y.%m.%d`); the
+# three published-* arguments are the labels of the image the channel tags
+# serve right now (`org.rimeos.release.id`, `org.opencontainers.image.revision`,
+# `org.rimeos.rime-shell.ref`), each "" when absent or unreadable.
+#
+# The rules are rimeos.com's (rime-website README, "Releases"):
+#   * IDs are YYYY.MM.DD by promotion date in AWST, and .2, .3 … for a second,
+#     third promotion the same day. The second is .2, not .1.
+#   * The same OS revision AND the same Shell revision is not a new release: the
+#     weekly scheduled rebuild reissues the published one, so it keeps its ID
+#     (and the Shell opens no "what's new" page for it — the ID did not move).
+#   * A published ID from an earlier day, none at all (every image before this
+#     script), or one this script cannot parse: today's plain date.
+#
+# The image bakes the result into /usr/share/rime/release.json (stamp-release)
+# and the label org.rimeos.release.id, and Rime Shell opens
+# https://rimeos.com/updates/<id> once after the update — so the site must
+# publish its page under exactly this ID. tests/test-next-release-id.sh.
+# ─────────────────────────────────────────────────────────────────────────────
+set -euo pipefail
+
+today="${1:?today}"; rev="${2:?revision}"; shell="${3:?shell revision}"
+pub_id="${4:-}"; pub_rev="${5:-}"; pub_shell="${6:-}"
+
+[[ "$today" =~ ^[0-9]{4}\.[0-9]{2}\.[0-9]{2}$ ]] || { echo "next-release-id: bad date '$today'" >&2; exit 2; }
+
+valid_id() { [[ "$1" =~ ^[0-9]{4}\.[0-9]{2}\.[0-9]{2}(\.([2-9]|[1-9][0-9]+))?$ ]]; }
+
+# A reissue: the published image is this very source.
+if [ -n "$pub_id" ] && valid_id "$pub_id" && [ "$pub_rev" = "$rev" ] && [ "$pub_shell" = "$shell" ]; then
+    printf '%s\n' "$pub_id"
+    exit 0
+fi
+
+if [ -n "$pub_id" ] && valid_id "$pub_id"; then
+    day="${pub_id:0:10}"
+    if [ "$day" = "$today" ]; then
+        n=1
+        [ "${#pub_id}" -gt 10 ] && n="${pub_id:11}"
+        printf '%s.%d\n' "$today" $((n + 1))
+        exit 0
+    fi
+fi
+
+printf '%s\n' "$today"
