@@ -156,7 +156,10 @@ jobs:
             *) echo "::error::the live rootfs of the two builds differs in more than the unattended marker"; exit 1 ;;
           esac
           only="$(sudo find "$T/usr/share/rime-installer" -mindepth 1 -printf '%P\n' | sort | tr '\n' ' ')"
-          prod_has="$(sudo find "$P/usr/share/rime-installer" -mindepth 1 -printf '%P\n' 2>/dev/null | sort | tr '\n' ' ')"
+          prod_has=""
+          if sudo test -d "$P/usr/share/rime-installer"; then
+            prod_has="$(sudo find "$P/usr/share/rime-installer" -mindepth 1 -printf '%P\n' | sort | tr '\n' ' ')"
+          fi
           [ "$only" = "${prod_has}allow-unattended " ] || [ "$only" = "allow-unattended " ] \
             || { echo "::error::the twin's /usr/share/rime-installer holds '$only', expected only allow-unattended"; exit 1; }
           for f in etc/shadow etc/shadow-; do
