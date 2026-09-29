@@ -657,6 +657,12 @@ pub fn start(daemon: &Arc<Daemon>, req: RunRequest, caller: &Caller) -> Result<S
             spec.env_set.push((name.to_string(), val));
         }
     }
+    // After `req.env`, so a caller's own `WAYLAND_DISPLAY` still wins.
+    if let Some(pair) = session_display(policy.sandbox.is_confined(), req.disposable, || {
+        crate::clipboard::display().map(|seat| seat.display)
+    }) {
+        spec.env_set.push(pair);
+    }
 
     // bwrap will not mount on a path that traverses a symlink ("Can't mount on
     // symlink destination"), and an atomic OS reaches every home through one:
@@ -1170,6 +1176,31 @@ fn rime_program() -> Option<PathBuf> {
 /// sandbox decides separately whether those directories are actually visible.
 fn inherited_path() -> String {
     std::env::var("PATH").unwrap_or_else(|_| "/usr/local/bin:/usr/bin:/bin".to_string())
+}
+
+/// The `WAYLAND_DISPLAY` a session should start with, if it should have one.
+///
+/// Pasting an image into an agent is the agent CLI reading the clipboard
+/// itself — `wl-paste` for Claude Code, a Wayland clipboard crate for Codex —
+/// and both find the compositor through `WAYLAND_DISPLAY`. This daemon has
+/// none (`clipboard.rs` says why: it starts before any compositor exists and
+/// nothing imports the variable afterwards), and an unconfined session's
+/// environment is the daemon's, so Ctrl+V of a screenshot silently did
+/// nothing. `probe` finds the live socket the way the clipboard verb does.
+///
+/// Unconfined sessions only. A confined one masks `/run`, so the socket is
+/// not there for it to reach, and a disposable session's child is the
+/// container engine, not the agent. No compositor (a TTY, an ssh login) is no
+/// variable, the same as before.
+fn session_display(
+    confined: bool,
+    disposable: bool,
+    probe: impl FnOnce() -> std::result::Result<String, String>,
+) -> Option<(String, String)> {
+    if confined || disposable {
+        return None;
+    }
+    probe().ok().map(|display| ("WAYLAND_DISPLAY".to_string(), display))
 }
 
 /// This runtime's own binary, which is also the egress bridge.
@@ -1940,6 +1971,26 @@ pub(crate) fn write_response(writer: &mut UnixStream, response: &Response) -> Re
 
 #[cfg(test)]
 mod tests {
+
+    /// Image paste: an unconfined session is told where the compositor is,
+    /// and nothing else is. The first assertion is the regression — before
+    /// it, every session ran with the daemon's environment and no display.
+    #[test]
+    fn only_an_unconfined_session_is_handed_the_display() {
+        use super::session_display;
+        let live = || Ok::<_, String>("wayland-1".to_string());
+
+        assert_eq!(
+            session_display(false, false, live),
+            Some(("WAYLAND_DISPLAY".to_string(), "wayland-1".to_string()))
+        );
+        // Confined and disposable are refused without asking the probe at all.
+        let untouched = || -> Result<String, String> { panic!("probed for a session that gets no display") };
+        assert_eq!(session_display(true, false, untouched), None);
+        assert_eq!(session_display(false, true, untouched), None);
+        // No compositor: the session still starts, with no variable.
+        assert_eq!(session_display(false, false, || Err("no compositor".to_string())), None);
+    }
 
     /// P2-012 route B: the three refusals that are facts about the request.
     ///
