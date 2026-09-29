@@ -20,7 +20,16 @@ RUN set -eux; \
     test "$(cat /usr/share/rime-os/secureboot/kernel-signed)" = signed; \
     bootc container lint || true
 
+# The fast shell-only path does not compute a release ID (build-image.yml
+# does, files/scripts/next-release-id), so it stamps "dev": its images carry a
+# release.json with no notes URL, and Rime Shell opens no "what's new" page for
+# them. Announce a release through build-image.yml.
 ARG RIME_REVISION=dev
+COPY --chmod=0755 files/scripts/stamp-release /tmp/stamp-release
+RUN set -eux; \
+    bash /tmp/stamp-release dev "${RIME_REVISION}" /; \
+    rm -f /tmp/stamp-release
+
 LABEL org.opencontainers.image.revision="${RIME_REVISION}" \
       org.rimeos.rime-shell.ref="${RIME_SHELL_REF}" \
       org.rimeos.release.kind="shell"

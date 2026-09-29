@@ -384,10 +384,26 @@ RUN set -eux; \
 # Informational lint.
 RUN bootc container lint || true
 
+# ── The release this image IS (rimeos.com master spec §7.6) ────────────────
+# /usr/share/rime/release.json: Rime Shell's ReleaseService reads it on the
+# first desktop session after an update and opens
+# https://rimeos.com/updates/<id> once (§7.2). The ID is computed by the
+# workflow from what the channel tags serve now (files/scripts/next-release-id)
+# and passed in; a build without one (local, branch test) is "dev", which has
+# no notes URL and opens nothing. Last, so a new ID invalidates one tiny layer.
 ARG RIME_REVISION=dev
+ARG RIME_RELEASE_ID=dev
+COPY --chmod=0755 files/scripts/stamp-release /tmp/stamp-release
+RUN set -eux; \
+    bash /tmp/stamp-release "${RIME_RELEASE_ID}" "${RIME_REVISION}" /; \
+    rm -f /tmp/stamp-release; \
+    cat /usr/share/rime/release.json; \
+    python3 -c 'import json; d = json.load(open("/usr/share/rime/release.json")); assert d["schema"] == 1 and d["id"], d'
+
 LABEL org.opencontainers.image.title="Rime OS" \
       org.opencontainers.image.description="Rime OS — one image for every laptop: NVIDIA + controller drivers built and signed in, gaming userspace on demand" \
       org.opencontainers.image.source="https://github.com/AndreNijman/rime-os" \
       org.opencontainers.image.revision="${RIME_REVISION}" \
       org.opencontainers.image.version="rime" \
-      org.opencontainers.image.vendor="Rime OS"
+      org.opencontainers.image.vendor="Rime OS" \
+      org.rimeos.release.id="${RIME_RELEASE_ID}"
