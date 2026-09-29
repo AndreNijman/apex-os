@@ -3314,6 +3314,20 @@ create_user_in "$deploy" "$USERNAME" "$P1" "$HOSTNAME" "post-install"
 copy_network_to "$deploy"
 set_locale_keymap_in "$deploy"
 write_crypttab_in "$deploy"
+# What 5b needs from the installed system, read while it is still mounted. 5b
+# runs after the unmount below, and until this it read both paths from the
+# empty mount point: the kernel state came back "unknown", 5b concluded there
+# was nothing to enrol, and the key the user had just chosen to enrol was never
+# queued. With Secure Boot on, shim then refused the kernel the install had
+# just put on the disk. Found by installing from the ISO in a VM with
+# enrolment chosen: no MOK request in NVRAM at the first boot.
+SB_KSTATE=$(cat "$deploy/usr/share/rime-os/secureboot/kernel-signed" 2>/dev/null || echo unknown)
+SB_CERT=""
+if [ -f "$deploy/usr/share/rime-os/secureboot/rime-mok.der" ]; then
+  SB_CERT=$(mktemp /tmp/rime-mok.XXXXXX) \
+    && cp "$deploy/usr/share/rime-os/secureboot/rime-mok.der" "$SB_CERT" \
+    || SB_CERT=""
+fi
 # Never let cleanup failures trip the ERR trap AFTER a successful install — that
 # would report failure on a system that is actually installed fine.
 sync || true; umount "$MNT" 2>/dev/null || true; rmdir "$MNT" 2>/dev/null || true
@@ -3343,8 +3357,9 @@ SB_STATE="unknown"
 if have mokutil; then SB_STATE=$(mokutil --sb-state 2>/dev/null | tr -d '\n' || true); fi
 sb_on=0
 case "$SB_STATE" in *[Ee]nabled*) sb_on=1 ;; esac
-cert="$deploy/usr/share/rime-os/secureboot/rime-mok.der"
-kstate=$(cat "$deploy/usr/share/rime-os/secureboot/kernel-signed" 2>/dev/null || echo unknown)
+# Both were read before the target was unmounted (see above); $deploy is gone.
+cert="${SB_CERT:-}"
+kstate="${SB_KSTATE:-unknown}"
 # Enrol whenever a password was supplied and the kernel is signed — NOT only
 # when Secure Boot is already on. `mokutil --import` writes MokNew/MokAuth to
 # UEFI NVRAM, which is firmware state belonging to the MACHINE, not to the OS on
