@@ -97,9 +97,10 @@ the ISO plus its `.sha256` file:
 |------|------------------|
 | `rime-os-netinstall-x86_64.iso` | Rime OS. One ISO, because there is one image. |
 
-Releases before v1.0.0 published one ISO per edition
-(`rime-os-daily-netinstall.iso`, `rime-os-gaming-nvidia-netinstall.iso`). Those
-names are gone; take the newest release.
+Releases before v3.0.0 were published under the old name, APEX-OS
+(`apex-os-netinstall-x86_64.iso`), and releases before v1.0.0 as one ISO per
+edition (`apex-os-daily-netinstall.iso`, `apex-os-gaming-nvidia-netinstall.iso`).
+Take the newest release.
 
 Each ISO downloads the exact Rime OS build it was tested with, not whatever was
 published last. The ISO records that image digest at
@@ -121,6 +122,14 @@ file.
 
 ```powershell
 Get-FileHash .\rime-os-netinstall-x86_64.iso -Algorithm SHA256
+```
+
+The checksum proves the file is whole, not who made it. From v3.0.0 on, the ISO
+is built by GitHub Actions and GitHub signs a build-provenance attestation for
+it, naming the workflow, commit and run that produced it. With the GitHub CLI:
+
+```sh
+gh attestation verify rime-os-netinstall-x86_64.iso -R AndreNijman/rime-os
 ```
 
 ---
@@ -339,11 +348,40 @@ when `:rime` moves on, and a registry cleanup removes untagged versions, so
 every copy of the ISO would fail at its first download:
 
 ```sh
-gh workflow run pin-netinstall-image.yml -f digest=sha256:… -f release=v2.1.0
+gh workflow run pin-netinstall-image.yml -f digest=sha256:… -f release=v3.0.0
 ```
 
 The workflow checks the digest's signature and gives it a write-once
 `netinstall-<release>` tag. The build prints the exact command at the end.
+
+### Releasing an ISO
+
+Published ISOs are built by `.github/workflows/build-installer-iso.yml`, not on
+a developer machine. It runs `build-live-iso.sh` unchanged on a GitHub runner
+and then boots the ISO it built, the file that gets published, in qemu with
+`installer/iso-qualify.py`: from a USB stick with Secure Boot on, from a USB
+stick on legacy BIOS, and from a CD on UEFI. Each boot must reach the
+installer's first page, read by OCR, naming Rime and never APEX.
+
+CI does not install from the ISO. Before publishing, install from it by hand in
+a VM with the defaults (whole disk, encrypted, Secure Boot key enrolled), boot
+it, and check `rime trust --gate` there; the release notes say what was tried.
+`iso-qualify.py firstboot` reads the booted image, its digest and the trust gate
+off a disk whose kernel line has `console=ttyS0`. The same driver runs on a
+developer machine inside a container with `--device /dev/kvm`; it needs no root.
+To release:
+
+```sh
+gh workflow run pin-netinstall-image.yml -f digest=sha256:… -f release=v3.0.0
+gh workflow run build-installer-iso.yml -f release=v3.0.0 -f digest=sha256:… -f draft_release=true
+```
+
+On `main`, with `draft_release`, a green run attests the ISO's build provenance
+and creates a **draft** release carrying it and a `.sha256` that names the file
+as it is downloaded. The draft is refused unless the digest is already pinned.
+Publishing it stays a person's decision; keep the sentence that says which
+image it installs (`installs image \`sha256:…\`, pinned as \`netinstall-…\``),
+because the website's download manifest reads it.
 
 To build the OS images with a signed kernel, use `./build-local.sh`. It passes
 the Secure Boot signing key and refuses to produce an unsigned image by
