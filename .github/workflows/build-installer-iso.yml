@@ -149,10 +149,16 @@ jobs:
           # salt, so a new hash for the same live-env root password. Every other
           # field of it must match.
           rest="$(printf '%s\n' "$diff_out" | grep -vE "^Files $P/etc/shadow-? and $T/etc/shadow-? differ$" || true)"
-          expected="Only in $T/usr/share/rime-installer: allow-unattended"
-          if [ "$rest" != "$expected" ]; then
-            echo "::error::the live rootfs of the two builds differs in more than the unattended marker"; exit 1
-          fi
+          # The marker's directory exists only in the twin, so diff names the
+          # directory; what is in it is checked separately.
+          case "$rest" in
+            "Only in $T/usr/share: rime-installer"|"Only in $T/usr/share/rime-installer: allow-unattended") ;;
+            *) echo "::error::the live rootfs of the two builds differs in more than the unattended marker"; exit 1 ;;
+          esac
+          only="$(sudo find "$T/usr/share/rime-installer" -mindepth 1 -printf '%P\n' | sort | tr '\n' ' ')"
+          prod_has="$(sudo find "$P/usr/share/rime-installer" -mindepth 1 -printf '%P\n' 2>/dev/null | sort | tr '\n' ' ')"
+          [ "$only" = "${prod_has}allow-unattended " ] || [ "$only" = "allow-unattended " ] \
+            || { echo "::error::the twin's /usr/share/rime-installer holds '$only', expected only allow-unattended"; exit 1; }
           for f in etc/shadow etc/shadow-; do
             sudo test -e "$P/$f" || continue
             sudo diff <(sudo cut -d: -f1,3- "$P/$f") <(sudo cut -d: -f1,3- "$T/$f") \

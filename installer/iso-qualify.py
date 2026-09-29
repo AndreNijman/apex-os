@@ -112,13 +112,15 @@ class Serial:
 
 
 class Qmp:
-    def __init__(self, path, deadline):
+    def __init__(self, path, deadline, proc):
         while True:
             try:
                 s = socket.socket(socket.AF_UNIX, socket.SOCK_STREAM)
                 s.connect(path)
                 break
             except OSError:
+                if proc.poll() is not None:
+                    raise RuntimeError("qemu exited with %s before QMP answered" % proc.returncode)
                 if time.time() > deadline:
                     raise
                 time.sleep(0.2)
@@ -151,19 +153,19 @@ class Qmp:
 
 def qemu_cmd(a, name, iso=None, media="cdrom", disk=None, firmware="uefi", display=True):
     work = a.work
-    cmd = ["qemu-system-x86_64", "-accel", a.accel, "-m", str(a.mem), "-smp", str(a.smp),
+    cmd = ["qemu-system-x86_64", "-m", str(a.mem), "-smp", str(a.smp),
            "-nodefaults", "-no-user-config", "-display", "none",
            "-chardev", "socket,id=ser0,path=%s/%s.serial.sock,server=on,wait=off" % (work, name),
            "-serial", "chardev:ser0",
            "-qmp", "unix:%s/%s.qmp.sock,server=on,wait=off" % (work, name),
            "-netdev", "user,id=net0", "-device", "virtio-net-pci,netdev=net0"]
     if firmware == "bios":
-        cmd += ["-machine", "q35"]
+        cmd += ["-machine", "q35,accel=%s" % a.accel]
     else:
         vars_src = "OVMF_VARS.secboot.fd" if firmware == "uefi-sb" else "OVMF_VARS.fd"
         myvars = os.path.join(work, "%s.vars.fd" % name)
         shutil.copyfile(os.path.join(OVMF, vars_src), myvars)
-        cmd += ["-machine", "q35,smm=on",
+        cmd += ["-machine", "q35,smm=on,accel=%s" % a.accel,
                 "-global", "driver=cfi.pflash01,property=secure,value=on",
                 "-drive", "if=pflash,unit=0,format=raw,readonly=on,file=%s/OVMF_CODE.secboot.fd" % OVMF,
                 "-drive", "if=pflash,unit=1,format=raw,file=%s" % myvars]
@@ -192,8 +194,15 @@ def start(a, name, cmd):
             os.unlink(p)
     err = open(os.path.join(a.work, name + ".qemu.err"), "wb")
     proc = subprocess.Popen(cmd, stdout=err, stderr=subprocess.STDOUT)
+    # Serial first: its thread connects as soon as the socket exists, and qemu
+    # drops what the guest writes while no client is connected.
     ser = Serial(os.path.join(a.work, name + ".serial.sock"), os.path.join(a.work, name + ".serial.log"))
-    qmp = Qmp(os.path.join(a.work, name + ".qmp.sock"), time.time() + 30)
+    try:
+        qmp = Qmp(os.path.join(a.work, name + ".qmp.sock"), time.time() + 30, proc)
+    except (OSError, RuntimeError):
+        err.flush()
+        sys.stderr.write(open(os.path.join(a.work, name + ".qemu.err"), errors="replace").read())
+        raise
     return proc, ser, qmp
 
 
