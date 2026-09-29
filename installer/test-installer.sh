@@ -520,6 +520,28 @@ if [ -n "$_del" ]; then
 else
     printf 'PASS  %-30s\n' "no GHCR version deletion"; pass=$((pass+1))
 fi
+# Secure Boot enrolment (5b) runs after the installed system is unmounted, so
+# everything it needs from the deployment must be read before that unmount.
+# It used to read the key and the kernel's signing state from the empty mount
+# point: every install then skipped the enrolment the user asked for, and a
+# machine with Secure Boot on refused the kernel it had just been given.
+_sbread_ln=$(grep -n '^SB_KSTATE=\$(cat "\$deploy/' "$ENGINE" | head -1 | cut -d: -f1)
+_5b_ln=$(grep -n '^# ── 5b\. Secure Boot' "$ENGINE" | head -1 | cut -d: -f1)
+_6_ln=$(grep -n '^# ── 6\. done' "$ENGINE" | head -1 | cut -d: -f1)
+_umnt_ln=""
+if [ -n "$_5b_ln" ]; then
+    _umnt_ln=$(head -n "$_5b_ln" "$ENGINE" | grep -n '^sync || true; umount "\$MNT"' | tail -1 | cut -d: -f1)
+fi
+_5b_deploy=""
+if [ -n "$_5b_ln" ] && [ -n "$_6_ln" ]; then
+    _5b_deploy=$(sed -n "${_5b_ln},${_6_ln}p" "$ENGINE" | grep -v '^[[:space:]]*#' | grep -n '\$deploy' || true)
+fi
+if [ -n "$_sbread_ln" ] && [ -n "$_umnt_ln" ] && [ "$_sbread_ln" -lt "$_umnt_ln" ] && [ -z "$_5b_deploy" ]; then
+    printf 'PASS  %-30s\n' "Secure Boot reads before umount"; pass=$((pass+1))
+else
+    printf 'FAIL  %-30s %s\n' "Secure Boot reads before umount" \
+        "reads at ${_sbread_ln:-none}, unmount at ${_umnt_ln:-?}, \$deploy inside 5b: ${_5b_deploy:-none}"; fail=$((fail+1))
+fi
 echo "── one engine at a time, and a front end that died can reattach ───────"
 # A VT switch can take cage (and so the GUI) down mid-install while the engine
 # keeps writing. The fresh front end must never start a second engine, and a
