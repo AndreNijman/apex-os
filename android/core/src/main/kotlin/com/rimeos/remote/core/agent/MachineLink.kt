@@ -6,6 +6,8 @@ import com.rimeos.remote.core.link.Mux
 import com.rimeos.remote.core.link.Upload
 import java.io.Closeable
 import java.util.concurrent.TimeoutException
+import java.util.concurrent.locks.ReentrantLock
+import kotlin.concurrent.withLock
 
 /**
  * The control plane: one connection, used for asking a machine questions.
@@ -27,11 +29,39 @@ import java.util.concurrent.TimeoutException
  *
  * ## Reconnecting is a property of asking, not of a loop
  *
- * There is no reconnect *thread* here, and that is deliberate. A control
- * connection has nothing to deliver while nobody is asking — unlike a PTY,
- * which is a stream whose whole point is arriving unbidden. So a dead
- * connection is noticed on the next question and replaced then, and a phone in
- * a pocket is not reconnecting to something it is not reading.
+ * There is no reconnect *thread* here, and that is deliberate. A dead
+ * connection is noticed on the next question and replaced then — or, since
+ * the phone started holding this connection open on purpose (the foreground
+ * service in `:app`), by whoever is holding it: [connectNow] opens one without
+ * asking anything, and [LinkEvent.Dropped] is the cue to call it again. The
+ * policy of WHEN to reconnect lives with the holder, because only the holder
+ * knows whether anybody still wants the connection.
+ *
+ * ## A dead connection is noticed within forty seconds, not five minutes
+ *
+ * `rime-remoted` pings every fifteen seconds from a thread of its own, so an
+ * idle control connection still has traffic, and a connection with NO traffic
+ * for [SILENCE_MS] is gone — a phone that walked out of Wi-Fi range does not
+ * get a FIN. Before the watchdog, a request on such a connection waited out
+ * [Mux.CONTROL_TIMEOUT_MS], five minutes, which is how "it takes ages" was
+ * sometimes simply "it is waiting on a socket that died a while ago". The
+ * watchdog closes the connection, which fails every waiting request with
+ * [Disconnected] at once, so a question is retried on a fresh connection and
+ * an instruction is reported as not known to have landed.
+ *
+ * Five minutes stays the per-request ceiling, and that is not a contradiction:
+ * a request waiting on a human is on a connection whose pings are still
+ * arriving, and the watchdog never touches a connection that is talking.
+ *
+ * ## Terminals can ride it (`mux_attach`)
+ *
+ * Against a machine whose `rime-remoted` advertises [Features.MUX_ATTACH], a
+ * terminal opens a channel on THIS connection ([shared]) instead of dialling
+ * its own — which was a full handshake, over the relay as often as not, every
+ * time a terminal was opened. Such a machine answers control requests on a
+ * worker so the frame loop, and the terminal's bytes, keep moving while one is
+ * slow. Against any other machine the note below still holds, and terminals
+ * still dial their own.
  *
  * One retry, and only for [Disconnected]: a request that reached the daemon
  * and was refused must not be sent twice. `signal` is the case that makes this
@@ -42,6 +72,13 @@ class MachineLink(
     /** Opens a fresh connection. May throw; the caller sees the throw. */
     private val connect: () -> FrameChannel,
     private val onEvent: (LinkEvent) -> Unit = {},
+    /**
+     * No frame — keepalive included — for this long means the connection is
+     * gone. Zero disables the watchdog.
+     */
+    private val silenceMs: Long = SILENCE_MS,
+    /** How often the watchdog looks. Injected so a test need not wait. */
+    private val watchdogPollMs: Long = WATCHDOG_POLL_MS,
 ) : Closeable {
     /** What a caller is told about the connection underneath. */
     sealed class LinkEvent {
@@ -49,11 +86,33 @@ class MachineLink(
 
         /** The connection went; the next request will make a new one. */
         data class Dropped(val cause: Throwable?) : LinkEvent()
+
+        /**
+         * Nothing arrived for [forMs], so the connection is being treated as
+         * dead. Always followed by a [Dropped].
+         *
+         * Its own event because it has its own cause: a connection that
+         * CLOSED was closed by something, and one that went quiet was not —
+         * which is the difference between "the machine went to sleep" and
+         * "this phone lost its network", and a person reading a log needs to
+         * know which.
+         */
+        data class Silent(val forMs: Long) : LinkEvent()
     }
 
+    /** One installed connection: its multiplexer and the channel under it. */
+    private class Installed(val mux: Mux, val channel: FrameChannel)
+
     private val lock = Any()
-    private var mux: Mux? = null
-    private var pump: Thread? = null
+    private var current: Installed? = null
+
+    /**
+     * Held while a connection is being made, so that two callers who both
+     * find the link down make ONE handshake between them rather than one
+     * each. The loser used to connect anyway and throw its connection away —
+     * a whole Noise handshake, over the relay as often as not, for nothing.
+     */
+    private val connecting = ReentrantLock()
 
     @Volatile
     private var closed = false
@@ -64,11 +123,49 @@ class MachineLink(
         private set
 
     /** Whether a connection is currently up. */
-    val connected: Boolean get() = synchronized(lock) { mux != null }
+    val connected: Boolean get() = synchronized(lock) { current != null }
+
+    /** The machine's name for itself, from the live connection, or null. */
+    val machine: String? get() = synchronized(lock) { current?.channel?.machine }
 
     // ---- the verbs ------------------------------------------------------
 
     fun hello(): Hello = Agentd.readHello(request(Agentd.hello()))
+
+    /**
+     * What this machine's `rime-remoted` can do, and where it is listening.
+     *
+     * [RemoteHello.NONE] — no features, no addresses — for a machine whose
+     * `rime-remoted` predates the verb. That one forwards the line to
+     * `rime-agentd`, which answers `bad_request`; ANY refusal is read the same
+     * way, because every refusal means the same thing to a caller: use
+     * nothing new. A connection that dropped is not a refusal and still throws.
+     */
+    fun remoteHello(): RemoteHello = try {
+        Agentd.readRemoteHello(request(Agentd.remoteHello()))
+    } catch (_: AgentError) {
+        RemoteHello.NONE
+    }
+
+    /**
+     * The tail of a session's output (contract §1.6). A question: retried.
+     *
+     * Only against a machine whose `hello` lists [Features.PEEK]; an older one
+     * answers `bad_request`, which arrives as the [AgentError] it is.
+     */
+    fun peek(id: Int, bytes: Int = Agentd.PEEK_MAX): Peek =
+        Agentd.readPeek(request(Agentd.peek(id, bytes)), bytes)
+
+    /**
+     * Name a session, or clear its name with null, and get it back.
+     *
+     * **Not retried**, though setting the same name twice would be harmless:
+     * this is an instruction, and the rule on this class is that only
+     * questions are asked twice. A caller whose connection dropped is told so
+     * and can look.
+     */
+    fun rename(id: Int, name: String?): AgentSession =
+        Agentd.readSession(request(Agentd.rename(id, name), retry = false))
 
     /**
      * Every session the daemon knows, in the order the Agent Center draws
@@ -165,6 +262,44 @@ class MachineLink(
      */
     fun input(id: Int, data: String) =
         Agentd.readOk(request(Agentd.input(id, data), retry = false))
+
+    /** [input], with the daemon pressing Return itself. See [Agentd.input]. */
+    fun input(id: Int, data: String, submit: Boolean) =
+        Agentd.readOk(request(Agentd.input(id, data, submit), retry = false))
+
+    /**
+     * Type a reply and SUBMIT it: [Reply.plan], carried out.
+     *
+     * [submitSupported] is whether the machine's `hello` lists
+     * [Features.INPUT_SUBMIT]; the caller knows, this does not ask. Nothing
+     * here is retried, for [input]'s reason.
+     *
+     * A plan of two requests can fail between them, and that case has its
+     * own exception, [NotSubmitted], because it means something the other
+     * failures do not: the words ARE on the agent's input line, and pressing
+     * Return is all that is missing. Told "nothing was sent", a person would
+     * send it again and the agent would get the sentence twice.
+     */
+    fun reply(
+        id: Int,
+        raw: String,
+        submitSupported: Boolean,
+        sleep: (Long) -> Unit = { Thread.sleep(it) },
+    ) {
+        var typed = false
+        for (step in Reply.plan(id, raw, submitSupported)) {
+            when (step) {
+                is Reply.Step.Wait -> sleep(step.ms)
+                is Reply.Step.Send -> try {
+                    Agentd.readOk(request(step.line, retry = false))
+                    typed = true
+                } catch (e: Exception) {
+                    if (typed) throw NotSubmitted(e)
+                    throw e
+                }
+            }
+        }
+    }
 
     /**
      * What is on the COMPUTER's clipboard right now (P1-059 criterion 3).
@@ -338,10 +473,11 @@ class MachineLink(
     @Throws(Disconnected::class, AgentError::class, TimeoutException::class)
     fun request(line: String, retry: Boolean = true): String {
         check(!closed) { "this link is closed" }
+        val first = live()
         return try {
-            live().request(line)
+            first.request(line)
         } catch (e: Disconnected) {
-            drop(e)
+            retire(first, e)
             if (!retry) throw e
             // One more, on a connection made for this attempt. If that fails
             // the throw reaches the caller: two dead connections in a row is
@@ -350,77 +486,231 @@ class MachineLink(
         }
     }
 
-    private fun live(): Mux {
-        synchronized(lock) {
-            mux?.let { return it }
-        }
-        // Outside the lock: opening a connection is a handshake over a socket
-        // and holding a monitor across it would block every other caller,
-        // including the one trying to close this link.
-        val channel = connect()
-        val m = Mux(channel, Listener())
-        val thread = Thread({ m.pump() }, "rime-link-${channel.machine}")
-        thread.isDaemon = true
-        val install = synchronized(lock) {
-            if (closed || mux != null) {
-                null
-            } else {
-                mux = m
-                pump = thread
-                connections++
-                m
-            }
-        }
-        if (install == null) {
-            // Two callers raced, or the link closed while this one was
-            // connecting. The loser's connection is closed rather than leaked.
-            runCatching { m.close() }
-            runCatching { channel.close() }
-            synchronized(lock) { mux }?.let { return it }
-            throw Disconnected("this link to ${channel.machine} closed while connecting")
-        }
-        thread.start()
-        onEvent(LinkEvent.Connected(channel.machine))
-        return install
+    /**
+     * Open the connection now, without asking anything on it.
+     *
+     * For the holder that keeps this link up while the app is unlocked: the
+     * point of being "always connected" is that the handshake has already
+     * happened by the time somebody taps a machine. A no-op when a live
+     * connection exists.
+     */
+    fun connectNow() {
+        check(!closed) { "this link is closed" }
+        live()
     }
 
-    private fun drop(cause: Throwable?) {
-        val going = synchronized(lock) {
-            val m = mux ?: return
-            mux = null
-            pump = null
+    /**
+     * The live multiplexer, for a terminal that rides this connection.
+     *
+     * Only for a machine that advertises [Features.MUX_ATTACH]; see the class
+     * note. Reconnects if needed, exactly as a request would. The caller must
+     * close only its own CHANNEL on it and never the multiplexer, which
+     * belongs to this link.
+     */
+    fun shared(): Mux {
+        check(!closed) { "this link is closed" }
+        return live()
+    }
+
+    /**
+     * Is this connection still alive, right now? Pings and waits up to
+     * [timeoutMs] for any frame to come back; drops the connection if none
+     * does.
+     *
+     * For the moment the forty-second watchdog is too slow: the phone has
+     * just changed networks, or come back to the foreground. Returns true
+     * without judging when it cannot judge — no connection to test is
+     * `false`, a channel that cannot ping or a request already in flight is
+     * `true`. The second matters: an older `rime-remoted` answers a ping from
+     * the same loop that is busy with that request, so silence during one is
+     * not evidence of death, and the watchdog is still watching.
+     */
+    fun probe(timeoutMs: Long = PROBE_MS, sleep: (Long) -> Unit = { Thread.sleep(it) }): Boolean {
+        val installed = synchronized(lock) { current } ?: return false
+        if (installed.mux.outstanding > 0) return true
+        val before = System.nanoTime()
+        val sent = runCatching { installed.channel.ping() }.getOrDefault(false)
+        if (!sent) return synchronized(lock) { current === installed }
+        val deadline = before + timeoutMs * 1_000_000
+        while (System.nanoTime() < deadline) {
+            val last = installed.channel.lastFrameNanos ?: return true
+            if (last > before) return true
+            if (synchronized(lock) { current !== installed }) return false
+            sleep(PROBE_STEP_MS)
+        }
+        onEvent(LinkEvent.Silent((System.nanoTime() - before) / 1_000_000))
+        retire(installed.mux, Disconnected("${installed.channel.machine} did not answer a ping"))
+        return false
+    }
+
+    /** Close the current connection, if any. The next request opens another. */
+    fun disconnect() {
+        synchronized(lock) { current }?.let { retire(it.mux, null) }
+    }
+
+    private fun live(): Mux {
+        synchronized(lock) { current }?.let { found ->
+            if (!stale(found)) return found.mux
+            onEvent(LinkEvent.Silent(idleMs(found)))
+            retire(found.mux, Disconnected("nothing arrived from ${found.channel.machine} for ${idleMs(found)}ms"))
+        }
+        return connecting.withLock {
+            // Somebody else may have connected while this caller waited for
+            // the lock; theirs is used rather than a second handshake.
+            synchronized(lock) { current }?.let { return@withLock it.mux }
+            if (closed) throw Disconnected("this link is closed")
+            // Outside [lock]: opening a connection is a handshake over a
+            // socket, and holding the monitor across it would block every
+            // other caller, including the one trying to close this link.
+            val channel = connect()
+            val listener = Listener()
+            val m = Mux(channel, listener)
+            listener.mux = m
+            val thread = Thread({ m.pump() }, "rime-link-${channel.machine}")
+            thread.isDaemon = true
+            val installed = synchronized(lock) {
+                if (closed || current != null) {
+                    null
+                } else {
+                    Installed(m, channel).also {
+                        current = it
+                        connections++
+                    }
+                }
+            }
+            if (installed == null) {
+                // The link closed while this one was connecting. The
+                // connection is closed rather than leaked.
+                runCatching { m.close() }
+                runCatching { channel.close() }
+                synchronized(lock) { current }?.let { return@withLock it.mux }
+                throw Disconnected("this link to ${channel.machine} closed while connecting")
+            }
+            thread.start()
+            watch(installed)
+            onEvent(LinkEvent.Connected(channel.machine))
             m
         }
-        runCatching { going.close() }
+    }
+
+    private fun idleMs(installed: Installed): Long {
+        val last = installed.channel.lastFrameNanos ?: return 0
+        return (System.nanoTime() - last) / 1_000_000
+    }
+
+    private fun stale(installed: Installed): Boolean =
+        silenceMs > 0 && installed.channel.lastFrameNanos != null && idleMs(installed) >= silenceMs
+
+    /**
+     * Watch one connection for silence, until it is no longer the current one.
+     *
+     * One thread per connection, daemon, polling. `lastFrameNanos` is written
+     * by the channel's reader for every frame, pings included, so this is the
+     * question "has ANY frame arrived", which is the one that tells an idle
+     * connection from a dead one — see [FrameChannel.lastFrameNanos].
+     */
+    private fun watch(installed: Installed) {
+        if (silenceMs <= 0 || installed.channel.lastFrameNanos == null) return
+        val thread = Thread({
+            try {
+                while (synchronized(lock) { current === installed }) {
+                    Thread.sleep(watchdogPollMs)
+                    if (synchronized(lock) { current !== installed }) return@Thread
+                    if (stale(installed)) {
+                        onEvent(LinkEvent.Silent(idleMs(installed)))
+                        // Closing is what fails the waiting requests and wakes
+                        // the pump; nothing here reconnects.
+                        retire(
+                            installed.mux,
+                            Disconnected("nothing arrived from ${installed.channel.machine} for ${idleMs(installed)}ms"),
+                        )
+                        return@Thread
+                    }
+                }
+            } catch (_: InterruptedException) {
+                Thread.currentThread().interrupt()
+            }
+        }, "rime-link-watchdog-${installed.channel.machine}")
+        thread.isDaemon = true
+        thread.start()
+    }
+
+    /**
+     * Retire [m] if it is still the current connection, and say so once.
+     *
+     * Keyed on the multiplexer rather than on "whatever is current", which is
+     * the bug the older `drop` had in waiting: a late disconnect from a
+     * connection that had ALREADY been replaced would have cleared its
+     * replacement.
+     */
+    private fun retire(m: Mux, cause: Throwable?) {
+        val going = synchronized(lock) {
+            val c = current ?: return
+            if (c.mux !== m) return
+            current = null
+            c
+        }
+        runCatching { going.mux.close() }
         onEvent(LinkEvent.Dropped(cause))
     }
 
     private inner class Listener : Mux.Listener {
-        // A control connection carries no channels: nothing is ever opened on
-        // it, so data and close cannot arrive. They are not errors, and they
-        // are not silently swallowed either — they simply cannot happen, and
-        // a build where they do has a multiplexer bug rather than a link one.
+        /** Set straight after the multiplexer is built, before its pump starts. */
+        @Volatile
+        var mux: Mux? = null
+
+        // Channels opened on this connection carry listeners of their own (a
+        // terminal riding it, `mux_attach`), and the multiplexer hands their
+        // data and close to those. Anything arriving here is for a channel
+        // nobody is listening to any more, which is a late frame for a
+        // terminal that has gone, and dropping it is right.
         override fun onData(channel: UInt, bytes: ByteArray) = Unit
 
         override fun onClose(channel: UInt, reason: String) = Unit
 
         override fun onDisconnect(cause: Throwable?) {
-            // The connection ended on its own — the machine went away, or slept.
-            // Cleared here so the next request opens a new one rather than
-            // failing against a corpse.
-            val ended = synchronized(lock) {
-                val m = mux ?: return
-                mux = null
-                pump = null
-                m
-            }
-            runCatching { ended.close() }
-            onEvent(LinkEvent.Dropped(cause))
+            // The connection ended on its own — the machine went away, or
+            // slept. Cleared here so the next request opens a new one rather
+            // than failing against a corpse.
+            mux?.let { retire(it, cause) }
         }
     }
 
     override fun close() {
         closed = true
-        drop(null)
+        synchronized(lock) { current }?.let { retire(it.mux, null) }
+    }
+
+    companion object {
+        /**
+         * Forty seconds: two and a half of the desktop's fifteen-second pings.
+         *
+         * Shorter than the terminal's forty-five (`PtyAttachment`), because a
+         * control connection that has gone is one every screen is waiting on,
+         * and longer than two pings so a single late one on a busy machine or
+         * a slow hop is not a reconnect.
+         */
+        const val SILENCE_MS: Long = 40_000
+
+        /** Often enough that the answer is within a ping of the truth. */
+        const val WATCHDOG_POLL_MS: Long = 2_000
+
+        /** How long [probe] waits for a pong. A round trip, generously. */
+        const val PROBE_MS: Long = 3_000
+
+        private const val PROBE_STEP_MS: Long = 25
     }
 }
+
+/**
+ * A reply was typed on the agent's terminal and the Return that submits it
+ * did not arrive — the second request of the fallback plan failed.
+ *
+ * Its own type because the person's next move is different: the words are on
+ * the agent's input line, so sending the reply again would put them there
+ * twice. What is needed is a bare Return, from the reply box or the terminal.
+ */
+class NotSubmitted(cause: Throwable) : Exception(
+    "the reply was typed but the Return that submits it did not arrive (${cause.message})",
+    cause,
+)

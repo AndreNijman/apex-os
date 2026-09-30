@@ -66,11 +66,25 @@ sealed class AttachmentEvent {
  * viewport — and it replays its scrollback to whoever attaches.
  *
  * That replay is why [Terminal.reset] is called before each attempt, and
- * calling it is not optional: the daemon sends up to 256 KiB of history to
- * every attaching client, so a terminal still holding the last attachment's
- * screen would show the last few hundred lines twice. The reconnect test
- * asserts the recovered screen equals the uninterrupted one, which is exactly
- * the assertion a missing `reset` fails.
+ * calling it is not optional: the daemon sends the scrollback the attach asks
+ * for (`Agentd.DEFAULT_REPLAY`, 64 KiB) to every attaching client, so a
+ * terminal still holding the last attachment's screen would show the last few
+ * hundred lines twice. The reconnect test asserts the recovered screen equals
+ * the uninterrupted one, which is exactly the assertion a missing `reset`
+ * fails.
+ *
+ * ## Its own connection, or a channel on the control connection
+ *
+ * By default each attempt dials a connection of its own ([connect]), which
+ * every machine understands. When [shared] is given — a machine whose
+ * `rime-remoted` advertises `mux_attach` — each attempt instead opens a
+ * CHANNEL on the control connection the app already holds, which costs no
+ * handshake at all and is most of why a terminal opens in a blink rather than
+ * after a second relay dial. The loop, the reset and the replay are the same
+ * either way; what differs is what [stop] closes (only the channel, never a
+ * connection somebody else owns) and who watches for silence (the owner of
+ * the shared connection already does, so this does not add a second
+ * watchdog to the same socket).
  *
  * ## Keystrokes typed while disconnected are dropped
  *
@@ -101,6 +115,11 @@ class PtyAttachment(
     private val silenceTimeoutMs: Long = DEFAULT_SILENCE_MS,
     /** How often the watchdog looks. Injected so a test need not wait a minute. */
     private val watchdogPollMs: Long = DEFAULT_POLL_MS,
+    /**
+     * The control connection's multiplexer, for a machine that allows
+     * terminals on it. When set, [connect] is not used. See the class note.
+     */
+    private val shared: (() -> Mux)? = null,
 ) {
     @Volatile
     private var stopped = false
@@ -117,7 +136,7 @@ class PtyAttachment(
      * dropped, which is the documented behaviour above. But it is assigned on
      * *this* thread after `openChannel` returns, and by then the pump thread
      * may already have delivered several `Data` frames: `rime-agentd` sends
-     * up to 256 KiB of scrollback the instant it answers `attached`.
+     * its scrollback replay the instant it answers `attached`.
      *
      * A listener reading [mux] therefore found `null` for the opening frames
      * and **silently dropped the terminal's answers to them** — which are
@@ -134,6 +153,14 @@ class PtyAttachment(
      */
     @Volatile
     private var wire: Mux? = null
+
+    /** The channel this attachment holds on a [shared] connection, while it holds one. */
+    @Volatile
+    private var sharedChannel: UInt? = null
+
+    /** Released by [stop], or by the channel or its connection ending. */
+    @Volatile
+    private var sharedEnded: java.util.concurrent.CountDownLatch? = null
 
     /** How many connection attempts have been made, successful or not. */
     @Volatile
@@ -207,6 +234,7 @@ class PtyAttachment(
     }
 
     private fun attempt(): Outcome {
+        shared?.let { return attemptShared(it) }
         var channel: FrameChannel? = null
         try {
             channel = connect()
@@ -272,6 +300,81 @@ class PtyAttachment(
     }
 
     /**
+     * One attempt on a connection this attachment does not own.
+     *
+     * The same shape as [attempt] with the connection taken out: reset, open
+     * the channel with a listener of its own registered BEFORE the `Open`
+     * (the scrollback follows the reply immediately, on the pump thread), and
+     * then wait — for the session to end, for the connection to drop, or for
+     * [stop]. Channel ids come from the multiplexer, so a second terminal on
+     * the same connection cannot take this one's.
+     */
+    private fun attemptShared(host: () -> Mux): Outcome {
+        val m = try {
+            host()
+        } catch (e: Throwable) {
+            return Outcome.Lost(e)
+        }
+        if (stopped) return Outcome.Lost(null)
+        terminal.reset()
+        val id = m.nextChannelId()
+        val ended = java.util.concurrent.CountDownLatch(1)
+        val onThis = object : Mux.Listener {
+            override fun onData(channel: UInt, bytes: ByteArray) {
+                if (channel != id) return
+                terminal.feed(bytes)
+                val answers = terminal.takeResponses()
+                if (answers.isNotEmpty()) runCatching { m.send(id, answers) }
+            }
+
+            override fun onClose(channel: UInt, reason: String) {
+                if (channel != id) return
+                stopped = true
+                onEvent(AttachmentEvent.Ended(reason))
+                ended.countDown()
+            }
+
+            override fun onDisconnect(cause: Throwable?) {
+                ended.countDown()
+            }
+        }
+        wire = m
+        sharedChannel = id
+        sharedEnded = ended
+        try {
+            if (stopped) return Outcome.Lost(null)
+            val reply = try {
+                m.openChannel(
+                    id,
+                    attachRequest().toByteArray(Charsets.UTF_8),
+                    SHARED_OPEN_TIMEOUT_MS,
+                    onThis,
+                ).toString(Charsets.UTF_8)
+            } catch (e: Throwable) {
+                return Outcome.Lost(e)
+            }
+            if (!attachAccepted(reply.toByteArray(Charsets.UTF_8))) {
+                onEvent(AttachmentEvent.Refused(reply))
+                return Outcome.Refused(reply)
+            }
+            if (stopped) {
+                runCatching { m.closeChannel(id) }
+                return Outcome.Lost(null)
+            }
+            mux = m
+            attachments++
+            onEvent(AttachmentEvent.Attached(m.machine, attempts))
+            ended.await()
+            return Outcome.Lost(null)
+        } finally {
+            mux = null
+            wire = null
+            sharedChannel = null
+            sharedEnded = null
+        }
+    }
+
+    /**
      * Send bytes to the PTY. Returns whether there was a connection to send on.
      *
      * `false` is a real answer and not an error: see the note about dropped
@@ -279,7 +382,8 @@ class PtyAttachment(
      */
     fun send(bytes: ByteArray): Boolean {
         val m = mux ?: return false
-        return runCatching { m.send(channelId, bytes) }.isSuccess
+        val id = sharedChannel ?: channelId
+        return runCatching { m.send(id, bytes) }.isSuccess
     }
 
     /**
@@ -307,6 +411,16 @@ class PtyAttachment(
     /** Detach and stop reconnecting. The session goes on running on the machine. */
     fun stop() {
         stopped = true
+        if (shared != null) {
+            // Only the CHANNEL. The connection is the control link's, and a
+            // terminal that closed it on the way out would take every other
+            // screen's connection down with it.
+            val m = wire
+            val id = sharedChannel
+            if (m != null && id != null) runCatching { m.closeChannel(id) }
+            sharedEnded?.countDown()
+            return
+        }
         // [wire] rather than [mux], so a stop during a handshake still closes
         // the connection it is holding open.
         val m = wire
@@ -388,7 +502,7 @@ class PtyAttachment(
          * connection. Waiting for three costs at most forty-five seconds of a
          * terminal that is already dead, and firing after one would reconnect
          * a working session every time the far end paused under load — which
-         * costs a fresh handshake and a 256 KiB replay on a phone's data
+         * costs a fresh handshake and a scrollback replay on a phone's data
          * allowance.
          */
         const val DEFAULT_SILENCE_MS: Long = 45_000
@@ -403,6 +517,17 @@ class PtyAttachment(
          * place to be.
          */
         const val RESIZE_TIMEOUT_MS: Long = 15_000
+
+        /**
+         * How long an attach on a shared connection may take to be answered.
+         *
+         * Not the five-minute control deadline: an attach does not wait on a
+         * human, and on a shared connection a timeout closes the connection
+         * every other screen is using (the multiplexer's FIFO has lost its
+         * place). Thirty seconds is a machine that is not answering, and the
+         * reconnect path is the right place for that.
+         */
+        const val SHARED_OPEN_TIMEOUT_MS: Long = 30_000
     }
 }
 

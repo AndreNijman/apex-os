@@ -272,10 +272,11 @@ class Session internal constructor(
     }
 
     /** Measure the connection. The answer lands in [roundTripMs]. */
-    fun ping() {
+    override fun ping(): Boolean {
         val token = nextToken.incrementAndGet()
         outstanding[token] = System.nanoTime()
         send(Frame.Ping(token))
+        return true
     }
 
     /**
