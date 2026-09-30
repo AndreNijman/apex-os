@@ -356,6 +356,11 @@ pub fn deliver(endpoint: &Endpoint, envelope: &Envelope, trust: &Trust) -> Resul
     // registered phone, and one wedged endpoint would stop the others.
     socket.set_read_timeout(Some(DELIVERY_TIMEOUT)).ok();
     socket.set_write_timeout(Some(DELIVERY_TIMEOUT)).ok();
+    // Nagle off, like every other socket this process opens. A delivery is a
+    // TLS handshake and one small request — exactly the write-write-read
+    // pattern a delayed ACK stalls — and a notification that a session is
+    // waiting on its owner is worth the 40 ms.
+    socket.set_nodelay(true).ok();
     let (mut reader, mut writer) = trust
         .connect(
             socket.try_clone().map_err(|e| e.to_string())?,
@@ -1140,6 +1145,11 @@ mod tests {
             br#"{"cmd":"input","id":1,"data":"hi"}"#.to_vec(),
             br#"{"cmd":"push"}"#.to_vec(),
             br#"{"cmd":"push_registers"}"#.to_vec(),
+            // Answered by this service too, but one level up: `serve::VERBS`
+            // is checked before this function is asked, and push must not
+            // claim a verb that is not about push. The union of the two
+            // lists is pinned in `serve`'s own test.
+            br#"{"cmd":"remote_hello"}"#.to_vec(),
             b"not json".to_vec(),
             br#"{"no":"cmd"}"#.to_vec(),
         ] {

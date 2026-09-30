@@ -43,12 +43,48 @@
 //! it writes the first byte to the loopback socket, and `serve::connection`
 //! reads the hello byte before it asks. So the lookup cannot run early; the
 //! ordering is the guarantee, not a sleep.
+//!
+//! ## Keeping the waiting connection honest
+//!
+//! A phone can only be joined to a waiting connection that is really there,
+//! and before this nothing checked. The keepalive pinged every 30 s and the
+//! pongs were thrown away; there was no read deadline. So a waiting socket
+//! the network had quietly dropped — a NAT that forgot the mapping, a Wi-Fi
+//! change with no FIN — sat here looking parked until the relay closed its
+//! end, and every phone that arrived meanwhile was joined to nothing or told
+//! 409. Now a waiting connection that hears NOTHING for [`WAIT_DEADLINE`],
+//! pongs included, is dropped and dialled again.
+//!
+//! **The deadline is armed only once the relay has shown it answers pings.**
+//! The Worker cannot be run from this machine and its hibernation API is the
+//! part of it this code knows least about; a relay that did not pong would,
+//! under a hard deadline, be re-dialled every 75 s for ever, with a 409
+//! window each time. So the first pong — on this connection or any earlier
+//! one this process made — is what turns the deadline on. Against a relay
+//! that never pongs this behaves exactly as it did before, and says so once.
+//!
+//! **Re-dialling is immediate after a connection that was healthy**, and
+//! backs off only for dials that fail and connections that die young. The
+//! Worker drops a long-lived waiting socket every twenty minutes to an hour
+//! (the journal: "the relay refused the connection: failed to fill whole
+//! buffer" — which was never a refusal, it was the WAIT ending), and each of
+//! those used to be followed by a two-second sleep during which every phone
+//! was told 409.
+//!
+//! **A second waiting connection cannot be held ahead of time.** The obvious
+//! way to close the 409 window after a device is joined — dial the next
+//! waiting socket before the current one is consumed — is refused by the
+//! relay by design: `room.js`'s `decide` answers a second host with 409, so a
+//! room holds one waiting desktop and no spare. What this can do, it does: the
+//! next dial starts the moment a device is announced, on this thread, while
+//! the splice runs on its own.
 
 use std::collections::HashSet;
 use std::io::{Read, Write};
 use std::net::TcpStream;
+use std::sync::atomic::{AtomicBool, Ordering};
 use std::sync::{Arc, Mutex};
-use std::time::Duration;
+use std::time::{Duration, Instant};
 
 use rime_remote_core::relay::{Endpoint, Notice, Op, Opening, Receiver, RelayError, Role, Sender};
 use rime_remote_core::tls::{TlsError, Trust};
@@ -56,14 +92,23 @@ use rime_remote_core::tls::{TlsError, Trust};
 use crate::state::State;
 
 /// How long to wait before dialling again after the first failure.
+///
+/// Also the fixed pause after a `409`, which is not a failure (see
+/// [`next_delay`]) but is still a relay saying "not yet". Two seconds keeps a
+/// desktop that is waiting its turn at 30 upgrades a minute, half of the
+/// Worker's per-address limit (`UPGRADES_PER_MINUTE` in `room.js`) — and a
+/// phone on the same Wi-Fi shares that address.
 pub const BACKOFF_MIN: Duration = Duration::from_secs(2);
 
 /// The longest this will ever wait between attempts.
 ///
-/// A minute rather than an hour: the common failure is a laptop whose Wi-Fi
-/// has just changed, and a device that is being reached right now should not
-/// have to wait out a backoff that grew while the lid was shut.
-pub const BACKOFF_MAX: Duration = Duration::from_secs(60);
+/// Ten seconds, down from a minute. The common failure is a laptop whose
+/// Wi-Fi has just changed, and the cost of this number is paid by a phone
+/// that is trying to reach the machine RIGHT NOW: with a minute, a desktop
+/// that had failed five times in a row was unreachable for up to a minute
+/// after its network came back. Ten seconds of retrying is six upgrades a
+/// minute, far under the relay's limit.
+pub const BACKOFF_MAX: Duration = Duration::from_secs(10);
 
 /// How often a waiting connection proves it is still there.
 ///
@@ -72,6 +117,22 @@ pub const BACKOFF_MAX: Duration = Duration::from_secs(60);
 /// decide the connection is dead. A WebSocket ping is the protocol's own
 /// answer to that.
 pub const KEEPALIVE: Duration = Duration::from_secs(30);
+
+/// How long a waiting connection may hear nothing before it is dialled again.
+///
+/// Two and a half keepalives. The relay answers each ping, so a healthy
+/// waiting connection hears something every 30 s; 75 s of silence is two
+/// pings unanswered and the third due, and a connection that has lost two
+/// round trips in a row is not one a phone should be joined to.
+pub const WAIT_DEADLINE: Duration = Duration::from_secs(75);
+
+/// A waiting connection that lived this long before it ended was healthy.
+///
+/// Its end is the relay's routine, not a failure, and the next dial is made
+/// at once with the backoff reset. Anything shorter is a relay that accepts
+/// and drops, and is backed off like a failed dial — otherwise a relay that
+/// did that would be dialled in a tight loop.
+pub const HEALTHY: Duration = Duration::from_secs(30);
 
 /// How much of the carried stream is moved per frame.
 const CHUNK: usize = 32 * 1024;
@@ -101,22 +162,35 @@ impl Sources {
     }
 }
 
-/// Why an attempt to reach the relay ended.
+/// Why a dial did not produce a waiting connection, by the step that failed.
+///
+/// By step because the journal used to say "the relay refused the
+/// connection: failed to fill whole buffer" for all of them — and for the end
+/// of a wait that had been going for an hour, which is not a dial failure at
+/// all (that is [`WaitEnd`] now). An owner reading "TCP" knows to look at
+/// the network, "TLS" at the clock or the CA store, and "upgrade" at the
+/// relay's address or the relay itself.
 #[derive(Debug)]
 pub enum DialError {
+    /// Resolving the relay's name or opening the TCP connection.
+    Tcp(std::io::Error),
     /// The address asks for TLS and the TLS leg could not be established —
     /// most importantly because the relay's certificate did not verify.
     Tls(TlsError),
+    /// The HTTP upgrade: the request could not be sent, or the answer to it
+    /// was not a switch to WebSocket. A relay's `409` lands here.
+    Upgrade(RelayError),
+    /// A local socket operation between the steps (duplicating the socket).
     Io(std::io::Error),
-    Relay(RelayError),
 }
 
 impl std::fmt::Display for DialError {
     fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
         match self {
-            DialError::Tls(e) => write!(f, "{e}"),
+            DialError::Tcp(e) => write!(f, "TCP: {e}"),
+            DialError::Tls(e) => write!(f, "TLS: {e}"),
+            DialError::Upgrade(e) => write!(f, "WebSocket upgrade: {e}"),
             DialError::Io(e) => write!(f, "{e}"),
-            DialError::Relay(e) => write!(f, "{e}"),
         }
     }
 }
@@ -127,16 +201,82 @@ impl From<std::io::Error> for DialError {
     }
 }
 
-impl From<RelayError> for DialError {
-    fn from(e: RelayError) -> DialError {
-        DialError::Relay(e)
-    }
-}
-
 impl From<TlsError> for DialError {
     fn from(e: TlsError) -> DialError {
         DialError::Tls(e)
     }
+}
+
+impl DialError {
+    /// The HTTP status the relay refused the upgrade with, if that is what
+    /// happened.
+    ///
+    /// Read out of the refusal's text, which `Opening::check` builds from the
+    /// relay's status line (`expected HTTP 101, got "HTTP/1.1 409 Conflict"`).
+    /// A parse of another crate's sentence is fragile, so the test that pins
+    /// it builds the error with `Opening::check` itself: a rewording there
+    /// fails here rather than silently turning every 409 into a failure.
+    pub fn refused_with(&self) -> Option<u16> {
+        let DialError::Upgrade(RelayError::Upgrade(why)) = self else {
+            return None;
+        };
+        let (_, status) = why.split_once("got \"")?;
+        status.split_whitespace().nth(1)?.parse().ok()
+    }
+}
+
+/// How a waiting connection ended after the upgrade had succeeded.
+#[derive(Debug)]
+pub enum WaitEnd {
+    /// Nothing at all arrived for this long, keepalive pongs included.
+    Silent(Duration),
+    /// The relay, or something between here and it, ended the connection.
+    Closed(String),
+    /// The relay sent something the protocol does not allow.
+    Broke(RelayError),
+}
+
+impl std::fmt::Display for WaitEnd {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        match self {
+            WaitEnd::Silent(d) => {
+                write!(f, "nothing arrived for {} s despite keepalive pings", d.as_secs())
+            }
+            WaitEnd::Closed(why) => write!(f, "{why}"),
+            WaitEnd::Broke(e) => write!(f, "{e}"),
+        }
+    }
+}
+
+/// The clocks a waiting connection runs on. A value rather than constants so
+/// a test can run a wait in milliseconds; the daemon always uses
+/// [`Timing::SHIPPED`].
+#[derive(Debug, Clone, Copy)]
+pub struct Timing {
+    pub keepalive: Duration,
+    pub deadline: Duration,
+}
+
+impl Timing {
+    pub const SHIPPED: Timing = Timing {
+        keepalive: KEEPALIVE,
+        deadline: WAIT_DEADLINE,
+    };
+}
+
+/// One attempt at holding the rendezvous, from the dial to the end of the
+/// wait.
+pub enum Attempt {
+    /// A device arrived. The connection is the device's now.
+    Paired(Joined),
+    /// The dial failed at one of its steps.
+    Failed(DialError),
+    /// The relay answered the upgrade with 409: something already holds this
+    /// rendezvous as its host. Usually this machine's OWN previous waiting
+    /// connection, dropped here and not yet noticed there.
+    Held,
+    /// The waiting connection was established and later ended.
+    Ended { lasted: Duration, why: WaitEnd },
 }
 
 /// Keep this machine reachable through the relay, for as long as it runs.
@@ -171,23 +311,268 @@ pub fn supervise(state: Arc<State>, endpoint: Endpoint) {
         "rime-remoted: relay {endpoint}, rendezvous {rendezvous} \
          (outbound only; no inbound port is opened)"
     );
+    // Whether this relay has ever answered a keepalive. See the module note:
+    // it is what arms the read deadline.
+    let answers_pings = AtomicBool::new(false);
     let mut backoff = BACKOFF_MIN;
+    let mut log = Log::default();
     loop {
-        match wait_for_a_device(&endpoint, &rendezvous, trust.as_ref()) {
-            Ok(joined) => {
-                backoff = BACKOFF_MIN;
-                let state = Arc::clone(&state);
-                std::thread::spawn(move || {
-                    if let Err(e) = splice(joined, &state) {
-                        eprintln!("rime-remoted: a relayed session ended: {e}");
+        let attempt = attempt(
+            &endpoint,
+            &rendezvous,
+            trust.as_ref(),
+            Timing::SHIPPED,
+            &answers_pings,
+            &mut log,
+        );
+        let delay = next_delay(&attempt, &mut backoff);
+        log.after(&attempt, delay, &answers_pings);
+        if let Attempt::Paired(joined) = attempt {
+            let state = Arc::clone(&state);
+            std::thread::spawn(move || {
+                if let Err(e) = splice(joined, &state) {
+                    eprintln!("rime-remoted: a relayed session ended: {e}");
+                }
+            });
+        }
+        if !delay.is_zero() {
+            std::thread::sleep(delay);
+        }
+    }
+}
+
+/// How long to wait before the next dial, given how the last attempt went.
+///
+/// A pure function of the outcome and the running backoff, so the rules are
+/// asserted directly rather than by timing a loop:
+///
+/// * **Paired**, or a waiting connection that lived [`HEALTHY`] or longer —
+///   including one dropped for silence, which by construction had lived
+///   [`WAIT_DEADLINE`] — re-dial NOW and reset the backoff. Neither says
+///   anything is wrong with reaching the relay.
+/// * **409** is not a failure and does not grow the backoff: the relay is
+///   reachable and answering. It is retried after [`BACKOFF_MIN`], not
+///   instantly, because each retry is an upgrade against the relay's
+///   per-address limit.
+/// * A dial that failed, or a connection that died young, backs off
+///   2 → 4 → 8 → 10 s and stays at [`BACKOFF_MAX`].
+fn next_delay(attempt: &Attempt, backoff: &mut Duration) -> Duration {
+    match attempt {
+        Attempt::Paired(_) => {
+            *backoff = BACKOFF_MIN;
+            Duration::ZERO
+        }
+        Attempt::Ended { lasted, .. } if *lasted >= HEALTHY => {
+            *backoff = BACKOFF_MIN;
+            Duration::ZERO
+        }
+        Attempt::Held => {
+            *backoff = BACKOFF_MIN;
+            BACKOFF_MIN
+        }
+        Attempt::Failed(_) | Attempt::Ended { .. } => {
+            let delay = *backoff;
+            *backoff = (*backoff * 2).min(BACKOFF_MAX);
+            delay
+        }
+    }
+}
+
+/// What the relay loop says in the journal, and how often.
+///
+/// With the backoff capped at ten seconds, a machine that is offline for an
+/// afternoon would log a line every ten seconds if every attempt were
+/// reported. So a run of failed dials — or of waiting connections that die
+/// young — is reported when it starts and then every [`Log::REPEAT`] while it
+/// lasts, and the recovery is reported once; a run of 409s is reported once.
+/// A healthy waiting connection that ends is always reported: that happens a
+/// few times an hour, and it is the line that used to be mislabelled.
+#[derive(Default)]
+struct Log {
+    /// Consecutive dials that failed.
+    failing: u32,
+    /// Consecutive waiting connections that ended before [`HEALTHY`].
+    dropping: u32,
+    /// When a line about the current run was last written.
+    said: Option<Instant>,
+    held: bool,
+    /// Whether "this relay does not answer pings" has been said.
+    said_no_pongs: bool,
+}
+
+impl Log {
+    const REPEAT: Duration = Duration::from_secs(600);
+
+    /// A dial completed: a waiting connection is up.
+    fn reached(&mut self) {
+        if self.failing > 0 {
+            eprintln!(
+                "rime-remoted: the relay is reachable again after {} failed attempt(s); waiting \
+                 for a device",
+                self.failing
+            );
+        } else if self.held {
+            eprintln!(
+                "rime-remoted: the relay has released this machine's rendezvous; waiting for a \
+                 device"
+            );
+        }
+        self.failing = 0;
+        self.held = false;
+    }
+
+    /// Whether the `n`th line of a run is worth writing.
+    fn due(&mut self, n: u32) -> bool {
+        let due = n == 1 || self.said.map_or(true, |t| t.elapsed() >= Self::REPEAT);
+        if due {
+            self.said = Some(Instant::now());
+        }
+        due
+    }
+
+    fn after(&mut self, attempt: &Attempt, delay: Duration, answers_pings: &AtomicBool) {
+        let retry = if delay.is_zero() {
+            "re-dialling now".to_string()
+        } else {
+            format!("retrying in {} s", delay.as_secs())
+        };
+        match attempt {
+            Attempt::Paired(_) => self.dropping = 0,
+            Attempt::Held => {
+                if !self.held {
+                    eprintln!(
+                        "rime-remoted: the relay says another connection already holds this \
+                         machine's rendezvous (409) — usually a waiting connection this machine \
+                         dropped that the relay has not noticed yet; {retry}, until it has"
+                    );
+                }
+                self.held = true;
+            }
+            Attempt::Ended { lasted, why } if *lasted >= HEALTHY => {
+                self.dropping = 0;
+                eprintln!(
+                    "rime-remoted: the relay's waiting connection ended after {} ({why}); {retry}",
+                    human(*lasted)
+                );
+                if !answers_pings.load(Ordering::Relaxed)
+                    && *lasted >= KEEPALIVE
+                    && !self.said_no_pongs
+                {
+                    self.said_no_pongs = true;
+                    eprintln!(
+                        "rime-remoted: this relay has not answered a keepalive ping, so a waiting \
+                         connection it loses without closing cannot be noticed from here; it is \
+                         re-dialled only when the relay closes it"
+                    );
+                }
+            }
+            Attempt::Ended { lasted, why } => {
+                self.dropping += 1;
+                if self.due(self.dropping) {
+                    eprintln!(
+                        "rime-remoted: the relay dropped the waiting connection after {} ({why}; \
+                         {} in a row); {retry}",
+                        human(*lasted),
+                        self.dropping
+                    );
+                }
+            }
+            Attempt::Failed(e) => {
+                self.failing += 1;
+                if self.due(self.failing) {
+                    if self.failing == 1 {
+                        eprintln!("rime-remoted: the relay is not reachable ({e}); {retry}");
+                    } else {
+                        eprintln!(
+                            "rime-remoted: the relay is still not reachable after {} attempts \
+                             ({e}); retrying every {} s",
+                            self.failing,
+                            delay.as_secs()
+                        );
                     }
-                });
+                }
+            }
+        }
+    }
+}
+
+/// A duration the way a person reads one in a log line.
+fn human(d: Duration) -> String {
+    let s = d.as_secs();
+    if s < 120 {
+        format!("{s} s")
+    } else if s < 7200 {
+        format!("{} min", s / 60)
+    } else {
+        format!("{} h {} min", s / 3600, (s % 3600) / 60)
+    }
+}
+
+/// Dial, then wait for a device, and say how it went.
+fn attempt(
+    endpoint: &Endpoint,
+    rendezvous: &str,
+    trust: Option<&Trust>,
+    timing: Timing,
+    answers_pings: &AtomicBool,
+    log: &mut Log,
+) -> Attempt {
+    let joined = match dial(endpoint, rendezvous, Role::Host, trust) {
+        Ok(joined) => joined,
+        // Only a HOST dial reaches this, and the relay has one 409 for a
+        // host: "this rendezvous already has a host waiting" (`room.js`,
+        // `decide`). The other 409, "no desktop is waiting", is a guest's.
+        Err(e) if e.refused_with() == Some(409) => return Attempt::Held,
+        Err(e) => return Attempt::Failed(e),
+    };
+    log.reached();
+    let since = Instant::now();
+    match wait(joined, timing, answers_pings) {
+        Ok(joined) => Attempt::Paired(joined),
+        Err(why) => Attempt::Ended {
+            lasted: since.elapsed(),
+            why,
+        },
+    }
+}
+
+/// What the socket under a relay connection last reported, kept for after a
+/// [`Receiver`] error has flattened it into text.
+///
+/// The receiver turns every read failure into `RelayError::Upgrade` with the
+/// error's words — which is how an end of file after an hour of waiting came
+/// to be logged as "the relay refused the connection: failed to fill whole
+/// buffer". Reading the facts at the source is simpler than parsing the
+/// sentence back.
+#[derive(Default)]
+pub struct ReadWatch {
+    eof: AtomicBool,
+    timed_out: AtomicBool,
+}
+
+struct Watched {
+    inner: Box<dyn Read + Send>,
+    watch: Arc<ReadWatch>,
+}
+
+impl Read for Watched {
+    fn read(&mut self, buf: &mut [u8]) -> std::io::Result<usize> {
+        match self.inner.read(buf) {
+            Ok(0) if !buf.is_empty() => {
+                self.watch.eof.store(true, Ordering::Relaxed);
+                Ok(0)
             }
             Err(e) => {
-                eprintln!("rime-remoted: the relay is not reachable ({e}); retrying");
-                std::thread::sleep(backoff);
-                backoff = (backoff * 2).min(BACKOFF_MAX);
+                match e.kind() {
+                    std::io::ErrorKind::WouldBlock | std::io::ErrorKind::TimedOut => {
+                        self.watch.timed_out.store(true, Ordering::Relaxed)
+                    }
+                    std::io::ErrorKind::UnexpectedEof => self.watch.eof.store(true, Ordering::Relaxed),
+                    _ => {}
+                }
+                Err(e)
             }
+            ok => ok,
         }
     }
 }
@@ -199,35 +584,32 @@ pub fn supervise(state: Arc<State>, endpoint: Endpoint) {
 /// for one socket. `socket` stays a real `TcpStream` either way: shutting it
 /// down is what unblocks a reader parked in the receiver, and that has to keep
 /// working on the TLS path too — a TLS reader blocked on the network is
-/// blocked in a plain `read` on exactly this socket.
+/// blocked in a plain `read` on exactly this socket. It is also where the
+/// waiting deadline is set, for the same reason.
 pub struct Joined {
     pub receiver: Receiver<Box<dyn Read + Send>>,
     pub sender: Arc<Mutex<Sender<Box<dyn Write + Send>>>>,
     /// Held so the connection can be shut down from another thread.
     pub socket: TcpStream,
+    /// What the reading half last saw at the socket.
+    pub watch: Arc<ReadWatch>,
 }
 
-/// Open the host side of the rendezvous and block until a device arrives.
+/// Block until a device arrives on a waiting connection, or the wait ends.
 ///
 /// A keepalive thread pings while this waits, and stops when the wait ends.
-fn wait_for_a_device(
-    endpoint: &Endpoint,
-    rendezvous: &str,
-    trust: Option<&Trust>,
-) -> Result<Joined, DialError> {
-    let joined = dial(endpoint, rendezvous, Role::Host, trust)?;
-
+fn wait(mut joined: Joined, timing: Timing, answers_pings: &AtomicBool) -> Result<Joined, WaitEnd> {
     // The keepalive runs only while waiting. Once a device is on the far end
     // the session's own traffic keeps the connection warm, and an extra ping
     // interleaved with it is a frame the splice has to step over.
-    let waiting = Arc::new(std::sync::atomic::AtomicBool::new(true));
+    let waiting = Arc::new(AtomicBool::new(true));
     {
         let sender = Arc::clone(&joined.sender);
         let waiting = Arc::clone(&waiting);
         std::thread::spawn(move || {
-            while waiting.load(std::sync::atomic::Ordering::Relaxed) {
-                std::thread::sleep(KEEPALIVE);
-                if !waiting.load(std::sync::atomic::Ordering::Relaxed) {
+            while waiting.load(Ordering::Relaxed) {
+                std::thread::sleep(timing.keepalive);
+                if !waiting.load(Ordering::Relaxed) {
                     return;
                 }
                 let Ok(mut s) = sender.lock() else { return };
@@ -238,11 +620,16 @@ fn wait_for_a_device(
         });
     }
 
-    let mut joined = joined;
+    // SO_RCVTIMEO on the socket itself, which the TLS reader's clone shares:
+    // one `read(2)` that waits this long is the deadline, and any frame at
+    // all — the waiting notice, a pong, a ping from the relay — restarts it.
+    let arm = |joined: &Joined| joined.socket.set_read_timeout(Some(timing.deadline)).is_ok();
+    let mut armed = answers_pings.load(Ordering::Relaxed) && arm(&joined);
+
     let outcome = loop {
         let message = match joined.receiver.message() {
             Ok(m) => m,
-            Err(e) => break Err(DialError::Relay(e)),
+            Err(e) => break Err(ended_by(&joined.watch, e, timing)),
         };
         match message.op {
             Op::Text => match Notice::parse(&message.payload) {
@@ -257,24 +644,66 @@ fn wait_for_a_device(
                     let _ = s.pong(&message.payload);
                 }
             }
-            Op::Pong => continue,
-            Op::Close => {
-                break Err(DialError::Relay(RelayError::Upgrade(
-                    "it closed the waiting connection".into(),
-                )))
+            // The relay answers pings: the deadline can be trusted, for this
+            // connection and every later one.
+            Op::Pong => {
+                answers_pings.store(true, Ordering::Relaxed);
+                if !armed {
+                    armed = arm(&joined);
+                }
             }
+            Op::Close => break Err(WaitEnd::Closed("it sent a WebSocket close".into())),
             // Binary before a device has been announced means the relay
             // joined this connection to something without saying so, and the
             // bytes would be fed to a splice that has not been set up.
             Op::Binary | Op::Continuation => {
-                break Err(DialError::Relay(RelayError::Protocol(
+                break Err(WaitEnd::Broke(RelayError::Protocol(
                     "payload before the relay said a device had arrived",
                 )))
             }
         }
     };
-    waiting.store(false, std::sync::atomic::Ordering::Relaxed);
-    outcome.map(|()| joined)
+    waiting.store(false, Ordering::Relaxed);
+    match outcome {
+        Ok(()) => {
+            // Off before the splice. A relayed terminal may be idle for
+            // hours, and a waiting-room deadline left on its socket would end
+            // it after 75 s of nobody typing.
+            joined.socket.set_read_timeout(None).ok();
+            Ok(joined)
+        }
+        Err(end) => {
+            // A close frame first, best effort: if the path is fine and only
+            // the relay went quiet, this is what frees the room for the next
+            // dial instead of leaving it held — and a 409 — until the relay
+            // notices on its own. On a dead path it goes nowhere and costs
+            // nothing.
+            if matches!(end, WaitEnd::Silent(_)) {
+                if let Ok(mut s) = joined.sender.lock() {
+                    let _ = s.close();
+                }
+            }
+            let _ = joined.socket.shutdown(std::net::Shutdown::Both);
+            Err(end)
+        }
+    }
+}
+
+/// Name the end of a wait from what the socket saw, not from the receiver's
+/// sentence.
+fn ended_by(watch: &ReadWatch, e: RelayError, timing: Timing) -> WaitEnd {
+    if watch.timed_out.load(Ordering::Relaxed) {
+        WaitEnd::Silent(timing.deadline)
+    } else if watch.eof.load(Ordering::Relaxed) {
+        WaitEnd::Closed("it closed the connection without a WebSocket close".into())
+    } else {
+        match e {
+            // The receiver's wrapper for a read error; the words are the
+            // socket's (a reset, a TLS alert).
+            RelayError::Upgrade(why) => WaitEnd::Closed(format!("the connection failed: {why}")),
+            other => WaitEnd::Broke(other),
+        }
+    }
 }
 
 /// Dial one connection to the relay and complete the WebSocket handshake.
@@ -288,13 +717,14 @@ pub fn dial(
     role: Role,
     trust: Option<&Trust>,
 ) -> Result<Joined, DialError> {
-    let socket = TcpStream::connect((endpoint.host.as_str(), endpoint.port))?;
+    let socket =
+        TcpStream::connect((endpoint.host.as_str(), endpoint.port)).map_err(DialError::Tcp)?;
     // Nagle off: the carried stream is a terminal, and coalescing a keystroke
     // with whatever comes next is exactly the latency this feature is judged
     // on.
     socket.set_nodelay(true).ok();
 
-    let (mut reading, mut writing): (Box<dyn Read + Send>, Box<dyn Write + Send>) =
+    let (reading, mut writing): (Box<dyn Read + Send>, Box<dyn Write + Send>) =
         if endpoint.secure {
             // TLS FIRST, and the upgrade request written into it afterwards.
             // The ordering is the point: the rendezvous id lives in that
@@ -316,15 +746,23 @@ pub fn dial(
         } else {
             (Box::new(socket.try_clone()?), Box::new(socket.try_clone()?))
         };
+    let watch = Arc::new(ReadWatch::default());
+    let mut reading: Box<dyn Read + Send> = Box::new(Watched {
+        inner: reading,
+        watch: Arc::clone(&watch),
+    });
     let opening = Opening::new();
-    writing.write_all(&opening.request(endpoint, rendezvous, role))?;
-    writing.flush()?;
-    opening.accept(&mut reading)?;
+    writing
+        .write_all(&opening.request(endpoint, rendezvous, role))
+        .and_then(|()| writing.flush())
+        .map_err(|e| DialError::Upgrade(RelayError::Upgrade(format!("the request was not sent: {e}"))))?;
+    opening.accept(&mut reading).map_err(DialError::Upgrade)?;
 
     Ok(Joined {
         receiver: Receiver::new(reading),
         sender: Arc::new(Mutex::new(Sender::new(writing))),
         socket,
+        watch,
     })
 }
 
@@ -343,6 +781,11 @@ fn splice(mut joined: Joined, state: &Arc<State>) -> std::io::Result<()> {
 
     let to_relay = local.try_clone()?;
     let sender = Arc::clone(&joined.sender);
+    let relay_socket = joined.socket.try_clone()?;
+    // Set by the pump when THIS side ended the session, so the reader below
+    // does not report the socket the pump shut as a failure.
+    let ours = Arc::new(AtomicBool::new(false));
+    let hung_up = Arc::clone(&ours);
     let pump = std::thread::spawn(move || {
         let mut from_local = to_relay;
         let mut buf = vec![0u8; CHUNK];
@@ -359,6 +802,14 @@ fn splice(mut joined: Joined, state: &Arc<State>) -> std::io::Result<()> {
         if let Ok(mut s) = sender.lock() {
             let _ = s.close();
         }
+        // And the relay socket down, so the reader below stops too. The
+        // local side ends first whenever THIS machine ends the session — the
+        // phone stopped answering pings, or it was revoked — and on a relay
+        // path that has gone dead the close frame above reaches nobody, so
+        // the reader would otherwise wait on it for as long as TCP let it:
+        // a thread and a socket per dead relayed session.
+        hung_up.store(true, Ordering::Relaxed);
+        let _ = relay_socket.shutdown(std::net::Shutdown::Both);
     });
 
     let mut to_local = local.try_clone()?;
@@ -384,6 +835,7 @@ fn splice(mut joined: Joined, state: &Arc<State>) -> std::io::Result<()> {
                 }
                 Op::Close => break Ok(()),
             },
+            Err(_) if ours.load(Ordering::Relaxed) => break Ok(()),
             Err(e) => break Err(std::io::Error::other(e.to_string())),
         }
     };
@@ -748,18 +1200,318 @@ mod tests {
         assert!(s.holds(4243));
     }
 
+    // ─────────────────────────────────────────────────────────────────────
+    //  Re-dialling: when, how soon, and what it is called in the journal
+    // ─────────────────────────────────────────────────────────────────────
+
+    fn tcp_failure() -> Attempt {
+        Attempt::Failed(DialError::Tcp(std::io::Error::from(
+            std::io::ErrorKind::ConnectionRefused,
+        )))
+    }
+
     #[test]
-    fn the_backoff_grows_and_stops_growing() {
+    fn the_backoff_grows_to_ten_seconds_and_stops() {
         let mut backoff = BACKOFF_MIN;
-        let mut seen = vec![backoff];
-        for _ in 0..12 {
-            backoff = (backoff * 2).min(BACKOFF_MAX);
-            seen.push(backoff);
+        let seen: Vec<u64> = (0..8)
+            .map(|_| next_delay(&tcp_failure(), &mut backoff).as_secs())
+            .collect();
+        assert_eq!(seen, vec![2, 4, 8, 10, 10, 10, 10, 10]);
+        // A laptop whose Wi-Fi just came back must not wait out a backoff it
+        // spent asleep accumulating, and the phone trying to reach it pays
+        // every second of this number.
+        assert!(BACKOFF_MAX <= Duration::from_secs(10));
+        // A connection that died young is a failure too, or a relay that
+        // accepted and dropped would be dialled in a tight loop.
+        let young = Attempt::Ended {
+            lasted: Duration::from_millis(300),
+            why: WaitEnd::Closed("x".into()),
+        };
+        assert_eq!(next_delay(&young, &mut backoff), BACKOFF_MAX);
+    }
+
+    #[test]
+    fn a_409_is_not_a_failure_and_a_healthy_connection_is_redialled_at_once() {
+        // The 409 a host gets means "a host is already waiting here" —
+        // usually this machine's own previous connection, which the relay
+        // has not noticed is gone. The relay is reachable and answering, so
+        // it must not push the next attempt out to the cap; but it is still
+        // retried after a pause, because each retry is an upgrade counted
+        // against the relay's per-address limit.
+        let mut backoff = BACKOFF_MAX;
+        for _ in 0..5 {
+            assert_eq!(next_delay(&Attempt::Held, &mut backoff), BACKOFF_MIN);
+            assert_eq!(backoff, BACKOFF_MIN, "a 409 grew the backoff");
         }
-        assert!(seen.windows(2).all(|w| w[1] >= w[0]), "the backoff went backwards");
-        assert_eq!(*seen.last().expect("last"), BACKOFF_MAX);
-        // A laptop whose Wi-Fi just came back must not wait out an hour it
-        // spent asleep accumulating.
-        assert!(BACKOFF_MAX <= Duration::from_secs(60));
+        // And a failure after a run of 409s starts from the bottom.
+        assert_eq!(next_delay(&tcp_failure(), &mut backoff), BACKOFF_MIN);
+
+        // The Worker drops a waiting socket every twenty minutes to an hour.
+        // That is not trouble reaching the relay, and the sleep that used to
+        // follow it was a window of 409s for every phone.
+        let mut backoff = BACKOFF_MAX;
+        for why in [
+            WaitEnd::Closed("it closed the connection without a WebSocket close".into()),
+            WaitEnd::Silent(WAIT_DEADLINE),
+        ] {
+            let healthy = Attempt::Ended {
+                lasted: WAIT_DEADLINE,
+                why,
+            };
+            assert_eq!(next_delay(&healthy, &mut backoff), Duration::ZERO);
+            assert_eq!(backoff, BACKOFF_MIN);
+        }
+        // A silent connection has by construction lived the whole deadline,
+        // so it is always re-dialled at once.
+        assert!(WAIT_DEADLINE >= HEALTHY);
+        assert!(WAIT_DEADLINE > KEEPALIVE * 2, "the deadline must outlast two keepalives");
+    }
+
+    #[test]
+    fn a_409_is_read_from_the_relays_own_status_line() {
+        // Built with `Opening::check` itself rather than a string written out
+        // here: `refused_with` parses that function's sentence, and a
+        // rewording in rime-remote-core must fail this test instead of
+        // silently turning every 409 back into a failure.
+        let opening = Opening::new();
+        for (head, want) in [
+            (&b"HTTP/1.1 409 Conflict\r\nContent-Length: 0\r\n\r\n"[..], Some(409)),
+            (&b"HTTP/1.1 404 Not Found\r\n\r\n"[..], Some(404)),
+            (&b"HTTP/1.1 429 Too Many Requests\r\n\r\n"[..], Some(429)),
+        ] {
+            let e = DialError::Upgrade(opening.check(head).expect_err("not a 101"));
+            assert_eq!(e.refused_with(), want, "{e}");
+        }
+        // A 101 that is wrong in some other way is not a status refusal.
+        let bad_accept = b"HTTP/1.1 101 Switching Protocols\r\nUpgrade: websocket\r\n\
+                           Connection: Upgrade\r\nSec-WebSocket-Accept: nope\r\n\r\n";
+        let e = DialError::Upgrade(opening.check(bad_accept).expect_err("a wrong accept"));
+        assert_eq!(e.refused_with(), None, "{e}");
+        assert_eq!(
+            DialError::Tcp(std::io::ErrorKind::TimedOut.into()).refused_with(),
+            None
+        );
+    }
+
+    #[test]
+    fn a_dial_failure_names_the_step_that_failed() {
+        // The journal said "the relay refused the connection" for every one
+        // of these, and for the end of an hour-long wait besides.
+        let closed = {
+            let l = std::net::TcpListener::bind(("127.0.0.1", 0)).expect("bind");
+            l.local_addr().expect("addr").port()
+        };
+        let endpoint = Endpoint::parse(&format!("ws://127.0.0.1:{closed}")).expect("parse");
+        let Err(e) = dial(&endpoint, "aaaabbbbccccdddd", Role::Host, None) else {
+            panic!("dialled a port nothing listens on");
+        };
+        assert!(matches!(e, DialError::Tcp(_)), "{e:?}");
+        assert!(e.to_string().starts_with("TCP: "), "{e}");
+
+        // Something that answers HTTP but will not upgrade.
+        let (port, _) = a_plain_listener();
+        let endpoint = Endpoint::parse(&format!("ws://127.0.0.1:{port}")).expect("parse");
+        let Err(e) = dial(&endpoint, "aaaabbbbccccdddd", Role::Host, None) else {
+            panic!("a server that answered 400 was taken for a relay");
+        };
+        assert!(matches!(e, DialError::Upgrade(_)), "{e:?}");
+        assert!(e.to_string().starts_with("WebSocket upgrade: "), "{e}");
+        assert_eq!(e.refused_with(), Some(400), "{e}");
+    }
+
+    // ─────────────────────────────────────────────────────────────────────
+    //  A waiting room that misbehaves on purpose
+    // ─────────────────────────────────────────────────────────────────────
+
+    /// What a parked host connection gets from [`a_waiting_room`] after the
+    /// `waiting` notice.
+    #[derive(Clone, Copy)]
+    enum Parked {
+        /// Answer this many pings, then say nothing at all, with the socket
+        /// left open: a path that has gone dead without a FIN.
+        PongsThenSilence(usize),
+        /// Answer nothing, ever, and keep the socket open.
+        NeverPongs,
+        /// Answer pings, and announce a device after this long.
+        PairsAfter(Duration),
+    }
+
+    /// A ws:// relay that holds whatever arrives as a waiting host and then
+    /// behaves as told. Every accepted socket is kept, so the test can cut it.
+    fn a_waiting_room(parked: Parked) -> (u16, Arc<Mutex<Vec<TcpStream>>>) {
+        let listener = std::net::TcpListener::bind(("127.0.0.1", 0)).expect("bind");
+        let port = listener.local_addr().expect("addr").port();
+        let held = Arc::new(Mutex::new(Vec::<TcpStream>::new()));
+        let kept = Arc::clone(&held);
+        std::thread::spawn(move || {
+            for stream in listener.incoming().flatten() {
+                if let Ok(c) = stream.try_clone() {
+                    kept.lock().expect("held").push(c);
+                }
+                std::thread::spawn(move || {
+                    let mut s = stream;
+                    let mut head = Vec::new();
+                    let mut byte = [0u8; 1];
+                    while !head.ends_with(b"\r\n\r\n") {
+                        if s.read(&mut byte).unwrap_or(0) == 0 {
+                            return;
+                        }
+                        head.push(byte[0]);
+                    }
+                    let text = String::from_utf8_lossy(&head).to_string();
+                    let Some(key) = text.split("\r\n").find_map(|line| {
+                        let (name, value) = line.split_once(':')?;
+                        name.trim()
+                            .eq_ignore_ascii_case("sec-websocket-key")
+                            .then(|| value.trim().to_string())
+                    }) else {
+                        return;
+                    };
+                    let reply = format!(
+                        "HTTP/1.1 101 Switching Protocols\r\nUpgrade: websocket\r\n\
+                         Connection: Upgrade\r\nSec-WebSocket-Accept: {}\r\n\r\n",
+                        rime_remote_core::relay::accept_for(&key)
+                    );
+                    if s.write_all(reply.as_bytes()).is_err()
+                        || write_server_frame(&mut s, 0x1, Notice::Waiting.text().as_bytes())
+                            .is_err()
+                    {
+                        return;
+                    }
+                    match parked {
+                        Parked::PongsThenSilence(n) => {
+                            let mut answered = 0;
+                            while answered < n {
+                                match read_client_frame(&mut s) {
+                                    Some((0x9, p)) => {
+                                        if write_server_frame(&mut s, 0xa, &p).is_err() {
+                                            return;
+                                        }
+                                        answered += 1;
+                                    }
+                                    Some(_) => {}
+                                    None => return,
+                                }
+                            }
+                            // Silence. The clone in `held` keeps it open.
+                        }
+                        Parked::NeverPongs => {}
+                        Parked::PairsAfter(after) => {
+                            std::thread::sleep(after);
+                            let _ =
+                                write_server_frame(&mut s, 0x1, Notice::Paired.text().as_bytes());
+                        }
+                    }
+                });
+            }
+        });
+        (port, held)
+    }
+
+    const FAST: Timing = Timing {
+        keepalive: Duration::from_millis(40),
+        deadline: Duration::from_millis(250),
+    };
+
+    /// Run one attempt on its own thread and hand back what it returned.
+    fn attempt_in_background(
+        port: u16,
+        answers_pings: Arc<AtomicBool>,
+    ) -> std::sync::mpsc::Receiver<(Attempt, Duration)> {
+        let (tx, rx) = std::sync::mpsc::channel();
+        std::thread::spawn(move || {
+            let endpoint = Endpoint::parse(&format!("ws://127.0.0.1:{port}")).expect("parse");
+            let started = Instant::now();
+            let outcome = attempt(
+                &endpoint,
+                "aaaabbbbccccdddd",
+                None,
+                FAST,
+                &answers_pings,
+                &mut Log::default(),
+            );
+            let _ = tx.send((outcome, started.elapsed()));
+        });
+        rx
+    }
+
+    #[test]
+    fn a_waiting_connection_that_goes_silent_is_dropped_at_the_deadline() {
+        // The black hole: the relay answered a ping, so it is one that
+        // answers, and then nothing came back at all — no FIN, no close. The
+        // old loop would have sat on this connection until the relay closed
+        // its end, looking parked the whole time.
+        let (port, _held) = a_waiting_room(Parked::PongsThenSilence(1));
+        let answers = Arc::new(AtomicBool::new(false));
+        let rx = attempt_in_background(port, Arc::clone(&answers));
+        let (outcome, took) = rx
+            .recv_timeout(Duration::from_secs(10))
+            .expect("the silent waiting connection was never given up on");
+        let Attempt::Ended { lasted, why } = outcome else {
+            panic!("expected the wait to end");
+        };
+        assert!(matches!(why, WaitEnd::Silent(_)), "{why}");
+        assert!(why.to_string().contains("despite keepalive pings"), "{why}");
+        assert!(lasted >= FAST.deadline, "dropped after {lasted:?}, before the deadline");
+        assert!(took < Duration::from_secs(5), "took {took:?}");
+        assert!(answers.load(Ordering::Relaxed), "the pong was not taken as liveness");
+
+        // Now the process knows this relay answers, so the NEXT waiting
+        // connection is held to the deadline from its first byte, even if it
+        // never gets a pong of its own.
+        let (port, _held) = a_waiting_room(Parked::NeverPongs);
+        let rx = attempt_in_background(port, Arc::clone(&answers));
+        let (outcome, _) = rx
+            .recv_timeout(Duration::from_secs(10))
+            .expect("a relay known to answer pings went silent and was not noticed");
+        assert!(
+            matches!(outcome, Attempt::Ended { why: WaitEnd::Silent(_), .. }),
+            "the learned deadline was not applied"
+        );
+    }
+
+    #[test]
+    fn a_relay_that_has_never_answered_a_ping_is_not_held_to_the_deadline() {
+        // The hedge. If the relay does not pong at all, a deadline would
+        // re-dial it every 75 s for ever with a 409 window each time — worse
+        // than the defect it fixes. So it waits as it always did, until the
+        // relay closes its end...
+        let (port, held) = a_waiting_room(Parked::NeverPongs);
+        let rx = attempt_in_background(port, Arc::new(AtomicBool::new(false)));
+        assert!(
+            rx.recv_timeout(FAST.deadline * 4).is_err(),
+            "a relay that never ponged was dropped for not ponging"
+        );
+        // ...and then the end is called what it is. This is the event the
+        // journal logged as "the relay refused the connection: failed to fill
+        // whole buffer" every twenty minutes to an hour.
+        for s in held.lock().expect("held").iter() {
+            let _ = s.shutdown(std::net::Shutdown::Both);
+        }
+        let (outcome, _) = rx
+            .recv_timeout(Duration::from_secs(10))
+            .expect("the closed waiting connection was not noticed");
+        let Attempt::Ended { why, .. } = outcome else {
+            panic!("expected the wait to end");
+        };
+        assert!(matches!(why, WaitEnd::Closed(_)), "{why}");
+        let said = why.to_string();
+        assert!(said.contains("closed the connection"), "{said}");
+        assert!(!said.contains("refused"), "the end of a wait was called a refusal: {said}");
+    }
+
+    #[test]
+    fn a_paired_connection_carries_no_waiting_deadline_into_the_splice() {
+        // A relayed terminal can be idle for hours. The deadline belongs to
+        // the waiting room, and one left on the socket would end every quiet
+        // relayed session 75 s after its last byte.
+        let (port, _held) = a_waiting_room(Parked::PairsAfter(Duration::from_millis(120)));
+        let rx = attempt_in_background(port, Arc::new(AtomicBool::new(true)));
+        let (outcome, _) = rx.recv_timeout(Duration::from_secs(10)).expect("paired");
+        let Attempt::Paired(joined) = outcome else {
+            panic!("the device's arrival was not seen");
+        };
+        assert_eq!(joined.socket.read_timeout().expect("SO_RCVTIMEO"), None);
+        let _ = joined.socket.shutdown(std::net::Shutdown::Both);
     }
 }
