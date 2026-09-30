@@ -1,0 +1,199 @@
+# Remote live: the contract between agentd, rime-remoted, the CLI, the Shell and the phone
+
+Working document for the `feat/remote-live` change set (2026-09-30). Every side
+builds against THIS file; `android/core/src/test/resources/requests.json` and
+`rimed/rime-agent-core/tests/android_requests_wire.rs` are where the phone's
+bytes and the daemon's parser meet, so the JSON below is exact, not
+illustrative.
+
+Andre's asks: the phone is too slow to connect and to show a terminal ("always
+connected"); see an agent's output without opening its terminal; name agents,
+synced between phone and desktop, settable at start on the desktop; a reply
+sent from the phone types but does not submit; opening a terminal on the phone
+leaves the desktop terminal shrunk to the phone's size.
+
+## 1. agentd protocol additions (no PROTOCOL_VERSION bump; old daemons answer `bad_request`)
+
+### 1.1 `hello` advertises features
+
+`Response::Hello` gains `#[serde(default)] features: Vec<String>`:
+
+```json
+{"reply":"hello","version":11,"agents":["claude"],"default_agent":"claude",
+ "features":["input_submit","rename","peek","session_name","session_title","size_restore"]}
+```
+
+A client uses a feature only when its string is present. An absent `features`
+key means none (an old daemon).
+
+### 1.2 `input` can submit
+
+```json
+{"cmd":"input","id":3,"data":"yes please","submit":true}
+```
+
+`#[serde(default)] submit: bool`. With `submit:true` the daemon writes `data`,
+waits **80 ms** (a constant, `SUBMIT_GAP`), then writes `"\r"` as a SEPARATE
+write. Reason, measured 2026-09-30 against Claude Code 2.1.283 in a pty: a
+~250-character burst ending in CR is taken as a paste and the CR becomes a
+newline in the prompt (not submitted); the same text with the CR written 50 ms
+or 250 ms later submits. Short bursts happen to submit, which is why it looked
+intermittent. `data` should not end in CR/LF when `submit` is set (the phone's
+`Reply.bytes` trims them); the daemon does not strip anything. Reply: `{"reply":"ok"}`.
+`rime agent input --submit` uses this flag.
+
+Old-daemon fallback (phone, when `input_submit` is absent): send
+`input(data)`, sleep **100 ms** on the client, then `input("\r")`.
+
+### 1.3 Session names
+
+`SessionInfo` gains two fields, both `#[serde(default)]`, both ALWAYS
+serialized (no `skip_serializing_if`), so `"name": null` means "this daemon
+supports names, none is set" and a missing key means "old daemon":
+
+- `name: Option<String>` — set only by a person: `rime agent run --name`,
+  `rename` from the CLI, the Shell or the phone. Never from agent output.
+- `title: Option<String>` — the agent's own terminal title (OSC 0 / OSC 2),
+  captured by the output scanner: leading spinner/status glyphs (braille
+  U+2800–U+28FF, `✳ ✻ ✶ ✢ · * ●` and similar) and surrounding whitespace
+  stripped, control characters removed, at most 80 characters, `None` when
+  empty. Display-only, agent-controlled, never trusted for anything.
+
+Display order everywhere (Shell, CLI list, phone): `name` → `title` → today's
+label (`<agent> · <project_name or cwd basename>`).
+
+Validation (one function in rime-agent-core, used by daemon and CLI): trim;
+empty → `None` (clears); at most **64** characters (chars, not bytes); no
+control characters (`char::is_control`); refused, not sanitised, with a
+sentence saying why.
+
+### 1.4 `run` takes a name
+
+`RunRequest` gains `#[serde(default)] name: Option<String>`. CLI:
+`rime agent run --name <NAME>` / `-n <NAME>`, defaulting to the environment
+variable `RIME_AGENT_NAME` when the flag is absent. Forwarded by
+`forward_argv` (`--host`). NOT added to `settings_a_daemon_could_drop`
+(dropping a label widens nothing). `aw <worktree>` defaults the name to the
+worktree name when neither is given.
+
+### 1.5 `rename`
+
+```json
+{"cmd":"rename","id":3,"name":"auth refactor"}
+{"cmd":"rename","id":3,"name":null}
+```
+
+Reply: the updated session, `{"reply":"session", ...SessionInfo fields...}`.
+Callers: allowed for exactly the callers `privilege::refuse_input` allows (a
+person's shell, the Shell, a paired phone); refused for a managed session and
+an unclassifiable caller — only a person names a session. Live sessions only
+(`no_such_session` otherwise). The record is written (`registry::write_record`).
+CLI: `rime agent rename <ID> <NAME>` and `rime agent rename <ID> --clear`.
+
+### 1.6 `peek`: the tail of a session's output, without attaching
+
+```json
+{"cmd":"peek","id":3,"bytes":8192}
+```
+
+`#[serde(default)] bytes: Option<usize>`; the daemon caps it at **8192**
+(`PEEK_MAX`), default 8192. Reads the in-memory scrollback ring (NOT the disk
+transcript, which stops at 32 MiB). No resize, no attach, no change to
+`attached`. Reply:
+
+```json
+{"reply":"peek","id":3,"data":"<base64 of raw PTY bytes>","cols":120,"rows":40,"state":"working"}
+```
+
+Base64 (standard alphabet, padded) because raw PTY bytes JSON-escape to up to
+6× and a control frame is at most 65514 bytes: 8192 → ≤ 10924 base64 chars,
+far inside it. The tail may start mid-escape-sequence or mid-UTF-8; the phone
+feeds it to its terminal emulator at `cols`×`rows` and shows the bottom lines.
+Allowed for the callers `refuse_input` allows (not for a managed session:
+agents do not read each other's screens).
+
+### 1.7 The phone's terminal no longer shrinks the desktop's
+
+Today `handle_attach` resizes the PTY to whoever attached last, and nothing
+puts it back. New rule (`size_restore` feature):
+
+- agentd remembers the last size set by a LOCAL client (the `rime agent run` /
+  `attach` terminal: its attach and its `resize` requests), per session.
+- A remote-origin attach (origin class `RemoteControl`) still resizes to the
+  phone while the phone is attached, but when the LAST remote attacher
+  detaches, the PTY is resized back to the remembered local size (if the
+  session has one).
+- Stretch, only if attribution is clean: input arriving from a local client
+  while a phone is attached resizes back to the local size ("latest typer
+  wins", tmux's `window-size latest`).
+
+Attribute by `privilege::origin` class, never by socket identity:
+rime-remoted opens a fresh agentd connection per control frame, so a phone's
+`resize` does not arrive on its attach socket.
+
+## 2. rime-remoted additions
+
+### 2.1 `remote_hello`, answered by rime-remoted itself (never forwarded)
+
+```json
+{"cmd":"remote_hello"}
+→ {"reply":"remote","version":1,"features":["nodelay","control_worker","mux_attach","liveness"],"lan":["192.168.1.232:7717"]}
+```
+
+An old rime-remoted forwards it to agentd, which answers
+`{"reply":"error","kind":"bad_request",...}`: the phone reads that as "no
+features". `lan` is the current list of addresses this machine listens on
+(same filter as pairing), so the phone can refresh its stored list.
+
+### 2.2 Behaviour
+
+- `TCP_NODELAY` on every accepted socket; one `write` per frame (header and
+  body in one buffer).
+- `control_worker`: control requests are handled on a per-connection worker
+  thread, in order (FIFO replies preserved: the phone matches replies by order),
+  so `Data`/`Open`/`Close`/`Ping`/`Pong` keep flowing while a slow control
+  request runs. `Open` (attach/receive) setup also off the frame loop.
+- `mux_attach`: with `control_worker`, a terminal opened on the SAME connection
+  as control is safe; the phone may then stop dialling a connection per
+  terminal.
+- `liveness`: the session ping (15 s) now expects pongs; 3 missed → close the
+  connection (the phone reconnects).
+- Relay waiting socket: a read deadline (no frame for 75 s despite 30 s pings →
+  re-dial); re-dial backoff capped at **10 s** (was 60); a `409` meaning "a host
+  is already waiting" is not counted as a failure.
+
+## 3. The phone
+
+- Connect: race the last-good path first, then LAN addresses and the relay in
+  parallel (relay after a 300 ms head start for LAN), first completed Noise
+  handshake wins, losers closed. Remember the last-good path per machine
+  (through `MachineStore`/`AppStorage` only: `android/tools/no-second-write-path.sh`).
+  Refresh stored LAN addresses from `remote_hello.lan`. Retry a relay `409`
+  (guest: no desktop waiting) at 100, 250, 500, 1000, 2000 ms.
+- One biometric prompt per launch (unlock the app and unwrap the identity in
+  one auth), if the current code allows it without weakening the key rules.
+- Always connected: a foreground service (`foregroundServiceType="specialUse"`,
+  sideloaded so no Play declaration; update `ManifestTest`) holds the link
+  while the app is unlocked; connect on unlock without waiting for a tap;
+  reconnect on network change (`ConnectivityManager` callback) and on silence
+  (no desktop ping for 40 s). Screen-off Doze may still drop the socket; the
+  point is instant reconnect without re-auth.
+- Terminals on the control connection when `remote_hello.features` has
+  `mux_attach`; a new connection otherwise (today's behaviour). Replay
+  default 64 KiB (was 256 KiB).
+- Reply uses `input` + `submit:true` when `input_submit` is advertised, the
+  100 ms two-request fallback otherwise.
+- Live output: the session screen shows the bottom ~15 lines of a `peek`,
+  refreshed every 1.5 s while visible; Agent Center rows show the last
+  non-empty line for live sessions (peek only while the list is on screen).
+- Names: display order as §1.3 everywhere in the app; rename from the session
+  screen (`rename`). Names stay OUT of lock-screen notifications
+  (`Notifications.kt` privacy rule is unchanged).
+- Log one line per connect: `connected to <machine> via <lan|relay> in <N> ms`.
+
+## 4. The Shell (rime-shell)
+
+Display order as §1.3 in `SessionRow`, `RemoteSessionRow`, search and desktop
+notifications; an inline rename in `SessionRow` through
+`AgentService._act(["rime","agent","rename",id,name])` (the Agent Center
+invariants forbid running anything directly).
