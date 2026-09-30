@@ -28,8 +28,12 @@ import com.rimeos.remote.core.agent.Reply
 import com.rimeos.remote.core.agent.SystemGrant
 import com.rimeos.remote.core.agent.WorktreeStatus
 import com.rimeos.remote.core.agent.Hello
-import com.rimeos.remote.core.agent.MachineLink
+import com.rimeos.remote.core.agent.Features
+import com.rimeos.remote.core.agent.LiveTail
+import com.rimeos.remote.core.agent.NotSubmitted
 import com.rimeos.remote.core.agent.Push
+import com.rimeos.remote.core.agent.SessionNames
+import com.rimeos.remote.link.LinkHub
 import com.rimeos.remote.push.PushRegistrar
 import com.rimeos.remote.core.Pairing
 import com.rimeos.remote.core.PairingException
@@ -46,7 +50,7 @@ import com.rimeos.remote.ui.term.TerminalController
 import kotlinx.coroutines.Dispatchers
 import kotlinx.coroutines.Job
 import kotlinx.coroutines.delay
-import kotlinx.coroutines.runBlocking
+import kotlinx.coroutines.isActive
 import kotlinx.coroutines.flow.MutableStateFlow
 import kotlinx.coroutines.flow.StateFlow
 import kotlinx.coroutines.flow.asStateFlow
@@ -93,6 +97,15 @@ data class UiState(
      */
     val crash: String? = null,
     val agents: AgentUiState = AgentUiState(),
+    /**
+     * How each machine's held connection stands, by device id.
+     *
+     * The machines list draws it: which machine is connected, and whether
+     * through the relay — the disclosure `docs/remote.md` requires a relay
+     * path to make, at the moment it becomes true rather than in a settings
+     * screen, now that the phone connects on unlock without being asked.
+     */
+    val links: Map<String, LinkHub.LinkState> = emptyMap(),
 )
 
 /**
@@ -168,6 +181,19 @@ data class AgentUiState(
      * it; see `Notifier`.
      */
     val alerts: List<Alert> = emptyList(),
+    /**
+     * The bottom of the open session's screen, from `peek`, while the session
+     * screen is showing it. Null when the machine cannot peek, or before the
+     * first answer.
+     */
+    val peek: PeekView? = null,
+    /**
+     * The last line each live session printed, for the Agent Center's rows,
+     * keyed by [PeekView.keyOf] — id AND start time, because ids are reused
+     * after a prune and a line from a pruned session must not appear under
+     * the session that took its number.
+     */
+    val lastLines: Map<String, String> = emptyMap(),
 ) {
     /**
      * Every transient banner on this machine's screens, cleared.
@@ -199,6 +225,21 @@ data class AgentUiState(
  * about the cause. Keyed on the token, every answer is a new effect.
  */
 data class ClipboardPull(val text: String, val token: Long)
+
+/**
+ * What a `peek` showed of one session: its bottom lines, already replayed
+ * through the terminal emulator, and the width they were drawn at.
+ *
+ * Carries the session's id and start time so a screen can refuse to draw a
+ * preview of a different session that has since taken the same number.
+ */
+data class PeekView(val session: Int, val started: Long, val lines: List<String>, val cols: Int) {
+    fun isFor(s: AgentSession): Boolean = s.id == session && s.started == started
+
+    companion object {
+        fun keyOf(s: AgentSession): String = "${s.id}:${s.started}"
+    }
+}
 
 /**
  * Projects, worktrees and the work in them (P1-056).
@@ -346,25 +387,28 @@ class RemoteViewModel(application: Application) : AndroidViewModel(application) 
     val state: StateFlow<UiState> = _state.asStateFlow()
 
     /**
-     * Device keys unwrapped this session, by device id.
+     * The connections and the unwrapped keys, which outlive this view model.
      *
-     * IN MEMORY, and that is the whole design. Unwrapping needs a `Cipher` the
-     * keystore authorised, which needs an `Activity` and a biometric prompt —
-     * and `PtyAttachment` calls its `connect` lambda on every backoff retry.
-     * A `connect` that went through `AppLock.unlock` would produce a prompt
-     * storm on a train: one dialog per reconnect, for as long as the tunnel
-     * lasts, and nothing headless would ever catch it.
+     * They used to be fields here. They moved to [LinkHub] because "always
+     * connected" means the connection lives as long as the app is unlocked,
+     * and a view model lives only as long as a screen: backing out to the
+     * launcher used to close every socket and forget every key. The key rule
+     * is the hub's now, and unchanged — memory only, dropped on [lock].
      *
-     * So the prompt happens once, here, and the reconnect loop is handed
-     * something that cannot prompt. Memory is not storage: this never reaches
-     * `AppStorage`, so `InsecureStorageTest`'s walk is unaffected — and it is
-     * cleared on [lock] and in [onCleared], which is what makes locking the
-     * app mean something.
+     * The reason the keys are unwrapped ONCE and handed to something that
+     * cannot prompt is also unchanged: `PtyAttachment` calls its `connect`
+     * lambda on every backoff retry, and a lambda that went through
+     * `AppLock.unlock` would put a biometric dialog on the screen once per
+     * reconnect — a prompt storm for as long as a tunnel lasts.
      */
-    private val identities = HashMap<String, StaticKey>()
+    private val hub = LinkHub.get(application)
 
-    /** One control connection per machine, opened on demand. */
-    private val links = HashMap<String, MachineLink>()
+    /** The session screen's live preview, while it is on screen. */
+    private var peekJob: Job? = null
+
+    /** Whether the Agent Center's rows want their last lines (it is on screen). */
+    @Volatile
+    private var listPeeking = false
 
     /** The attached terminal, when there is one. At most one at a time. */
     var terminal: TerminalController? = null
@@ -374,6 +418,21 @@ class RemoteViewModel(application: Application) : AndroidViewModel(application) 
 
     init {
         refresh()
+        viewModelScope.launch {
+            hub.states.collect { links -> _state.update { it.copy(links = links) } }
+        }
+        viewModelScope.launch {
+            // Locked from somewhere else — the notification's Lock action —
+            // must lock this screen too, not leave it drawing a machine whose
+            // keys are gone.
+            hub.unlocked.collect { unlocked ->
+                if (!unlocked && _state.value.unlocked && !_state.value.loading &&
+                    AppLock.canAuthenticate(BiometricManager.from(getApplication()))
+                ) {
+                    lockScreenOnly()
+                }
+            }
+        }
     }
 
     fun refresh() = viewModelScope.launch {
@@ -390,8 +449,29 @@ class RemoteViewModel(application: Application) : AndroidViewModel(application) 
                 // Refusing to show the app on such a device would protect
                 // nothing — the key gate is already absent, and the store holds
                 // no secrets — so the lock stands down and says why.
-                unlocked = it.unlocked || !canGate,
+                //
+                // And a process whose hub is still unlocked — the person backed
+                // out with the connection held, and came back — is not asked
+                // again for a connection that never closed.
+                unlocked = it.unlocked || !canGate || hub.unlocked.value,
             )
+        }
+        if (!canGate && !hub.unlocked.value) {
+            // No prompt is possible, so none is shown; the last machine is
+            // connected all the same, because a key with no gate unwraps
+            // without one.
+            hub.markUnlocked()
+            val target = store.lastUsed()
+            if (target != null) {
+                runCatching {
+                    val box = KeystoreSecretBox.forDevice(target.deviceId, requireAuthentication = false)
+                    val sealed = requireNotNull(com.rimeos.remote.core.Base64Url.decode(target.sealed))
+                    if (!box.authenticationIsRequired) {
+                        hub.remember(target.deviceId, com.rimeos.remote.core.InMemoryStaticKey(box.open(sealed)))
+                        hub.hold(target)
+                    }
+                }
+            }
         }
     }
 
@@ -412,9 +492,22 @@ class RemoteViewModel(application: Application) : AndroidViewModel(application) 
         // leave a failure notice on screen, and then be overruled a moment
         // later by a refresh that says no lock was needed.
         if (_state.value.loading || _state.value.unlocked) return@launch
+        // ONE prompt, where there used to be two: the front door and the key
+        // of the machine used last, together. See `AppLock.unlockApp` for why
+        // that is no weaker, and why it is one machine and not all of them.
+        val target = repository.load().lastUsed()
+        val box = target?.let { runCatching { KeystoreSecretBox.forDevice(it.deviceId) }.getOrNull() }
+        val sealed = target?.let { com.rimeos.remote.core.Base64Url.decode(it.sealed) }
         try {
-            AppLock.confirmPresence(activity)
+            val result = AppLock.unlockApp(activity, box, sealed, target?.machine)
+            hub.markUnlocked()
             _state.update { it.copy(unlocked = true, failure = null) }
+            if (target != null && result.identity != null) {
+                hub.remember(target.deviceId, result.identity)
+                // Connect now, without waiting for a tap: by the time the
+                // person taps the machine the handshake has happened.
+                hub.hold(target)
+            }
         } catch (e: AppLockRefused) {
             _state.update { it.copy(failure = e.message) }
         }
@@ -430,24 +523,28 @@ class RemoteViewModel(application: Application) : AndroidViewModel(application) 
      * would leave a live socket and a usable key behind it.
      */
     fun lock() {
+        // The hub drops the keys and the visible links at once, on this
+        // thread, because those are what "locked" means, and closes the
+        // sockets on its IO dispatcher — Android kills a process that touches
+        // a socket on the main thread (`StrictMode.enableDeathOnNetwork()`),
+        // and a debug build does not relax it. It stops the foreground
+        // service too: a lock that left the app "always connected" would not
+        // be a lock.
+        hub.lock()
+        lockScreenOnly()
+    }
+
+    /** Everything [lock] does to THIS screen, for a lock that came from elsewhere. */
+    private fun lockScreenOnly() {
         poll?.cancel()
         poll = null
+        peekJob?.cancel()
+        peekJob = null
+        listPeeking = false
         terminal?.close()
         terminal = null
-        // Closing a `MachineLink` writes to and shuts a socket, and Android
-        // kills a process that touches a socket on the main thread —
-        // `StrictMode.enableDeathOnNetwork()` is on for every app targeting
-        // API 11 or later and a debug build does not relax it. The keys and
-        // the visible state go immediately, on this thread, because those are
-        // what "locked" means; the sockets follow.
-        val closing = links.values.toList()
-        links.clear()
-        identities.clear()
         _state.update {
             it.copy(unlocked = false, connection = null, agents = AgentUiState())
-        }
-        viewModelScope.launch(Dispatchers.IO) {
-            closing.forEach { runCatching { it.close() } }
         }
     }
 
@@ -455,6 +552,7 @@ class RemoteViewModel(application: Application) : AndroidViewModel(application) 
     fun leaveAgents() {
         poll?.cancel()
         poll = null
+        listPeeking = false
         // The watcher's history goes with it. Coming back to a machine after
         // an hour away, every session's state is news to the phone but none of
         // it is news that just happened — and `AlertWatcher` raises nothing on
@@ -464,19 +562,12 @@ class RemoteViewModel(application: Application) : AndroidViewModel(application) 
 
     override fun onCleared() {
         super.onCleared()
+        // The terminal is this screen's; the control links are NOT. They are
+        // the hub's, held by the foreground service for as long as the app is
+        // unlocked, and closing them here is exactly what used to make every
+        // return to the app a fresh connection. `lock()` is what closes them.
         terminal?.close()
-        val closing = links.values.toList()
-        links.clear()
-        identities.clear()
-        // `viewModelScope` is cancelled by the time this runs, so the closes
-        // go to a plain thread rather than a coroutine that would never start.
-        // Daemon, because a process on its way out must not be held open by a
-        // socket close that is waiting on a machine that has gone.
-        if (closing.isNotEmpty()) {
-            Thread({ closing.forEach { runCatching { it.close() } } }, "rime-link-close").apply {
-                isDaemon = true
-            }.start()
-        }
+        terminal = null
     }
 
     /**
@@ -565,12 +656,17 @@ class RemoteViewModel(application: Application) : AndroidViewModel(application) 
         }
         try {
             openIdentity(activity, machine)
-            val link = linkFor(machine)
+            // Held from now on: connected while the app is unlocked, and
+            // reconnected when it drops. Usually already true — the machine
+            // used last was connected on unlock — and then this costs nothing.
+            hub.hold(machine)
+            val link = hub.link(machine)
             val (hello, sessions) = withContext(Dispatchers.IO) {
                 // `hello` first: it is the only request a mismatched client
                 // can rely on, and the adapter list it carries is what the
-                // start screen offers.
-                val h = runCatching { link.hello() }.getOrNull()
+                // start screen offers. Already asked on this connection when
+                // the hub made it, so usually not asked again.
+                val h = hub.state(machine.deviceId)?.hello ?: runCatching { link.hello() }.getOrNull()
                 h to link.sessions()
             }
             _state.update {
@@ -634,7 +730,7 @@ class RemoteViewModel(application: Application) : AndroidViewModel(application) 
                 val current = repository.load().find(machine.deviceId) ?: return@withContext
                 val endpoint = Push.endpointToSend(current) ?: return@withContext
                 val key = current.push?.key ?: return@withContext
-                val link = links[machine.deviceId] ?: return@withContext
+                val link = linkOf(machine) ?: return@withContext
                 link.pushRegister(endpoint, key)
                 // Only now, and only for the endpoint that was actually sent.
                 PushRegistrar.sent(context, current, endpoint)
@@ -655,7 +751,7 @@ class RemoteViewModel(application: Application) : AndroidViewModel(application) 
         poll = viewModelScope.launch {
             while (true) {
                 delay(POLL_MS)
-                val link = links[machine.deviceId] ?: return@launch
+                val link = linkOf(machine) ?: return@launch
                 val sessions = runCatching { withContext(Dispatchers.IO) { link.sessions() } }.getOrNull()
 
                 // Privilege requests ride the same loop at a slower cadence,
@@ -667,6 +763,16 @@ class RemoteViewModel(application: Application) : AndroidViewModel(application) 
                 ticks += 1
                 val requests = if (ticks % REQUESTS_EVERY == 0L) {
                     runCatching { withContext(Dispatchers.IO) { link.requests() } }.getOrNull()
+                } else {
+                    null
+                }
+
+                // The Agent Center's last lines, while it is on screen and the
+                // machine can peek. One small request per live session, on the
+                // same four seconds as the list, and none at all when the list
+                // is not being looked at.
+                val lines = if (listPeeking && sessions != null && helloFor(machine)?.has(Features.PEEK) == true) {
+                    runCatching { withContext(Dispatchers.IO) { lastLinesOf(link, sessions) } }.getOrNull()
                 } else {
                     null
                 }
@@ -725,6 +831,7 @@ class RemoteViewModel(application: Application) : AndroidViewModel(application) 
                                 it.agents.approvals.copy(requests = requests, failure = null)
                             },
                             alerts = it.agents.alerts + raised,
+                            lastLines = lines ?: it.agents.lastLines,
                         ),
                     )
                 }
@@ -732,9 +839,88 @@ class RemoteViewModel(application: Application) : AndroidViewModel(application) 
         }
     }
 
+    /**
+     * The last line of each live session, for the Agent Center's rows.
+     *
+     * A 4 KiB tail each — enough to reconstruct the bottom of a screen, a
+     * half of what the session screen asks for — and at most [LIST_PEEKS]
+     * sessions a round, so a machine running thirty agents costs no more
+     * than one running twelve. Finished sessions are skipped: their last
+     * line is not news, and their detail says how they ended.
+     */
+    private fun lastLinesOf(
+        link: com.rimeos.remote.core.agent.MachineLink,
+        sessions: List<AgentSession>,
+    ): Map<String, String> {
+        val out = HashMap<String, String>()
+        for (s in sessions.filter { !it.isTerminal }.take(LIST_PEEKS)) {
+            val tail = runCatching { link.peek(s.id, LIST_PEEK_BYTES) }.getOrNull() ?: continue
+            LiveTail.lastLine(tail)?.let { out[PeekView.keyOf(s)] = it }
+        }
+        return out
+    }
+
+    /** The daemon's `hello` for [machine]: this screen's copy, else the hub's. */
+    private fun helloFor(machine: PairedMachine): Hello? =
+        _state.value.agents.hello?.takeIf { _state.value.agents.machine?.deviceId == machine.deviceId }
+            ?: hub.state(machine.deviceId)?.hello
+
+    /**
+     * The Agent Center is on screen, or has left it. Its rows ask for last
+     * lines only while it is.
+     */
+    fun watchList(on: Boolean) {
+        listPeeking = on
+    }
+
+    /**
+     * Show the bottom of [session]'s screen, refreshed every 1.5 s, until
+     * [stopWatchingSession] — which the session screen calls when it leaves.
+     *
+     * Only against a machine whose `hello` lists [Features.PEEK]; otherwise
+     * nothing is asked and the screen shows the session's `detail`, as it
+     * always did. A peek does not attach, does not resize, and does not show
+     * up in `attached`, so looking at a session from the phone changes
+     * nothing on the desktop.
+     */
+    fun watchSession(session: AgentSession) {
+        peekJob?.cancel()
+        val machine = _state.value.agents.machine ?: return
+        if (helloFor(machine)?.has(Features.PEEK) != true) {
+            updateAgents(machine) { it.copy(peek = null) }
+            return
+        }
+        peekJob = viewModelScope.launch {
+            while (isActive) {
+                val current = _state.value.agents.sessions
+                    .firstOrNull { it.id == session.id && it.started == session.started }
+                    ?: _state.value.agents.selected?.takeIf { it.id == session.id && it.started == session.started }
+                    ?: break
+                val link = linkOf(machine) ?: break
+                val view = runCatching {
+                    withContext(Dispatchers.IO) {
+                        val tail = link.peek(current.id)
+                        PeekView(current.id, current.started, LiveTail.lines(tail), tail.cols)
+                    }
+                }.getOrNull()
+                if (view != null) updateAgents(machine) { it.copy(peek = view) }
+                // A finished session's screen does not change; one last look
+                // is the whole of it.
+                if (current.isTerminal) break
+                delay(PEEK_MS)
+            }
+        }
+    }
+
+    fun stopWatchingSession() {
+        peekJob?.cancel()
+        peekJob = null
+        updateAgents { it.copy(peek = null) }
+    }
+
     fun refreshAgents() = viewModelScope.launch {
         val machine = _state.value.agents.machine ?: return@launch
-        val link = links[machine.deviceId] ?: return@launch
+        val link = linkOf(machine) ?: return@launch
         try {
             val sessions = withContext(Dispatchers.IO) { link.sessions() }
             _state.update {
@@ -829,7 +1015,7 @@ class RemoteViewModel(application: Application) : AndroidViewModel(application) 
      */
     fun pullMachineClipboard() = viewModelScope.launch {
         val machine = _state.value.agents.machine ?: return@launch
-        val link = links[machine.deviceId] ?: return@launch
+        val link = linkOf(machine) ?: return@launch
         updateAgents(machine) {
             it.copy(busy = "Reading ${machine.machine}'s clipboard…", failure = null, notice = null)
         }
@@ -906,7 +1092,7 @@ class RemoteViewModel(application: Application) : AndroidViewModel(application) 
      */
     fun loadWorktrees() = viewModelScope.launch {
         val machine = _state.value.agents.machine ?: return@launch
-        val link = links[machine.deviceId] ?: return@launch
+        val link = linkOf(machine) ?: return@launch
         updateWorktrees(machine) { it.copy(loading = true, failure = null) }
         try {
             val projects = withContext(Dispatchers.IO) { link.projects() }
@@ -975,7 +1161,7 @@ class RemoteViewModel(application: Application) : AndroidViewModel(application) 
      */
     fun loadPickers() = viewModelScope.launch {
         val machine = _state.value.agents.machine ?: return@launch
-        val link = links[machine.deviceId] ?: return@launch
+        val link = linkOf(machine) ?: return@launch
         updatePicker(machine) { it.copy(loading = true, failure = null) }
         try {
             val (projects, profiles) = withContext(Dispatchers.IO) {
@@ -1029,7 +1215,7 @@ class RemoteViewModel(application: Application) : AndroidViewModel(application) 
      */
     fun loadPickerWorktrees(slug: String) = viewModelScope.launch {
         val machine = _state.value.agents.machine ?: return@launch
-        val link = links[machine.deviceId] ?: return@launch
+        val link = linkOf(machine) ?: return@launch
         if (slug.isEmpty()) {
             updatePicker(machine) { it.copy(worktrees = emptyList(), worktreesFor = null) }
             return@launch
@@ -1084,7 +1270,7 @@ class RemoteViewModel(application: Application) : AndroidViewModel(application) 
      */
     fun loadApprovals() = viewModelScope.launch {
         val machine = _state.value.agents.machine ?: return@launch
-        val link = links[machine.deviceId] ?: return@launch
+        val link = linkOf(machine) ?: return@launch
         updateApprovals(machine) { it.copy(loading = true, failure = null) }
         try {
             val loaded = withContext(Dispatchers.IO) {
@@ -1116,7 +1302,7 @@ class RemoteViewModel(application: Application) : AndroidViewModel(application) 
      */
     fun revokeGrant(project: String, key: String? = null) = viewModelScope.launch {
         val machine = _state.value.agents.machine ?: return@launch
-        val link = links[machine.deviceId] ?: return@launch
+        val link = linkOf(machine) ?: return@launch
         updateApprovals(machine) { it.copy(busy = "Revoking…", failure = null) }
         try {
             val grants = withContext(Dispatchers.IO) { link.revoke(project, key) }
@@ -1135,7 +1321,7 @@ class RemoteViewModel(application: Application) : AndroidViewModel(application) 
     /** End a live system-access grant now. Same non-retry reasoning. */
     fun revokeSystemGrant(id: Int) = viewModelScope.launch {
         val machine = _state.value.agents.machine ?: return@launch
-        val link = links[machine.deviceId] ?: return@launch
+        val link = linkOf(machine) ?: return@launch
         updateApprovals(machine) { it.copy(busy = "Revoking…", failure = null) }
         try {
             withContext(Dispatchers.IO) { link.revokeSystemGrant(id) }
@@ -1197,7 +1383,7 @@ class RemoteViewModel(application: Application) : AndroidViewModel(application) 
      */
     fun signal(session: AgentSession, signal: String) = viewModelScope.launch {
         val machine = _state.value.agents.machine ?: return@launch
-        val link = links[machine.deviceId] ?: return@launch
+        val link = linkOf(machine) ?: return@launch
         _state.update { it.copy(agents = it.agents.copy(busy = "Sending…", failure = null)) }
         try {
             withContext(Dispatchers.IO) { link.signal(session.id, signal) }
@@ -1247,7 +1433,7 @@ class RemoteViewModel(application: Application) : AndroidViewModel(application) 
      */
     fun sendFileToSession(session: AgentSession, uri: Uri) = viewModelScope.launch {
         val machine = _state.value.agents.machine ?: return@launch
-        val link = links[machine.deviceId] ?: return@launch
+        val link = linkOf(machine) ?: return@launch
         val target = Reply.Target(machine.deviceId, session.id, session.started)
         Reply.check(target, machine.deviceId, _state.value.agents.sessions)?.let { refusal ->
             updateAgents(machine) { it.copy(failure = refusal.message, notice = null) }
@@ -1372,20 +1558,36 @@ class RemoteViewModel(application: Application) : AndroidViewModel(application) 
      */
     fun replyToSession(session: AgentSession, text: String) = viewModelScope.launch {
         val machine = _state.value.agents.machine ?: return@launch
-        val link = links[machine.deviceId] ?: return@launch
+        val link = linkOf(machine) ?: return@launch
         val target = Reply.Target(machine.deviceId, session.id, session.started)
         Reply.check(target, machine.deviceId, _state.value.agents.sessions)?.let { refusal ->
             updateAgents(machine) { it.copy(failure = refusal.message) }
             return@launch
         }
         updateAgents(machine) { it.copy(busy = "Sending…", failure = null, notice = null) }
+        // The daemon presses Return itself when it can (`input_submit`), and
+        // otherwise the phone does, a hundred milliseconds after the text —
+        // see `Reply.plan` for the measurement that made one write not enough.
+        val submits = helloFor(machine)?.has(Features.INPUT_SUBMIT) == true
         try {
-            withContext(Dispatchers.IO) { link.input(session.id, Reply.bytes(text)) }
+            withContext(Dispatchers.IO) { link.reply(session.id, text, submitSupported = submits) }
             updateAgents(machine) { it.copy(busy = null) }
             // Asked for immediately: the agent's state changes the moment it
             // reads the line, and waiting up to four seconds to see it makes a
             // reply feel as though it went nowhere.
             refreshAgents()
+        } catch (e: NotSubmitted) {
+            // The one outcome where "send it again" is wrong: the words ARE on
+            // the agent's input line, and a second send would put them there
+            // twice. What is missing is a Return.
+            updateAgents(machine) {
+                it.copy(
+                    busy = null,
+                    failure = "Your reply is typed on the agent's input line, but the Return that " +
+                        "submits it did not arrive (${e.cause?.message ?: "the machine did not answer"}). " +
+                        "Send a bare return to submit it — do not send the reply again.",
+                )
+            }
         } catch (e: AgentError) {
             // The daemon ANSWERED, so nothing was typed, and saying otherwise
             // would be the worst possible error message here: told the reply
@@ -1424,6 +1626,71 @@ class RemoteViewModel(application: Application) : AndroidViewModel(application) 
         }
     }
 
+    // ---- naming a session (contract §1.5) --------------------------------
+
+    /**
+     * Name [session], or clear its name when [raw] is blank.
+     *
+     * Checked here with the daemon's own rule first ([SessionNames.check]),
+     * so a name that is too long is refused while the dialog is still open,
+     * and against the live list second — `SessionInfo.id` is reused after a
+     * prune, and a rename composed against a stale screen must not name a
+     * different agent. A paused session may be renamed; one that has exited
+     * may not (the daemon renames live sessions only).
+     *
+     * The answer is the updated session, applied to the list and to the
+     * open screen at once, so the new name shows without waiting a poll.
+     *
+     * @return the refusal to show in the dialog, or null when it was sent.
+     */
+    fun renameSession(session: AgentSession, raw: String): String? {
+        val machine = _state.value.agents.machine ?: return "Not connected."
+        val name = when (val checked = SessionNames.check(raw)) {
+            is SessionNames.Checked.Refused -> return checked.why
+            is SessionNames.Checked.Ok -> checked.name
+        }
+        val target = Reply.Target(machine.deviceId, session.id, session.started)
+        Reply.check(target, machine.deviceId, _state.value.agents.sessions)
+            ?.takeIf { it != Reply.Refusal.PAUSED }
+            ?.let { refusal ->
+                return when (refusal) {
+                    Reply.Refusal.EXITED -> "That agent has exited, and only a live session can be renamed."
+                    else -> refusal.message
+                }
+            }
+        val link = linkOf(machine) ?: return "Not connected."
+        viewModelScope.launch {
+            updateAgents(machine) { it.copy(busy = "Renaming…", failure = null) }
+            try {
+                val updated = withContext(Dispatchers.IO) { link.rename(session.id, name) }
+                updateAgents(machine) {
+                    it.copy(
+                        busy = null,
+                        sessions = it.sessions.map { s -> if (s.id == updated.id && s.started == updated.started) updated else s },
+                        selected = it.selected?.let { s ->
+                            if (s.id == updated.id && s.started == updated.started) updated else s
+                        },
+                    )
+                }
+            } catch (e: AgentError) {
+                updateAgents(machine) { it.copy(busy = null, failure = "Not renamed: ${describe(e)}") }
+            } catch (e: Exception) {
+                updateAgents(machine) {
+                    it.copy(
+                        busy = null,
+                        failure = "The connection went before the machine answered, so the rename may " +
+                            "or may not have happened: ${describe(e)}. Refresh to see.",
+                    )
+                }
+            }
+        }
+        return null
+    }
+
+    /** Whether the connected machine can rename sessions at all. */
+    fun canRename(): Boolean =
+        _state.value.agents.machine?.let { helloFor(it)?.has(Features.RENAME) } == true
+
     // ---- notifications --------------------------------------------------
 
     /** Create the channel and record whether anything will be shown. */
@@ -1447,7 +1714,7 @@ class RemoteViewModel(application: Application) : AndroidViewModel(application) 
     ) =
         viewModelScope.launch {
             val machine = _state.value.agents.machine ?: return@launch
-            val link = links[machine.deviceId] ?: return@launch
+            val link = linkOf(machine) ?: return@launch
             _state.update { it.copy(agents = it.agents.copy(busy = "Starting…", failure = null)) }
             try {
                 val session = withContext(Dispatchers.IO) {
@@ -1494,12 +1761,19 @@ class RemoteViewModel(application: Application) : AndroidViewModel(application) 
      */
     fun attach(session: AgentSession): TerminalController? {
         val machine = _state.value.agents.machine ?: return null
-        val identity = identities[machine.deviceId] ?: return null
+        if (hub.identity(machine.deviceId) == null) return null
         terminal?.close()
+        // A channel on the connection the app already holds, when the
+        // machine's `rime-remoted` says that is safe (`mux_attach`): no
+        // handshake, no second relay dial, and the terminal is there at once.
+        // Otherwise a connection of its own, as before.
+        val link = hub.link(machine)
+        val shared = hub.state(machine.deviceId)?.remote?.has(Features.MUX_ATTACH) == true
         val controller = TerminalController(
             sessionId = session.id,
-            // Cannot prompt, and must not: see [identities].
-            connect = { runBlocking { pairing.connect(machine, identity) } },
+            // Cannot prompt, and must not: see [hub].
+            connect = { hub.dialSession(machine) },
+            shared = if (shared) ({ link.shared() }) else null,
         )
         terminal = controller
         return controller
@@ -1517,24 +1791,23 @@ class RemoteViewModel(application: Application) : AndroidViewModel(application) 
     }
 
     private suspend fun openIdentity(activity: FragmentActivity, machine: PairedMachine): StaticKey {
-        identities[machine.deviceId]?.let { return it }
+        hub.identity(machine.deviceId)?.let { return it }
         val box = KeystoreSecretBox.forDevice(machine.deviceId)
         val sealed = requireNotNull(com.rimeos.remote.core.Base64Url.decode(machine.sealed)) {
             "the stored key for ${machine.machine} is not base64url"
         }
         val identity = AppLock.unlock(activity, box, sealed, machine.machine)
-        identities[machine.deviceId] = identity
+        hub.remember(machine.deviceId, identity)
         return identity
     }
 
-    private fun linkFor(machine: PairedMachine): MachineLink =
-        links.getOrPut(machine.deviceId) {
-            MachineLink({
-                val identity = identities[machine.deviceId]
-                    ?: throw IllegalStateException("${machine.machine} is locked")
-                runBlocking { pairing.connect(machine, identity) }
-            })
-        }
+    /**
+     * The control link for [machine], or null when its key is not unwrapped
+     * this process — which, since the hub outlives screens, means the app was
+     * locked, and a screen asking for it has outlived that.
+     */
+    private fun linkOf(machine: PairedMachine): com.rimeos.remote.core.agent.MachineLink? =
+        if (hub.identity(machine.deviceId) == null) null else hub.link(machine)
 
     /**
      * Open a session, prove it works, and hang up.
@@ -1591,9 +1864,10 @@ class RemoteViewModel(application: Application) : AndroidViewModel(application) 
         // best-effort and its failure changes nothing here.
         runCatching {
             withContext(Dispatchers.IO) {
-                links[machine.deviceId]?.pushUnregister()
+                linkOf(machine)?.pushUnregister()
             }
         }
+        hub.forget(machine.deviceId)
         PushRegistrar.forget(getApplication<Application>(), machine)
         val store = repository.forget(machine)
         _state.update {
@@ -1700,5 +1974,14 @@ class RemoteViewModel(application: Application) : AndroidViewModel(application) 
          * this one keeps that to one.
          */
         const val REQUESTS_EVERY: Long = 8
+
+        /** How often the session screen's live preview is refreshed. */
+        const val PEEK_MS: Long = 1_500
+
+        /** The Agent Center's per-row tail: enough for the bottom of a screen. */
+        const val LIST_PEEK_BYTES: Int = 4_096
+
+        /** At most this many rows are previewed per poll. */
+        const val LIST_PEEKS: Int = 12
     }
 }

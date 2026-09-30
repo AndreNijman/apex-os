@@ -5,6 +5,7 @@ import androidx.compose.runtime.mutableStateOf
 import androidx.compose.runtime.setValue
 import com.rimeos.remote.core.FrameChannel
 import com.rimeos.remote.core.link.AttachmentEvent
+import com.rimeos.remote.core.link.Mux
 import com.rimeos.remote.core.link.PtyAttachment
 import com.rimeos.remote.core.term.Keys
 import com.rimeos.remote.core.term.Mods
@@ -36,7 +37,7 @@ sealed class TerminalStatus {
  *
  * Because a rotation destroys and rebuilds every composable, and this holds a
  * socket, a Noise session and a thread. A terminal that re-handshaked every
- * time the phone was turned sideways would cost a fresh 256 KiB replay per
+ * time the phone was turned sideways would cost a fresh scrollback replay per
  * rotation — and would lose whatever the user had typed but not sent. The
  * activity declares `configChanges` for orientation as well, so in practice
  * the composition survives; this makes it not matter either way, which is the
@@ -58,6 +59,12 @@ class TerminalController(
     connect: () -> FrameChannel,
     cols: Int = 80,
     rows: Int = 24,
+    /**
+     * The control connection's multiplexer, when the machine allows a
+     * terminal on it (`mux_attach`). Then [connect] is never called and the
+     * terminal is a channel on a connection that is already open.
+     */
+    shared: (() -> Mux)? = null,
 ) : Closeable {
     val terminal: Terminal = Terminal(cols, rows)
     val viewport: Viewport = Viewport(terminal, rows)
@@ -109,6 +116,7 @@ class TerminalController(
         attachRequest = { Agentd.attach(sessionId, terminal.cols, terminal.rows) },
         terminal = terminal,
         onEvent = ::onEvent,
+        shared = shared,
     )
 
     private val thread = Thread({ attachment.run() }, "rime-terminal-$sessionId").apply {

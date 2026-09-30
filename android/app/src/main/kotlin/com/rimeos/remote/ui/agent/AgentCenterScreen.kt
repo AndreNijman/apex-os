@@ -28,6 +28,7 @@ import androidx.compose.material3.TextButton
 import androidx.compose.material3.TopAppBar
 import androidx.compose.material3.TopAppBarDefaults
 import androidx.compose.runtime.Composable
+import androidx.compose.runtime.DisposableEffect
 import androidx.compose.runtime.LaunchedEffect
 import androidx.compose.ui.Alignment
 import androidx.compose.ui.Modifier
@@ -43,6 +44,7 @@ import com.rimeos.remote.core.agent.Gauge
 import com.rimeos.remote.core.agent.Order
 import com.rimeos.remote.core.agent.live
 import com.rimeos.remote.ui.ClipboardPull
+import com.rimeos.remote.ui.PeekView
 import com.rimeos.remote.ui.theme.RimeTones
 import com.rimeos.remote.ui.theme.MachineText
 
@@ -104,10 +106,22 @@ fun AgentCenterScreen(
     notificationsEnabled: Boolean = true,
     /** True while `POST_NOTIFICATIONS` has never been asked for. */
     notificationsUnasked: Boolean = false,
+    /**
+     * The last line each live session printed, from `peek`, keyed by
+     * `PeekView.keyOf` (id and start time). Empty against a machine that
+     * cannot peek, and then each row shows the session's `detail`, as before.
+     */
+    lastLines: Map<String, String> = emptyMap(),
+    /** Tell the view model the list is on screen, so it asks for last lines only then. */
+    onWatchList: (Boolean) -> Unit = {},
     onBack: () -> Unit,
     onDismiss: () -> Unit,
 ) {
     val (needsYou, rest) = Order.groups(sessions)
+    DisposableEffect(Unit) {
+        onWatchList(true)
+        onDispose { onWatchList(false) }
+    }
 
     // Keyed on the TOKEN and not on the text: asking twice for the same
     // clipboard has to copy twice, and an effect keyed on the text would not
@@ -212,13 +226,13 @@ fun AgentCenterScreen(
                             )
                         }
                         items(needsYou, key = { "n${it.id}" }) {
-                            SessionRow(it, nowSeconds) { onOpen(it) }
+                            SessionRow(it, nowSeconds, lastLines[PeekView.keyOf(it)]) { onOpen(it) }
                         }
                     }
                     if (rest.isNotEmpty()) {
                         if (needsYou.isNotEmpty()) item { Heading("Everything else") }
                         items(rest, key = { "r${it.id}" }) {
-                            SessionRow(it, nowSeconds) { onOpen(it) }
+                            SessionRow(it, nowSeconds, lastLines[PeekView.keyOf(it)]) { onOpen(it) }
                         }
                     }
                 }
@@ -251,7 +265,13 @@ private fun Heading(text: String) {
  * and says so.
  */
 @Composable
-fun SessionRow(session: AgentSession, nowSeconds: Long, onClick: () -> Unit) {
+fun SessionRow(
+    session: AgentSession,
+    nowSeconds: Long,
+    /** The last line it printed, when the machine can peek and it is live. */
+    lastLine: String? = null,
+    onClick: () -> Unit,
+) {
     val tone = RimeTones.forState(session.state)
     Row(
         Modifier
@@ -266,7 +286,24 @@ fun SessionRow(session: AgentSession, nowSeconds: Long, onClick: () -> Unit) {
         Spacer(Modifier.width(12.dp))
         Column(Modifier.weight(1f)) {
             Row(verticalAlignment = Alignment.CenterVertically) {
-                Text(session.agentName, style = MaterialTheme.typography.titleSmall)
+                // Name, then the agent's own title, then the label — the same
+                // order as the desktop's Agent Center and `rime agent list`.
+                Text(
+                    session.displayName,
+                    style = MaterialTheme.typography.titleSmall,
+                    maxLines = 1,
+                    overflow = TextOverflow.Ellipsis,
+                    modifier = Modifier.weight(1f, fill = false),
+                )
+                if (session.isNamed) {
+                    // Which agent it is, when the name no longer says.
+                    Spacer(Modifier.width(6.dp))
+                    Text(
+                        session.agentName,
+                        style = MaterialTheme.typography.labelSmall,
+                        color = MaterialTheme.colorScheme.onSurfaceVariant,
+                    )
+                }
                 session.telemetry?.model?.let {
                     // The model, only when the agent has told us. A row that
                     // printed a default would be naming a model nobody chose.
@@ -291,7 +328,7 @@ fun SessionRow(session: AgentSession, nowSeconds: Long, onClick: () -> Unit) {
                 Text(StateLabel(session.state), style = MaterialTheme.typography.labelSmall, color = tone)
                 // The runtime's own words about the state, when it attached
                 // any: a step, an error, "paused". Never invented here.
-                session.detail?.takeIf { it.isNotBlank() }?.let {
+                session.detail?.takeIf { it.isNotBlank() && lastLine == null }?.let {
                     Spacer(Modifier.width(6.dp))
                     Text(
                         it,
@@ -301,6 +338,20 @@ fun SessionRow(session: AgentSession, nowSeconds: Long, onClick: () -> Unit) {
                         overflow = TextOverflow.Ellipsis,
                     )
                 }
+            }
+            // What it last printed, in its own words and its own font, for a
+            // live session on a machine that can peek. It replaces the detail
+            // above rather than joining it: one line of "what is it doing" is
+            // what a row has room for, and the agent's screen is the more
+            // current answer.
+            lastLine?.takeIf { session.live && it.isNotBlank() }?.let {
+                Text(
+                    it,
+                    style = MachineText,
+                    color = MaterialTheme.colorScheme.onSurfaceVariant,
+                    maxLines = 1,
+                    overflow = TextOverflow.Ellipsis,
+                )
             }
             val branch = session.telemetry?.branch
             val graph = AgentGraph.summary(session.children)
