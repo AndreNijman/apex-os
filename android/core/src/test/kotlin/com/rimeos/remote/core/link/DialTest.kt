@@ -333,3 +333,70 @@ class DialTest {
         assertFalse(other.noDesktopWaiting)
     }
 }
+
+/**
+ * What the store remembers about connecting: the path that worked, when, and
+ * where the machine says it is listening now.
+ */
+class ConnectMemoryTest {
+    private fun machine(id: String, lastUsed: Long = 0, lan: List<String> = listOf("192.168.1.232:7717")) =
+        com.rimeos.remote.core.PairedMachine(
+            deviceId = id,
+            machine = "m-$id",
+            desktopKey = "k",
+            deviceKey = "d",
+            sealed = "s",
+            lan = lan,
+            relay = "wss://relay.example",
+            pairedMs = 1,
+            lastUsedMs = lastUsed,
+        )
+
+    @Test
+    fun `the machine connected on unlock is the one used last, else the only one`() {
+        val none = com.rimeos.remote.core.MachineStore()
+        assertNull(none.lastUsed())
+        val one = com.rimeos.remote.core.MachineStore(machines = listOf(machine("a")))
+        assertEquals("a", one.lastUsed()?.deviceId, "a phone with one machine connects it")
+        val two = com.rimeos.remote.core.MachineStore(machines = listOf(machine("a", 10), machine("b", 20)))
+        assertEquals("b", two.lastUsed()?.deviceId)
+        // Two machines and no history: which one would be a guess, and the
+        // guess would spend the one unlock prompt on the wrong key.
+        val unknown = com.rimeos.remote.core.MachineStore(machines = listOf(machine("a"), machine("b")))
+        assertNull(unknown.lastUsed())
+    }
+
+    @Test
+    fun `a connection records its path, and a reconnect a moment later writes nothing`() {
+        val store = com.rimeos.remote.core.MachineStore(machines = listOf(machine("a")))
+        val after = store.connected("a", Route.Relay.key, nowMs = 100_000)
+        assertEquals("relay", after.find("a")?.lastRoute)
+        assertEquals(100_000, after.find("a")?.lastUsedMs)
+        assertEquals(Route.Relay, Route.parse(after.find("a")?.lastRoute))
+        // The same path thirty seconds later: the same instance, so the caller
+        // skips the write.
+        assertSame(after, after.connected("a", Route.Relay.key, nowMs = 130_000))
+        // A different path is always news.
+        val lan = after.connected("a", Route.Lan("192.168.1.232:7717").key, nowMs = 130_000)
+        assertEquals("lan:192.168.1.232:7717", lan.find("a")?.lastRoute)
+        assertSame(store, store.connected("nobody", "relay", 1))
+    }
+
+    @Test
+    fun `stored addresses follow the machine, and an empty answer keeps the old ones`() {
+        val store = com.rimeos.remote.core.MachineStore(machines = listOf(machine("a")))
+        val moved = store.withLan("a", listOf("192.168.1.40:7717"))
+        assertEquals(listOf("192.168.1.40:7717"), moved.find("a")?.lan)
+        assertSame(moved, moved.withLan("a", listOf("192.168.1.40:7717")))
+        assertSame(moved, moved.withLan("a", emptyList()))
+    }
+
+    @Test
+    fun `a store written before these fields reads with neither set`() {
+        val old = """{"v":1,"machines":[{"device_id":"a","machine":"m","desktop_key":"k",""" +
+            """"device_key":"d","sealed_device_secret":"s","lan":[],"paired_ms":1}]}"""
+        val m = com.rimeos.remote.core.MachineStore.decode(old).find("a")!!
+        assertNull(m.lastRoute)
+        assertEquals(0, m.lastUsedMs)
+    }
+}
