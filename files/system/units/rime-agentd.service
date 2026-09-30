@@ -67,6 +67,21 @@ ExecStart=/usr/bin/rime-agentd
 # `systemctl --user edit rime-agentd`.
 Environment=TERM=xterm-256color
 Environment=COLORTERM=truecolor
+# The user's own bin directories, first, as a login shell has them. The daemon
+# resolves an adapter's program (`claude`, `codex`, …) against ITS OWN PATH, and
+# hands that PATH to every session it starts. Without this, that PATH is what
+# the user manager had when the daemon started at boot —
+# /usr/local/sbin:/usr/local/bin:/usr/bin on the L16, read from
+# /proc/<pid>/environ on 2026-09-30 — because the login session adds
+# ~/.local/bin to the manager's environment only later, and a daemon already
+# running never sees it. `npm i -g @openai/codex` with npm's prefix at ~/.local
+# installs `codex` exactly there, so `a -a codex` said codex was not installed
+# while it sat in ~/.local/bin/codex. A daemon restarted by hand after login
+# looked fine, which is why it reproduced only after a reboot.
+#
+# %h is the user's home in a user unit. A directory in this list that does not
+# exist costs nothing; `pty::resolve_program` walks past it.
+Environment=PATH=%h/.local/bin:%h/bin:%h/.cargo/bin:/usr/local/sbin:/usr/local/bin:/usr/bin
 # The daemon reaps its own children and stops sessions on SIGTERM; give it time
 # to signal every process group before systemd escalates.
 KillSignal=SIGTERM
