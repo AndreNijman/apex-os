@@ -12,6 +12,13 @@ import com.rimeos.remote.core.RelayEndpoint
 import com.rimeos.remote.core.Rendezvous
 import com.rimeos.remote.core.Session
 import com.rimeos.remote.core.StaticKey
+import com.rimeos.remote.core.link.Cancel
+import com.rimeos.remote.core.link.ConnectPlan
+import com.rimeos.remote.core.link.PathRace
+import com.rimeos.remote.core.link.RaceLost
+import com.rimeos.remote.core.link.RelayRetry
+import com.rimeos.remote.core.link.Route
+import android.util.Log
 import java.net.InetSocketAddress
 import java.net.Socket
 import kotlinx.coroutines.Dispatchers
@@ -26,11 +33,20 @@ import kotlinx.coroutines.withContext
  * main thread is an immediate `NetworkOnMainThreadException`, and it is a crash
  * that never happens on a laptop running the unit tests.
  *
- * **LAN first, always**, which is [Rendezvous.PREFERENCE] and not a preference
- * of this file's. A client that raced both paths and took whichever answered
- * first would leak a rendezvous connection every time, including on the network
- * where it was unnecessary — the relay would learn that a session happened at
- * all, which on the LAN it otherwise never does.
+ * **Pairing is LAN first, always**: the addresses in the offer, in order, and
+ * the relay only when none answered. A pairing happens once, at the machine,
+ * which is on the same network as the phone in practice.
+ *
+ * **Connecting races**, and that is a reversal of what this note used to say
+ * ("a client that raced both paths … would leak a rendezvous connection every
+ * time"). The sequential walk it defended cost four seconds per stored address
+ * on a network that drops SYNs, before the relay was even asked — most of why
+ * connecting took ages. `ConnectPlan` gives the LAN a 300 ms head start, so on
+ * the machine's own network the relay is normally never dialled; when it is,
+ * it learns that this phone connected at that moment and nothing else, since
+ * the rendezvous is a hash of the machine's key and everything after the
+ * upgrade is Noise ciphertext. The trade is written down in
+ * docs/remote-live-contract.md §3 and in `ConnectPlan`.
  *
  * Below [Client.pair] and [Client.openSession] the two legs are the same thing:
  * an [java.io.InputStream] and an [java.io.OutputStream]. Which one was used is
@@ -160,113 +176,175 @@ class PairingService {
      * branched on it the relay leg would stop being indistinguishable from the
      * LAN one. It is returned to whoever chose the path, which is the only
      * layer entitled to know.
+     *
+     * ## Every path at once
+     *
+     * The stored LAN addresses and the relay are raced ([PathRace]) on the
+     * schedule [ConnectPlan] draws up from [lastGood] — the path that worked
+     * last time goes first — and the first completed Noise handshake wins.
+     * The losers' sockets are closed mid-dial. One line goes to the log per
+     * connection, `connected to <machine> via <lan|relay> in <N> ms`, because
+     * "it takes ages to connect" is a claim, and that line is how it is
+     * measured on the phone itself.
+     *
+     * When every path fails, a path that REACHED the machine and was refused
+     * is the error raised — a revoked device, a protocol the machine does not
+     * speak — and "unreachable" only when nothing answered at all.
      */
-    suspend fun open(machine: PairedMachine, identity: StaticKey): Connected =
-        withContext(Dispatchers.IO) {
-            var lastFailure: Exception? = null
-            for (address in machine.lan) {
-                // `reached` separates "this address did not answer" from "this
-                // address answered and the conversation failed". The first is
-                // a reason to try the next address; the second is a real
-                // answer and must be raised, or a machine that refused this
-                // device would be reported as unreachable.
-                //
-                // It is needed because the connection is now made INSIDE
-                // `openSessionAcrossVersions` — a desktop refuses a protocol
-                // revision by closing the socket, so each revision tried needs
-                // its own connection and the dial can no longer sit out here.
-                var reached = false
-                // NOT `use`: the session owns the socket for as long as it
-                // lives, and closing it here would end the session the moment
-                // this function returned. But a handshake that *fails* owns
-                // nothing, and leaving that socket open would leak one file
-                // descriptor per refused connection — on a revoked phone that
-                // keeps trying, which is exactly the phone this path is for.
-                // `abandon` below is what closes those.
-                val attached = try {
-                    Client.openSessionAcrossVersions(
-                        identity = identity,
-                        desktopPublic = Device.checkKey(machine.desktopKey),
-                        connect = { connect(address).also { reached = true } },
-                        streams = { it.getInputStream() to it.getOutputStream() },
-                        abandon = { runCatching { it.close() } },
-                    )
-                } catch (e: Exception) {
-                    if (!reached) {
-                        lastFailure = e
-                        continue
-                    }
-                    throw e
+    suspend fun open(
+        machine: PairedMachine,
+        identity: StaticKey,
+        lastGood: Route? = Route.parse(machine.lastRoute),
+    ): Connected = withContext(Dispatchers.IO) {
+        val desktop = Device.checkKey(machine.desktopKey)
+        val plan = ConnectPlan.schedule(machine.lan, machine.relay != null, lastGood)
+        if (plan.isEmpty()) {
+            throw NoRouteToMachine("${machine.machine} has no address and no relay to try", null)
+        }
+        val race = PathRace<Connected>(
+            dial = { route, cancel ->
+                when (route) {
+                    is Route.Lan -> dialLan(route, desktop, identity, cancel)
+                    Route.Relay -> dialRelay(machine, desktop, identity, cancel)
                 }
-                val socket = attached.connection
-                return@withContext try {
-                    val session = attached.session
-                    // The deadline comes OFF here, and only here: everything
-                    // before this line ran against a peer that had not proved
-                    // anything, and everything after it may sit idle for
-                    // hours. A PTY with nobody typing produces no bytes, and a
-                    // twenty-second read deadline on one would end somebody's
-                    // terminal every twenty seconds of silence. The desktop
-                    // does exactly the same thing at exactly the same point
-                    // (`serve.rs`: "authenticated, so the handshake deadline
-                    // comes off").
-                    //
-                    // The keepalive is what stands in for it: `rime-remoted`
-                    // sends a `Ping` every fifteen seconds and `Session.receive`
-                    // answers it, so a connection that has really gone away
-                    // still fails on the next write rather than hanging for
-                    // ever.
-                    socket.soTimeout = 0
-                    Connected(session, Rendezvous.Path.LAN)
-                } catch (e: Exception) {
-                    runCatching { socket.close() }
-                    throw e
-                }
-            }
+            },
+            abandon = { it.hangUp() },
+        )
+        val won = try {
+            race.run(plan)
+        } catch (lost: RaceLost) {
+            lost.answer { it !is Unreached }?.let { throw it }
+            val last = lost.failures.lastOrNull()?.second
+            throw NoRouteToMachine(
+                "${machine.machine} did not answer on any known address" +
+                    (if (machine.relay != null) " or through the relay" else "") +
+                    (last?.message?.let { ": $it" } ?: ""),
+                (last as? Unreached)?.cause ?: last,
+            )
+        }
+        Log.i(TAG, "connected to ${machine.machine} via ${won.route.kind} in ${won.elapsedMs} ms")
+        won.result.also { it.route = won.route; it.elapsedMs = won.elapsedMs }
+    }
 
-            val relay = machine.relay
-                ?: throw NoRouteToMachine(
-                    "${machine.machine} did not answer on any known address",
-                    lastFailure,
-                )
-            // Off the machine's network. The rendezvous is derived from the key
-            // pinned when this phone paired, so a relay that wanted to stand in
-            // the middle would still have to complete a Noise handshake against
-            // a key it does not hold.
-            //
-            // Dialled once per protocol revision tried, for the same reason as
-            // the LAN leg: a desktop refuses a revision by hanging up, so a
-            // second attempt needs a second connection. A relay dial is more
-            // expensive than a TCP connect, which is the other half of why
-            // `SUPPORTED_REMOTE_PROTOCOL_VERSIONS` is ordered newest first —
-            // an up-to-date pair pays for exactly one.
-            val endpoint = RelayEndpoint.parse(relay)
-            val attached = Client.openSessionAcrossVersions(
+    /** One LAN address, as a racer. */
+    private fun dialLan(
+        route: Route.Lan,
+        desktop: ByteArray,
+        identity: StaticKey,
+        cancel: Cancel,
+    ): Connected {
+        // `reached` separates "this address did not answer" from "this
+        // address answered and the conversation failed". The first is
+        // [Unreached]; the second is a real answer and must be raised as
+        // itself, or a machine that refused this device would be reported as
+        // unreachable.
+        //
+        // It is needed because the connection is made INSIDE
+        // `openSessionAcrossVersions` — a desktop refuses a protocol revision
+        // by closing the socket, so each revision tried needs its own
+        // connection.
+        var reached = false
+        // NOT `use`: the session owns the socket for as long as it lives. But
+        // a handshake that FAILS owns nothing, and leaving that socket open
+        // would leak one file descriptor per refused connection. `abandon`
+        // closes those.
+        val attached = try {
+            Client.openSessionAcrossVersions(
                 identity = identity,
-                desktopPublic = Device.checkKey(machine.desktopKey),
-                connect = { RelayDialler.dial(endpoint, machine.rendezvousId()) },
+                desktopPublic = desktop,
+                connect = { connect(route.address, cancel).also { reached = true } },
+                streams = { it.getInputStream() to it.getOutputStream() },
+                abandon = { runCatching { it.close() } },
+            )
+        } catch (e: Exception) {
+            if (!reached) throw Unreached(e)
+            throw e
+        }
+        val socket = attached.connection
+        return try {
+            // The deadline comes OFF here, and only here: everything before
+            // this line ran against a peer that had not proved anything, and
+            // everything after it may sit idle for hours. A PTY with nobody
+            // typing produces no bytes, and a twenty-second read deadline on
+            // one would end somebody's terminal every twenty seconds of
+            // silence. The desktop does exactly the same thing at exactly the
+            // same point (`serve.rs`: "authenticated, so the handshake
+            // deadline comes off").
+            //
+            // The keepalive is what stands in for it: `rime-remoted` sends a
+            // `Ping` every fifteen seconds and `Session.receive` answers it,
+            // and the control link's watchdog treats forty seconds without one
+            // as a dead connection.
+            socket.soTimeout = 0
+            Connected(attached.session, Rendezvous.Path.LAN) { runCatching { socket.close() } }
+        } catch (e: Exception) {
+            runCatching { socket.close() }
+            throw e
+        }
+    }
+
+    /**
+     * The relay, as a racer.
+     *
+     * Off the machine's network. The rendezvous is derived from the key
+     * pinned when this phone paired, so a relay that wanted to stand in the
+     * middle would still have to complete a Noise handshake against a key it
+     * does not hold.
+     *
+     * A 409 — no desktop waiting at the rendezvous right now — is retried on
+     * [RelayRetry]'s schedule: the desktop keeps one socket waiting and a
+     * second guest a moment after the first finds it used up. Dialled once
+     * per protocol revision tried, like the LAN leg, which is the other half
+     * of why `SUPPORTED_REMOTE_PROTOCOL_VERSIONS` is newest first.
+     */
+    private fun dialRelay(
+        machine: PairedMachine,
+        desktop: ByteArray,
+        identity: StaticKey,
+        cancel: Cancel,
+    ): Connected {
+        val endpoint = RelayEndpoint.parse(requireNotNull(machine.relay))
+        val rendezvous = machine.rendezvousId()
+        var reached = false
+        val attached = try {
+            Client.openSessionAcrossVersions(
+                identity = identity,
+                desktopPublic = desktop,
+                connect = {
+                    RelayRetry.onNoDesktop(cancel) {
+                        RelayDialler.dial(
+                            endpoint,
+                            rendezvous,
+                            onSocket = { s -> cancel.onCancel { runCatching { s.close() } } },
+                        )
+                    }.also { reached = true }
+                },
                 streams = { it.link.input to it.link.output },
                 abandon = { runCatching { it.link.close() } },
             )
-            val dialled = attached.connection
-            return@withContext try {
-                val session = attached.session
-                // Here, and for the same reason as twenty lines above: the
-                // handshake ran under a deadline because the far end had
-                // proved nothing, and a terminal nobody is typing at produces
-                // no bytes for hours. The relay's own ping and the desktop's
-                // keepalive are what stand in for it.
-                dialled.socket.soTimeout = 0
-                Connected(session, Rendezvous.Path.RELAY)
-            } catch (e: Exception) {
-                runCatching { dialled.link.close() }
-                throw e
-            }
+        } catch (e: Exception) {
+            if (!reached) throw Unreached(e)
+            throw e
         }
+        val dialled = attached.connection
+        return try {
+            // Here, and for the same reason as the LAN leg: the handshake ran
+            // under a deadline because the far end had proved nothing, and a
+            // terminal nobody is typing at produces no bytes for hours.
+            dialled.socket.soTimeout = 0
+            Connected(attached.session, Rendezvous.Path.RELAY) { runCatching { dialled.link.close() } }
+        } catch (e: Exception) {
+            runCatching { dialled.link.close() }
+            throw e
+        }
+    }
 
-    private fun connect(address: String): Socket {
+    private fun connect(address: String, cancel: Cancel? = null): Socket {
         val (host, port) = splitHostPort(address)
         val socket = Socket()
+        // Before the connect, so a race won elsewhere can end a SYN that a
+        // firewall is silently dropping instead of waiting out its timeout.
+        cancel?.onCancel { runCatching { socket.close() } }
         socket.connect(InetSocketAddress(host, port), CONNECT_TIMEOUT_MS)
         // The desktop drops an unauthenticated peer after thirty seconds, so
         // this end sets a deadline of its own rather than waiting forever on a
@@ -312,6 +390,9 @@ class PairingService {
     }
 
     private companion object {
+        /** The log tag, stable so `adb logcat -s RimeRemote` finds every connection. */
+        const val TAG = "RimeRemote"
+
         const val CONNECT_TIMEOUT_MS = 4_000
         const val HANDSHAKE_TIMEOUT_MS = 20_000
 
@@ -324,9 +405,29 @@ class PairingService {
  * A live session and the path it came in on.
  *
  * Two values rather than one because the second is not the session's business:
- * see [PairingService.open].
+ * see [PairingService.open]. [route] and [elapsedMs] are filled in by the race
+ * that produced it — which address, or the relay, and how long the connection
+ * took — for the store's last-good path and for the screen.
  */
-class Connected(val session: Session, val path: Rendezvous.Path)
+class Connected(
+    val session: Session,
+    val path: Rendezvous.Path,
+    /** Closes the socket under [session], for a racer that finished second. */
+    internal val hangUp: () -> Unit = { runCatching { session.close() } },
+) {
+    var route: Route? = null
+        internal set
+    var elapsedMs: Long = 0
+        internal set
+}
+
+/**
+ * A path that did not reach the machine at all: nothing answered.
+ *
+ * A marker for the race, which prefers any failure that is NOT this one when
+ * everything has failed — see [PairingService.open].
+ */
+internal class Unreached(cause: Throwable) : Exception(cause.message, cause)
 
 /** Nothing the pairing code named could be reached. */
 class NoRouteToMachine(message: String, cause: Throwable?) : Exception(message, cause)

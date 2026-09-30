@@ -75,6 +75,95 @@ object AppLock {
     }
 
     /**
+     * What one unlock prompt produced: the app is open, and — when it could be
+     * — one machine's key is unwrapped.
+     */
+    class Unlocked(
+        /** The unwrapped key for the machine the prompt named, or null. */
+        val identity: StaticKey?,
+        /**
+         * Why the key could not be unwrapped, when it could not, for the
+         * screen to say once the person tries that machine. Null on success
+         * and when no key was attempted.
+         */
+        val keyFailure: Throwable?,
+    )
+
+    /**
+     * The front door and the key in ONE prompt, where the key allows it.
+     *
+     * ## Why this is not weaker than two prompts
+     *
+     * The two prompts it replaces were [confirmPresence] — no `CryptoObject`,
+     * so it authorises nothing and is, in its own words, a curtain — and then
+     * [unlock] for the machine the person tapped, which carries the cipher.
+     * Both accept exactly the same authenticators ([authenticators]). So a
+     * prompt that carries the cipher proves everything the curtain did and
+     * more: it cannot succeed without the person, and it cannot be satisfied
+     * by anything the curtain would not also accept.
+     *
+     * What does NOT change is the key rule, and that is the reason this is
+     * one machine and not all of them. Each machine's wrapping key is gated
+     * per use (`KeystoreSecretBox`: timeout 0), so one authentication
+     * authorises exactly ONE cipher, and therefore one unwrap. A second
+     * machine still needs its own prompt when it is first used, and there is
+     * no way to batch them without making the keys time-bound — a window in
+     * which a phone taken out of a hand works — which this design refuses.
+     * The unwrapped key goes where it always went: memory, never storage.
+     *
+     * ## When it falls back to the curtain
+     *
+     * No machine to name ([box] null), or a key that cannot start an unwrap
+     * at all — invalidated by a new fingerprint, a keystore that was wiped.
+     * Then the app still opens behind [confirmPresence], and the key's
+     * problem is reported when that machine is used, where the screen can
+     * say "forget it and pair again". A key that is simply UNGATED (a phone
+     * paired with no screen lock) unwraps without a prompt, and the curtain
+     * is still shown, because a curtain is what this door is for.
+     */
+    suspend fun unlockApp(
+        activity: FragmentActivity,
+        box: KeystoreSecretBox?,
+        sealed: ByteArray?,
+        machineName: String?,
+    ): Unlocked {
+        if (box == null || sealed == null || machineName == null) {
+            confirmPresence(activity)
+            return Unlocked(null, null)
+        }
+        if (!box.authenticationIsRequired) {
+            val identity = runCatching { InMemoryStaticKey(box.open(sealed)) }
+            confirmPresence(activity)
+            return Unlocked(identity.getOrNull(), identity.exceptionOrNull())
+        }
+        val cipher = try {
+            box.beginOpen(sealed)
+        } catch (e: Exception) {
+            // Before any prompt: the key cannot even begin. The door still
+            // opens; the machine's problem is its own.
+            confirmPresence(activity)
+            return Unlocked(null, e)
+        }
+        // AppLockRefused (cancelled, too many attempts) propagates: that is
+        // the person saying no, and the app stays locked.
+        val authorised = prompt(
+            activity,
+            cipher,
+            title = "Unlock Rime Remote",
+            subtitle = "Connecting to $machineName",
+        )
+        // The person is present — the prompt succeeded — so the app is open
+        // whatever happens next. A key whose ciphertext no longer matches
+        // (a keystore wiped and a fresh key created in its place) fails here,
+        // after the prompt, and is reported for that machine.
+        return try {
+            Unlocked(InMemoryStaticKey(box.finishOpen(authorised, sealed)), null)
+        } catch (e: Exception) {
+            Unlocked(null, e)
+        }
+    }
+
+    /**
      * A box authorised to seal exactly once, for pairing.
      *
      * Sealing is gated as tightly as opening — `KeyGenParameterSpec` restricts

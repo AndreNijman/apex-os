@@ -41,6 +41,7 @@ import androidx.compose.ui.draw.clip
 import androidx.compose.ui.text.style.TextOverflow
 import androidx.compose.ui.unit.dp
 import com.rimeos.remote.core.PairedMachine
+import com.rimeos.remote.link.LinkHub
 import com.rimeos.remote.ui.theme.MachineText
 import java.text.DateFormat
 import java.util.Date
@@ -142,6 +143,7 @@ fun MachinesScreen(
                     items(state.machines, key = { it.deviceId }) { machine ->
                         MachineRow(
                             machine = machine,
+                            link = state.links[machine.deviceId],
                             onClick = { onConnect(machine) },
                             onPing = { onPing(machine) },
                             onForget = { forgetting = machine },
@@ -272,6 +274,8 @@ fun MachinesScreen(
 @Composable
 private fun MachineRow(
     machine: PairedMachine,
+    /** The held connection's state, when this machine has one. */
+    link: LinkHub.LinkState?,
     onClick: () -> Unit,
     onPing: () -> Unit,
     onForget: () -> Unit,
@@ -311,6 +315,20 @@ private fun MachineRow(
                     style = MaterialTheme.typography.labelSmall,
                     color = MaterialTheme.colorScheme.onSurfaceVariant,
                 )
+                // Now that the phone connects on unlock without being asked,
+                // the path is said here, on the row, and a relay path carries
+                // its disclosure (`docs/remote.md`) at the moment it is true.
+                linkLine(link)?.let {
+                    Text(
+                        it,
+                        style = MaterialTheme.typography.labelSmall,
+                        color = if (link?.status == LinkHub.Status.CONNECTED) {
+                            MaterialTheme.colorScheme.primary
+                        } else {
+                            MaterialTheme.colorScheme.onSurfaceVariant
+                        },
+                    )
+                }
             }
             // "Does this still answer" is a different question from "show me
             // the agents", and it is the one somebody asks after changing a
@@ -327,6 +345,21 @@ private fun MachineRow(
             thickness = 1.dp,
             color = MaterialTheme.colorScheme.outline.copy(alpha = 0.4f),
         )
+    }
+}
+
+/** One line about a held connection, or null when there is none. */
+private fun linkLine(link: LinkHub.LinkState?): String? = when (link?.status) {
+    null, LinkHub.Status.IDLE -> null
+    LinkHub.Status.CONNECTING -> "connecting…"
+    LinkHub.Status.RECONNECTING -> "reconnecting" + (link.failure?.let { " — $it" } ?: "…")
+    LinkHub.Status.CONNECTED -> buildString {
+        append("connected")
+        when (link.via) {
+            "lan" -> append(" on this network")
+            "relay" -> append(" through the relay, which sees when you connect but not what you send")
+        }
+        link.connectMs?.let { append(" · ${it} ms") }
     }
 }
 

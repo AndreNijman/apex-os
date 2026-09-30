@@ -88,6 +88,23 @@ data class PairedMachine(
      * polling while it is open — which is what it did before push existed.
      */
     val push: PushRegistration? = null,
+    /**
+     * The path the last successful connection took: `lan:<address>` or
+     * `relay` (`Route.key`), or null before the first one.
+     *
+     * Tried first next time, because most connections are from the same
+     * place as the last one — see `ConnectPlan`. A hint and nothing more: it
+     * names a path, never a secret, and a stale one costs one parallel dial.
+     */
+    @SerialName("last_route") val lastRoute: String? = null,
+    /**
+     * When this phone last connected to this machine, unix milliseconds, or 0.
+     *
+     * Decides which machine is connected on unlock without a tap, and so
+     * which machine's key the one unlock prompt unwraps. See
+     * [MachineStore.lastUsed].
+     */
+    @SerialName("last_used_ms") val lastUsedMs: Long = 0,
 ) {
     /** The rendezvous this machine is reachable at through a relay. */
     fun rendezvousId(): String = Rendezvous.idFor(Device.checkKey(desktopKey))
@@ -297,6 +314,48 @@ data class MachineStore(
     fun find(deviceId: String): PairedMachine? = machines.firstOrNull { it.deviceId == deviceId }
 
     /**
+     * The machine to connect on unlock: the one used most recently, else the
+     * only one there is, else none.
+     *
+     * Only one, and that is the key design rather than a shortcut: each
+     * machine's device key is wrapped by a keystore key gated PER USE, so one
+     * biometric prompt authorises exactly one unwrap. Connecting every paired
+     * machine on unlock would mean one prompt each.
+     */
+    fun lastUsed(): PairedMachine? =
+        machines.filter { it.lastUsedMs > 0 }.maxByOrNull { it.lastUsedMs }
+            ?: machines.singleOrNull()
+
+    /**
+     * Record a successful connection: the path it took and when.
+     *
+     * A no-op store (the same instance) when nothing would change except the
+     * time and the time moved by less than [USED_GRANULARITY_MS] — the caller
+     * compares instances to skip a write, because a phone that reconnects
+     * after every network change should not rewrite its store every time.
+     */
+    fun connected(deviceId: String, route: String, nowMs: Long): MachineStore {
+        val m = find(deviceId) ?: return this
+        if (m.lastRoute == route && nowMs - m.lastUsedMs in 0 until USED_GRANULARITY_MS) return this
+        return copy(machines = machines.map { if (it.deviceId == deviceId) it.copy(lastRoute = route, lastUsedMs = nowMs) else it })
+    }
+
+    /**
+     * Replace a machine's LAN hints with what the machine says now.
+     *
+     * The same instance back when they already match, or when [lan] is empty:
+     * an empty list is as likely a machine momentarily between networks as
+     * one with no network at all, and a stale hint costs one parallel dial
+     * where an empty one could cost the LAN path entirely.
+     */
+    fun withLan(deviceId: String, lan: List<String>): MachineStore {
+        if (lan.isEmpty()) return this
+        val m = find(deviceId) ?: return this
+        if (m.lan == lan) return this
+        return copy(machines = machines.map { if (it.deviceId == deviceId) it.copy(lan = lan) else it })
+    }
+
+    /**
      * The device identity for a machine, unsealed.
      *
      * Returns a [StaticKey] and not bytes. The caller gets something it can
@@ -314,6 +373,9 @@ data class MachineStore(
 
     companion object {
         const val VERSION = 1
+
+        /** A connection within a minute of the last one does not rewrite the store. */
+        const val USED_GRANULARITY_MS: Long = 60_000
 
         private val json = Json {
             encodeDefaults = true

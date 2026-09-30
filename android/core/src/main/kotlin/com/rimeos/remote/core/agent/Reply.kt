@@ -169,7 +169,86 @@ object Reply {
      * enter to continue" is exactly the case this workflow exists for. The
      * caller decides whether to offer it; this function does not refuse it.
      */
-    fun bytes(text: String): String = text.trimEnd('\n', '\r', ' ', '\t') + "\r"
+    fun bytes(text: String): String = this.text(text) + "\r"
+
+    /**
+     * The reply without its terminator: what the person meant, trimmed.
+     *
+     * The same trim as [bytes] and for the same reasons, minus the CR. This
+     * is what goes in `data` when the Return is a separate write — by the
+     * daemon under `submit: true`, or by [plan]'s fallback — and it must not
+     * end in CR or LF: the daemon strips nothing, so a trailing CR here would
+     * be the paste-then-newline failure all over again, followed by a second
+     * Return that accepts whatever the agent asks next.
+     */
+    fun text(raw: String): String = raw.trimEnd('\n', '\r', ' ', '\t')
+
+    /**
+     * One step of sending a reply: a request to make, or a pause between two.
+     *
+     * A plan rather than a function that sends, so that WHAT is sent is a
+     * value a test can read — the difference between the two plans below is
+     * the whole of the bug they fix, and it is invisible in a test that can
+     * only watch a socket.
+     */
+    sealed class Step {
+        data class Send(val line: String) : Step()
+        data class Wait(val ms: Long) : Step()
+    }
+
+    /**
+     * How to deliver [raw] to session [id] so that it is SUBMITTED.
+     *
+     * ## The bug this exists for
+     *
+     * A reply used to be one `input` whose data ended in CR — [bytes]. It
+     * typed and did not submit, often enough to be the complaint. Measured on
+     * 2026-09-30 against Claude Code 2.1.283 in a pty: a burst of ~250
+     * characters that ends in CR is taken as a PASTE, and a CR inside a paste
+     * is a newline in the prompt, not a press of Return. The same text with
+     * the CR written 50 ms later submits. Short replies happened to be read
+     * as typing, which is why it looked intermittent.
+     *
+     * So the Return has to be its own write, some time after the text:
+     *
+     * * **[Features.INPUT_SUBMIT]** — one request, `submit: true`, and the
+     *   daemon writes the CR 80 ms after the text. The daemon is the right
+     *   place for the gap: it is next to the PTY, so the network cannot
+     *   shrink it.
+     * * **An older daemon** — two requests: the text, [FALLBACK_GAP_MS], then
+     *   `"\r"`. The gap is measured from when the first request was
+     *   ANSWERED, which is after the daemon wrote it, so network jitter only
+     *   ever lengthens it.
+     * * **A bare return** — `"\r"` alone, either way. Nothing is typed first,
+     *   so there is nothing for it to be pasted with, and "press enter to
+     *   continue" is the case this workflow is most often for.
+     *
+     * Interior newlines are untouched here: [Handoff.Clipboard] decides what
+     * a multi-line box sends, before it reaches this.
+     */
+    fun plan(id: Int, raw: String, submitSupported: Boolean): List<Step> {
+        if (isBare(raw)) return listOf(Step.Send(Agentd.input(id, "\r")))
+        val text = text(raw)
+        return if (submitSupported) {
+            listOf(Step.Send(Agentd.input(id, text, submit = true)))
+        } else {
+            listOf(
+                Step.Send(Agentd.input(id, text)),
+                Step.Wait(FALLBACK_GAP_MS),
+                Step.Send(Agentd.input(id, "\r")),
+            )
+        }
+    }
+
+    /**
+     * The client-side gap between text and Return for a daemon without
+     * [Features.INPUT_SUBMIT]: 100 ms.
+     *
+     * Longer than the daemon's own 80 ms on purpose, because this one is
+     * measured on the wrong side of the network — but 50 ms was already
+     * enough in the measurement above, so both have room.
+     */
+    const val FALLBACK_GAP_MS: Long = 100
 
     /**
      * Whether a reply of this text would send anything but a bare return.

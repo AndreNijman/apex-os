@@ -55,8 +55,15 @@ object RelayDialler {
         role: Rendezvous.Role = Rendezvous.Role.GUEST,
         connectTimeoutMs: Int = CONNECT_TIMEOUT_MS,
         handshakeTimeoutMs: Int = HANDSHAKE_TIMEOUT_MS,
+        /**
+         * Handed the socket before it connects, so a caller racing this dial
+         * against the LAN can close it from another thread — which is the
+         * only way to stop a `connect` or a TLS handshake that is blocked.
+         */
+        onSocket: (Socket) -> Unit = {},
     ): Dialled {
         val plain = Socket()
+        onSocket(plain)
         plain.connect(InetSocketAddress(endpoint.host, endpoint.port), connectTimeoutMs)
         val socket: Socket = try {
             plain.soTimeout = handshakeTimeoutMs
