@@ -346,6 +346,101 @@ pub fn refuse_input(who: &Origin, target: u32) -> Option<Response> {
     None
 }
 
+/// The predicate [`refuse_input`] applies, with the sentences left to the verb.
+///
+/// `refuse_input` and `refuse_clipboard` each spell the rule out, and a test
+/// holds them to the same answer on every origin. `rename` and `peek` are two
+/// more verbs under exactly that rule (`docs/remote-live-contract.md` §1.5,
+/// §1.6), and a fourth copy of the same two `if`s would be one careless edit
+/// from a gate that answers a different question — so they share this.
+fn refuse_unless_a_person(
+    who: &Origin,
+    as_session: impl FnOnce(u32) -> String,
+    unclassified: impl FnOnce(&str) -> String,
+) -> Option<Response> {
+    if let Some(caller) = who.session {
+        return Some(Response::error(ErrorKind::PermissionDenied, as_session(caller)));
+    }
+    if let Some(why) = who.origin_unreadable.as_deref() {
+        return Some(Response::error(ErrorKind::PermissionDenied, unclassified(why)));
+    }
+    None
+}
+
+/// Whether a connection may name session `target` (§1.5).
+///
+/// [`refuse_input`]'s predicate. Only a person names a session: the name is
+/// what the Agent Center, `rime agent list` and a phone show a person, so an
+/// agent that could rename a sibling could make one session read as another
+/// on the screen somebody approves things from.
+pub fn refuse_rename(who: &Origin, target: u32) -> Option<Response> {
+    refuse_unless_a_person(
+        who,
+        |caller| {
+            format!(
+                "session {caller} may not rename session {target}; a session's name is what a \
+                 person reads to tell sessions apart, and only a person sets it"
+            )
+        },
+        |why| {
+            format!(
+                "refusing to rename session {target}: this connection could not be classified, \
+                 so there is no way to tell it is not a session ({why})"
+            )
+        },
+    )
+}
+
+/// Whether a connection may read the tail of session `target`'s screen
+/// (§1.6).
+///
+/// [`refuse_input`]'s predicate, for the opposite direction's reason: agents
+/// do not read each other's screens. What is on one is whatever that agent
+/// was shown — a diff, a key it printed, a question it is answering.
+pub fn refuse_peek(who: &Origin, target: u32) -> Option<Response> {
+    refuse_unless_a_person(
+        who,
+        |caller| {
+            format!(
+                "session {caller} may not read session {target}'s screen; one agent does not \
+                 read what another was shown"
+            )
+        },
+        |why| {
+            format!(
+                "refusing to show session {target}'s screen: this connection could not be \
+                 classified, so there is no way to tell it is not a session ({why})"
+            )
+        },
+    )
+}
+
+/// Which kind of viewer a connection is, for whose size a session's terminal
+/// takes (§1.7).
+///
+/// A phone is exactly a connection whose origin is `claude-remote-control`:
+/// `rime-remoted` declares that on every connection it opens, before anything
+/// else, and refuses to forward a byte if the declaration is not accepted —
+/// so a phone's attach AND its resize, which arrive on two different
+/// connections, carry the same class. Attributed by origin and never by
+/// socket, because the socket is the one thing the two do not share.
+///
+/// Everything else is local, including the origins §7 does not call local —
+/// a scheduled job, an unreadable one. That is deliberate and it is not a
+/// permission question: nothing here grants anything, it decides whose
+/// terminal size to give back. The failure it avoids is concrete. A terminal
+/// launched as a systemd app scope (uwsm does this for every app) sits under
+/// `user@N.service` and classifies as `scheduled-job`, and treating that as
+/// "not local" would make the desktop's own terminal the one whose size is
+/// never remembered — the bug this exists to fix, on those machines.
+pub fn viewer(who: &Origin) -> rime_agent_core::session::Viewer {
+    use rime_agent_core::session::Viewer;
+    match who.request_origin {
+        Some(o) if o.origin == RequestOrigin::RemoteControl => Viewer::Remote,
+        _ => Viewer::Local,
+    }
+}
+
 /// Whether a connection may read what is on the machine's clipboard.
 ///
 /// `None` means it may. A [`Response`] means it may not, and says why.
@@ -1689,7 +1784,68 @@ mod tests {
                 "the two gates disagree about {what}, so one of them has been edited \
                  and the other has not"
             );
+            // `rename` and `peek` are the same rule too (§1.5, §1.6): only a
+            // person names a session, and agents do not read each other's
+            // screens.
+            assert_eq!(
+                refuse_rename(&who, 4).is_some(),
+                refuse_input(&who, 4).is_some(),
+                "rename and input disagree about {what}"
+            );
+            assert_eq!(
+                refuse_peek(&who, 4).is_some(),
+                refuse_input(&who, 4).is_some(),
+                "peek and input disagree about {what}"
+            );
         }
+    }
+
+    #[test]
+    fn rename_and_peek_refusals_say_which_verb_was_refused() {
+        // The same verdicts as `input`, but not the same sentence: a person
+        // told they may not "write into the terminal" after tapping Rename
+        // would look for the wrong thing.
+        let session = Origin {
+            session: Some(3),
+            ..Origin::default()
+        };
+        let (_, rename) = refuse_rename(&session, 4).unwrap().as_error().map(|(k, m)| (k, m.to_string())).unwrap();
+        assert!(rename.contains("rename session 4"), "{rename}");
+        let (kind, peek) = refuse_peek(&session, 4).unwrap().as_error().map(|(k, m)| (k, m.to_string())).unwrap();
+        assert_eq!(kind, ErrorKind::PermissionDenied);
+        assert!(peek.contains("screen"), "{peek}");
+        let unread = Origin::unreadable("peer credentials unavailable");
+        let (_, why) = refuse_rename(&unread, 4).unwrap().as_error().map(|(k, m)| (k, m.to_string())).unwrap();
+        assert!(why.contains("peer credentials unavailable"), "{why}");
+        // And a person is let through by both.
+        assert!(refuse_rename(&unsessioned(RequestOrigin::LocalTerminal), 4).is_none());
+        assert!(refuse_peek(&unsessioned(RequestOrigin::RemoteControl), 4).is_none());
+    }
+
+    #[test]
+    fn only_a_remote_control_origin_is_a_phone_for_the_terminal_size() {
+        use rime_agent_core::session::Viewer;
+        for o in RequestOrigin::ALL {
+            let want = if *o == RequestOrigin::RemoteControl {
+                Viewer::Remote
+            } else {
+                Viewer::Local
+            };
+            assert_eq!(viewer(&unsessioned(*o)), want, "{o}");
+        }
+        // A session's inherited origin counts the same way as an observed one:
+        // the class is the origin's, not the connection's shape.
+        let remote_session = Origin {
+            session: Some(3),
+            request_origin: Some(SessionOrigin::inherited(RequestOrigin::RemoteControl)),
+            ..Origin::default()
+        };
+        assert_eq!(viewer(&remote_session), Viewer::Remote);
+        // No origin at all is not a phone: rime-remoted cannot reach agentd
+        // without an accepted declaration, so an unreadable origin is never
+        // one of its connections.
+        assert_eq!(viewer(&Origin::unreadable("x")), Viewer::Local);
+        assert_eq!(viewer(&Origin::default()), Viewer::Local);
     }
 
     #[test]

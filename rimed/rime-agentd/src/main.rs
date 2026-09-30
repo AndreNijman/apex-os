@@ -630,7 +630,7 @@ fn serve(daemon: &Arc<Daemon>, stream: UnixStream) -> Result<()> {
             replay,
         } = request
         {
-            return session::handle_attach(daemon, writer, reader, id, cols, rows, replay);
+            return session::handle_attach(daemon, &caller, writer, reader, id, cols, rows, replay);
         }
 
         // And neither does `Receive`, for the same reason with the direction
@@ -673,7 +673,10 @@ fn dispatch(daemon: &Arc<Daemon>, request: Request, caller: &mut privilege::Call
                 version: PROTOCOL_VERSION,
                 agents: adapter::ids().into_iter().map(|s| s.to_string()).collect(),
                 default_agent: cfg.default_agent.clone(),
-                features: Vec::new(),
+                features: rime_agent_core::protocol::FEATURES
+                    .iter()
+                    .map(|f| f.to_string())
+                    .collect(),
             }
         }
 
@@ -708,6 +711,12 @@ fn dispatch(daemon: &Arc<Daemon>, request: Request, caller: &mut privilege::Call
         ),
 
         Request::Resize { id, cols, rows } => {
+            // Whose size this is (§1.7), from the connection's origin: a
+            // phone's resize arrives on a connection of its own, not on its
+            // attach, so the origin is the only thing that ties the two
+            // together. Resolved before the session lock is taken, because
+            // resolving it takes session locks of its own.
+            let viewer = privilege::viewer(&privilege::origin(daemon, caller));
             let Some(handle) = lookup(daemon, id) else {
                 return no_such_session(id);
             };
@@ -719,18 +728,19 @@ fn dispatch(daemon: &Arc<Daemon>, request: Request, caller: &mut privilege::Call
                 );
             }
             let size = rime_agent_core::term::WinSize { cols, rows }.or_fallback();
-            match pty::resize(s.master, size) {
-                Ok(()) => {
-                    s.info.cols = size.cols;
-                    s.info.rows = size.rows;
-                    Response::Ok
-                }
+            // `Ok` whether or not the PTY took it. A phone's resize that lands
+            // after the phone's terminal closed is remembered and not applied
+            // — applying it would shrink the desktop with nothing left to give
+            // its size back — and that is the runtime deciding, not a failure
+            // the phone could act on.
+            match s.resize_from(viewer, size) {
+                Ok(_) => Response::Ok,
                 Err(e) => Response::error(ErrorKind::Internal, e.to_string()),
             }
         }
 
         Request::Inject { id, source } => inject::handle(daemon, caller, id, &source),
-        Request::Input { id, data, .. } => {
+        Request::Input { id, data, submit } => {
             // A session may not type into a sibling.
             //
             // This is the only verb on the socket that acts on a session other
@@ -755,7 +765,15 @@ fn dispatch(daemon: &Arc<Daemon>, request: Request, caller: &mut privilege::Call
             let Some(handle) = lookup(daemon, id) else {
                 return no_such_session(id);
             };
-            match session::write_input(&handle, data.as_bytes()) {
+            // With `submit`, Enter goes as its own write a SUBMIT_GAP later
+            // (§1.2); this connection's thread sleeps through the gap, which
+            // costs nobody else anything — every connection has its own.
+            let written = if submit {
+                session::submit_input(&handle, data.as_bytes())
+            } else {
+                session::write_input(&handle, data.as_bytes())
+            };
+            match written {
                 session::Input::Written => Response::Ok,
                 session::Input::Exited => Response::error(
                     ErrorKind::SessionExited,
@@ -771,10 +789,44 @@ fn dispatch(daemon: &Arc<Daemon>, request: Request, caller: &mut privilege::Call
         // who is asking. See `clipboard.rs`.
         Request::Clipboard => clipboard::handle(daemon, caller),
 
-        Request::Rename { .. } | Request::Peek { .. } => Response::error(
-            ErrorKind::BadRequest,
-            "this runtime does not implement that verb yet",
-        ),
+        // §1.5. Only a person names a session: `refuse_input`'s callers, with
+        // a sentence of its own. The name is checked after the caller and
+        // before the lookup, so a bad name is `bad_request` whether or not
+        // the session exists, and a session never learns it was asked.
+        Request::Rename { id, name } => {
+            let who = privilege::origin(daemon, caller);
+            if let Some(refusal) = privilege::refuse_rename(&who, id) {
+                return refusal;
+            }
+            let name = match rime_agent_core::session::session_name_opt(name.as_deref()) {
+                Ok(name) => name,
+                Err(why) => return Response::error(ErrorKind::BadRequest, why),
+            };
+            let Some(handle) = lookup(daemon, id) else {
+                return no_such_session(id);
+            };
+            match session::rename(&handle, name) {
+                Response::Session(mut info) => {
+                    add_process_children(std::slice::from_mut(&mut *info));
+                    Response::Session(info)
+                }
+                other => other,
+            }
+        }
+
+        // §1.6. The tail of a session's screen, without attaching: no resize,
+        // no attach, `attached` unchanged. Agents do not read each other's
+        // screens, so `refuse_input`'s callers are refused here too.
+        Request::Peek { id, bytes } => {
+            let who = privilege::origin(daemon, caller);
+            if let Some(refusal) = privilege::refuse_peek(&who, id) {
+                return refusal;
+            }
+            let Some(handle) = lookup(daemon, id) else {
+                return no_such_session(id);
+            };
+            session::peek(&handle, bytes)
+        }
 
         Request::Signal { id, signal } => {
             let Some(number) = rime_agent_core::session::signal_number(&signal) else {
