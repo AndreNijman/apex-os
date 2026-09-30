@@ -14,8 +14,10 @@ as a test.
 | The desktop: bar, notch, Dashboard, lock screen, settings, notifications | [rime-shell](https://github.com/AndreNijman/rime-shell) |
 | rimeos.com | [rime-website](https://github.com/AndreNijman/rime-website) |
 
-The image build vendors rime-shell's `main`, so a desktop fix reaches
-machines with the next Rime OS image after it merges there.
+A published image (built from rime-os `main`) vendors rime-shell's `main`,
+so a desktop fix reaches machines with the next Rime OS image after it merges
+there. A build of another rime-os branch vendors the rime-shell branch of the
+same name if there is one.
 
 ## Issues
 
@@ -75,7 +77,10 @@ section "Building the ISOs yourself" covers the installers.
 A merge to `main` that touches `Containerfile*`, `files/**`, `rimed/**`,
 `config/**`, `kernel/**` or `.github/**` builds, signs and publishes a new
 image, and every Rime machine picks it up on its next `rime update`. Treat
-those merges as releases. A change to `kernel/kernel.pin` also rebuilds the
+those merges as releases. The one exception is a merge whose commit subject
+contains `[skip ci]`, which the maintainer uses for documentation-only changes
+under `.github/` (issue forms, templates) so they do not publish an image. A
+change to `kernel/kernel.pin` also rebuilds the
 kernel, and a change to `Containerfile.core` makes the next update a
 multi-gigabyte download for everyone.
 
@@ -85,9 +90,10 @@ Rime OS is released under the [MIT licence](LICENSE), and contributions are
 accepted under the same licence. A few files come from other projects and keep
 their own licences:
 
-- `kernel/kernel-cachyos.spec` is derived from CachyOS's
-  [copr-linux-cachyos](https://github.com/CachyOS/copr-linux-cachyos) spec
-  (GPL-3.0).
+- `kernel/kernel-cachyos.spec` is derived from the spec in CachyOS's
+  [copr-linux-cachyos](https://github.com/CachyOS/copr-linux-cachyos), a
+  GPL-3.0 repository. (Its `License:` tag, GPL-2.0-only, is the licence of the
+  kernel it packages, not of the spec file.)
 - `kernel/research/Makefile.btf.cachyos` is a copy of the Linux kernel's
   `scripts/Makefile.btf` (GPL-2.0).
 - `android/gradlew` and `android/gradlew.bat` are the Gradle wrapper

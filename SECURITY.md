@@ -28,11 +28,13 @@ reporter unless they ask otherwise.
 
 ## Supported versions
 
-Rime OS is one rolling image. Only the newest published image receives fixes:
-`ghcr.io/andrenijman/rime-os:rime`, and the `daily`, `gaming-mesa` and
-`gaming-nvidia` tags, which always resolve to the same digest. A fix reaches a
-machine through `sudo rime update` and a reboot. Older images, including the
-rollback deployment a machine keeps, are not patched.
+Rime OS is one rolling image. Only the newest published image receives fixes.
+Every tag a machine can track (`rime`, `apex`, `daily`, `edge`, `gaming-mesa`
+and `gaming-nvidia`) resolves to that one digest, under
+`ghcr.io/andrenijman/rime-os` and, during the rename from APEX-OS, the old name
+`ghcr.io/andrenijman/apex-os` as well. A fix reaches a machine through
+`sudo rime update` and a reboot. Older images, including the rollback
+deployment a machine keeps, are not patched.
 
 An installer ISO installs the image it was built with, so a new install should
 run `sudo rime update` straight away. For Rime Remote on Android, only the
