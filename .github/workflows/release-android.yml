@@ -226,10 +226,12 @@ jobs:
         run: |
           set -euo pipefail
           tag="${{ steps.version.outputs.tag }}"
+          # --latest=false: the OS installer release owns "Latest" (rimeos.com and GitHub's badge read it).
           gh release create "$tag" \
             --title "Rime Remote for Android ${{ steps.version.outputs.name }}" \
             --notes-file "$RUNNER_TEMP/notes.md" \
             --target "${{ github.sha }}" \
+            --latest=false \
             "$RUNNER_TEMP"/release/*
 
       # Read back, because `gh release create` exiting zero is not evidence the
