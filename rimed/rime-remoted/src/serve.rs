@@ -20,10 +20,40 @@
 //! There is no step where the device says who it is. It cannot: the identity
 //! is what the handshake proved, and every proxied request carries it as the
 //! `actor` the daemon records.
+//!
+//! ## Three threads per connection, and why the frame loop is never the one that waits
+//!
+//! The **frame loop** reads, decrypts and routes. It answers a `Ping`, times a
+//! `Pong`, and writes a `Data` frame to the PTY it names — and it does nothing
+//! that can wait on `rime-agentd`. The **worker** takes every `Control` and
+//! every `Open`, strictly in the order they arrived, and writes each reply
+//! through the same [`Sealer`]. The **pinger** measures the connection and,
+//! since `liveness`, ends it when the device stops answering.
+//!
+//! It used to be one loop doing all of it, and a control request that waited
+//! — `CONTROL_TIMEOUT` is five minutes, for the requests a human answers —
+//! stopped every terminal on the connection for as long as it waited: no
+//! keystroke reached a PTY, no pong was read, and a phone that wanted a
+//! terminal to keep moving had to open a second connection per terminal and
+//! pay a full handshake each time. The worker is what makes one connection
+//! enough (`mux_attach`).
+//!
+//! **One worker, not one thread per request.** The phone pairs a reply with
+//! its request by ORDER alone — there is no request id on the wire — and its
+//! queue holds `Open`s as well as `Control`s, because an `Open` is answered
+//! on channel zero too (`android/.../link/Mux.kt`, "The ordering rule"). A
+//! pool would answer a fast `list` before a slow `approve` sent ahead of it
+//! and the phone would show one reply under the other request. So a slow
+//! request still delays the replies behind it, which the protocol requires;
+//! what it no longer delays is everything that is not a reply.
 
+use std::collections::{HashMap, VecDeque};
 use std::io::{Read, Write};
 use std::net::TcpStream;
-use std::sync::{Arc, Mutex};
+use std::path::{Path, PathBuf};
+use std::sync::atomic::{AtomicBool, Ordering};
+use std::sync::mpsc::{Receiver, SyncSender};
+use std::sync::{Arc, Mutex, MutexGuard};
 use std::time::{Duration, Instant};
 
 use rime_remote_core::noise::{Channel, Handshake};
@@ -58,6 +88,52 @@ pub const PING_INTERVAL: Duration = Duration::from_secs(15);
 /// filling the thread pool takes deliberate effort rather than patience.
 pub const HANDSHAKE_TIMEOUT: std::time::Duration = std::time::Duration::from_secs(30);
 
+/// What this build answers `remote_hello` with.
+///
+/// A phone uses a feature only when its name is here, so each entry is a
+/// promise about behaviour this file keeps, not a version number: `nodelay`
+/// is `main::prepare_accepted` and `net::write_message`'s single write;
+/// `control_worker` is [`Worker`]; `mux_attach` is the consequence — a
+/// terminal on the control connection keeps moving while a request waits, so
+/// the phone may stop dialling a connection per terminal; `liveness` is
+/// [`Outstanding::silent`]. A name the code did not honour would be a phone
+/// relying on something that is not there, which is worse than one that
+/// never heard of it.
+pub const FEATURES: [&str; 4] = ["nodelay", "control_worker", "mux_attach", "liveness"];
+
+/// The verbs this file answers itself, before a line could reach `rime-agentd`.
+///
+/// `push::VERBS` are the only others. Both lists are consulted by
+/// [`answered_here`] and nothing else is intercepted.
+pub const VERBS: [&str; 1] = ["remote_hello"];
+
+/// How many pings in a row may go unanswered before the connection is closed.
+///
+/// Three, at the shipped fifteen-second interval: forty-five seconds without
+/// a pong. The phone reconnects on its own, so closing a connection that is
+/// merely slow costs a handshake; keeping one that is dead costs everything
+/// sent into it, and before this nothing ever closed one — a phone that
+/// walked out of Wi-Fi coverage left a connection here that swallowed its
+/// terminal output until TCP gave up, which on Linux is a quarter of an hour.
+pub const LIVENESS_MISSES: usize = 3;
+
+/// The least silence that closes a connection, however short the interval.
+///
+/// Only matters below the shipped interval. The suites run pings every
+/// 100 ms so they can watch a measurement happen, and a test that pauses for
+/// half a second to poll the status socket would otherwise have its session
+/// closed underneath it — which is a fact about the test's clock, not about
+/// the link.
+pub const LIVENESS_FLOOR: Duration = Duration::from_secs(2);
+
+/// How many requests may wait for the worker before the frame loop waits too.
+///
+/// Bounded, so a device that floods control frames meets the same
+/// back-pressure it met when the frame loop did the work itself — the loop
+/// stops reading and TCP pushes back — rather than growing this process's
+/// memory. A phone never has more than a handful outstanding.
+const WORK_QUEUE: usize = 64;
+
 /// Why a device connection ended.
 #[derive(Debug)]
 pub enum ServeError {
@@ -70,6 +146,11 @@ pub enum ServeError {
     /// machine has ever seen.
     NotPaired,
     Protocol(String),
+    /// The device stopped answering pings and the connection was closed.
+    ///
+    /// Carries how long it had been silent, which is the one number that says
+    /// whether this was a phone in a lift or a phone in a drawer.
+    Silent(Duration),
 }
 
 impl std::fmt::Display for ServeError {
@@ -79,6 +160,12 @@ impl std::fmt::Display for ServeError {
             ServeError::Handshake(w) => write!(f, "the handshake did not complete: {w}"),
             ServeError::NotPaired => write!(f, "that device is not paired with this machine"),
             ServeError::Protocol(w) => write!(f, "{w}"),
+            ServeError::Silent(quiet) => write!(
+                f,
+                "it answered none of the last {LIVENESS_MISSES} pings ({} s without a sign of \
+                 life), so the connection was closed and the device will have to reconnect",
+                quiet.as_secs()
+            ),
         }
     }
 }
@@ -172,10 +259,15 @@ fn complete_pairing(
 }
 
 /// A session connection: `Noise_IK`, then frames.
+///
+/// Takes the `Arc` rather than a reference because the connection's worker
+/// outlives nothing but still has to own what it uses: a borrowed `State`
+/// would tie the worker to this thread's stack, and a scoped thread would
+/// hold the connection open until a five-minute request finished.
 fn session(
     reader_socket: Option<TcpStream>,
     mut socket: TcpStream,
-    state: &State,
+    state: &Arc<State>,
     agentd: &std::path::Path,
 ) -> Result<(), ServeError> {
     let secret = crate::secret_of(state);
@@ -261,7 +353,6 @@ fn session(
         state,
         agentd,
         &device_id,
-        &device_name,
         rtt_ms,
     );
     state.unregister(&device_id, peer);
@@ -271,48 +362,84 @@ fn session(
 /// The frame loop.
 ///
 /// One writer, several readers: PTY channels each get a thread that reads the
-/// daemon's Unix socket and pushes `Data` frames into a queue. Everything
-/// that goes out of this connection goes through that one queue, because the
-/// Noise channel's nonce is a counter and two threads sealing concurrently
-/// would produce two messages claiming the same one.
-#[allow(clippy::too_many_arguments)]
+/// daemon's Unix socket and pushes `Data` frames out. Everything that leaves
+/// this connection goes through one [`Sealer`], because the Noise channel's
+/// nonce is a counter and two threads sealing concurrently would produce two
+/// messages claiming the same one.
+///
+/// What this function itself does is read. Control and `Open` go to the
+/// [`Worker`]; `Data` and `Close` go straight to the channel they name unless
+/// that channel is still behind the worker (see [`Channels`]); `Ping` is
+/// answered here and `Pong` is timed here, which is what keeps both working
+/// while a request is in flight.
 fn frames(
     mut inbound: TcpStream,
     outbound: TcpStream,
     channel: Channel,
-    state: &State,
+    state: &Arc<State>,
     agentd: &std::path::Path,
     device_id: &str,
-    device_name: &str,
     rtt_ms: Arc<Mutex<Option<u64>>>,
 ) -> Result<(), ServeError> {
+    // The write half gets a deadline the read half never has. A read that
+    // waits is an idle terminal and is fine for hours; a WRITE that makes no
+    // progress for this long is a peer whose TCP window has been shut the
+    // whole time — gone, or frozen. Without it a writer blocked on such a
+    // socket holds the sealer, the pinger queues behind it, and the liveness
+    // rule below never gets to run. SO_SNDTIMEO bounds each `write(2)` rather
+    // than the whole frame, so a slow link that is moving never trips it.
+    outbound
+        .set_write_timeout(Some(write_deadline(state.ping_interval)))
+        .ok();
+    // Held here so this function can end the connection for every thread at
+    // once when it returns, whatever the reason.
+    let hangup = outbound.try_clone()?;
     let sealer = Arc::new(Mutex::new(Sealer {
         channel,
         socket: outbound,
     }));
-    let mut ptys: Vec<DaemonChannel> = Vec::new();
-    let _ = device_name;
+    let channels = Arc::new(Mutex::new(Channels::default()));
+    let ended = Arc::new(AtomicBool::new(false));
 
     // The desktop measures its own connections. Answering a device's pings,
     // which is all this used to do, tells the desktop nothing: a round trip
     // is only known to whoever sent the first half of it.
-    let outstanding = Arc::new(Mutex::new(Outstanding::default()));
+    let outstanding = Arc::new(Mutex::new(Outstanding::new()));
+    let silenced: Arc<Mutex<Option<Duration>>> = Arc::new(Mutex::new(None));
     {
         let sealer = Arc::clone(&sealer);
         let outstanding = Arc::clone(&outstanding);
+        let silenced = Arc::clone(&silenced);
+        let ended = Arc::clone(&ended);
+        let hangup = hangup.try_clone()?;
         let interval = state.ping_interval;
         std::thread::spawn(move || {
             let mut token: u64 = 0;
             loop {
-                token += 1;
+                if ended.load(Ordering::Relaxed) {
+                    return;
+                }
                 {
                     let Ok(mut o) = outstanding.lock() else { return };
+                    // Checked BEFORE the next ping goes out, so the newest of
+                    // the three unanswered ones has had a whole interval to
+                    // come back. `shutdown` rather than a flag: the frame loop
+                    // is parked in a read and would not look at a flag until
+                    // the device sent something, which is the one thing a
+                    // silent device does not do.
+                    if let Some(quiet) = o.silent() {
+                        drop(o);
+                        if let Ok(mut s) = silenced.lock() {
+                            *s = Some(quiet);
+                        }
+                        let _ = hangup.shutdown(std::net::Shutdown::Both);
+                        return;
+                    }
+                    token += 1;
                     o.sent(token);
                 }
-                // The thread ends when the write fails, which is what a
-                // closed connection looks like from here. No flag to check
-                // and nothing to leak: one thread per open connection, gone
-                // when the connection is.
+                // The thread also ends when the write fails, which is what a
+                // closed connection looks like from here.
                 if send(&sealer, Frame::Ping { token }).is_err() {
                     return;
                 }
@@ -321,11 +448,79 @@ fn frames(
         });
     }
 
+    let (work, queue) = std::sync::mpsc::sync_channel::<Work>(WORK_QUEUE);
+    {
+        let worker = Worker {
+            state: Arc::clone(state),
+            agentd: agentd.to_path_buf(),
+            device_id: device_id.to_string(),
+            sealer: Arc::clone(&sealer),
+            channels: Arc::clone(&channels),
+        };
+        std::thread::spawn(move || worker.run(queue));
+    }
+
+    let outcome = read_frames(
+        &mut inbound,
+        &sealer,
+        &channels,
+        &work,
+        &outstanding,
+        &rtt_ms,
+    );
+
+    // The end, in an order that leaves nothing half-done. The worker is told
+    // first — under the channel lock, so an `Open` it is finishing right now
+    // either lands before the sweep below or sees the flag and detaches —
+    // then its queue is closed, so it drains what the device sent and stops.
+    // Every PTY is detached (the sessions go on running in the daemon), and
+    // the socket is shut so every writer still holding the sealer fails at
+    // once instead of at its next ping.
+    ended.store(true, Ordering::Relaxed);
+    let detached: Vec<Arc<DaemonChannel>> = {
+        let mut c = lock(&channels);
+        c.ended = true;
+        c.open.drain().map(|(_, p)| p).collect()
+    };
+    drop(work);
+    drop(detached);
+    let _ = hangup.shutdown(std::net::Shutdown::Both);
+
+    if let Some(quiet) = silenced.lock().ok().and_then(|s| *s) {
+        return Err(ServeError::Silent(quiet));
+    }
+    outcome
+}
+
+/// How long one write to the device may make no progress.
+///
+/// The same window the pings get, so the two ways this side notices a dead
+/// device agree about how long "dead" takes.
+fn write_deadline(interval: Duration) -> Duration {
+    (interval * LIVENESS_MISSES as u32).max(LIVENESS_FLOOR)
+}
+
+/// Read, decrypt and route until the connection ends.
+fn read_frames(
+    inbound: &mut TcpStream,
+    sealer: &Arc<Mutex<Sealer>>,
+    channels: &Arc<Mutex<Channels>>,
+    work: &SyncSender<Work>,
+    outstanding: &Arc<Mutex<Outstanding>>,
+    rtt_ms: &Arc<Mutex<Option<u64>>>,
+) -> Result<(), ServeError> {
+    let to_worker = |w: Work| {
+        work.send(w).map_err(|_| {
+            ServeError::Protocol("this connection's control worker stopped".into())
+        })
+    };
     loop {
-        let message = match crate::net::read_message(&mut inbound) {
+        let message = match crate::net::read_message(inbound) {
             Ok(m) => m,
-            // An ordinary close, or a revoked device's socket shut down under
-            // it. Both end the loop and neither is an error worth a log line.
+            // An ordinary close, a revoked device's socket shut down under
+            // it, or the pinger giving up on a silent one. All end the loop
+            // and none is an error worth a log line here; the pinger's case
+            // is reported by the caller, which knows it happened.
             Err(e) if e.kind() == std::io::ErrorKind::UnexpectedEof => return Ok(()),
             Err(e) => return Err(ServeError::Io(e)),
         };
@@ -337,11 +532,12 @@ fn frames(
         };
         let frame = Frame::decode(&plaintext).map_err(|e| ServeError::Protocol(e.to_string()))?;
         match frame {
-            Frame::Ping { token } => send(&sealer, Frame::Pong { token })?,
+            Frame::Ping { token } => send(sealer, Frame::Pong { token })?,
             // The other half of the measurement. A token that was never sent
             // is ignored rather than timed: a device that echoed a number of
             // its own choosing could otherwise report any quality it liked,
-            // including a good one for a connection that is unusable.
+            // including a good one for a connection that is unusable. It
+            // does not count as a sign of life either, for the same reason.
             Frame::Pong { token } => {
                 if let Ok(mut o) = outstanding.lock() {
                     if let Some(elapsed) = o.answered(token) {
@@ -351,73 +547,316 @@ fn frames(
                     }
                 }
             }
-            Frame::Control(line) => {
-                // Two verbs belong to this service rather than to the daemon:
-                // they are about how this phone is REACHED, which `rime-agentd`
-                // has no concept of. Everything else is forwarded verbatim.
-                // See `crate::push::control` for why this is the seam and not a
-                // new frame tag.
-                let reply = match crate::push::control(state, device_id, &line) {
-                    Some(reply) => reply,
-                    None => control(agentd, device_id, &line),
-                };
-                send(&sealer, Frame::Control(reply))?;
-            }
+            Frame::Control(line) => to_worker(Work::Control(line))?,
             Frame::Open { channel, request } => {
-                match DaemonChannel::open(agentd, device_id, channel, &request, &sealer) {
-                    Ok((pty, reply, buffered)) => {
-                        send(&sealer, Frame::Control(reply))?;
-                        for f in Frame::data_frames(channel, &buffered) {
-                            send(&sealer, f)?;
-                        }
-                        ptys.push(pty);
-                    }
-                    // A refused takeover comes back as the daemon's own reply
-                    // where possible, so the device renders "no session 4" or
-                    // the size cap rather than a channel that closed for no
-                    // stated reason.
-                    Err(crate::proxy::ProxyError::NotTakenOver(reply)) => {
-                        send(&sealer, Frame::Control(reply))?;
-                        send(
-                            &sealer,
-                            Frame::Close {
-                                channel,
-                                reason: String::new(),
-                            },
-                        )?;
-                    }
-                    Err(e) => send(
-                        &sealer,
-                        Frame::Close {
-                            channel,
-                            reason: e.to_string(),
-                        },
-                    )?,
-                }
+                lock(channels).queue(channel);
+                to_worker(Work::Open { channel, request })?;
             }
             Frame::Data { channel, bytes } => {
-                if let Some(p) = ptys.iter_mut().find(|p| p.channel == channel) {
-                    let _ = p.write(&bytes);
+                let route = lock(channels).route(channel);
+                match route {
+                    Route::Direct(pty) => {
+                        let _ = pty.write(&bytes);
+                    }
+                    Route::Worker => to_worker(Work::Data { channel, bytes })?,
+                    Route::Nowhere => {}
                 }
             }
             Frame::Close { channel, .. } => {
-                ptys.retain(|p| p.channel != channel);
+                let detached = {
+                    let mut c = lock(channels);
+                    if c.is_behind(channel) {
+                        c.queue(channel);
+                        None
+                    } else {
+                        Some(c.open.remove(&channel))
+                    }
+                };
+                // Dropped outside the lock: dropping the last handle shuts
+                // the daemon connection down, which is a syscall the worker
+                // has no reason to wait behind.
+                if detached.is_none() {
+                    to_worker(Work::Close { channel })?;
+                }
             }
         }
-        let _ = state;
     }
 }
 
-/// Pings that have gone out and not come back.
+/// What the frame loop hands the worker, in the order the device sent it.
+enum Work {
+    /// One line of `rime-agentd`'s protocol, or of this service's own.
+    Control(Vec<u8>),
+    /// A channel to open. Answered on channel zero, so it queues with control.
+    Open { channel: u32, request: Vec<u8> },
+    /// Bytes for a channel whose `Open` the worker has not finished yet.
+    Data { channel: u32, bytes: Vec<u8> },
+    /// A close for a channel whose `Open` the worker has not finished yet.
+    Close { channel: u32 },
+}
+
+/// The channels one connection has open, shared by the frame loop and the
+/// worker.
+///
+/// ## `behind`, and the reordering it exists to prevent
+///
+/// With `Open` off the frame loop, a device's `Data` can arrive for a channel
+/// the worker has not opened yet. Dropping it would lose bytes that the old
+/// inline loop delivered; writing it anywhere but through the worker would let
+/// it overtake the `Open`. So a channel with anything still queued in the
+/// worker — its `Open`, or a `Data`/`Close` that followed it — takes its next
+/// frames through the worker too, in order, and goes back to the direct path
+/// only once the worker has caught up. The count is changed under this lock
+/// by both sides, so the frame loop can never see a channel as neither behind
+/// nor open while its `Open` is being finished.
+///
+/// A real phone waits for the `attached` reply before it types, so in
+/// practice this is empty; it is here so that a client that does not wait is
+/// still served exactly as it was before.
+#[derive(Default)]
+struct Channels {
+    /// Channels carrying a PTY or an upload, by the device's channel number.
+    open: HashMap<u32, Arc<DaemonChannel>>,
+    /// How many frames for a channel are waiting in the worker's queue.
+    behind: HashMap<u32, usize>,
+    /// Set once the connection has ended: a channel opened after this is
+    /// detached rather than published into a map nobody will ever sweep.
+    ended: bool,
+}
+
+/// Where a `Data` frame goes.
+enum Route {
+    Direct(Arc<DaemonChannel>),
+    Worker,
+    /// No such channel: closed, refused, or never opened. Dropped, as before.
+    Nowhere,
+}
+
+impl Channels {
+    fn queue(&mut self, channel: u32) {
+        *self.behind.entry(channel).or_default() += 1;
+    }
+
+    fn is_behind(&self, channel: u32) -> bool {
+        self.behind.contains_key(&channel)
+    }
+
+    /// The worker has dealt with one frame for this channel.
+    fn done(&mut self, channel: u32) {
+        if let Some(n) = self.behind.get_mut(&channel) {
+            *n = n.saturating_sub(1);
+            if *n == 0 {
+                self.behind.remove(&channel);
+            }
+        }
+    }
+
+    fn route(&mut self, channel: u32) -> Route {
+        if self.is_behind(channel) {
+            self.queue(channel);
+            Route::Worker
+        } else if let Some(pty) = self.open.get(&channel) {
+            Route::Direct(Arc::clone(pty))
+        } else {
+            Route::Nowhere
+        }
+    }
+}
+
+/// A lock that survives a panic on another thread.
+///
+/// The data behind it is two maps and a flag, written whole, so a guard
+/// recovered from a poisoned lock is as good as any; refusing it would turn
+/// one panicking pump into a connection that can open no more channels.
+fn lock<T>(m: &Mutex<T>) -> MutexGuard<'_, T> {
+    m.lock().unwrap_or_else(|e| e.into_inner())
+}
+
+/// The per-connection thread that answers control requests and opens
+/// channels, one at a time and in arrival order.
+struct Worker {
+    state: Arc<State>,
+    agentd: PathBuf,
+    device_id: String,
+    sealer: Arc<Mutex<Sealer>>,
+    channels: Arc<Mutex<Channels>>,
+}
+
+impl Worker {
+    /// Until the frame loop drops its end of the queue and the queue is empty.
+    ///
+    /// ## When the connection ends with a request in flight
+    ///
+    /// The request in flight finishes — `rime-agentd` is not interrupted, as
+    /// it was not when the frame loop itself waited — and its reply is sent
+    /// into a closed socket and lost. Requests queued behind it still RUN, in
+    /// order, with nobody to read their replies: each was received whole
+    /// before the connection ended, and the old loop likewise ran everything
+    /// it had read. `Open`s are the exception. An attach for a connection that
+    /// no longer exists would resize the session to the phone's terminal and
+    /// detach again at once, which changes the desktop's terminal for nobody,
+    /// so a queued `Open` is skipped once the connection has ended.
+    fn run(self, queue: Receiver<Work>) {
+        for work in queue {
+            match work {
+                Work::Control(line) => {
+                    let reply = answered_here(&self.state, &self.device_id, &line)
+                        .unwrap_or_else(|| control(&self.agentd, &self.device_id, &line));
+                    let _ = send(&self.sealer, Frame::Control(reply));
+                }
+                Work::Open { channel, request } => self.open(channel, &request),
+                Work::Data { channel, bytes } => {
+                    let pty = lock(&self.channels).open.get(&channel).cloned();
+                    if let Some(pty) = pty {
+                        let _ = pty.write(&bytes);
+                    }
+                    lock(&self.channels).done(channel);
+                }
+                Work::Close { channel } => {
+                    let detached = {
+                        let mut c = lock(&self.channels);
+                        c.done(channel);
+                        c.open.remove(&channel)
+                    };
+                    drop(detached);
+                }
+            }
+        }
+    }
+
+    fn open(&self, channel: u32, request: &[u8]) {
+        {
+            let mut c = lock(&self.channels);
+            if c.ended {
+                c.done(channel);
+                return;
+            }
+        }
+        match DaemonChannel::open(&self.agentd, &self.device_id, request) {
+            Ok((pty, reply, buffered)) => {
+                // The reply, then the bytes that arrived with it, THEN the
+                // pump. The pump used to start inside `open`, before the
+                // reply had been sent, so the first burst of scrollback could
+                // reach the phone ahead of the `attached` that tells it the
+                // channel exists — and the phone drops `Data` for a channel it
+                // does not know yet. A terminal that opened blank, sometimes.
+                let delivered = send(&self.sealer, Frame::Control(reply)).is_ok()
+                    && Frame::data_frames(channel, &buffered)
+                        .into_iter()
+                        .all(|f| send(&self.sealer, f).is_ok());
+                let pty = Arc::new(pty);
+                let pumping = match delivered.then(|| pty.pump(channel, &self.sealer)) {
+                    Some(Ok(())) => true,
+                    Some(Err(e)) => {
+                        let _ = send(
+                            &self.sealer,
+                            Frame::Close {
+                                channel,
+                                reason: e.to_string(),
+                            },
+                        );
+                        false
+                    }
+                    None => false,
+                };
+                // Published and marked done in one critical section, so the
+                // frame loop's next `Data` for this channel finds it open.
+                // A channel with the same number already open is replaced and
+                // detached; the old loop kept both and wrote to the first.
+                let mut c = lock(&self.channels);
+                if pumping && !c.ended {
+                    c.open.insert(channel, pty);
+                }
+                c.done(channel);
+            }
+            // A refused takeover comes back as the daemon's own reply where
+            // possible, so the device renders "no session 4" or the size cap
+            // rather than a channel that closed for no stated reason.
+            Err(crate::proxy::ProxyError::NotTakenOver(reply)) => {
+                let _ = send(&self.sealer, Frame::Control(reply));
+                let _ = send(
+                    &self.sealer,
+                    Frame::Close {
+                        channel,
+                        reason: String::new(),
+                    },
+                );
+                lock(&self.channels).done(channel);
+            }
+            Err(e) => {
+                let _ = send(
+                    &self.sealer,
+                    Frame::Close {
+                        channel,
+                        reason: e.to_string(),
+                    },
+                );
+                lock(&self.channels).done(channel);
+            }
+        }
+    }
+}
+
+/// A control line this service answers itself, or `None` to forward it.
+///
+/// `remote_hello` and push registration. Each is about the CONNECTION — what
+/// this end of it can do, how the phone is reached — which `rime-agentd` has
+/// no concept of; see `push::control` for why this is the seam and not a new
+/// frame tag. Everything else is forwarded verbatim.
+fn answered_here(state: &State, device_id: &str, line: &[u8]) -> Option<Vec<u8>> {
+    let cmd = serde_json::from_slice::<serde_json::Value>(line)
+        .ok()
+        .and_then(|v| v.get("cmd").and_then(|c| c.as_str()).map(str::to_string));
+    match cmd.as_deref() {
+        // Through the list, so "which verbs does this file take" has one
+        // answer a test can read — the same rule `push::control` keeps.
+        Some(c) if VERBS.contains(&c) => Some(remote_hello(state)),
+        _ => crate::push::control(state, device_id, line),
+    }
+}
+
+/// What this end of the connection can do, and where else it can be reached.
+///
+/// Answered here and never forwarded, so it describes THIS process. An older
+/// `rime-remoted` forwards the line, `rime-agentd` answers `bad_request`, and
+/// the phone reads that as "no features" — which is exactly right for a
+/// daemon that has none of them.
+///
+/// `lan` is the pairing code's list, computed the same way at the moment of
+/// asking: the port actually bound and only the address families the listener
+/// accepts. A phone that paired on another network, or before a DHCP lease
+/// changed, refreshes its stored list from this instead of dialling
+/// addresses that stopped being this machine's.
+fn remote_hello(state: &State) -> Vec<u8> {
+    serde_json::json!({
+        "reply": "remote",
+        "version": rime_remote_core::REMOTE_PROTOCOL_VERSION,
+        "features": FEATURES,
+        "lan": state.lan_addresses(),
+    })
+    .to_string()
+    .into_bytes()
+}
+
+/// Pings that have gone out and not come back, and when the device was last
+/// heard from.
 ///
 /// Bounded on purpose. A device that answers nothing would otherwise make
 /// this grow by one entry every interval for as long as the connection is
 /// open, which is a slow leak driven by the far end — exactly the shape of
-/// thing a remote peer should not be able to do.
-#[derive(Default)]
+/// thing a remote peer should not be able to do. And since `liveness` it
+/// cannot grow for long anyway: [`LIVENESS_MISSES`] unanswered ends the
+/// connection.
 struct Outstanding {
-    sent: std::collections::VecDeque<(u64, Instant)>,
+    sent: VecDeque<(u64, Instant)>,
+    /// The connection's start, then the moment of every valid pong.
+    heard: Instant,
 }
+
+// The liveness rule counts entries in `sent`, so the bound has to be able to
+// hold that many. A compile-time check rather than a comment, because the two
+// numbers live in different places and drift apart one edit at a time.
+const _: () = assert!(Outstanding::DEPTH >= LIVENESS_MISSES);
 
 impl Outstanding {
     /// How many unanswered pings are remembered.
@@ -426,6 +865,13 @@ impl Outstanding {
     /// and the answer to a ping from a minute ago is not a measurement of
     /// anything current.
     const DEPTH: usize = 4;
+
+    fn new() -> Outstanding {
+        Outstanding {
+            sent: VecDeque::new(),
+            heard: Instant::now(),
+        }
+    }
 
     fn sent(&mut self, token: u64) {
         self.sent.push_back((token, Instant::now()));
@@ -437,15 +883,36 @@ impl Outstanding {
     /// The round trip for a token this connection actually sent, or `None`.
     ///
     /// Consumed, so a device replaying one pong cannot pin a good reading in
-    /// place while the connection degrades.
+    /// place while the connection degrades. Every OLDER ping goes with it: an
+    /// answer to the newest proves the link is carrying answers now, and an
+    /// earlier ping that got lost on the way is not evidence against a
+    /// connection that has since answered.
     fn answered(&mut self, token: u64) -> Option<Duration> {
         let i = self.sent.iter().position(|(t, _)| *t == token)?;
-        let (_, at) = self.sent.remove(i)?;
+        let (_, at) = self.sent[i];
+        self.sent.drain(..=i);
+        self.heard = Instant::now();
         Some(at.elapsed())
+    }
+
+    /// How long the device has been silent, once that is long enough to
+    /// close the connection; `None` while it is not.
+    ///
+    /// Both halves: [`LIVENESS_MISSES`] pings in a row with no answer, and at
+    /// least [`LIVENESS_FLOOR`] since the last one that was answered.
+    fn silent(&self) -> Option<Duration> {
+        let quiet = self.heard.elapsed();
+        (self.sent.len() >= LIVENESS_MISSES && quiet >= LIVENESS_FLOOR).then_some(quiet)
     }
 }
 
 /// The one place a frame leaves this connection.
+///
+/// A failed write ends the connection for everybody. The nonce has already
+/// moved on and the far end may hold part of the message, so nothing sealed
+/// after it could be opened there; before this, a pump whose write failed
+/// simply stopped, and the next frame any other thread sent was one the phone
+/// could not decrypt.
 fn send(sealer: &Arc<Mutex<Sealer>>, frame: Frame) -> Result<(), ServeError> {
     let bytes = frame
         .encode()
@@ -455,7 +922,10 @@ fn send(sealer: &Arc<Mutex<Sealer>>, frame: Frame) -> Result<(), ServeError> {
         .channel
         .seal(&bytes)
         .map_err(|e| ServeError::Protocol(e.to_string()))?;
-    crate::net::write_message(&mut s.socket, &sealed)?;
+    if let Err(e) = crate::net::write_message(&mut s.socket, &sealed) {
+        let _ = s.socket.shutdown(std::net::Shutdown::Both);
+        return Err(ServeError::Io(e));
+    }
     Ok(())
 }
 
@@ -477,7 +947,7 @@ struct Sealer {
 /// daemon's own vocabulary, rather than as a dropped connection: a phone that
 /// loses its terminal because the runtime was restarted is a worse experience
 /// than one that is told the runtime was restarted.
-fn control(agentd: &std::path::Path, device_id: &str, line: &[u8]) -> Vec<u8> {
+fn control(agentd: &Path, device_id: &str, line: &[u8]) -> Vec<u8> {
     // A takeover verb on the control channel would leave the daemon connection
     // half out of control mode with this side still expecting reply lines.
     // `attach` wedges with the device's terminal bytes going nowhere;
@@ -514,19 +984,19 @@ fn control(agentd: &std::path::Path, device_id: &str, line: &[u8]) -> Vec<u8> {
 /// line the daemon writes back when it is done — the `injected` reply, or the
 /// refusal — comes back as `Frame::Data` too, because the pump below does not
 /// know or need to know which of the two it is carrying.
+///
+/// Shared (`Arc`) between the channel map and whichever thread is writing to
+/// it at the moment, so a write never happens under the map's lock; the last
+/// handle to go detaches.
 struct DaemonChannel {
-    channel: u32,
     stream: std::os::unix::net::UnixStream,
-    _pump: std::thread::JoinHandle<()>,
 }
 
 impl DaemonChannel {
     fn open(
-        agentd: &std::path::Path,
+        agentd: &Path,
         device_id: &str,
-        channel: u32,
         request: &[u8],
-        sealer: &Arc<Mutex<Sealer>>,
     ) -> Result<(DaemonChannel, Vec<u8>, Vec<u8>), crate::proxy::ProxyError> {
         let (stream, reply, buffered) =
             crate::proxy::Agentd::open(agentd, device_id)?.take_over(request)?;
@@ -548,9 +1018,19 @@ impl DaemonChannel {
         if !taken {
             return Err(crate::proxy::ProxyError::NotTakenOver(reply));
         }
-        let mut read_half = stream.try_clone()?;
+        Ok((DaemonChannel { stream }, reply, buffered))
+    }
+
+    /// Start copying the daemon's side of the channel to the device.
+    ///
+    /// Separate from [`DaemonChannel::open`] so the caller can put the reply
+    /// and the buffered bytes on the wire first; see [`Worker::open`].
+    fn pump(&self, channel: u32, sealer: &Arc<Mutex<Sealer>>) -> std::io::Result<()> {
+        let mut read_half = self.stream.try_clone()?;
         let sealer = Arc::clone(sealer);
-        let pump = std::thread::spawn(move || {
+        // Detached: it ends by itself when the daemon connection does, which
+        // is when the channel is closed or the daemon hangs up.
+        std::thread::spawn(move || {
             let mut buf = [0u8; 16 * 1024];
             loop {
                 match read_half.read(&mut buf) {
@@ -574,20 +1054,12 @@ impl DaemonChannel {
                 }
             }
         });
-        Ok((
-            DaemonChannel {
-                channel,
-                stream,
-                _pump: pump,
-            },
-            reply,
-            buffered,
-        ))
+        Ok(())
     }
 
-    fn write(&mut self, bytes: &[u8]) -> std::io::Result<()> {
-        self.stream.write_all(bytes)?;
-        self.stream.flush()
+    fn write(&self, bytes: &[u8]) -> std::io::Result<()> {
+        (&self.stream).write_all(bytes)?;
+        (&self.stream).flush()
     }
 }
 
@@ -598,7 +1070,6 @@ impl Drop for DaemonChannel {
         let _ = self.stream.shutdown(std::net::Shutdown::Both);
     }
 }
-
 
 #[cfg(test)]
 mod tests {
@@ -658,5 +1129,165 @@ mod tests {
         );
         // And it is one line, so it cannot desynchronise the frame it rides in.
         assert!(!reply.contains(&b'\n'));
+    }
+
+    fn a_state(tag: &str) -> (Arc<State>, std::path::PathBuf) {
+        let dir = std::env::temp_dir().join(format!(
+            "rime-serve-state-{}-{tag}-{}",
+            std::process::id(),
+            rime_remote_core::now_ms()
+        ));
+        std::fs::create_dir_all(&dir).expect("mkdir");
+        let identity = rime_remote_core::identity::Identity::generate().expect("identity");
+        let state = State::new(
+            identity,
+            "test-machine".into(),
+            47717,
+            std::net::IpAddr::from([0u8; 16]),
+            None,
+            dir.join("devices.json"),
+            PING_INTERVAL,
+        )
+        .expect("state");
+        (state, dir)
+    }
+
+    #[test]
+    fn remote_hello_is_answered_here_with_what_this_build_does() {
+        let (state, dir) = a_state("hello");
+        let reply = answered_here(&state, "pixel-8", br#"{"cmd":"remote_hello"}"#)
+            .expect("remote_hello reached the daemon");
+        let v: serde_json::Value = serde_json::from_slice(&reply).expect("json");
+        assert_eq!(v["reply"], "remote", "{v}");
+        assert_eq!(v["version"], rime_remote_core::REMOTE_PROTOCOL_VERSION, "{v}");
+        // Exactly the contract's four, in its order: a phone keys behaviour
+        // off these strings, so a typo is a feature it silently never uses.
+        assert_eq!(
+            v["features"],
+            serde_json::json!(["nodelay", "control_worker", "mux_attach", "liveness"]),
+            "{v}"
+        );
+        // The pairing code's list, with the port this listener has — and
+        // `host:port` a phone can split, so an IPv6 entry is bracketed.
+        let lan: Vec<String> = serde_json::from_value(v["lan"].clone()).expect("strings");
+        assert_eq!(lan, state.lan_addresses());
+        for a in &lan {
+            let addr: std::net::SocketAddr = a.parse().unwrap_or_else(|e| panic!("{a}: {e}"));
+            assert_eq!(addr.port(), 47717, "{a}");
+        }
+        // One line, so it cannot desynchronise the frame it rides in.
+        assert!(!reply.contains(&b'\n'));
+        let _ = std::fs::remove_dir_all(dir);
+    }
+
+    #[test]
+    fn only_the_reserved_verbs_are_answered_here_and_everything_else_is_forwarded() {
+        // `wire.rs` says a control frame carries the daemon's protocol
+        // verbatim. A verb this service swallowed would be one the phone
+        // silently lost, so the set it takes is pinned: this file's own and
+        // push registration's, and nothing that merely resembles them.
+        let (state, dir) = a_state("verbs");
+        for cmd in VERBS.iter().chain(crate::push::VERBS.iter()) {
+            let line = format!(r#"{{"cmd":"{cmd}"}}"#);
+            assert!(
+                answered_here(&state, "pixel-8", line.as_bytes()).is_some(),
+                "{cmd} was forwarded"
+            );
+        }
+        for line in [
+            br#"{"cmd":"hello"}"#.to_vec(),
+            br#"{"cmd":"list"}"#.to_vec(),
+            br#"{"cmd":"remote"}"#.to_vec(),
+            br#"{"cmd":"remote_hello_again"}"#.to_vec(),
+            br#"{"remote_hello":true}"#.to_vec(),
+            b"remote_hello".to_vec(),
+        ] {
+            assert_eq!(
+                answered_here(&state, "pixel-8", &line),
+                None,
+                "{} never reached the daemon",
+                String::from_utf8_lossy(&line)
+            );
+        }
+        assert_eq!(VERBS, ["remote_hello"]);
+        let _ = std::fs::remove_dir_all(dir);
+    }
+
+    #[test]
+    fn three_unanswered_pings_are_silence_and_any_answer_ends_it() {
+        let long_ago = |o: &mut Outstanding| {
+            o.heard = Instant::now()
+                .checked_sub(Duration::from_secs(60))
+                .expect("a clock a minute old");
+        };
+        let mut o = Outstanding::new();
+        long_ago(&mut o);
+        o.sent(1);
+        o.sent(2);
+        assert_eq!(o.silent(), None, "two misses closed the connection");
+        o.sent(3);
+        assert!(o.silent().is_some(), "three misses did not");
+
+        // One answer — even to the newest ping only — is a live link, and
+        // the older misses go with it rather than lingering towards the next
+        // three.
+        assert!(o.answered(3).is_some());
+        assert_eq!(o.silent(), None);
+        assert_eq!(o.answered(2), None, "an older token survived a newer answer");
+        o.sent(4);
+        o.sent(5);
+        assert_eq!(o.silent(), None);
+
+        // A token this end never sent is not a sign of life.
+        let mut o = Outstanding::new();
+        long_ago(&mut o);
+        for t in 1..=3 {
+            o.sent(t);
+        }
+        assert_eq!(o.answered(0xdead_beef), None);
+        assert!(o.silent().is_some(), "an invented pong kept a silent device alive");
+
+        // And the floor: at a test's 100 ms interval three misses come in a
+        // fraction of a second, which is not a dead link.
+        let mut o = Outstanding::new();
+        for t in 1..=3 {
+            o.sent(t);
+        }
+        assert_eq!(o.silent(), None, "closed inside the floor");
+    }
+
+    #[test]
+    fn a_write_that_makes_no_progress_is_given_the_same_window_as_the_pings() {
+        assert_eq!(write_deadline(PING_INTERVAL), Duration::from_secs(45));
+        assert_eq!(write_deadline(Duration::from_millis(100)), LIVENESS_FLOOR);
+    }
+
+    #[test]
+    fn a_channel_behind_the_worker_takes_its_frames_through_the_worker_until_it_catches_up() {
+        // The reordering this prevents: a `Data` written straight to a PTY
+        // while an earlier one for the same channel was still queued behind
+        // its `Open`.
+        let mut c = Channels::default();
+        assert!(matches!(c.route(7), Route::Nowhere), "a channel nobody opened");
+        c.queue(7); // the Open
+        assert!(matches!(c.route(7), Route::Worker));
+        assert!(matches!(c.route(7), Route::Worker));
+        // The worker finishes the Open and publishes the channel...
+        let (ours, _theirs) = std::os::unix::net::UnixStream::pair().expect("pair");
+        c.open.insert(7, Arc::new(DaemonChannel { stream: ours }));
+        c.done(7);
+        // ...but two Data frames are still queued behind it, so a third must
+        // queue too rather than overtake them.
+        assert!(matches!(c.route(7), Route::Worker));
+        c.done(7);
+        c.done(7);
+        c.done(7);
+        assert!(matches!(c.route(7), Route::Direct(_)), "caught up and still queued");
+        // Another channel is not held up by this one.
+        c.queue(8);
+        assert!(matches!(c.route(7), Route::Direct(_)));
+        // And `done` past zero cannot wrap into a channel stuck behind for ever.
+        c.done(9);
+        assert!(!c.is_behind(9));
     }
 }
