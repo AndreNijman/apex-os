@@ -43,6 +43,29 @@ data class AgentSession(
     val state: String = AgentStates.STARTING,
     /** Free text the runtime attached to the state. `"paused"`, an error, a step. */
     val detail: String? = null,
+    /**
+     * What a PERSON called this session, or null.
+     *
+     * Set only by a person — `rime agent run --name`, a rename from the CLI,
+     * the Shell or this phone — and never from anything the agent printed.
+     * `SessionInfo` always serialises the key, so `"name": null` means "this
+     * daemon has names and none is set" and a missing key means an older
+     * daemon; both decode to null here, and the difference that matters to a
+     * screen (whether renaming is possible) is read off `Hello.features`
+     * instead of guessed from a null.
+     */
+    val name: String? = null,
+    /**
+     * The agent's own terminal title (OSC 0 / OSC 2), cleaned by the daemon.
+     *
+     * **Agent-controlled text.** The daemon strips spinner glyphs and control
+     * characters and clips it to 80 characters, and this phone still treats it
+     * as display-only: nothing branches on it, it is sanitised again before it
+     * is drawn ([SessionNames.forDisplay]), and it never reaches a
+     * notification — an agent that could put words on a lock screen could put
+     * a secret there.
+     */
+    val title: String? = null,
     val paused: Boolean = false,
 
     // The policy, flattened. Six of the seven dimensions; `connectors` is
@@ -91,6 +114,42 @@ data class AgentSession(
 
     /** Project name, project path, or working directory — the first that exists. */
     val where: String get() = projectName ?: project ?: cwd
+
+    /**
+     * The label a session had before sessions had names: `Claude · rime`.
+     *
+     * The adapter, then the project's name or the last part of the directory.
+     * It is the third choice of [displayName] and the one every session has,
+     * which is why a named session still shows it as its secondary line — a
+     * name says what the work is, and this says which agent is doing it where.
+     */
+    val label: String
+        get() {
+            val place = where.trimEnd('/').substringAfterLast('/')
+            return if (place.isEmpty()) agentName else "$agentName · $place"
+        }
+
+    /**
+     * What to call this session on a screen: its name, else its title, else
+     * [label].
+     *
+     * The order is the contract's (§1.3) and the Shell's and the CLI's too, so
+     * the phone, the desktop and `rime agent list` never disagree about what a
+     * session is called. A person's name wins over the agent's title because
+     * only the person's is a statement anybody made on purpose.
+     *
+     * **Screens only.** `NotificationContent` does not call this and must not:
+     * a name can say what somebody is working on and a title is whatever the
+     * agent chose to print, and the lock-screen rule is fixed words, an
+     * adapter and a machine.
+     */
+    val displayName: String
+        get() = SessionNames.forDisplay(name, SessionNames.MAX_CHARS)
+            ?: SessionNames.forDisplay(title, SessionNames.MAX_TITLE_CHARS)
+            ?: label
+
+    /** Whether [displayName] is something other than [label]. */
+    val isNamed: Boolean get() = displayName != label
 
     /**
      * The command that undoes this session's work, to be run **at the
@@ -202,7 +261,21 @@ data class Hello(
      */
     val agents: List<String> = emptyList(),
     @SerialName("default_agent") val defaultAgent: String = "",
-)
+    /**
+     * What this daemon can do beyond the verbs every version has.
+     *
+     * `#[serde(default)]` on the far side and empty here when absent, and an
+     * empty list means exactly what an absent key does: an older daemon, which
+     * gets today's behaviour for everything. A client uses a feature ONLY when
+     * its string is present — never on a version number, which cannot say
+     * that a feature was backported, and never by trying the verb and reading
+     * the refusal, which for `input` would type a sentence it then could not
+     * submit.
+     */
+    val features: List<String> = emptyList(),
+) {
+    fun has(feature: String): Boolean = feature in features
+}
 
 /** The daemon said no, in its own vocabulary. */
 class AgentError(val kind: String, override val message: String) : Exception(message)
@@ -274,6 +347,72 @@ object Agentd {
      */
     fun input(id: Int, data: String): String =
         """{"cmd":"input","id":$id,"data":"${escape(data)}"}"""
+
+    /**
+     * Type into a live session and then press Return, as two writes.
+     *
+     * `{"cmd":"input","id":N,"data":"…","submit":true}` — only against a
+     * daemon whose `hello` lists [Features.INPUT_SUBMIT]. The daemon writes
+     * [data], waits 80 ms, and writes `"\r"` separately. The gap is the whole
+     * fix, and it was measured rather than guessed (2026-09-30, Claude Code
+     * 2.1.283 in a pty): a ~250-character burst that ends in CR is read as a
+     * PASTE, and the CR becomes a newline inside the prompt instead of a
+     * submit. The same text with the CR written 50 ms later submits. Short
+     * bursts happened to submit, which is why the failure looked random.
+     *
+     * [data] must not end in CR or LF — [Reply.text] trims them — because the
+     * daemon strips nothing and a trailing CR would be the paste all over
+     * again, followed by a second Return.
+     *
+     * The flag is sent only when true, like every optional key here: `submit`
+     * is `#[serde(default)]`, and a daemon older than it rejects the key
+     * outright — which is exactly the daemon this builder is never used for.
+     */
+    fun input(id: Int, data: String, submit: Boolean): String =
+        if (submit) {
+            """{"cmd":"input","id":$id,"data":"${escape(data)}","submit":true}"""
+        } else {
+            input(id, data)
+        }
+
+    /**
+     * Name a session, or clear its name (contract §1.5).
+     *
+     * `{"cmd":"rename","id":N,"name":"auth refactor"}`, or `"name":null` to
+     * clear. **The one builder here that sends an explicit null**, and the
+     * opposite rule from [revoke]'s: there an absent key means "every grant"
+     * and a null would be a mistake, here the null IS the instruction —
+     * "this session has no name now" — and leaving the key out would be a
+     * request that says nothing. The daemon answers with the updated session
+     * (`{"reply":"session", …}`), read with [readSession].
+     *
+     * The name is checked by [SessionNames.check] BEFORE it gets here, so the
+     * person reads a sentence about a 70-character name on this screen rather
+     * than a refusal from a machine somewhere else; the daemon checks again
+     * with the same rule, and its check is the one that counts.
+     */
+    fun rename(id: Int, name: String?): String =
+        if (name == null) {
+            """{"cmd":"rename","id":$id,"name":null}"""
+        } else {
+            """{"cmd":"rename","id":$id,"name":"${escape(name)}"}"""
+        }
+
+    /**
+     * The tail of a session's output, without attaching (contract §1.6).
+     *
+     * `{"cmd":"peek","id":N,"bytes":8192}`. The daemon reads its in-memory
+     * scrollback ring — not the transcript on disk — caps [bytes] at
+     * [PEEK_MAX], and answers `{"reply":"peek","data":"<base64>",…}` with the
+     * PTY's size. No resize, no attach, and `attached` does not move, which is
+     * what makes it safe to ask every second and a half while a screen is
+     * open: the desktop's terminal is not touched.
+     */
+    fun peek(id: Int, bytes: Int = PEEK_MAX): String =
+        """{"cmd":"peek","id":$id,"bytes":$bytes}"""
+
+    /** The daemon's cap on one [peek], and its default. */
+    const val PEEK_MAX: Int = 8192
 
     /**
      * Read what is on the COMPUTER's clipboard (P1-059 criterion 3, receive).
@@ -750,6 +889,41 @@ object Agentd {
     }
 
     /**
+     * A `peek` reply, with its bytes decoded.
+     *
+     * Standard padded base64, and decoded with `java.util.Base64` rather than
+     * a hand-rolled decoder like [com.rimeos.remote.core.Base64Url]. That one
+     * exists because the JDK's URL decoder is LAX about padding in a place
+     * where a key must have exactly one spelling; this is terminal output for
+     * a preview, where the JDK's basic decoder is exactly the RFC 4648 §4
+     * alphabet the daemon writes and leniency costs nothing. Present on every
+     * Android this app supports (API 26 and up).
+     *
+     * A reply whose data will not decode is an [AgentError] rather than an
+     * empty preview: an empty panel would say "this agent has printed
+     * nothing", which is a claim.
+     */
+    fun readPeek(reply: String, requested: Int = PEEK_MAX): Peek {
+        val obj = require(reply, "peek")
+        val text = obj["data"]?.jsonPrimitive?.content.orEmpty()
+        val data = try {
+            java.util.Base64.getDecoder().decode(text)
+        } catch (e: IllegalArgumentException) {
+            throw AgentError("internal", "the machine's preview was not base64: ${e.message}")
+        }
+        fun int(key: String, fallback: Int): Int =
+            obj[key]?.jsonPrimitive?.content?.toIntOrNull() ?: fallback
+        return Peek(
+            id = int("id", -1),
+            data = data,
+            cols = int("cols", 80),
+            rows = int("rows", 24),
+            state = obj["state"]?.jsonPrimitive?.content.orEmpty(),
+            requested = requested,
+        )
+    }
+
+    /**
      * An `ok`, or the error it actually was.
      *
      * The parsers are named `read*` and the builders are named for their
@@ -794,12 +968,39 @@ object Agentd {
     fun pushUnregister(): String = """{"cmd":"push_unregister"}"""
 
     /**
-     * The daemon's scrollback window, and what a phone asks for.
+     * Ask `rime-remoted` what it can do and where it is listening (contract
+     * §2.1).
      *
-     * 256 KiB is the daemon's own `SCROLLBACK_BYTES` and its default, so this
-     * is "everything there is" rather than a number chosen here. A phone on a
-     * slow link pays for it once per attach; asking for less would mean
-     * reconnecting into a terminal missing the part that mattered.
+     * Like [pushRegister], answered by `rime-remoted` itself and never by
+     * `rime-agentd` — which is why it is NOT in `requests.json`: that fixture
+     * is every request the DAEMON must parse, and the Rust half deserialises
+     * each entry into agentd's `Request`. An `rime-remoted` older than the
+     * verb forwards it, and agentd answers `bad_request`; [readRemoteHello]
+     * is not where that is handled, `MachineLink.remoteHello` is, by reading
+     * any refusal as [RemoteHello.NONE].
      */
-    const val DEFAULT_REPLAY: Int = 256 * 1024
+    fun remoteHello(): String = """{"cmd":"remote_hello"}"""
+
+    /** `{"reply":"remote",…}`, or the [AgentError] it was. */
+    fun readRemoteHello(reply: String): RemoteHello {
+        val obj = require(reply, "remote")
+        return json.decodeFromJsonElement(RemoteHello.serializer(), obj)
+    }
+
+    /**
+     * How much scrollback a phone asks for when it attaches: 64 KiB.
+     *
+     * It used to be 256 KiB — the daemon's whole `SCROLLBACK_BYTES`, on the
+     * argument that asking for less meant reconnecting into a terminal missing
+     * the part that mattered. What that cost was measured by the person using
+     * it: opening a terminal took long enough to be the complaint. A replay is
+     * paid on every attach and every reconnect, over a relay as often as not,
+     * and the phone's screen shows perhaps sixty rows of it. 64 KiB is still
+     * several hundred lines at eighty columns — far more than the screen and a
+     * good way back through the scrollback — for a quarter of the bytes.
+     *
+     * Anybody who needs the whole history has the transcript on the machine,
+     * and a session that is open on the desktop has all of it there.
+     */
+    const val DEFAULT_REPLAY: Int = 64 * 1024
 }
