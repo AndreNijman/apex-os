@@ -118,6 +118,59 @@ class StayConnectedTest {
         }
     }
 
+    // ---- replies go to the request that asked -----------------------------------
+
+    /**
+     * A channel that holds the FIRST control frame back until a second one
+     * has been written (or 300 ms pass), then writes it — which is exactly
+     * the interleaving two threads produce when queueing a reply slot and
+     * writing the request are separate steps.
+     */
+    private class Reordering(private val inner: com.rimeos.remote.core.FrameChannel) :
+        com.rimeos.remote.core.FrameChannel by inner {
+        val firstParked = CountDownLatch(1)
+        private val secondSent = CountDownLatch(1)
+        private val first = java.util.concurrent.atomic.AtomicBoolean(true)
+
+        override fun send(frame: com.rimeos.remote.core.Frame) {
+            if (frame is com.rimeos.remote.core.Frame.Control && first.compareAndSet(true, false)) {
+                firstParked.countDown()
+                secondSent.await(300, TimeUnit.MILLISECONDS)
+                inner.send(frame)
+                return
+            }
+            inner.send(frame)
+            if (frame is com.rimeos.remote.core.Frame.Control) secondSent.countDown()
+        }
+    }
+
+    @Test
+    @Timeout(20)
+    fun `two questions asked at once each get their own answer`() {
+        // The machine echoes the line it was sent, so a swapped reply is
+        // visible as one request receiving the other's words. Every reply in
+        // the other tests here is identical, which is why none of them could
+        // see this: the hub now asks `hello` and `remote_hello` together, and
+        // a swap made every feature read as absent.
+        val machine = FakeMachine(control = { it })
+        var wrapped: Reordering? = null
+        val link = MachineLink({ Reordering(machine.open()).also { wrapped = it } })
+        link.connectNow()
+        val a = """{"cmd":"info","id":1}"""
+        val b = """{"cmd":"info","id":2}"""
+        var gotA: String? = null
+        var gotB: String? = null
+        val ta = Thread { gotA = link.request(a) }.apply { start() }
+        assertTrue(wrapped!!.firstParked.await(5, TimeUnit.SECONDS))
+        val tb = Thread { gotB = link.request(b) }.apply { start() }
+        ta.join(10_000)
+        tb.join(10_000)
+        assertEquals(a, gotA, "the first request was handed the second one's reply")
+        assertEquals(b, gotB, "the second request was handed the first one's reply")
+        assertEquals(listOf(a, b), machine.requests.toList(), "requests reached the wire out of order")
+        link.close()
+    }
+
     // ---- a terminal on the control connection ---------------------------------
 
     @Test

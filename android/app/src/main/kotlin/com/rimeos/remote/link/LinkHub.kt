@@ -138,8 +138,11 @@ class LinkHub private constructor(private val app: Context) {
     fun state(deviceId: String): LinkState? = _states.value[deviceId]
 
     /** The link to [machine], made on first use. Opens nothing by itself. */
-    fun link(machine: PairedMachine): MachineLink = links.getOrPut(machine.deviceId) {
-        val id = machine.deviceId
+    fun link(machine: PairedMachine): MachineLink = links.computeIfAbsent(machine.deviceId) { id ->
+        // `computeIfAbsent`, not Kotlin's `getOrPut`: that one is a read and
+        // then a write, and `hold` on the IO dispatcher and a tap on the main
+        // thread could each make a link — two connections to one machine,
+        // one of them orphaned.
         MachineLink(
             connect = {
                 val identity = identities[id]
@@ -220,8 +223,11 @@ class LinkHub private constructor(private val app: Context) {
     fun onNetworkChanged() {
         if (!_unlocked.value) return
         for (id in held.toList()) {
-            val machine = machineFor(id) ?: continue
+            // The store read inside the launch too: this is called on the
+            // ConnectivityManager's binder thread, which is not the place for
+            // a disk read either.
             scope.launch {
+                val machine = machineFor(id) ?: return@launch
                 val link = links[id]
                 val alive = link != null && link.connected && link.probe()
                 if (!alive) {
@@ -306,10 +312,11 @@ class LinkHub private constructor(private val app: Context) {
     /**
      * What every new connection asks first, in one round trip's time.
      *
-     * `remote_hello` and `hello` are sent together — the multiplexer's FIFO
-     * pairs the replies — rather than one after the other, because each is a
-     * round trip and over the relay a round trip is a noticeable fraction of
-     * a second. Then the store learns the path that worked and the addresses
+     * `remote_hello` and `hello` are sent together rather than one after the
+     * other, because each is a round trip and over the relay a round trip is
+     * a noticeable fraction of a second. Safe because `Mux` writes requests
+     * in the order it queues their replies (its `sendOrder`), and the daemon
+     * answers in wire order. Then the store learns the path that worked and the addresses
      * the machine is listening on now, so the next connection starts from
      * both.
      */

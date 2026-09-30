@@ -91,6 +91,24 @@ class Mux(
     )
 
     private val lock = Any()
+
+    /**
+     * Held across enqueue-and-send, so that the order requests are queued in
+     * IS the order they reach the wire.
+     *
+     * Without it two threads could queue A then B and write B then A, and the
+     * daemon — which answers in wire order — would hand B's reply to A. That
+     * was rare while one screen asked one question at a time. It is the norm
+     * now that the phone holds its connection open: the hub asks `hello` and
+     * `remote_hello` together, the session screen peeks every second and a
+     * half, the list polls every four, and a terminal may open a channel on
+     * the same connection. A swap there is one session's output shown under
+     * another's name, or every feature silently read as absent.
+     *
+     * Separate from [lock] because a send can block on a slow socket, and the
+     * pump thread takes [lock] for every frame it dispatches.
+     */
+    private val sendOrder = Any()
     private val pending = ArrayDeque<Pending>()
     private val open = HashSet<UInt>()
 
@@ -258,8 +276,7 @@ class Mux(
      */
     @Throws(Disconnected::class, TimeoutException::class)
     fun request(line: ByteArray, timeoutMs: Long = CONTROL_TIMEOUT_MS): ByteArray {
-        val future = enqueue(null)
-        channel.send(Frame.Control(line))
+        val future = enqueueAndSend(null, Frame.Control(line))
         return await(future, timeoutMs)
     }
 
@@ -290,8 +307,7 @@ class Mux(
         require(id != Frame.CONTROL_CHANNEL) { "channel 0 is the control channel" }
         if (channelListener != null) synchronized(lock) { channelListeners[id] = channelListener }
         try {
-            val future = enqueue(id)
-            channel.send(Frame.Open(id, attach))
+            val future = enqueueAndSend(id, Frame.Open(id, attach))
             return await(future, timeoutMs)
         } catch (e: Throwable) {
             synchronized(lock) { channelListeners.remove(id) }
@@ -299,13 +315,31 @@ class Mux(
         }
     }
 
-    private fun enqueue(forChannel: UInt?): CompletableFuture<ByteArray> {
+    /**
+     * Queue a reply slot and write the frame that asks for it, as one step.
+     * See [sendOrder].
+     *
+     * A write that FAILS takes its slot back out of the queue. Left in, it
+     * would be a head no reply is coming for, and the next request's reply
+     * would resolve it — every reply after that one behind. (The connection
+     * is almost certainly going anyway; this makes that the only outcome.)
+     */
+    private fun enqueueAndSend(forChannel: UInt?, frame: Frame): CompletableFuture<ByteArray> {
         val future = CompletableFuture<ByteArray>()
-        synchronized(lock) {
-            if (disconnected || closed) {
-                throw Disconnected("this connection to ${channel.machine} is closed")
+        val slot = Pending(forChannel, future)
+        synchronized(sendOrder) {
+            synchronized(lock) {
+                if (disconnected || closed) {
+                    throw Disconnected("this connection to ${channel.machine} is closed")
+                }
+                pending.addLast(slot)
             }
-            pending.addLast(Pending(forChannel, future))
+            try {
+                channel.send(frame)
+            } catch (e: Throwable) {
+                synchronized(lock) { pending.remove(slot) }
+                throw e
+            }
         }
         return future
     }
