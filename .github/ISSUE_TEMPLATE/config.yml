@@ -1,0 +1,11 @@
+blank_issues_enabled: false
+contact_links:
+  - name: Report a security vulnerability
+    url: https://github.com/AndreNijman/rime-os/security/advisories/new
+    about: Report it privately. Please don't open a public issue with exploit details.
+  - name: Rime Shell (the desktop)
+    url: https://github.com/AndreNijman/rime-shell/issues
+    about: The bar, notch, Dashboard, lock screen, settings and notifications.
+  - name: rimeos.com
+    url: https://github.com/AndreNijman/rime-website/issues
+    about: Problems with the website or its documentation.

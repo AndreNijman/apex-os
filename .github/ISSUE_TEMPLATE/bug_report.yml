@@ -1,0 +1,64 @@
+name: Bug report
+description: Something in Rime OS is broken or behaves wrongly.
+labels: ["bug"]
+body:
+  - type: markdown
+    attributes:
+      value: |
+        Thanks for reporting. Security problems go through [private vulnerability reporting](https://github.com/AndreNijman/rime-os/security/advisories/new), not here.
+        Problems with the bar, notch, Dashboard, lock screen or settings belong in [rime-shell](https://github.com/AndreNijman/rime-shell/issues).
+  - type: textarea
+    id: what
+    attributes:
+      label: What happened
+      description: What you saw, and what you expected instead.
+    validations:
+      required: true
+  - type: textarea
+    id: steps
+    attributes:
+      label: How to reproduce it
+      description: The steps from a known state. Say if it happens every time or only sometimes.
+      placeholder: |
+        1. …
+        2. …
+    validations:
+      required: true
+  - type: textarea
+    id: image
+    attributes:
+      label: Output of `bootc status`
+      description: It names the image digest you are running. Paste it as it is.
+      render: text
+    validations:
+      required: true
+  - type: input
+    id: hardware
+    attributes:
+      label: Hardware
+      description: Laptop or desktop model, CPU, and GPU(s).
+      placeholder: e.g. Lenovo Legion 5, Ryzen 7 7840HS, Radeon 780M + RTX 4060
+    validations:
+      required: true
+  - type: dropdown
+    id: area
+    attributes:
+      label: Area
+      options:
+        - Installing
+        - Updating or rolling back
+        - Booting, Secure Boot or disk encryption
+        - Hardware, drivers or power
+        - Gaming
+        - Installing software (rime install, Flatpak)
+        - Coding agents
+        - Rime Remote (phone app)
+        - Something else
+    validations:
+      required: true
+  - type: textarea
+    id: logs
+    attributes:
+      label: Logs
+      description: Anything relevant, for example `journalctl -b -p warning` or the output of the command that failed.
+      render: text
