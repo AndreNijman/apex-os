@@ -125,8 +125,38 @@ pub enum AgentCmd {
         #[arg(required = true, num_args = 1.., value_name = "TEXT")]
         text: Vec<String>,
         /// Press Enter after it, so the agent acts on the line.
+        ///
+        /// Sent as its own keystroke a moment after the text, never glued to
+        /// the end of it: an agent reads a long burst that ends in Enter as a
+        /// paste, and a pasted Enter is a newline in the prompt.
         #[arg(long)]
         submit: bool,
+    },
+    /// Give a session a name, or take it away.
+    ///
+    /// The name is what `rime agent list`, the Agent Center and Rime Remote
+    /// show before anything else — before the agent's own terminal title, and
+    /// before `<agent> · <project>`. At most 64 characters, and no control
+    /// characters: a name that could rewrite the line it is printed on is
+    /// refused, not cleaned. Only a person can name a session; a session
+    /// cannot rename itself or another.
+    Rename {
+        id: u32,
+        /// The new name. Several words are joined with single spaces, so
+        /// quoting is optional.
+        #[arg(
+            num_args = 1..,
+            value_name = "NAME",
+            required_unless_present = "clear",
+            conflicts_with = "clear"
+        )]
+        name: Vec<String>,
+        /// Remove the name instead.
+        #[arg(long)]
+        clear: bool,
+        /// Rename a session on a trusted device (§20).
+        #[arg(long, value_name = "HOST")]
+        host: Option<String>,
     },
     /// Suspend a session and everything it started.
     Pause { id: u32 },
@@ -497,6 +527,13 @@ pub struct RunArgs {
     /// Which agent to run. Defaults to the configured one.
     #[arg(long, short)]
     pub agent: Option<String>,
+    /// What to call the session: shown first in `rime agent list`, the Agent
+    /// Center and Rime Remote. Defaults to `$RIME_AGENT_NAME`.
+    ///
+    /// At most 64 characters and no control characters, checked here before
+    /// anything starts. `rime agent rename` changes it later.
+    #[arg(long, short = 'n', value_name = "NAME")]
+    pub name: Option<String>,
     /// strict | project | unrestricted. The Rime filesystem and process
     /// sandbox (dimension 2). Defaults to the configured policy.
     #[arg(long, short, value_parser = parse_sandbox)]
@@ -731,7 +768,42 @@ pub struct RunArgs {
     pub allow_dirty: bool,
 }
 
+/// The environment variable a session's name is taken from when `--name` is
+/// not given (§1.4).
+///
+/// For a wrapper that knows what the work is called — a script that starts one
+/// agent per ticket — and would otherwise have to rebuild every `a` it calls.
+pub const NAME_ENV: &str = "RIME_AGENT_NAME";
+
 impl RunArgs {
+    /// The name this invocation asks for: `--name`, else `$RIME_AGENT_NAME`,
+    /// unchecked. An empty variable is no name rather than a request to clear
+    /// one, which at `run` would mean the same thing anyway.
+    fn name_or_env(&self) -> Option<String> {
+        self.name.clone().or_else(|| {
+            std::env::var(NAME_ENV)
+                .ok()
+                .filter(|v| !v.trim().is_empty())
+        })
+    }
+
+    /// [`RunArgs::name_or_env`], checked by the validator the daemon uses, so
+    /// a name the daemon would refuse is refused here, before a worktree, a
+    /// checkpoint or a remote login — and says which of the two it came from.
+    pub fn validated_name(&self) -> Result<Option<String>> {
+        let from_env = self.name.is_none();
+        let Some(raw) = self.name_or_env() else {
+            return Ok(None);
+        };
+        rime_agent_core::session::session_name(&raw).map_err(|why| {
+            if from_env {
+                anyhow!("${NAME_ENV}: {why}")
+            } else {
+                anyhow!("--name: {why}")
+            }
+        })
+    }
+
     /// Rebuild the flags this invocation carried, for forwarding to a remote
     /// `rime agent run`.
     ///
@@ -745,8 +817,12 @@ impl RunArgs {
         if let Some(p) = &self.prompt {
             out.push(p.clone());
         }
+        // The EFFECTIVE name, so `$RIME_AGENT_NAME` goes with the run: the
+        // remote command runs in a login on another machine, which never saw
+        // this shell's environment.
         for (flag, value) in [
             ("--agent", self.agent.clone()),
+            ("--name", self.name_or_env()),
             ("--worktree", self.worktree.clone()),
         ] {
             if let Some(v) = value {
@@ -954,6 +1030,11 @@ pub fn agent(cmd: AgentCmd) -> i32 {
             // §20. Checked before anything local happens, so a remote run
             // never starts a local session as a side effect.
             Some(host) => {
+                // Checked here as well as by the remote, so a bad name is
+                // refused before an ssh login rather than after one.
+                if let Err(e) = args.validated_name() {
+                    return report(Err(e));
+                }
                 let (h, rp, ad) = (host.clone(), args.remote_path.clone(), args.allow_dirty);
                 let forward = args.forward_argv();
                 // `Result<i32>`, matching the local arm: this function's
@@ -1004,6 +1085,30 @@ pub fn agent(cmd: AgentCmd) -> i32 {
             None => attach(id, !no_replay),
         },
         AgentCmd::Input { id, text, submit } => input(id, &text.join(" "), submit),
+        AgentCmd::Rename {
+            id,
+            name,
+            clear,
+            host,
+        } => match host {
+            Some(h) => {
+                let mut argv = vec!["agent".to_string(), "rename".to_string(), id.to_string()];
+                if clear {
+                    argv.push("--clear".to_string());
+                } else {
+                    argv.extend(name);
+                }
+                // No tty, as for `list`: nothing here is interactive.
+                crate::dispatch::forward_to_host(
+                    &h,
+                    &argv,
+                    rimed_core::host::Tty::None,
+                    Some(crate::dispatch::Capability::Agentd),
+                )
+                .map(|()| 0)
+            }
+            None => rename(id, (!clear).then(|| name.join(" "))),
+        },
         AgentCmd::Handoff { id, to, no_start, transcript_bytes } =>
             handoff(id, &to, no_start, transcript_bytes),
         AgentCmd::Pause { id } => signal(id, "stop", "paused"),
@@ -1309,10 +1414,14 @@ fn run(args: RunArgs) -> Result<i32> {
         }
     };
 
+    // Before anything is created, for the reason the daemon checks it before
+    // anything is: a refused name should cost the person nothing.
+    let name = args.validated_name()?;
+
     let size = term::stdout_window_size();
     let request = RunRequest {
         agent: args.agent.clone(),
-        name: None,
+        name,
         prompt: args.prompt.clone(),
         args: args.args.clone(),
         cwd: cwd.to_string_lossy().into_owned(),
@@ -1360,12 +1469,20 @@ fn run(args: RunArgs) -> Result<i32> {
     }
 
     if args.detach {
-        println!(
-            "session {} — {} in {}",
-            info.id,
-            info.agent,
-            short_path(&info.cwd)
-        );
+        match &info.name {
+            Some(name) => println!(
+                "session {} \"{name}\" — {} in {}",
+                info.id,
+                info.agent,
+                short_path(&info.cwd)
+            ),
+            None => println!(
+                "session {} — {} in {}",
+                info.id,
+                info.agent,
+                short_path(&info.cwd)
+            ),
+        }
         println!("attach with: rime agent attach {}", info.id);
         return Ok(0);
     }
@@ -1599,8 +1716,8 @@ fn list(all: bool, json: bool) -> Result<i32> {
     }
 
     println!(
-        "{:>3}  {:<10} {:<20} {:<22} {:<12} WHERE",
-        "ID", "AGENT", "STATE", "PROJECT", "SANDBOX"
+        "{:>3}  {:<24} {:<10} {:<20} {:<22} {:<12} WHERE",
+        "ID", "NAME", "AGENT", "STATE", "PROJECT", "SANDBOX"
     );
     for s in shown {
         let state = match s.exit_summary() {
@@ -1613,8 +1730,9 @@ fn list(all: bool, json: bool) -> Result<i32> {
             .or_else(|| s.worktree.clone())
             .unwrap_or_else(|| "-".to_string());
         println!(
-            "{:>3}  {:<10} {:<20} {:<22} {:<12} {}",
+            "{:>3}  {:<24} {:<10} {:<20} {:<22} {:<12} {}",
             s.id,
+            truncate(&list_name(s), 24),
             truncate(&s.agent, 10),
             // 20 fits the longest real value, "killed by signal 15".
             truncate(&state, 20),
@@ -1624,6 +1742,32 @@ fn list(all: bool, json: bool) -> Result<i32> {
         );
     }
     Ok(0)
+}
+
+/// What the NAME column shows (§1.3's order): the name a person gave the
+/// session, else the agent's own terminal title, else `-` — the columns beside
+/// it already are the `<agent> · <project>` a client falls back to.
+fn list_name(s: &SessionInfo) -> String {
+    s.name
+        .clone()
+        .or_else(|| s.title.clone())
+        .unwrap_or_else(|| "-".to_string())
+}
+
+/// One line naming a session, in §1.3's order: the name a person gave it, the
+/// agent's own title, and otherwise `<agent> · <project or directory>` — the
+/// label every client showed before names existed.
+fn session_label(s: &SessionInfo) -> String {
+    if let Some(name) = s.name.as_deref().or(s.title.as_deref()) {
+        return name.to_string();
+    }
+    let place = s.project_name.clone().unwrap_or_else(|| {
+        Path::new(&s.cwd)
+            .file_name()
+            .map(|f| f.to_string_lossy().into_owned())
+            .unwrap_or_else(|| s.cwd.clone())
+    });
+    format!("{} · {place}", s.agent)
 }
 
 fn attach(id: u32, replay: bool) -> Result<i32> {
@@ -2164,34 +2308,78 @@ fn handoff(id: Option<u32>, to: &str, no_start: bool, transcript_bytes: usize) -
     Ok(1)
 }
 
-/// Build the bytes `rime agent input` puts on the wire.
+/// How long `rime agent input --submit` waits between the text and Enter when
+/// the daemon is too old to do it itself (§1.2's fallback).
 ///
-/// Carriage return and not newline for --submit. CR is the byte a terminal
-/// actually sends when Enter is pressed, so it is what a program reading that
-/// terminal is written against: the line discipline's ICRNL turns it into a
-/// newline for anything reading lines, and a TUI reading its input raw — which
-/// is what the agents in this runtime do — treats CR as Enter.
+/// Longer than the daemon's own `SUBMIT_GAP` on purpose: the daemon's pause is
+/// between two writes to one descriptor, this one is between two requests,
+/// each a connection and a round trip, and the contract gives the phone's
+/// fallback the same 100 ms.
+const CLIENT_SUBMIT_GAP: std::time::Duration = std::time::Duration::from_millis(100);
+
+/// The requests `rime agent input` sends, in order.
 ///
-/// The reason this comment is careful is that the obvious test does not support
-/// it. Measured on a real PTY against `sh -c 'read line'`: CR and LF BOTH end
-/// the line, because ICRNL is on by default. So rime-agentd's cooked-mode test
-/// proves the bytes arrive and that the terminator ends the line, and it does
-/// NOT discriminate between the two candidates. CR is chosen for the raw-mode
-/// case, where they differ and where no test in either crate reaches.
+/// Nothing is ever appended to the text — the carriage return that means
+/// Enter is a separate thing in both shapes, because a long burst ending in CR
+/// is read by an agent TUI as a paste and not sent (measured against Claude
+/// Code, 2026-09-30):
 ///
-/// Split out from [`input`] so it can be tested without a running daemon: the
-/// whole behaviour of the flag is in this function.
-fn input_bytes(text: &str, submit: bool) -> String {
-    let mut data = text.to_string();
-    if submit {
-        data.push('\r');
+/// * a daemon that advertises `input_submit` gets ONE request with `submit`
+///   set, and writes the CR itself, a `SUBMIT_GAP` after the text;
+/// * an older one gets the text, and then — after [`CLIENT_SUBMIT_GAP`],
+///   which the caller sleeps — a second request carrying `\r` alone. An old
+///   daemon IGNORES a `submit` key it has never heard of, so sending it the
+///   flag would type the text, press nothing, and let this command report
+///   "sent".
+///
+/// CR and not LF: CR is the byte a terminal sends for Enter, which is what a
+/// TUI reading its input raw treats as Enter; in cooked mode ICRNL makes the
+/// two the same, so the cooked-mode tests in rime-agentd do not discriminate.
+///
+/// Pure, so the shape is tested without a daemon.
+fn input_requests(id: u32, text: &str, submit: bool, daemon_submits: bool) -> Vec<Request> {
+    let typed = Request::Input {
+        id,
+        data: text.to_string(),
+        submit: submit && daemon_submits,
+    };
+    if submit && !daemon_submits {
+        return vec![
+            typed,
+            Request::Input {
+                id,
+                data: "\r".to_string(),
+                submit: false,
+            },
+        ];
     }
-    data
+    vec![typed]
+}
+
+/// Whether the running daemon lists `feature` in its hello.
+///
+/// An answer that is not a hello — or no answer — is "no": guessing yes would
+/// send a daemon a field it drops, which is the silent failure this asks to
+/// avoid.
+fn daemon_has(feature: &str) -> Result<bool> {
+    Ok(match client::call(&Request::Hello)? {
+        Response::Hello { features, .. } => features.iter().any(|f| f == feature),
+        _ => false,
+    })
 }
 
 fn input(id: u32, text: &str, submit: bool) -> Result<i32> {
-    let data = input_bytes(text, submit);
-    client::call(&Request::Input { id, data, submit: false })?;
+    // Only asked when it matters: an unsubmitted input is the same request to
+    // every daemon, so it costs no extra round trip.
+    let daemon_submits = submit && daemon_has("input_submit")?;
+    let requests = input_requests(id, text, submit, daemon_submits);
+    let last = requests.len() - 1;
+    for (i, req) in requests.iter().enumerate() {
+        client::call(req)?;
+        if i < last {
+            std::thread::sleep(CLIENT_SUBMIT_GAP);
+        }
+    }
     // On stderr, so a script's stdout stays empty. Says whether Enter was
     // pressed, because "nothing happened" and "it is sitting in the prompt"
     // look the same from outside the session and want different next steps.
@@ -2199,6 +2387,29 @@ fn input(id: u32, text: &str, submit: bool) -> Result<i32> {
         eprintln!("rime: sent to session {id}");
     } else {
         eprintln!("rime: typed into session {id}, not sent; add --submit to send it");
+    }
+    Ok(0)
+}
+
+/// `rime agent rename <id> <name>` and `--clear` (§1.5).
+///
+/// Checked here with the validator the daemon uses, so a refusal names the
+/// problem before a request is sent; the daemon checks again, because it is
+/// the boundary. `None` — `--clear`, or a name that is only whitespace — is
+/// sent as `null`, which clears.
+fn rename(id: u32, name: Option<String>) -> Result<i32> {
+    let name = rime_agent_core::session::session_name_opt(name.as_deref())
+        .map_err(|why| anyhow!("{why}"))?;
+    let info = match client::call(&Request::Rename {
+        id,
+        name: name.clone(),
+    })? {
+        Response::Session(info) => *info,
+        other => bail!("unexpected reply: {other:?}"),
+    };
+    match info.name {
+        Some(n) => eprintln!("rime: session {id} is now called \"{n}\""),
+        None => eprintln!("rime: session {id} has no name now"),
     }
     Ok(0)
 }
@@ -2454,6 +2665,17 @@ fn run_tool(program: &str, args: &[&str], env: Option<(&str, &str)>) -> Result<i
 
 fn print_session(s: &SessionInfo) {
     println!("session      {}", s.id);
+    // First, in §1.3's order, so the line a person scans for is at the top.
+    // The name and the title get lines of their own when both are there: one
+    // is what a person called the work, the other what the agent calls it, and
+    // hiding either would make the other look like the only one.
+    println!("label        {}", session_label(s));
+    if let Some(name) = &s.name {
+        println!("name         {name}");
+    }
+    if let Some(title) = &s.title {
+        println!("title        {title}");
+    }
     println!("agent        {}", s.agent);
     println!(
         "command      {} {}",
@@ -4556,6 +4778,7 @@ mod tests {
         RunArgs {
             prompt: None,
             agent: None,
+            name: None,
             sandbox: None,
             native: None,
             agent_bypass: false,
@@ -4585,30 +4808,183 @@ mod tests {
         }
     }
 
+    /// `$RIME_AGENT_NAME` is process-wide and these cases run in threads of
+    /// one process: the two that set it are serialised on this, the shape
+    /// `gaming.rs` and `blueprint.rs` already use.
+    static ENV_LOCK: std::sync::Mutex<()> = std::sync::Mutex::new(());
+
+    fn only_input(reqs: &[Request]) -> Vec<(String, bool)> {
+        reqs.iter()
+            .map(|r| match r {
+                Request::Input { data, submit, .. } => (data.clone(), *submit),
+                other => panic!("not an input: {other:?}"),
+            })
+            .collect()
+    }
+
     #[test]
     fn input_without_submit_adds_nothing_at_all() {
         // The default has to be inert. A newline appended "helpfully" here is
         // the whole difference between text waiting in a prompt and an agent
         // acting on words that may have come from a speech-to-text hook.
-        assert_eq!(input_bytes("run the tests", false), "run the tests");
-        assert_eq!(input_bytes("", false), "");
+        for daemon_submits in [true, false] {
+            assert_eq!(
+                only_input(&input_requests(4, "run the tests", false, daemon_submits)),
+                vec![("run the tests".to_string(), false)]
+            );
+        }
+        assert_eq!(only_input(&input_requests(4, "", false, true)), vec![(String::new(), false)]);
         // Text that already ends in a newline is passed through untouched:
         // trimming it would be this function deciding, which is the caller's
         // job in both directions.
-        assert_eq!(input_bytes("two lines\n", false), "two lines\n");
+        assert_eq!(
+            only_input(&input_requests(4, "two lines\n", false, true)),
+            vec![("two lines\n".to_string(), false)]
+        );
     }
 
     #[test]
-    fn input_with_submit_appends_exactly_one_carriage_return() {
-        assert_eq!(input_bytes("run the tests", true), "run the tests\r");
-        // Exactly one, and at the end. A doubled terminator would submit an
-        // empty line after the text, which in an agent's prompt is a second
-        // turn with nothing in it.
-        assert_eq!(input_bytes("x", true).matches('\r').count(), 1);
-        assert!(input_bytes("x", true).ends_with('\r'));
-        // CR and not LF. See `input_bytes` for why, including what the PTY
-        // test in rime-agentd does and does not prove about the choice.
-        assert!(!input_bytes("x", true).contains('\n'));
+    fn input_with_submit_uses_the_flag_and_never_glues_enter_to_the_text() {
+        // §1.2. A daemon that can: one request, the text bare, the flag set.
+        // The CR the old code appended is exactly the byte an agent read as
+        // part of a paste.
+        assert_eq!(
+            only_input(&input_requests(4, "run the tests", true, true)),
+            vec![("run the tests".to_string(), true)]
+        );
+        // A daemon that cannot: it would drop the flag in silence, so Enter
+        // goes as a request of its own, and still never on the end of the
+        // text. CR, not LF, and exactly one.
+        assert_eq!(
+            only_input(&input_requests(4, "run the tests", true, false)),
+            vec![("run the tests".to_string(), false), ("\r".to_string(), false)]
+        );
+        for daemon_submits in [true, false] {
+            for (data, _) in only_input(&input_requests(4, "x", true, daemon_submits)) {
+                assert!(data == "\r" || !data.contains('\r'), "{data:?}");
+                assert!(!data.contains('\n'), "{data:?}");
+            }
+        }
+    }
+
+    #[test]
+    fn a_name_comes_from_the_flag_then_the_environment_and_is_checked_early() {
+        let _env = ENV_LOCK.lock().unwrap_or_else(|e| e.into_inner());
+        std::env::remove_var(NAME_ENV);
+        assert_eq!(run_args().validated_name().unwrap(), None);
+
+        let flagged = RunArgs {
+            name: Some("  auth refactor ".into()),
+            ..run_args()
+        };
+        assert_eq!(flagged.validated_name().unwrap().as_deref(), Some("auth refactor"));
+
+        std::env::set_var(NAME_ENV, "from the env");
+        assert_eq!(run_args().validated_name().unwrap().as_deref(), Some("from the env"));
+        // The flag wins over the variable.
+        assert_eq!(flagged.validated_name().unwrap().as_deref(), Some("auth refactor"));
+        // An empty variable is no name, not a refusal.
+        std::env::set_var(NAME_ENV, "  ");
+        assert_eq!(run_args().validated_name().unwrap(), None);
+
+        // Refused, and the refusal says where the bad name came from.
+        std::env::set_var(NAME_ENV, "a\u{1b}[2Jb");
+        let why = run_args().validated_name().unwrap_err().to_string();
+        assert!(why.starts_with("$RIME_AGENT_NAME"), "{why}");
+        let long = RunArgs {
+            name: Some("n".repeat(65)),
+            ..run_args()
+        };
+        let why = long.validated_name().unwrap_err().to_string();
+        assert!(why.starts_with("--name"), "{why}");
+        std::env::remove_var(NAME_ENV);
+    }
+
+    #[test]
+    fn a_remote_run_carries_the_effective_name_but_a_name_is_not_a_setting_a_daemon_could_drop() {
+        let _env = ENV_LOCK.lock().unwrap_or_else(|e| e.into_inner());
+        std::env::remove_var(NAME_ENV);
+        let named = RunArgs {
+            name: Some("auth refactor".into()),
+            ..run_args()
+        };
+        let argv = named.forward_argv();
+        let at = argv.iter().position(|a| a == "--name").expect("--name is forwarded");
+        assert_eq!(argv[at + 1], "auth refactor");
+
+        // `$RIME_AGENT_NAME` goes too: the remote login never saw this shell.
+        std::env::set_var(NAME_ENV, "from the env");
+        let argv = run_args().forward_argv();
+        let at = argv.iter().position(|a| a == "--name").expect("the variable is forwarded");
+        assert_eq!(argv[at + 1], "from the env");
+        std::env::remove_var(NAME_ENV);
+        assert!(!run_args().forward_argv().contains(&"--name".to_string()));
+
+        // And it widens nothing when an old daemon drops it, so it is not on
+        // the table that makes `run` refuse an old daemon.
+        let p = AgentPolicy::default();
+        assert!(settings_a_daemon_could_drop(&p, None, false, false, false, false).is_empty());
+    }
+
+    #[test]
+    fn the_label_is_the_name_then_the_title_then_agent_and_project() {
+        let mut s: SessionInfo = serde_json::from_str(
+            r#"{"id":4,"agent":"claude","program":"claude","args":[],"cwd":"/home/a/rime-os",
+                "project":null,"project_name":null,"worktree":null,"state":"working",
+                "detail":null,"paused":false,"pid":1,"started":1,"last_activity":1,
+                "exit_code":null,"exit_signal":null,"attached":0,"checkpoint":null,
+                "cols":80,"rows":24}"#,
+        )
+        .expect("a record from before names");
+        assert_eq!(session_label(&s), "claude · rime-os");
+        assert_eq!(list_name(&s), "-");
+        s.project_name = Some("rime".into());
+        assert_eq!(session_label(&s), "claude · rime");
+        s.title = Some("Rime showcase studio".into());
+        assert_eq!(session_label(&s), "Rime showcase studio");
+        assert_eq!(list_name(&s), "Rime showcase studio");
+        s.name = Some("auth refactor".into());
+        assert_eq!(session_label(&s), "auth refactor", "a person's name beats the agent's title");
+        assert_eq!(list_name(&s), "auth refactor");
+    }
+
+    #[test]
+    fn rename_takes_a_name_or_clear_and_not_both() {
+        use clap::Parser;
+        #[derive(Parser)]
+        struct Cli {
+            #[command(subcommand)]
+            cmd: AgentCmd,
+        }
+        match Cli::try_parse_from(["agent", "rename", "4", "auth", "refactor"]).unwrap().cmd {
+            AgentCmd::Rename { id, name, clear, host } => {
+                assert_eq!(id, 4);
+                assert_eq!(name.join(" "), "auth refactor");
+                assert!(!clear);
+                assert_eq!(host, None);
+            }
+            _ => panic!("not rename"),
+        }
+        match Cli::try_parse_from(["agent", "rename", "4", "--clear"]).unwrap().cmd {
+            AgentCmd::Rename { name, clear, .. } => {
+                assert!(clear);
+                assert!(name.is_empty());
+            }
+            _ => panic!("not rename"),
+        }
+        assert!(Cli::try_parse_from(["agent", "rename", "4"]).is_err(), "neither is refused");
+        assert!(
+            Cli::try_parse_from(["agent", "rename", "4", "x", "--clear"]).is_err(),
+            "both is refused"
+        );
+        // `-n` on run is the name, and no other flag has it.
+        match Cli::try_parse_from(["agent", "run", "-n", "auth refactor", "fix it"]).unwrap().cmd {
+            AgentCmd::Run(args) => {
+                assert_eq!(args.name.as_deref(), Some("auth refactor"));
+                assert_eq!(args.prompt.as_deref(), Some("fix it"));
+            }
+            _ => panic!("not run"),
+        }
     }
 
     #[test]

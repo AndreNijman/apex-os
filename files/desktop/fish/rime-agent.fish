@@ -132,13 +132,41 @@ if command -q rime
                 rime agent diff $argv
             end
 
+            # Whether a `rime agent run` command line already names its
+            # session, so `aw` does not name it twice (`--name` given twice is
+            # refused). Stops at `--`: what follows belongs to the agent.
+            # `-n*` rather than `-n?*`: fish 4 reads `?` literally.
+            function _rime_names_itself --description 'does this run command line already name the session'
+                if set -q RIME_AGENT_NAME; and test -n "$RIME_AGENT_NAME"
+                    return 0
+                end
+                for arg in $argv
+                    switch $arg
+                        case --
+                            return 1
+                        case --name '--name=*' '-n*'
+                            return 0
+                    end
+                end
+                return 1
+            end
+
+            # The worktree's name is the session's name too, unless the
+            # command line or $RIME_AGENT_NAME already gives one. Past the
+            # 64-character limit it is left off rather than passed along to be
+            # refused. The same rule as agent.sh.
             function aw --description 'start an agent in a worktree'
                 if test (count $argv) -eq 0
                     echo "usage: aw <worktree-name> [prompt]" >&2
                     return 2
                 end
                 set -l wt $argv[1]
-                rime agent run --worktree $wt $argv[2..]
+                set -l rest $argv[2..]
+                if _rime_names_itself $rest; or test (string length -- $wt) -gt 64
+                    rime agent run --worktree $wt $rest
+                else
+                    rime agent run --worktree $wt --name $wt $rest
+                end
             end
 
             function ap --description 'project commands'
