@@ -195,8 +195,9 @@ impl Harness {
     /// the network, and an allowlisted session would need the egress bridge
     /// to start before this could measure a mount.
     fn report(&self, workdir: &Path, trust_ca: Option<String>) -> serde_json::Value {
-        let reply = self.call(&Request::Run(RunRequest {
+        let reply = self.call(&Request::Run(Box::new(RunRequest {
             agent: Some("generic".into()),
+            name: None,
             prompt: None,
             args: vec!["/bin/sh".into(), "-c".into(), REPORT.into()],
             cwd: workdir.to_string_lossy().into_owned(),
@@ -219,7 +220,7 @@ impl Harness {
             env: vec![],
             disposable: false,
             copy_out: None,
-        }));
+        })));
         if let Some(pid) = reply["pid"].as_i64() {
             self.sessions.borrow_mut().push(pid);
         }
@@ -468,8 +469,9 @@ fn an_unconfined_session_is_refused_rather_than_given_a_field_that_does_nothing(
     std::fs::write(&ca, CA_PEM).expect("write");
     let work = h.workdir("unconfined");
 
-    let reply = h.call(&Request::Run(RunRequest {
+    let reply = h.call(&Request::Run(Box::new(RunRequest {
         agent: Some("generic".into()),
+        name: None,
         prompt: None,
         args: vec!["/bin/sh".into(), "-c".into(), "sleep 5".into()],
         cwd: work.to_string_lossy().into_owned(),
@@ -492,7 +494,7 @@ fn an_unconfined_session_is_refused_rather_than_given_a_field_that_does_nothing(
         env: vec![],
         disposable: false,
         copy_out: None,
-    }));
+    })));
     if let Some(pid) = reply["pid"].as_i64() {
         h.sessions.borrow_mut().push(pid);
     }

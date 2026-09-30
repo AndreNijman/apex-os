@@ -1345,6 +1345,8 @@ mod tests {
             cwd: cwd.into(),
             project: None,
             project_name: None,
+            name: None,
+            title: None,
             worktree: None,
             state: AgentState::Working,
             detail: None,

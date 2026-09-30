@@ -242,8 +242,9 @@ impl Harness {
     /// say — would be asserting that a lookup misses, and would have passed
     /// just as happily against the defect this file was written for.
     fn session(&self) -> Option<(u32, String)> {
-        let reply = self.call(&Request::Run(RunRequest {
+        let reply = self.call(&Request::Run(Box::new(RunRequest {
             agent: Some("generic".into()),
+            name: None,
             prompt: None,
             // It must WRITE something. A session with a silent transcript
             // exercises the "the transcript is empty" arm and never the one
@@ -277,7 +278,7 @@ impl Harness {
             // This fixture asks for no elevation at all, so there is nothing
             // for a second factor to authorise.
             second_factor: None,
-        }));
+        })));
         if reply["reply"] != "session" {
             // A daemon that will not start a session at all is a broken
             // fixture on this machine, not a failing assertion. Said out loud.

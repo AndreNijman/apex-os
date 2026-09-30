@@ -210,8 +210,9 @@ impl Harness {
 
     /// Start a session running `script` under `sh`, and return its id.
     fn run_shell(&self, script: &str) -> Option<u32> {
-        let reply = self.call(&Request::Run(RunRequest {
+        let reply = self.call(&Request::Run(Box::new(RunRequest {
             agent: Some("generic".into()),
+            name: None,
             prompt: None,
             args: vec!["/bin/sh".into(), "-c".into(), script.into()],
             cwd: "/tmp".into(),
@@ -233,7 +234,7 @@ impl Harness {
             env: vec![],
             disposable: false,
             copy_out: None,
-        }));
+        })));
         if reply["reply"] != "session" {
             eprintln!("SKIP: the daemon would not start a session: {reply}");
             return None;

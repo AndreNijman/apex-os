@@ -1312,6 +1312,7 @@ fn run(args: RunArgs) -> Result<i32> {
     let size = term::stdout_window_size();
     let request = RunRequest {
         agent: args.agent.clone(),
+        name: None,
         prompt: args.prompt.clone(),
         args: args.args.clone(),
         cwd: cwd.to_string_lossy().into_owned(),
@@ -1346,7 +1347,7 @@ fn run(args: RunArgs) -> Result<i32> {
         args.trust_ca.is_some(),
         args.present.is_some(),
     )?;
-    let info = match c.call(&Request::Run(request))? {
+    let info = match c.call(&Request::Run(Box::new(request)))? {
         Response::Session(info) => *info,
         other => bail!("unexpected reply: {other:?}"),
     };
@@ -2085,8 +2086,12 @@ fn handoff(id: Option<u32>, to: &str, no_start: bool, transcript_bytes: usize) -
     // it had one. `worktree:` is deliberately not passed: that would create a
     // second worktree and hand the next agent an empty one, when the whole
     // point is to continue in the tree the work is already in.
-    let req = Request::Run(RunRequest {
+    let req = Request::Run(Box::new(RunRequest {
         agent: Some(target.id.to_string()),
+        // The name a person gave the work goes with the work. It is the one
+        // thing on the outgoing session that was never the agent's to choose,
+        // and the Agent Center row for the continuation should read the same.
+        name: session.name.clone(),
         prompt: Some(handoff_prompt(&path)),
         args: vec![],
         cwd: session.cwd.clone(),
@@ -2125,7 +2130,7 @@ fn handoff(id: Option<u32>, to: &str, no_start: bool, transcript_bytes: usize) -
         // session is refused for a missing factor, which is the right answer:
         // a second root session is a second thing for a human to agree to.
         second_factor: None,
-    });
+    }));
     // Deliberately NOT `client::call(&req)?`. The `?` would return the error
     // up to the top-level handler, which prints it and knows nothing about the
     // packet — so the one thing the user still has, a written document and its
@@ -2186,7 +2191,7 @@ fn input_bytes(text: &str, submit: bool) -> String {
 
 fn input(id: u32, text: &str, submit: bool) -> Result<i32> {
     let data = input_bytes(text, submit);
-    client::call(&Request::Input { id, data })?;
+    client::call(&Request::Input { id, data, submit: false })?;
     // On stderr, so a script's stdout stays empty. Says whether Enter was
     // pressed, because "nothing happened" and "it is sitting in the prompt"
     // look the same from outside the session and want different next steps.

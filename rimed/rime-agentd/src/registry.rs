@@ -842,6 +842,8 @@ mod tests {
             cwd: "/tmp".into(),
             project: None,
             project_name: None,
+            name: None,
+            title: None,
             worktree: None,
             state: AgentState::Starting,
             detail: None,

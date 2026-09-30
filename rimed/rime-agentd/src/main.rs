@@ -673,10 +673,11 @@ fn dispatch(daemon: &Arc<Daemon>, request: Request, caller: &mut privilege::Call
                 version: PROTOCOL_VERSION,
                 agents: adapter::ids().into_iter().map(|s| s.to_string()).collect(),
                 default_agent: cfg.default_agent.clone(),
+                features: Vec::new(),
             }
         }
 
-        Request::Run(req) => match session::start(daemon, req, caller) {
+        Request::Run(req) => match session::start(daemon, *req, caller) {
             Ok(info) => Response::Session(Box::new(info)),
             Err(e) => session::run_error(e),
         },
@@ -729,7 +730,7 @@ fn dispatch(daemon: &Arc<Daemon>, request: Request, caller: &mut privilege::Call
         }
 
         Request::Inject { id, source } => inject::handle(daemon, caller, id, &source),
-        Request::Input { id, data } => {
+        Request::Input { id, data, .. } => {
             // A session may not type into a sibling.
             //
             // This is the only verb on the socket that acts on a session other
@@ -769,6 +770,11 @@ fn dispatch(daemon: &Arc<Daemon>, request: Request, caller: &mut privilege::Call
         // so there is nothing to look up, and the whole of the decision is
         // who is asking. See `clipboard.rs`.
         Request::Clipboard => clipboard::handle(daemon, caller),
+
+        Request::Rename { .. } | Request::Peek { .. } => Response::error(
+            ErrorKind::BadRequest,
+            "this runtime does not implement that verb yet",
+        ),
 
         Request::Signal { id, signal } => {
             let Some(number) = rime_agent_core::session::signal_number(&signal) else {
@@ -1435,6 +1441,8 @@ mod lock_tests {
             cwd: "/tmp".into(),
             project: None,
             project_name: None,
+            name: None,
+            title: None,
             worktree: None,
             state: rime_agent_core::protocol::AgentState::Working,
             detail: None,
