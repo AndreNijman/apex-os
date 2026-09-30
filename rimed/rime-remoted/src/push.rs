@@ -1145,6 +1145,11 @@ mod tests {
             br#"{"cmd":"input","id":1,"data":"hi"}"#.to_vec(),
             br#"{"cmd":"push"}"#.to_vec(),
             br#"{"cmd":"push_registers"}"#.to_vec(),
+            // Answered by this service too, but one level up: `serve::VERBS`
+            // is checked before this function is asked, and push must not
+            // claim a verb that is not about push. The union of the two
+            // lists is pinned in `serve`'s own test.
+            br#"{"cmd":"remote_hello"}"#.to_vec(),
             b"not json".to_vec(),
             br#"{"no":"cmd"}"#.to_vec(),
         ] {

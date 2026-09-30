@@ -82,7 +82,8 @@ rime-remoted — the desktop service for Rime Remote
                       deadline is what stops an idle connection holding a
                       thread on the only network listener in the stack.
   --relay <url>       the rendezvous to fall back to when no LAN path works
-  --ping-interval-ms  how often an open connection is measured (default 15000)
+  --ping-interval-ms  how often an open connection is measured (default 15000);
+                      three unanswered in a row close it
   --no-announce       do not advertise this machine over mDNS on this network
   --allow-foreground  run outside a systemd user unit (see below)
   --help
