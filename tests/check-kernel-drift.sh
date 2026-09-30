@@ -118,7 +118,6 @@ fi
 # date_stable=None. That false positive was live in this script until it was
 # checked against a second source. Bodhi carries the status as the answer
 # rather than as a footnote.
-DW_VER="${DWARVES_NVR%%-*}"
 DW_NVR="dwarves-${DWARVES_NVR}"
 bodhi="$(fetch -H 'Accept: application/json' \
     'https://bodhi.fedoraproject.org/updates/?packages=dwarves&releases=F43&rows_per_page=20')"
@@ -149,12 +148,15 @@ print(status or "-", newest_stable or "-")
         unknowable "bodhi lists no F43 update called ${DW_NVR}; cannot tell whether it is still testing, or was withdrawn"
     else
         case "${dw_status}" in
+            # Stable is CURRENT, not drift. This used to be reported as drift
+            # so a person would relax the pin to 'dwarves >= 1.32' once it got
+            # there. It got there on 2026-09-25, and the pin was KEPT instead:
+            # a koji NVR with a sha256 is content-addressed, a dnf requirement
+            # resolves against the live repository on the day of the build. So
+            # the answer to "does the pinned dwarves still exist in a sane
+            # state" is yes, and the koji URL check below keeps asking.
             stable)
-                drifted "${DW_NVR} has REACHED F43 stable."
-                echo "         Good news reported as drift on purpose: the koji NVR pin exists"
-                echo "         only because it was in updates-testing. It can now become a"
-                echo "         normal 'dwarves >= ${DW_VER}' requirement, and the BTF gate is"
-                echo "         what makes that relaxation safe rather than a hope." ;;
+                current "${DW_NVR} is in F43 stable; kept pinned by koji NVR + sha256 on purpose (content-addressed)" ;;
             testing|pending)
                 current "${DW_NVR} is still '${dw_status}' in F43 (stable is ${dw_stable_nvr}); the koji NVR pin is still required" ;;
             unpushed|obsolete|revoked)

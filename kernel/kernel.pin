@@ -19,23 +19,26 @@
 
 # ── The tree ────────────────────────────────────────────────────────────────
 # CachyOS's kernel tree. BORE + sched_ext + the CachyOS patch set.
-KERNEL_VERSION=7.2.6
-KERNEL_TAG=cachyos-7.2.6-1
+KERNEL_VERSION=7.2.8
+KERNEL_TAG=cachyos-7.2.8-1
 # git tag object for KERNEL_TAG, for provenance when someone goes looking:
-#   ad989a1d77e9ffdf2c1a92f67b75707bae0dda74
+#   3fc6cfc8abd7b70a8d56b9de478204254445e571
 # Not a KEY= line: KERNEL_SRC_SHA256 is what actually pins the content, and
 # tests/check-kernel-pin.sh rejects a pin key nothing reads.
-KERNEL_SRC_URL=https://github.com/CachyOS/linux/archive/refs/tags/cachyos-7.2.6-1.tar.gz
-KERNEL_SRC_SHA256=df0e592cb404cc650664241820d53385b76b4fb284f2ab33ffa9bf9f7d43243d
+KERNEL_SRC_URL=https://github.com/CachyOS/linux/archive/refs/tags/cachyos-7.2.8-1.tar.gz
+KERNEL_SRC_SHA256=9030fb2fe630d97be841ee2b7621c59c07709030fb8cee25c59df635c56067f7
 
 # ── The config ──────────────────────────────────────────────────────────────
 # Upstream fetches this from `master`, so it moves under them without the NVR
 # changing. Pinned to the commit that was current when this kernel was adopted.
+# Still the newest commit to touch linux-cachyos/config at cachyos-7.2.8-1
+# (checked 2026-09-30), so the 7.2.8 bump did not move it.
 KERNEL_CONFIG_URL=https://raw.githubusercontent.com/CachyOS/linux-cachyos/6676e72b85eb9e30d079a8c3dcdf93aedd1e8226/linux-cachyos/config
 KERNEL_CONFIG_SHA256=3df33112e3357feb6a899bbfc006f2ded15226d1b2eb741ac986d581b9ca7773
 
 # ── The BORE patch ──────────────────────────────────────────────────────────
-# Same problem, same fix: upstream's Patch0 is a `master` URL.
+# Same problem, same fix: upstream's Patch0 is a `master` URL. No commit has
+# touched 7.2/sched/0001-bore-cachy.patch since this one (checked 2026-09-30).
 KERNEL_PATCH_BORE_URL=https://raw.githubusercontent.com/CachyOS/kernel-patches/c9ed808e86cc1f5fafdbe208627533ee10499b5b/7.2/sched/0001-bore-cachy.patch
 KERNEL_PATCH_BORE_SHA256=1809a4d4d6508a2a3f92cd8b3b385640583f90bd6cee46584f4bf105affd24a0
 
@@ -52,9 +55,14 @@ KERNEL_PATCH_BORE_SHA256=1809a4d4d6508a2a3f92cd8b3b385640583f90bd6cee46584f4bf10
 # three times. Pinning it by NVR is the fix, and the build gate is what keeps
 # the pin honest.
 #
-# 1.32-1.fc43 is in Fedora 43 updates-testing, not stable, which is why these
-# are koji NVR URLs rather than a `dnf install dwarves`. This is a BUILD input;
-# nothing ships dwarves to a user.
+# 1.32-1.fc43 was in Fedora 43 updates-testing when it was pinned, which is
+# why these are koji NVR URLs rather than a `dnf install dwarves`. Bodhi moved
+# it to F43 stable on 2026-09-25. The koji pin stays anyway: it is
+# content-addressed, and `dnf install dwarves` takes whatever the live
+# repository holds on the day of the build, which is the unversioned input this
+# tier exists to remove. tests/check-kernel-drift.sh reports a pinned NVR that
+# is in stable as current. This is a BUILD input; nothing ships dwarves to a
+# user.
 DWARVES_NVR=1.32-1.fc43
 DWARVES_RPM_URL=https://kojipkgs.fedoraproject.org/packages/dwarves/1.32/1.fc43/x86_64/dwarves-1.32-1.fc43.x86_64.rpm
 DWARVES_RPM_SHA256=3f1392b9ce3ea7dadb19105bb40396d3b14afe0ca0db19c3909a20491cc0dbf4
