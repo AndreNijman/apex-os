@@ -8,6 +8,7 @@ import androidx.activity.compose.rememberLauncherForActivityResult
 import androidx.activity.result.PickVisualMediaRequest
 import androidx.activity.result.contract.ActivityResultContracts
 import androidx.compose.foundation.background
+import androidx.compose.foundation.horizontalScroll
 import androidx.compose.foundation.layout.Arrangement
 import androidx.compose.foundation.layout.Box
 import androidx.compose.foundation.layout.Column
@@ -22,6 +23,7 @@ import androidx.compose.foundation.lazy.LazyColumn
 import androidx.compose.foundation.rememberScrollState
 import androidx.compose.foundation.shape.RoundedCornerShape
 import androidx.compose.foundation.verticalScroll
+import androidx.compose.material3.AlertDialog
 import androidx.compose.material3.Button
 import androidx.compose.material3.ButtonDefaults
 import androidx.compose.material3.ExperimentalMaterial3Api
@@ -37,6 +39,7 @@ import androidx.compose.material3.TextButton
 import androidx.compose.material3.TopAppBar
 import androidx.compose.material3.TopAppBarDefaults
 import androidx.compose.runtime.Composable
+import androidx.compose.runtime.DisposableEffect
 import androidx.compose.runtime.getValue
 import androidx.compose.runtime.mutableStateOf
 import androidx.compose.runtime.remember
@@ -45,6 +48,8 @@ import androidx.compose.ui.Alignment
 import androidx.compose.ui.Modifier
 import androidx.compose.ui.draw.clip
 import androidx.compose.ui.platform.LocalClipboardManager
+import androidx.compose.ui.semantics.contentDescription
+import androidx.compose.ui.semantics.semantics
 import androidx.compose.ui.text.style.TextOverflow
 import androidx.compose.ui.unit.dp
 import com.rimeos.remote.core.agent.AgentGraph
@@ -55,6 +60,7 @@ import com.rimeos.remote.core.agent.Gauge
 import com.rimeos.remote.core.agent.Handoff
 import com.rimeos.remote.core.agent.Reply
 import com.rimeos.remote.core.agent.live
+import com.rimeos.remote.ui.PeekView
 import com.rimeos.remote.ui.theme.RimeTones
 import com.rimeos.remote.ui.theme.MachineText
 import com.rimeos.remote.ui.theme.labelColumnWidth
@@ -105,23 +111,64 @@ fun SessionScreen(
     onSendFile: (Uri) -> Unit,
     /** Something that worked and still has to be said; see AgentUiState.notice. */
     notice: String? = null,
+    /**
+     * The bottom of the session's screen from `peek`, or null — a machine
+     * that cannot peek, or no answer yet. Drawn only when it is for THIS
+     * session (id and start time): see [PeekView.isFor].
+     */
+    peek: PeekView? = null,
+    /** Start and stop the live preview; tied to this screen being shown. */
+    onWatch: () -> Unit = {},
+    onUnwatch: () -> Unit = {},
+    /** Whether the machine can rename sessions (`hello.features` has `rename`). */
+    canRename: Boolean = false,
+    /** Rename; returns a sentence to show in the dialog, or null when it was sent. */
+    onRename: (String) -> String? = { null },
     onBack: () -> Unit,
     onDismiss: () -> Unit,
 ) {
     val tone = RimeTones.forState(session.state)
+    // The preview runs while this screen is on screen and for this session,
+    // and stops the moment either stops being true — a peek every second and
+    // a half is cheap, and it is still not something to do for a screen
+    // nobody is looking at.
+    DisposableEffect(session.id, session.started) {
+        onWatch()
+        onDispose { onUnwatch() }
+    }
+    var renaming by remember(session.id, session.started) { mutableStateOf(false) }
     Scaffold(
         containerColor = MaterialTheme.colorScheme.background,
         topBar = {
             TopAppBar(
                 title = {
-                    Text(
-                        "${session.agentName} on $machine",
-                        style = MaterialTheme.typography.titleMedium,
-                        maxLines = 1,
-                    )
+                    // Its name first, as everywhere (name, then title, then
+                    // the label), and the label underneath when the name is
+                    // something else — the name says what the work is, the
+                    // label says which agent is doing it where.
+                    Column {
+                        Text(
+                            session.displayName,
+                            style = MaterialTheme.typography.titleMedium,
+                            maxLines = 1,
+                            overflow = TextOverflow.Ellipsis,
+                        )
+                        Text(
+                            if (session.isNamed) "${session.label} on $machine" else "on $machine",
+                            style = MaterialTheme.typography.labelSmall,
+                            color = MaterialTheme.colorScheme.onSurfaceVariant,
+                            maxLines = 1,
+                            overflow = TextOverflow.Ellipsis,
+                        )
+                    }
                 },
                 navigationIcon = { TextButton(onClick = onBack) { Text("Back") } },
-                actions = { TextButton(onClick = onRefresh) { Text("Refresh") } },
+                actions = {
+                    if (canRename && session.live) {
+                        TextButton(onClick = { renaming = true }) { Text("Rename") }
+                    }
+                    TextButton(onClick = onRefresh) { Text("Refresh") }
+                },
                 colors = TopAppBarDefaults.topAppBarColors(
                     containerColor = MaterialTheme.colorScheme.background,
                 ),
@@ -163,6 +210,8 @@ fun SessionScreen(
                     )
                 }
             }
+
+            peek?.takeIf { it.isFor(session) }?.let { LivePanel(it) }
 
             Controls(
                 session = session,
@@ -241,6 +290,108 @@ fun SessionScreen(
             Spacer(Modifier.height(32.dp))
         }
     }
+
+    if (renaming) {
+        RenameDialog(
+            current = session.name.orEmpty(),
+            onRename = onRename,
+            onClose = { renaming = false },
+        )
+    }
+}
+
+/**
+ * The bottom of the agent's screen, without opening the terminal.
+ *
+ * What `peek` returned, replayed through the same emulator the terminal uses
+ * and cut to its bottom rows, so it reads the way the desktop's terminal
+ * reads rather than as a stream of escape sequences. Monospace and one row
+ * per line, scrolled sideways rather than wrapped, because a TUI's layout is
+ * columns and wrapping them is how a table becomes noise.
+ */
+@Composable
+private fun LivePanel(peek: PeekView) {
+    Section("Live")
+    Surface(
+        color = MaterialTheme.colorScheme.surfaceVariant,
+        shape = RoundedCornerShape(6.dp),
+        modifier = Modifier.fillMaxWidth().padding(horizontal = 16.dp),
+    ) {
+        Column(
+            Modifier
+                .horizontalScroll(rememberScrollState())
+                .padding(horizontal = 10.dp, vertical = 8.dp)
+                .semantics { contentDescription = "The last ${peek.lines.size} lines the agent printed" },
+        ) {
+            if (peek.lines.isEmpty()) {
+                Text(
+                    "Nothing on the screen yet.",
+                    style = MaterialTheme.typography.bodySmall,
+                    color = MaterialTheme.colorScheme.onSurfaceVariant,
+                )
+            }
+            for (line in peek.lines) {
+                Text(line.ifEmpty { " " }, style = MachineText, maxLines = 1, softWrap = false)
+            }
+        }
+    }
+    Text(
+        "Refreshed every second and a half while this page is open. Reading it does not " +
+            "attach, and does not change the terminal on the computer.",
+        style = MaterialTheme.typography.labelSmall,
+        color = MaterialTheme.colorScheme.onSurfaceVariant,
+        modifier = Modifier.padding(horizontal = 16.dp, vertical = 6.dp),
+    )
+}
+
+/**
+ * Naming a session: one field, and a refusal shown where it was typed.
+ *
+ * Empty clears the name — the daemon's rule, and the one the Shell and the
+ * CLI follow — so there is no separate "remove name" button to find. The
+ * check runs before anything is sent ([RemoteViewModel.renameSession]), and a
+ * refusal keeps the dialog open with the reason under the field.
+ */
+@Composable
+private fun RenameDialog(current: String, onRename: (String) -> String?, onClose: () -> Unit) {
+    var text by remember { mutableStateOf(current) }
+    var refusal by remember { mutableStateOf<String?>(null) }
+    AlertDialog(
+        onDismissRequest = onClose,
+        title = { Text("Name this session") },
+        text = {
+            Column {
+                OutlinedTextField(
+                    value = text,
+                    onValueChange = {
+                        text = it
+                        refusal = null
+                    },
+                    singleLine = true,
+                    placeholder = { Text("auth refactor") },
+                    supportingText = {
+                        Text(
+                            refusal ?: "Shown on the phone, the desktop and `rime agent list`. " +
+                                "Leave it empty to remove the name.",
+                            color = if (refusal != null) {
+                                MaterialTheme.colorScheme.error
+                            } else {
+                                MaterialTheme.colorScheme.onSurfaceVariant
+                            },
+                        )
+                    },
+                    isError = refusal != null,
+                )
+            }
+        },
+        confirmButton = {
+            TextButton(onClick = {
+                val why = onRename(text)
+                if (why == null) onClose() else refusal = why
+            }) { Text(if (text.isBlank()) "Remove name" else "Save") }
+        },
+        dismissButton = { TextButton(onClick = onClose) { Text("Cancel") } },
+    )
 }
 
 @Composable

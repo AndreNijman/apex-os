@@ -268,6 +268,8 @@ fun RimeRemoteApp(
                     pendingApprovals = state.agents.approvals.pending.size,
                     notificationsEnabled = state.notificationsEnabled,
                     notificationsUnasked = state.notificationsUnasked,
+                    lastLines = state.agents.lastLines,
+                    onWatchList = { viewModel.watchList(it) },
                     onBack = {
                         // Stop the four-second poll. Leaving it running would
                         // keep a control round trip going to a machine nobody
@@ -308,6 +310,12 @@ fun RimeRemoteApp(
                         onReply = { viewModel.replyToSession(session, it) },
                         onSendFile = { viewModel.sendFileToSession(session, it) },
                         notice = state.agents.notice,
+                        peek = state.agents.peek,
+                        onWatch = { viewModel.watchSession(session) },
+                        onUnwatch = { viewModel.stopWatchingSession() },
+                        canRename = state.agents.hello?.has(com.rimeos.remote.core.agent.Features.RENAME) == true ||
+                            viewModel.canRename(),
+                        onRename = { viewModel.renameSession(session, it) },
                         onBack = { navigation.popBackStack() },
                         onDismiss = { viewModel.dismiss() },
                     )
@@ -321,7 +329,7 @@ fun RimeRemoteApp(
                 } else {
                     TerminalScreen(
                         controller = controller,
-                        title = state.agents.selected?.let { "${it.agentName} · ${it.where.substringAfterLast('/')}" }
+                        title = state.agents.selected?.displayName
                             ?: (state.agents.machine?.machine ?: "Terminal"),
                         settings = state.settings,
                         onBack = {

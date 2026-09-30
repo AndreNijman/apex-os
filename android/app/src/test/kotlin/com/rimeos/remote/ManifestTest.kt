@@ -122,7 +122,7 @@ class ManifestTest {
     }
 
     @Test
-    fun `the permissions this app does declare are the five it can justify`() {
+    fun `the permissions this app does declare are the seven it can justify`() {
         // A fixed set rather than a floor. A permission added without a reason
         // fails here and has to be argued for in a diff, which is the only
         // moment anybody reads the list.
@@ -147,9 +147,49 @@ class ManifestTest {
                 // Argued at length in the manifest and in docs/android-app.md,
                 // including why the DESKTOP AI apps are ruled the other way.
                 "android.permission.REQUEST_INSTALL_PACKAGES",
+                // Added deliberately with the remote-live change set: "I want
+                // it just always connected." A foreground service holds the
+                // connection to the computer while the app is unlocked, so a
+                // machine or a terminal opens without a fresh handshake. The
+                // first is what any foreground service needs, the second what
+                // its `specialUse` type needs on Android 14 and later; neither
+                // is a runtime prompt, and the cost is the ongoing
+                // notification, which the next test pins.
+                "android.permission.FOREGROUND_SERVICE",
+                "android.permission.FOREGROUND_SERVICE_SPECIAL_USE",
             ),
             "the declared permissions changed: $declared",
         )
+    }
+
+    @Test
+    fun `the connection keeper is a private specialUse service that says what it is for`() {
+        // Android 14 refuses to start a foreground service whose type the
+        // manifest does not declare, and a `specialUse` one without the
+        // subtype property is the kind a reviewer — or a person reading the
+        // app's info page — cannot account for. Exported, it could be started
+        // or stopped by any app on the phone.
+        val service = manifest.substringAfter("\".link.LinkService\"").substringBefore("</service>")
+        assertTrue(manifest.contains("\".link.LinkService\""), "the connection service is not declared")
+        assertTrue(service.contains("android:exported=\"false\""), "the connection service is exported")
+        assertTrue(
+            service.contains("android:foregroundServiceType=\"specialUse\""),
+            "the connection service does not declare its foreground type",
+        )
+        assertTrue(
+            service.contains("android.app.PROPERTY_SPECIAL_USE_FGS_SUBTYPE"),
+            "a specialUse service with no stated reason",
+        )
+        // And nothing else that a service could have been used as an excuse
+        // for: it runs while the app is unlocked, not from boot, and it does
+        // not ask to be exempt from the battery rules everything else obeys.
+        for (p in listOf(
+            "android.permission.RECEIVE_BOOT_COMPLETED",
+            "android.permission.WAKE_LOCK",
+            "android.permission.REQUEST_IGNORE_BATTERY_OPTIMIZATIONS",
+        )) {
+            assertFalse(declares(p), "$p came in with the connection service")
+        }
     }
 
     @Test
@@ -304,12 +344,17 @@ class PushManifestTest {
     @Test
     fun `push adds no permission to this app`() {
         // The whole design's cost, stated as a check. A UnifiedPush client
-        // needs no permission at all — no FOREGROUND_SERVICE, no WAKE_LOCK, no
-        // RECEIVE_BOOT_COMPLETED, and nothing from Google Play services. The
-        // distributor is the app that holds a connection open, and it is the
-        // one the user chose to install for that.
+        // needs no permission at all — no WAKE_LOCK, no RECEIVE_BOOT_COMPLETED,
+        // and nothing from Google Play services. The distributor is the app
+        // that holds a connection open for push, and it is the one the user
+        // chose to install for that.
+        //
+        // FOREGROUND_SERVICE used to be on this list and is not any more, and
+        // the reason is not push: the remote-live change set holds the
+        // connection to the COMPUTER open while the app is unlocked (the
+        // `.link.LinkService` that `ManifestTest` pins). Push still works with
+        // the app closed and that service stopped, which is the point of it.
         for (permission in listOf(
-            "android.permission.FOREGROUND_SERVICE",
             "android.permission.WAKE_LOCK",
             "android.permission.RECEIVE_BOOT_COMPLETED",
             "android.permission.REQUEST_IGNORE_BATTERY_OPTIMIZATIONS",
