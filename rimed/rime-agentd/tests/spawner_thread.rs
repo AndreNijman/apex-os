@@ -132,8 +132,9 @@ impl Harness {
 }
 
 fn run_request(argv: Vec<String>) -> Request {
-    Request::Run(RunRequest {
+    Request::Run(Box::new(RunRequest {
         agent: Some("generic".into()),
+        name: None,
         prompt: None,
         args: argv,
         cwd: "/tmp".into(),
@@ -155,7 +156,7 @@ fn run_request(argv: Vec<String>) -> Request {
         env: vec![],
         disposable: false,
         copy_out: None,
-    })
+    }))
 }
 
 #[test]

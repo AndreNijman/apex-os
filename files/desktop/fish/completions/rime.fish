@@ -67,6 +67,7 @@ complete -c rime -n '__rime_group agent; and __rime_at 2' -a run -d 'start an ag
 complete -c rime -n '__rime_group agent; and __rime_at 2' -a list -d 'sessions'
 complete -c rime -n '__rime_group agent; and __rime_at 2' -a attach -d 'reattach to a session'
 complete -c rime -n '__rime_group agent; and __rime_at 2' -a input -d 'type text into a session'
+complete -c rime -n '__rime_group agent; and __rime_at 2' -a rename -d 'name a session'
 complete -c rime -n '__rime_group agent; and __rime_at 2' -a handoff -d 'hand a session to another agent'
 complete -c rime -n '__rime_group agent; and __rime_at 2' -a pause -d 'stop a session'
 complete -c rime -n '__rime_group agent; and __rime_at 2' -a resume -d 'continue a paused session'
@@ -83,9 +84,12 @@ complete -c rime -n '__rime_group agent; and __rime_at 2' -a rm -d 'forget a fin
 complete -c rime -n '__rime_group agent; and __rime_at 2' -a prune -d 'forget every finished session'
 complete -c rime -n '__rime_group agent; and __rime_at 2' -a enable -d 'turn the runtime on'
 
-for v in attach input handoff pause resume kill logs rm status diff undo
+for v in attach input rename handoff pause resume kill logs rm status diff undo
     complete -c rime -n "__rime_verb agent $v" -a '(_rime_session_ids)' -d session
 end
+complete -c rime -n '__rime_verb agent rename' -l clear -d 'remove the name'
+complete -c rime -n '__rime_verb agent run' -s n -l name -x -d 'what to call the session'
+complete -c rime -n '__rime_verb agent input' -l submit -d 'press Enter after it'
 complete -c rime -n '__rime_verb agent default' -a '(_rime_agent_names)' -d agent
 complete -c rime -n '__rime_verb agent event' \
     -a 'working waiting_for_user permission_request complete failed' -d state

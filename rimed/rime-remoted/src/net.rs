@@ -27,6 +27,17 @@ use std::net::IpAddr;
 pub const MAX_MESSAGE: usize = rime_remote_core::noise::MAX_MESSAGE;
 
 /// Write one length-prefixed message.
+///
+/// **One `write` for the header and the body together**, and that is the
+/// point of the copy. Written as two, a four-byte header went out on its own
+/// and the body waited behind it: with Nagle on (it was, on every accepted
+/// socket, until `main` turned it off) the kernel holds the body until the
+/// header is acknowledged, and the phone's delayed ACK holds the
+/// acknowledgement for up to 40 ms — per frame, on every keystroke echo and
+/// every control reply. `TCP_NODELAY` removes the wait; one buffer removes the
+/// second segment, so the fix does not depend on the socket option having
+/// been set by whoever opened the socket. A message is at most 64 KiB, so
+/// the copy is cheap next to the Noise sealing that produced it.
 pub fn write_message(w: &mut impl Write, message: &[u8]) -> std::io::Result<()> {
     if message.len() > MAX_MESSAGE {
         return Err(std::io::Error::new(
@@ -34,8 +45,10 @@ pub fn write_message(w: &mut impl Write, message: &[u8]) -> std::io::Result<()> 
             format!("a message of {} bytes exceeds {MAX_MESSAGE}", message.len()),
         ));
     }
-    w.write_all(&(message.len() as u32).to_be_bytes())?;
-    w.write_all(message)?;
+    let mut framed = Vec::with_capacity(4 + message.len());
+    framed.extend_from_slice(&(message.len() as u32).to_be_bytes());
+    framed.extend_from_slice(message);
+    w.write_all(&framed)?;
     w.flush()
 }
 
@@ -131,6 +144,40 @@ mod tests {
             assert_eq!(buf.len(), payload.len() + 4);
             let mut cursor = std::io::Cursor::new(buf);
             assert_eq!(read_message(&mut cursor).expect("read"), payload);
+        }
+    }
+
+    /// A writer that accepts everything and counts how many times it was asked.
+    #[derive(Default)]
+    struct Counting {
+        writes: usize,
+        bytes: Vec<u8>,
+    }
+
+    impl Write for Counting {
+        fn write(&mut self, buf: &[u8]) -> std::io::Result<usize> {
+            self.writes += 1;
+            self.bytes.extend_from_slice(buf);
+            Ok(buf.len())
+        }
+        fn flush(&mut self) -> std::io::Result<()> {
+            Ok(())
+        }
+    }
+
+    #[test]
+    fn a_frame_leaves_in_one_write_so_nagle_has_nothing_to_hold_back() {
+        // Two writes per frame was a four-byte segment followed by the body,
+        // and on a socket with Nagle on the body then waited for the header's
+        // ACK — which a phone delays by up to 40 ms. A writer that accepts
+        // everything it is offered must therefore be asked exactly once, for
+        // the whole frame, header first.
+        for payload in [vec![], vec![1u8], vec![9u8; 4096], vec![0xabu8; MAX_MESSAGE]] {
+            let mut w = Counting::default();
+            write_message(&mut w, &payload).expect("write");
+            assert_eq!(w.writes, 1, "a {}-byte frame took {} writes", payload.len(), w.writes);
+            assert_eq!(&w.bytes[..4], &(payload.len() as u32).to_be_bytes());
+            assert_eq!(&w.bytes[4..], &payload[..]);
         }
     }
 

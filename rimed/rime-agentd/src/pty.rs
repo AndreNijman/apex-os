@@ -680,6 +680,61 @@ pub fn close(fd: RawFd) {
     }
 }
 
+/// A PTY pair with no process on it: `(master, slave)`, the slave in raw
+/// mode and non-blocking.
+///
+/// For tests of what the DAEMON does to a terminal — its size, and the bytes
+/// and their timing that reach the program's side — which need a real line
+/// discipline and nothing else. No fork, so it works where [`spawn`] cannot
+/// (a process under `no_new_privs`, a runner that refuses `setsid`), and there
+/// is no child to reap or to outlive the test.
+///
+/// Raw mode for the reason a real agent is in it: Claude Code reads its
+/// terminal raw, so a CR arrives as CR and a read returns whatever has been
+/// written, with no line to wait for. `None` when the machine has no
+/// `/dev/ptmx`, and the caller says it skipped.
+#[cfg(test)]
+pub(crate) fn bare_pair() -> Option<(RawFd, RawFd)> {
+    // Safe throughout: libc calls on descriptors this function owns, with
+    // buffers it owns; every failure path closes what it opened.
+    unsafe {
+        let master = libc::posix_openpt(libc::O_RDWR | libc::O_NOCTTY | libc::O_CLOEXEC);
+        if master < 0 {
+            return None;
+        }
+        if libc::grantpt(master) != 0 || libc::unlockpt(master) != 0 {
+            libc::close(master);
+            return None;
+        }
+        let mut name = [0 as libc::c_char; 128];
+        if libc::ptsname_r(master, name.as_mut_ptr(), name.len()) != 0 {
+            libc::close(master);
+            return None;
+        }
+        let slave = libc::open(
+            name.as_ptr(),
+            libc::O_RDWR | libc::O_NOCTTY | libc::O_CLOEXEC | libc::O_NONBLOCK,
+        );
+        if slave < 0 {
+            libc::close(master);
+            return None;
+        }
+        let mut tio: libc::termios = std::mem::zeroed();
+        if libc::tcgetattr(slave, &mut tio) != 0 {
+            libc::close(slave);
+            libc::close(master);
+            return None;
+        }
+        libc::cfmakeraw(&mut tio);
+        if libc::tcsetattr(slave, libc::TCSANOW, &tio) != 0 {
+            libc::close(slave);
+            libc::close(master);
+            return None;
+        }
+        Some((master, slave))
+    }
+}
+
 /// Build the environment block the child will exec with.
 ///
 /// This is the daemon's own environment with `overrides` applied — which is

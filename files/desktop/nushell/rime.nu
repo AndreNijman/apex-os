@@ -119,13 +119,36 @@ export def --wrapped aa [...rest] {
     ^rime agent attach ($ids | first)
 }
 
-# Start an agent in a worktree.
+# Whether a `rime agent run` command line already names its session, so `aw`
+# does not name it twice (`--name` given twice is refused). Stops at `--`: what
+# follows belongs to the agent binary.
+def "rime names itself" [args: list<string>] {
+    if ($env.RIME_AGENT_NAME? | default "" | str trim | is-not-empty) { return true }
+    for arg in $args {
+        if $arg == "--" { return false }
+        if ($arg == "--name") or ($arg | str starts-with "--name=") or ($arg | str starts-with "-n") {
+            return true
+        }
+    }
+    false
+}
+
+# Start an agent in a worktree. The worktree's name is the session's name too,
+# unless the command line or $RIME_AGENT_NAME already gives one; past the
+# 64-character limit it is left off rather than passed along to be refused.
+# The same rule as agent.sh.
 export def --wrapped aw [...rest] {
     if ($rest | is-empty) {
         print -e "usage: aw <worktree-name> [prompt]"
         return
     }
-    ^rime agent run --worktree ($rest | first) ...($rest | skip 1)
+    let wt = ($rest | first)
+    let args = ($rest | skip 1)
+    if (rime names itself $args) or (($wt | str length) > 64) {
+        ^rime agent run --worktree $wt ...$args
+    } else {
+        ^rime agent run --worktree $wt --name $wt ...$args
+    }
 }
 
 # ── prompt indicator ────────────────────────────────────────────────────────
@@ -198,10 +221,17 @@ export extern "rime agent event"  [ state?: string@"nu-complete rime states" ]
 export extern "rime agent run" [
     prompt?: string
     --agent(-a): string@"nu-complete rime agents"
+    --name(-n): string
     --sandbox(-s): string@"nu-complete rime sandbox"
     --worktree(-w): string
     --checkpoint(-c): string
     --detach
+]
+export extern "rime agent rename" [
+    id?: string@"nu-complete rime sessions"
+    ...name: string
+    --clear
+    --host: string
 ]
 
 export extern "rime request ask"     [ operation?: string@"nu-complete rime operations" ]

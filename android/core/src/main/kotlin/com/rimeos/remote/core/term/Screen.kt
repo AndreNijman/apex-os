@@ -399,9 +399,10 @@ class Screen(cols: Int, rows: Int, val scrollbackLimit: Int = DEFAULT_SCROLLBACK
         /**
          * How many lines of history to keep.
          *
-         * The daemon replays at most 256 KiB on attach, which at eighty
-         * columns is about 3200 lines, so this holds a whole replay and a
-         * good deal of what follows it.
+         * The daemon's whole ring is 256 KiB, about 3200 lines at eighty
+         * columns, and a phone asks for a quarter of it on attach
+         * (`Agentd.DEFAULT_REPLAY`), so this holds any replay and a good deal
+         * of what follows it.
          */
         const val DEFAULT_SCROLLBACK: Int = 4000
     }

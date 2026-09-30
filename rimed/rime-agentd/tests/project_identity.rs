@@ -164,8 +164,9 @@ impl Harness {
 
     /// Ask for a session in `cwd`, optionally naming an agent.
     fn run(&self, cwd: &Path, agent: Option<&str>) -> serde_json::Value {
-        self.call(&Request::Run(RunRequest {
+        self.call(&Request::Run(Box::new(RunRequest {
             agent: agent.map(str::to_string),
+            name: None,
             prompt: None,
             args: vec!["/bin/sh".into(), "-c".into(), "sleep 30".into()],
             cwd: cwd.to_string_lossy().into_owned(),
@@ -187,7 +188,7 @@ impl Harness {
             env: vec![],
             disposable: false,
             copy_out: None,
-        }))
+        })))
     }
 }
 

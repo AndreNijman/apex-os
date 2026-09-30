@@ -324,6 +324,36 @@ pub const BROWSER_CA_VERSION: u32 = 10;
 /// believes it is logged in to.
 pub const BROWSER_PRESENT_VERSION: u32 = 11;
 
+/// What this daemon can do that an older one of the same protocol revision
+/// cannot, as [`Response::Hello`] lists it (`docs/remote-live-contract.md`
+/// §1.1).
+///
+/// A list of words and not a revision, because none of these is a change a
+/// version number exists for. Every guard above catches a key an old daemon
+/// DROPS while the session runs wider than was asked for; each of these is a
+/// verb an old daemon answers `bad_request`, or a field it ignores while losing
+/// a convenience — a name not shown, a reply typed and not sent. The rule the
+/// comments on [`Request::Event`] set out is that such a change is not a
+/// bump, and three branches editing this file at once is the reason the rule
+/// exists.
+///
+/// What the list buys a client is knowing BEFORE it asks. A phone that sees no
+/// `input_submit` sends the text and the carriage return as two requests
+/// itself; one that sees no `peek` does not draw a preview it would have to
+/// take away again. An absent `features` key is an old daemon, and means none.
+///
+/// Exactly the features this build implements, in the contract's order.
+/// `every_advertised_feature_is_the_contracts` pins the strings, because a
+/// client matches on them byte for byte.
+pub const FEATURES: &[&str] = &[
+    "input_submit",
+    "rename",
+    "peek",
+    "session_name",
+    "session_title",
+    "size_restore",
+];
+
 /// What a session is doing. The five user-facing values come straight from the
 /// roadmap's agent event protocol; `Starting` and `Exited` are the lifecycle
 /// bookends the runtime itself owns.
@@ -472,6 +502,33 @@ pub struct SessionInfo {
     pub project: Option<String>,
     /// Project name for display, when known.
     pub project_name: Option<String>,
+    /// What a PERSON called this session (§1.3): `rime agent run --name`, or
+    /// `rename` from the CLI, the Shell or a phone.
+    ///
+    /// Never taken from anything the agent writes, which is the difference
+    /// between this and [`SessionInfo::title`] and the reason they are two
+    /// fields. Checked by [`crate::session::session_name`] on the way in, by
+    /// the CLI and again by the daemon.
+    ///
+    /// `#[serde(default)]` so a record written before names existed still
+    /// loads, as a session nobody has named. ALWAYS serialised, `null`
+    /// included, and deliberately without `skip_serializing_if`: a client
+    /// tells "this daemon has names and none is set" (`"name": null`) from
+    /// "this daemon predates names" (no key) by exactly that difference, and
+    /// it decides whether to offer Rename from it.
+    #[serde(default)]
+    pub name: Option<String>,
+    /// The agent's own terminal title (OSC 0 / OSC 2), with its spinner glyphs
+    /// stripped ([`crate::session::clean_title`]).
+    ///
+    /// Display only. It is text the agent chose, so nothing reads it to decide
+    /// anything; the order a client shows a session by is `name`, then this,
+    /// then `<agent> · <project>`, so a person's name always wins over the
+    /// agent's.
+    ///
+    /// Serialised the way `name` is, for `name`'s reason.
+    #[serde(default)]
+    pub title: Option<String>,
     /// Git worktree this session was given, when it was created with one.
     pub worktree: Option<String>,
     pub state: AgentState,
@@ -685,7 +742,13 @@ pub enum Request {
     /// rely on.
     Hello,
     /// Start a session.
-    Run(RunRequest),
+    ///
+    /// Boxed for the reason `AgentCmd::Run` is in the CLI: the parameters of a
+    /// session are by far the largest variant here, and clippy's
+    /// `large_enum_variant` is right. It crossed the threshold when `name` was
+    /// added (§1.4). The wire is unchanged — serde serialises a box as what it
+    /// holds.
+    Run(Box<RunRequest>),
     /// Every session the daemon knows about, newest last.
     List,
     /// One session.
@@ -784,11 +847,29 @@ pub enum Request {
     /// push-to-talk route is the first: it holds a transcript and owns no
     /// terminal.
     ///
-    /// `data` is written verbatim and no byte is added. Whether the line is
-    /// SENT is the caller's decision, because it is the difference between
-    /// putting words in a prompt and making an agent act on them: `rime agent
-    /// input --submit` appends the carriage return that means Enter, and
-    /// without it the text waits in the prompt for a person.
+    /// `data` is written verbatim and no byte is added to it. Whether the line
+    /// is SENT is the caller's decision, because it is the difference between
+    /// putting words in a prompt and making an agent act on them: `submit`
+    /// presses Enter after the text, and without it the text waits in the
+    /// prompt for a person.
+    ///
+    /// ## Why `submit` is a flag and not a `\r` on the end of `data`
+    ///
+    /// It used to be the byte, appended by the caller, and it was measured to
+    /// fail: an agent TUI that sees a long burst ending in CR treats the whole
+    /// burst as a PASTE, so the CR becomes a newline in the prompt and nothing
+    /// is sent (Claude Code 2.1.283, a ~250-character reply from a phone,
+    /// 2026-09-30). The same CR written on its own a moment later is a key
+    /// press. So with `submit` the daemon writes `data`, waits
+    /// [`crate::session::SUBMIT_GAP`] WITHOUT holding the session lock, and
+    /// writes `"\r"` as a separate write. `data` should not itself end in a
+    /// line terminator when `submit` is set; the daemon strips nothing.
+    ///
+    /// `#[serde(default)]`: every client written before the flag sends none
+    /// and means none. A daemon that predates it IGNORES the key, so the text
+    /// arrives unsent — which is why the flag is advertised in
+    /// [`FEATURES`] as `input_submit`, and why a client that does not see it
+    /// there sends the CR itself, as a second request after a short pause.
     ///
     /// Refused when the caller is itself a managed session. Every other verb
     /// on this socket is either a question or an action on the caller's own
@@ -799,7 +880,57 @@ pub enum Request {
     /// daemon that predates this answers "unparseable request", the client
     /// reports that it could not deliver, and nothing has been typed. The
     /// failure loses a message, never a restriction.
-    Input { id: u32, data: String },
+    Input {
+        id: u32,
+        data: String,
+        /// Press Enter after `data`, as a separate write. See above.
+        #[serde(default)]
+        submit: bool,
+    },
+    /// Give a live session a name, or take its name away (§1.5).
+    ///
+    /// `name: null` — or no `name` at all, or one that is only whitespace —
+    /// clears it. Checked by [`crate::session::session_name`]: at most 64
+    /// characters, no control characters, and refused rather than cleaned.
+    /// Answered with the updated [`Response::Session`], so a client redraws
+    /// from what the daemon recorded rather than from what it sent.
+    ///
+    /// Refused to exactly the callers [`Request::Input`] is refused to — a
+    /// managed session, and a connection that cannot be classified. Only a
+    /// person names a session. An agent that could rename a sibling could
+    /// make the Agent Center show one session under another's name, and a
+    /// person approving something from a phone reads that name.
+    ///
+    /// Not a protocol bump, by [`Request::Event`]'s criterion: a daemon that
+    /// predates it answers "unparseable request" and nothing was renamed.
+    Rename {
+        id: u32,
+        #[serde(default)]
+        name: Option<String>,
+    },
+    /// The tail of a session's output, without attaching to it (§1.6).
+    ///
+    /// Read from the in-memory scrollback ring, never the on-disk transcript
+    /// (which stops at 32 MiB, so a long session's transcript tail is not its
+    /// screen). No resize, no attach, and `attached` does not move: a phone
+    /// drawing the last lines of five sessions in a list is not five people
+    /// looking at five terminals, and must not shrink any of them.
+    ///
+    /// `bytes` is capped at [`crate::session::PEEK_MAX`] and defaults to it.
+    /// The tail may begin in the middle of an escape sequence or of a UTF-8
+    /// character; a client feeds it to a terminal emulator at the reply's
+    /// `cols`×`rows` and shows the bottom lines, which is what makes a
+    /// mid-sequence start harmless.
+    ///
+    /// Refused to exactly the callers [`Request::Input`] is refused to. An
+    /// agent reading another agent's screen is reading whatever that one was
+    /// shown — a diff, a secret it printed, a prompt it is answering — and
+    /// agents do not read each other's screens.
+    Peek {
+        id: u32,
+        #[serde(default)]
+        bytes: Option<usize>,
+    },
     /// Read what is on the machine's clipboard right now (P1-059 criterion 3,
     /// the receive half).
     ///
@@ -1334,6 +1465,19 @@ pub struct RunRequest {
     /// Adapter id, or `None` to use the configured default agent.
     #[serde(default)]
     pub agent: Option<String>,
+    /// What to call the session (§1.4): `rime agent run --name`, or
+    /// `$RIME_AGENT_NAME`, or the worktree `aw` was given.
+    ///
+    /// Checked by [`crate::session::session_name`] in the daemon as well as
+    /// in the CLI — a client is not a boundary — and before anything is
+    /// created, so a refused name leaves no reserved id behind.
+    ///
+    /// NOT on the CLI's table of settings a daemon could drop, and not a
+    /// protocol bump: a daemon that predates it ignores the key and starts
+    /// the same session with no name. That loses a label, never a
+    /// restriction, which is the test the version guards apply.
+    #[serde(default)]
+    pub name: Option<String>,
     /// Prompt handed to the agent, when it takes one.
     #[serde(default)]
     pub prompt: Option<String>,
@@ -1573,6 +1717,13 @@ pub enum Response {
         agents: Vec<String>,
         /// Configured default agent.
         default_agent: String,
+        /// What this daemon can do beyond its revision: [`FEATURES`].
+        ///
+        /// `#[serde(default)]`, so a client reading an older daemon's hello
+        /// gets an empty list — "none" — rather than a parse failure. A
+        /// client uses a feature only when its word is here.
+        #[serde(default)]
+        features: Vec<String>,
     },
     /// A session was created or inspected.
     Session(Box<SessionInfo>),
@@ -1649,6 +1800,23 @@ pub enum Response {
         id: u32,
         /// UTF-8 lossy transcript tail.
         text: String,
+    },
+    /// The tail of a session's output ([`Request::Peek`]).
+    Peek {
+        id: u32,
+        /// The raw PTY bytes, base64 with the standard alphabet and padding.
+        ///
+        /// Base64 and not a string, because the bytes are a terminal's and not
+        /// text: a tail can start inside a UTF-8 character, which a lossy
+        /// decode would turn into U+FFFD, and every control byte JSON-escapes
+        /// to six. 8192 bytes of base64 is at most 10924 characters.
+        data: String,
+        /// The size the PTY is right now, which is the grid those bytes were
+        /// drawn for. A client renders them at this size and reads the bottom
+        /// of the result.
+        cols: u16,
+        rows: u16,
+        state: AgentState,
     },
     /// A privilege request was filed, decided or executed.
     Request(Box<crate::request::PrivilegeRequest>),
@@ -1887,12 +2055,14 @@ mod tests {
         let req = Request::Input {
             id: 4,
             data: text.to_string(),
+            submit: false,
         };
         let line = serde_json::to_string(&req).expect("serialise");
         assert!(!line.contains('\n'), "{line} would break NDJSON framing");
         assert!(!line.contains('\r'), "{line} would break NDJSON framing");
         match serde_json::from_str::<Request>(&line).expect("round-trip") {
-            Request::Input { id, data } => {
+            Request::Input { id, data, submit } => {
+                assert!(!submit);
                 assert_eq!(id, 4);
                 assert_eq!(data, text, "the payload changed on the wire");
             }
@@ -1909,6 +2079,7 @@ mod tests {
         let line = serde_json::to_string(&Request::Input {
             id: 9,
             data: "x".into(),
+            submit: false,
         })
         .unwrap();
         assert!(line.contains(r#""cmd":"input""#), "{line}");
@@ -1976,6 +2147,8 @@ mod tests {
             cwd: "/home/t/p".into(),
             project: Some("/home/t/p".into()),
             project_name: Some("p".into()),
+            name: None,
+            title: None,
             worktree: None,
             state: AgentState::Working,
             detail: None,
@@ -2015,6 +2188,14 @@ mod tests {
                 version: PROTOCOL_VERSION,
                 agents: vec!["claude".into(), "generic".into()],
                 default_agent: "claude".into(),
+                features: FEATURES.iter().map(|f| f.to_string()).collect(),
+            },
+            Response::Peek {
+                id: 3,
+                data: "G1swbWhp".into(),
+                cols: 120,
+                rows: 40,
+                state: AgentState::Working,
             },
             Response::Session(Box::new(sample_session())),
             Response::Sessions {
@@ -2173,6 +2354,7 @@ mod tests {
         // a dropped `allow` is a session that reaches MORE than was asked for.
         let req = RunRequest {
             agent: None,
+            name: None,
             prompt: None,
             args: vec![],
             cwd: "/home/t/p".into(),
@@ -2231,6 +2413,7 @@ mod tests {
         // timeout, so the silence is the cost.
         let req = RunRequest {
             agent: None,
+            name: None,
             prompt: None,
             args: vec![],
             cwd: "/home/t/p".into(),
@@ -2280,6 +2463,7 @@ mod tests {
         // plausible. Nothing anywhere says the credential was not presented.
         let req = RunRequest {
             agent: None,
+            name: None,
             prompt: None,
             args: vec![],
             cwd: "/home/t/p".into(),
@@ -2334,8 +2518,9 @@ mod tests {
         // connection failure while the dialog is still up.
         use crate::policy::SystemAccess;
         let run = |system| {
-            Request::Run(RunRequest {
+            Request::Run(Box::new(RunRequest {
                 agent: None,
+                name: None,
                 prompt: None,
                 args: vec![],
                 cwd: "/home/t/p".into(),
@@ -2357,7 +2542,7 @@ mod tests {
                 env: vec![],
                 disposable: false,
                 copy_out: None,
-            })
+            }))
         };
         assert!(run(SystemAccess::Session).waits_on_a_human());
         assert!(run(SystemAccess::Unsafe).waits_on_a_human());
@@ -2382,8 +2567,9 @@ mod tests {
                 id: 3,
                 source: "/home/t/Pictures/Screenshots/shot.png".into(),
             },
-            Request::Run(RunRequest {
+            Request::Run(Box::new(RunRequest {
                 agent: Some("claude".into()),
+                name: None,
                 prompt: Some("go".into()),
                 args: vec!["--verbose".into()],
                 cwd: "/home/t/p".into(),
@@ -2415,11 +2601,12 @@ mod tests {
                 env: vec![("K".into(), "V".into())],
                 disposable: false,
                 copy_out: None,
-            }),
-            Request::Run(RunRequest {
+            })),
+            Request::Run(Box::new(RunRequest {
                 // A disposable run, so the two new keys cross the wire in the
                 // round-trip too rather than only in their default form.
                 agent: Some("claude".into()),
+                name: None,
                 prompt: Some("review this".into()),
                 args: vec![],
                 cwd: "/home/t/p".into(),
@@ -2441,7 +2628,7 @@ mod tests {
                 env: vec![],
                 disposable: true,
                 copy_out: Some("/home/t/results".into()),
-            }),
+            })),
             Request::List,
             Request::PrivilegeRequest {
                 verb: "install".into(),
@@ -2499,10 +2686,23 @@ mod tests {
             Request::Input {
                 id: 1,
                 // A transcript with a carriage return in it, because that is
-                // what `--submit` appends and it is the byte most likely to be
-                // mangled on the way through JSON.
+                // the byte most likely to be mangled on the way through JSON —
+                // and what an older client still appends in place of `submit`.
                 data: "run the tests\r".into(),
+                submit: false,
             },
+            Request::Input {
+                id: 1,
+                data: "run the tests".into(),
+                submit: true,
+            },
+            Request::Rename {
+                id: 1,
+                name: Some("auth refactor".into()),
+            },
+            Request::Rename { id: 1, name: None },
+            Request::Peek { id: 1, bytes: Some(4096) },
+            Request::Peek { id: 1, bytes: None },
             Request::Event {
                 id: 1,
                 state: Some("working".into()),
@@ -2757,6 +2957,8 @@ mod tests {
             cwd: "/tmp".into(),
             project: None,
             project_name: None,
+            name: None,
+            title: None,
             worktree: None,
             state: AgentState::Working,
             detail: None,
@@ -2794,5 +2996,183 @@ mod tests {
         info.exit_signal = Some(9);
         assert!(!info.is_live());
         assert_eq!(info.exit_summary().as_deref(), Some("killed by signal 9"));
+    }
+
+    // ── docs/remote-live-contract.md §1: the exact JSON the other sides send ──
+    //
+    // Parsed from the contract's own strings, not from a round trip. A round
+    // trip agrees with itself whatever a key is called; the phone, the Shell
+    // and rime-remoted were built against these bytes, so these bytes are what
+    // has to parse.
+
+    #[test]
+    fn every_advertised_feature_is_the_contracts() {
+        // A client matches these byte for byte, so a rename here is a phone
+        // that silently stops using the feature.
+        assert_eq!(
+            FEATURES,
+            &["input_submit", "rename", "peek", "session_name", "session_title", "size_restore"]
+        );
+    }
+
+    #[test]
+    fn the_contracts_hello_reply_parses_and_an_old_one_means_no_features() {
+        let line = r#"{"reply":"hello","version":11,"agents":["claude"],"default_agent":"claude",
+ "features":["input_submit","rename","peek","session_name","session_title","size_restore"]}"#;
+        match serde_json::from_str::<Response>(line).expect("the contract's hello") {
+            Response::Hello { version, agents, default_agent, features } => {
+                assert_eq!(version, 11);
+                assert_eq!(agents, vec!["claude".to_string()]);
+                assert_eq!(default_agent, "claude");
+                assert_eq!(features, FEATURES);
+            }
+            other => panic!("wrong variant: {other:?}"),
+        }
+        // An old daemon's hello has no `features` key, and that is "none",
+        // not a reply a new client cannot read.
+        let old = r#"{"reply":"hello","version":11,"agents":["claude"],"default_agent":"claude"}"#;
+        match serde_json::from_str::<Response>(old).expect("an old daemon's hello") {
+            Response::Hello { features, .. } => assert!(features.is_empty()),
+            other => panic!("wrong variant: {other:?}"),
+        }
+        // And the key is written by this build, so a client can find it.
+        let v = serde_json::to_value(Response::Hello {
+            version: PROTOCOL_VERSION,
+            agents: vec![],
+            default_agent: "claude".into(),
+            features: FEATURES.iter().map(|f| f.to_string()).collect(),
+        })
+        .unwrap();
+        assert_eq!(v["features"][0], "input_submit");
+    }
+
+    #[test]
+    fn the_contracts_input_with_submit_parses_and_submit_defaults_off() {
+        match serde_json::from_str::<Request>(
+            r#"{"cmd":"input","id":3,"data":"yes please","submit":true}"#,
+        )
+        .expect("the contract's input")
+        {
+            Request::Input { id, data, submit } => {
+                assert_eq!(id, 3);
+                assert_eq!(data, "yes please", "the daemon must not strip or add a byte");
+                assert!(submit);
+            }
+            other => panic!("wrong variant: {other:?}"),
+        }
+        // Every client written before the flag: no key, no Enter.
+        match serde_json::from_str::<Request>(r#"{"cmd":"input","id":3,"data":"yes\r"}"#).unwrap()
+        {
+            Request::Input { submit, data, .. } => {
+                assert!(!submit);
+                assert_eq!(data, "yes\r");
+            }
+            other => panic!("wrong variant: {other:?}"),
+        }
+    }
+
+    #[test]
+    fn the_contracts_rename_parses_with_a_name_and_with_null() {
+        match serde_json::from_str::<Request>(r#"{"cmd":"rename","id":3,"name":"auth refactor"}"#)
+            .expect("rename with a name")
+        {
+            Request::Rename { id, name } => {
+                assert_eq!(id, 3);
+                assert_eq!(name.as_deref(), Some("auth refactor"));
+            }
+            other => panic!("wrong variant: {other:?}"),
+        }
+        for clear in [r#"{"cmd":"rename","id":3,"name":null}"#, r#"{"cmd":"rename","id":3}"#] {
+            match serde_json::from_str::<Request>(clear).expect(clear) {
+                Request::Rename { id: 3, name: None } => {}
+                other => panic!("{clear} parsed as {other:?}"),
+            }
+        }
+    }
+
+    #[test]
+    fn the_contracts_peek_parses_with_and_without_bytes() {
+        match serde_json::from_str::<Request>(r#"{"cmd":"peek","id":3,"bytes":8192}"#)
+            .expect("peek with bytes")
+        {
+            Request::Peek { id: 3, bytes: Some(8192) } => {}
+            other => panic!("wrong variant: {other:?}"),
+        }
+        match serde_json::from_str::<Request>(r#"{"cmd":"peek","id":3}"#).expect("peek") {
+            Request::Peek { id: 3, bytes: None } => {}
+            other => panic!("wrong variant: {other:?}"),
+        }
+    }
+
+    #[test]
+    fn the_contracts_peek_reply_parses_and_this_build_writes_the_same_keys() {
+        let line = r#"{"reply":"peek","id":3,"data":"G1swbWhp","cols":120,"rows":40,"state":"working"}"#;
+        match serde_json::from_str::<Response>(line).expect("the contract's peek reply") {
+            Response::Peek { id, data, cols, rows, state } => {
+                assert_eq!((id, cols, rows), (3, 120, 40));
+                assert_eq!(data, "G1swbWhp");
+                assert_eq!(state, AgentState::Working);
+            }
+            other => panic!("wrong variant: {other:?}"),
+        }
+        let v = serde_json::to_value(Response::Peek {
+            id: 3,
+            data: "G1swbWhp".into(),
+            cols: 120,
+            rows: 40,
+            state: AgentState::Working,
+        })
+        .unwrap();
+        let mut keys: Vec<&str> = v.as_object().unwrap().keys().map(|k| k.as_str()).collect();
+        keys.sort_unstable();
+        assert_eq!(keys, ["cols", "data", "id", "reply", "rows", "state"]);
+        assert_eq!(v["reply"], "peek");
+    }
+
+    #[test]
+    fn name_and_title_are_always_on_the_wire_even_when_empty() {
+        // `"name": null` is "this daemon has names, none is set"; a missing key
+        // is "this daemon predates names". A `skip_serializing_if` would make
+        // the two indistinguishable, and a client decides whether to offer
+        // Rename from exactly that.
+        let v = serde_json::to_value(sample_session()).unwrap();
+        let obj = v.as_object().unwrap();
+        assert_eq!(obj.get("name"), Some(&serde_json::Value::Null), "{v}");
+        assert_eq!(obj.get("title"), Some(&serde_json::Value::Null), "{v}");
+
+        let mut named = sample_session();
+        named.name = Some("auth refactor".into());
+        named.title = Some("Rime showcase studio".into());
+        let v = serde_json::to_value(&named).unwrap();
+        assert_eq!(v["name"], "auth refactor");
+        assert_eq!(v["title"], "Rime showcase studio");
+        let back: SessionInfo = serde_json::from_value(v).unwrap();
+        assert_eq!(back.name.as_deref(), Some("auth refactor"));
+        assert_eq!(back.title.as_deref(), Some("Rime showcase studio"));
+    }
+
+    #[test]
+    fn a_session_record_written_before_names_still_loads() {
+        // Every record on every machine today. It must load as a session
+        // nobody has named and whose agent never titled itself.
+        let mut v = serde_json::to_value(sample_session()).unwrap();
+        let obj = v.as_object_mut().unwrap();
+        assert!(obj.remove("name").is_some());
+        assert!(obj.remove("title").is_some());
+        let old: SessionInfo = serde_json::from_value(v).expect("an old record still loads");
+        assert_eq!(old.name, None);
+        assert_eq!(old.title, None);
+    }
+
+    #[test]
+    fn a_run_request_carries_its_name_as_name_and_an_older_client_sends_none() {
+        let req: RunRequest = serde_json::from_str(
+            r#"{"cwd":"/tmp","cols":80,"rows":24,"name":"auth refactor"}"#,
+        )
+        .expect("a named run");
+        assert_eq!(req.name.as_deref(), Some("auth refactor"));
+        let req: RunRequest =
+            serde_json::from_str(r#"{"cwd":"/tmp","cols":80,"rows":24}"#).expect("an old run");
+        assert_eq!(req.name, None);
     }
 }

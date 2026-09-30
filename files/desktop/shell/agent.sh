@@ -56,6 +56,11 @@ if [ -z "${RIME_NO_AGENT_ALIASES}${APEX_NO_AGENT_ALIASES:-}" ]; then  # rime-ren
 
     al() { rime agent list "$@"; }
     ad() { rime agent diff "$@"; }
+    # The worktree's name is the session's name too, unless the command line or
+    # $RIME_AGENT_NAME already gives one — so `aw issue-217` shows up as
+    # "issue-217" in the Agent Center and on the phone without anybody typing
+    # it twice. A name past the 64-character limit is left off rather than
+    # passed along to be refused: the worktree is still what was asked for.
     aw() {
         if [ "$#" -eq 0 ]; then
             echo "usage: aw <worktree-name> [prompt]" >&2
@@ -63,11 +68,32 @@ if [ -z "${RIME_NO_AGENT_ALIASES}${APEX_NO_AGENT_ALIASES:-}" ]; then  # rime-ren
         fi
         _rime_wt="$1"
         shift
-        rime agent run --worktree "$_rime_wt" "$@"
+        if _rime_names_itself "$@" || [ "${#_rime_wt}" -gt 64 ]; then
+            rime agent run --worktree "$_rime_wt" "$@"
+        else
+            rime agent run --worktree "$_rime_wt" --name "$_rime_wt" "$@"
+        fi
+        _rime_rc=$?
         unset _rime_wt
+        return "$_rime_rc"
     }
     ap() { rime project "$@"; }
 fi
+
+# Whether a `rime agent run` command line already names its session, so `aw`
+# does not name it a second time (`--name` given twice is refused). Stops at
+# `--`: everything after it belongs to the agent binary, not to rime.
+_rime_names_itself() {
+    [ -n "${RIME_AGENT_NAME:-}" ] && return 0
+    for _rime_arg in "$@"; do
+        case "$_rime_arg" in
+            --) break ;;
+            --name|--name=*|-n|-n?*) unset _rime_arg; return 0 ;;
+        esac
+    done
+    unset _rime_arg
+    return 1
+}
 
 # The id of the single running session, or failure when there is not exactly
 # one. Used by `aa` so the common case needs no id, without ever attaching to an
@@ -207,16 +233,18 @@ if [ -n "${BASH_VERSION}" ]; then
             --agent|-a) COMPREPLY=($(compgen -W "$(_rime_agent_names)" -- "$cur")); return ;;
             --to|-t) COMPREPLY=($(compgen -W "$(_rime_agent_names)" -- "$cur")); return ;;
             --sandbox|-s) COMPREPLY=($(compgen -W "strict project unrestricted" -- "$cur")); return ;;
+            # A name is free text: offering anything here would be a guess.
+            --name|-n) COMPREPLY=(); return ;;
         esac
 
         if [ "$COMP_CWORD" -eq 2 ]; then
-            COMPREPLY=($(compgen -W "run list attach input handoff pause resume kill logs status \
-                default adapters diff undo checkpoint event rm prune enable" -- "$cur"))
+            COMPREPLY=($(compgen -W "run list attach input rename handoff pause resume kill logs \
+                status default adapters diff undo checkpoint event rm prune enable" -- "$cur"))
             return
         fi
 
         case "$verb" in
-            attach|input|handoff|pause|resume|kill|logs|rm|status|diff|undo)
+            attach|input|rename|handoff|pause|resume|kill|logs|rm|status|diff|undo)
                 COMPREPLY=($(compgen -W "$(_rime_session_ids)" -- "$cur")) ;;
             default)
                 COMPREPLY=($(compgen -W "$(_rime_agent_names)" -- "$cur")) ;;
@@ -307,7 +335,8 @@ if [ -n "${BASH_VERSION}" ]; then
         case "$prev" in
             --agent|-a) COMPREPLY=($(compgen -W "$(_rime_agent_names)" -- "$cur")) ;;
             --sandbox|-s) COMPREPLY=($(compgen -W "strict project unrestricted" -- "$cur")) ;;
-            *) COMPREPLY=($(compgen -W "--agent --sandbox --worktree --checkpoint --detach" -- "$cur")) ;;
+            --name|-n) COMPREPLY=() ;;
+            *) COMPREPLY=($(compgen -W "--agent --name --sandbox --worktree --checkpoint --detach" -- "$cur")) ;;
         esac
     }
     complete -F _a_complete a
@@ -336,14 +365,14 @@ fi
 if [ -n "${ZSH_VERSION}" ]; then
     _rime_agent_zsh() {
         local -a verbs
-        verbs=(run list attach input handoff pause resume kill logs status default adapters
-               diff undo checkpoint event rm prune enable)
+        verbs=(run list attach input rename handoff pause resume kill logs status default
+               adapters diff undo checkpoint event rm prune enable)
         if (( CURRENT == 3 )); then
             _describe 'agent verb' verbs
             return
         fi
         case "${words[3]}" in
-            attach|input|handoff|pause|resume|kill|logs|rm|status|diff|undo)
+            attach|input|rename|handoff|pause|resume|kill|logs|rm|status|diff|undo)
                 local -a ids
                 ids=(${(f)"$(_rime_session_ids)"})
                 _describe 'session' ids ;;

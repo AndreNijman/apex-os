@@ -38,6 +38,16 @@ import java.util.concurrent.TimeoutException
  * would be one behind. So a `Close` naming the channel of an unanswered
  * `Open` at the head resolves it, as a failure carrying the reason.
  *
+ * ## Several terminals, one connection (`mux_attach`)
+ *
+ * A channel opened with its own [Listener] gets that channel's `Data` and
+ * `Close` delivered to it rather than to the connection's listener, and is
+ * told when the connection ends. That is what lets a terminal ride the
+ * control connection instead of dialling one of its own — which a machine
+ * whose `rime-remoted` advertises `mux_attach` has said is safe, because its
+ * control requests no longer block the frame loop. Channel ids come from
+ * [nextChannelId] so two terminals on one connection cannot collide.
+ *
  * ## Why there is no locking around the reader
  *
  * One thread calls [pump] and it is the only caller of [FrameChannel.receive].
@@ -81,8 +91,31 @@ class Mux(
     )
 
     private val lock = Any()
+
+    /**
+     * Held across enqueue-and-send, so that the order requests are queued in
+     * IS the order they reach the wire.
+     *
+     * Without it two threads could queue A then B and write B then A, and the
+     * daemon — which answers in wire order — would hand B's reply to A. That
+     * was rare while one screen asked one question at a time. It is the norm
+     * now that the phone holds its connection open: the hub asks `hello` and
+     * `remote_hello` together, the session screen peeks every second and a
+     * half, the list polls every four, and a terminal may open a channel on
+     * the same connection. A swap there is one session's output shown under
+     * another's name, or every feature silently read as absent.
+     *
+     * Separate from [lock] because a send can block on a slow socket, and the
+     * pump thread takes [lock] for every frame it dispatches.
+     */
+    private val sendOrder = Any()
     private val pending = ArrayDeque<Pending>()
     private val open = HashSet<UInt>()
+
+    /** Channels whose traffic goes to a listener of their own. See the class note. */
+    private val channelListeners = HashMap<UInt, Listener>()
+
+    private val nextChannel = java.util.concurrent.atomic.AtomicInteger(1)
 
     @Volatile
     private var closed = false
@@ -118,13 +151,21 @@ class Mux(
     private fun dispatch(frame: Frame) {
         when (frame) {
             is Frame.Control -> resolveHead(frame.line, null)
-            is Frame.Data -> if (frame.channel in openChannels()) listener.onData(frame.channel, frame.bytes)
+            is Frame.Data -> {
+                val to = synchronized(lock) {
+                    if (frame.channel in open) channelListeners[frame.channel] ?: listener else null
+                }
+                to?.onData(frame.channel, frame.bytes)
+            }
             is Frame.Close -> {
-                // A close that answers an unanswered `Open` at the head is the
-                // desktop's "it went wrong and there is no daemon reply" path.
+                // A close that answers an unanswered `Open` is the desktop's
+                // "it went wrong and there is no daemon reply" path.
                 if (!resolveHead(null, frame)) {
-                    synchronized(lock) { open.remove(frame.channel) }
-                    listener.onClose(frame.channel, frame.reason)
+                    val to = synchronized(lock) {
+                        open.remove(frame.channel)
+                        channelListeners.remove(frame.channel) ?: listener
+                    }
+                    to.onClose(frame.channel, frame.reason)
                 }
             }
             // `Open` never arrives at a client: the desktop opens nothing.
@@ -132,8 +173,6 @@ class Mux(
             else -> Unit
         }
     }
-
-    private fun openChannels(): Set<UInt> = synchronized(lock) { open.toSet() }
 
     /**
      * Hand a reply to the head of the queue.
@@ -144,13 +183,34 @@ class Mux(
      */
     private fun resolveHead(reply: ByteArray?, close: Frame.Close?): Boolean {
         val head = synchronized(lock) {
+            if (close != null) {
+                // The unanswered `Open` for this channel, wherever it is in
+                // the queue — not only at the head. A desktop in order puts it
+                // at the head anyway; one that is not must still not leave an
+                // `Open` waiting for a `Control` that will never come, which
+                // would hand the NEXT reply to it and every reply after that
+                // to the request before its own.
+                val at = pending.indexOfFirst { it.channel == close.channel }
+                if (at < 0) return false
+                channelListeners.remove(close.channel)
+                return@synchronized pending.removeAt(at)
+            }
             val head = pending.firstOrNull() ?: return false
-            if (close != null && head.channel != close.channel) return false
             pending.removeFirst()
             // Recorded on the pump thread and not by the caller, because the
             // desktop sends the scrollback immediately after the reply: the
             // first `Data` frame can arrive before the caller has woken up.
-            if (reply != null && head.channel != null && accepted(reply)) open.add(head.channel)
+            if (reply != null && head.channel != null) {
+                if (accepted(reply)) {
+                    open.add(head.channel)
+                } else {
+                    // Refused: the `Close("")` that follows belongs to nobody,
+                    // and a terminal told "your channel closed" for a channel
+                    // that never opened would report a refusal as the session
+                    // ending.
+                    channelListeners.remove(head.channel)
+                }
+            }
             head
         }
         if (reply != null) {
@@ -170,21 +230,40 @@ class Mux(
     }
 
     private fun finish(cause: Throwable?) {
-        val waiting = synchronized(lock) {
+        val (waiting, channels) = synchronized(lock) {
             if (disconnected) return
             disconnected = true
             val copy = pending.toList()
             pending.clear()
             open.clear()
-            copy
+            val listeners = channelListeners.values.toList()
+            channelListeners.clear()
+            copy to listeners
         }
         val ended = cause ?: Disconnected("the connection to ${channel.machine} ended")
         // Every outstanding request fails, and none is left to time out on its
         // own. A caller blocked on a reply that can never come is the shape of
         // bug that looks like a slow network for thirty seconds.
         for (p in waiting) p.future.completeExceptionally(ended)
+        // Every terminal riding this connection hears that it went, before
+        // the connection's owner does: the owner may reconnect at once, and a
+        // terminal still waiting on the old connection would then never learn
+        // it had to re-attach.
+        for (l in channels) runCatching { l.onDisconnect(cause) }
         listener.onDisconnect(cause)
     }
+
+    /** How many requests are waiting for a reply. */
+    val outstanding: Int get() = synchronized(lock) { pending.size }
+
+    /**
+     * A channel id nobody on this connection has used.
+     *
+     * From 1, because 0 is the control channel, and never reused within one
+     * connection: a late `Close` for a terminal that has gone must not land
+     * on the next one.
+     */
+    fun nextChannelId(): UInt = nextChannel.getAndIncrement().toUInt()
 
     /**
      * Send one `rime-agentd` request and wait for its reply.
@@ -197,8 +276,7 @@ class Mux(
      */
     @Throws(Disconnected::class, TimeoutException::class)
     fun request(line: ByteArray, timeoutMs: Long = CONTROL_TIMEOUT_MS): ByteArray {
-        val future = enqueue(null)
-        channel.send(Frame.Control(line))
+        val future = enqueueAndSend(null, Frame.Control(line))
         return await(future, timeoutMs)
     }
 
@@ -214,20 +292,54 @@ class Mux(
      * attach leaves nothing behind.
      */
     @Throws(Disconnected::class, ChannelRefused::class, TimeoutException::class)
-    fun openChannel(id: UInt, attach: ByteArray, timeoutMs: Long = CONTROL_TIMEOUT_MS): ByteArray {
+    fun openChannel(
+        id: UInt,
+        attach: ByteArray,
+        timeoutMs: Long = CONTROL_TIMEOUT_MS,
+        /**
+         * Where this channel's `Data` and `Close` go, instead of the
+         * connection's listener. Registered BEFORE the `Open` is sent, because
+         * the scrollback follows the reply immediately and is dispatched on
+         * the pump thread — possibly before this call has returned.
+         */
+        channelListener: Listener? = null,
+    ): ByteArray {
         require(id != Frame.CONTROL_CHANNEL) { "channel 0 is the control channel" }
-        val future = enqueue(id)
-        channel.send(Frame.Open(id, attach))
-        return await(future, timeoutMs)
+        if (channelListener != null) synchronized(lock) { channelListeners[id] = channelListener }
+        try {
+            val future = enqueueAndSend(id, Frame.Open(id, attach))
+            return await(future, timeoutMs)
+        } catch (e: Throwable) {
+            synchronized(lock) { channelListeners.remove(id) }
+            throw e
+        }
     }
 
-    private fun enqueue(forChannel: UInt?): CompletableFuture<ByteArray> {
+    /**
+     * Queue a reply slot and write the frame that asks for it, as one step.
+     * See [sendOrder].
+     *
+     * A write that FAILS takes its slot back out of the queue. Left in, it
+     * would be a head no reply is coming for, and the next request's reply
+     * would resolve it — every reply after that one behind. (The connection
+     * is almost certainly going anyway; this makes that the only outcome.)
+     */
+    private fun enqueueAndSend(forChannel: UInt?, frame: Frame): CompletableFuture<ByteArray> {
         val future = CompletableFuture<ByteArray>()
-        synchronized(lock) {
-            if (disconnected || closed) {
-                throw Disconnected("this connection to ${channel.machine} is closed")
+        val slot = Pending(forChannel, future)
+        synchronized(sendOrder) {
+            synchronized(lock) {
+                if (disconnected || closed) {
+                    throw Disconnected("this connection to ${channel.machine} is closed")
+                }
+                pending.addLast(slot)
             }
-            pending.addLast(Pending(forChannel, future))
+            try {
+                channel.send(frame)
+            } catch (e: Throwable) {
+                synchronized(lock) { pending.remove(slot) }
+                throw e
+            }
         }
         return future
     }
@@ -257,7 +369,10 @@ class Mux(
 
     /** Detach: the session keeps running on the machine, which is the point. */
     fun closeChannel(id: UInt, reason: String = "") {
-        synchronized(lock) { open.remove(id) }
+        synchronized(lock) {
+            open.remove(id)
+            channelListeners.remove(id)
+        }
         runCatching { channel.send(Frame.Close(id, reason)) }
     }
 

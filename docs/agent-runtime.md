@@ -84,8 +84,10 @@ The long forms:
 
 ```
 rime agent run "upgrade to Qt 7" --checkpoint --worktree qt7
+rime agent run -n "qt 7 port" "upgrade to Qt 7"  # a name, shown before anything else
 rime agent list --all
 rime agent attach 4
+rime agent rename 4 "auth refactor"            # or: rime agent rename 4 --clear
 rime agent pause 4 / resume 4 / kill 4
 rime agent input 4 "run the tests"            # types it, leaves it unsent
 rime agent input 4 "run the tests" --submit   # and presses Enter
@@ -116,6 +118,52 @@ kill the work. Detach with **ctrl-]** and reattach later from anywhere.
 
 Attaching replays the session's scrollback, so you get the screen back as it
 was, then live output. Several terminals can attach to one session at once.
+
+### Names, titles, and what a list shows
+
+A session has two labels besides its id. Its **name** is yours: `rime agent
+run --name` (or `-n`, or `$RIME_AGENT_NAME` when neither is given) sets it,
+`rime agent rename` changes or `--clear`s it, and `aw <worktree>` uses the
+worktree's name unless you gave one. At most 64 characters and no control
+characters; a name that breaks either rule is refused, not cleaned. Only a
+person names a session: a managed session cannot rename itself or another.
+
+Its **title** is the agent's: whatever it last set as its terminal title (OSC 0
+or OSC 2), with the spinner glyph in front stripped, so Claude's `✳ Fix the
+login flow` is recorded as `Fix the login flow` and its working spinner does
+not rewrite the record every frame. Display only; nothing decides anything on
+it.
+
+Every client shows the name, then the title, then `<agent> · <project>`:
+`rime agent list` has a NAME column, `rime agent status <id>` a `label` line,
+and the Agent Center and Rime Remote read the same two fields from the session
+record (`"name"` and `"title"`, both always present, `null` when unset).
+
+### `--submit` is a separate keystroke
+
+`rime agent input --submit` does not put a carriage return on the end of the
+text. It asks the daemon to write the text, wait 80 ms, and write Enter on its
+own. Measured against Claude Code: a long burst that ends in CR is read as a
+paste, and the CR becomes a newline in the prompt instead of sending it. A
+daemon too old to do this (no `input_submit` in its `hello`) gets the text and
+then, 100 ms later, a second request carrying the CR.
+
+### Looking without attaching
+
+The `peek` request answers the last 8 KiB of a session's output, base64,
+with the terminal's size and state — what Rime Remote uses to show the bottom
+of a session's screen in a list. It does not attach, resize or count as a
+viewer. `rename` and `peek` are refused to a managed session, like `input`.
+
+### A phone's terminal size is its own
+
+When Rime Remote attaches, the session's terminal takes the phone's size, as
+before. When the last phone detaches (or its connection drops), the terminal
+goes back to the size your desktop terminal last gave it, so the desktop is not
+left 46 columns wide. While both are attached, whoever types takes the size
+back: a key on the desktop gives it the desktop's size, a key on the phone the
+phone's. Which side a client is on is decided by its connection's origin
+(`claude-remote-control` is the phone), never by the socket.
 
 ---
 

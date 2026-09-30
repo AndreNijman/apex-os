@@ -3,6 +3,7 @@ package com.rimeos.remote.core.agent
 import kotlinx.serialization.json.Json
 import kotlinx.serialization.json.JsonObject
 import kotlinx.serialization.json.jsonObject
+import kotlinx.serialization.json.jsonPrimitive
 import org.junit.jupiter.api.Assertions.assertEquals
 import org.junit.jupiter.api.Assertions.assertFalse
 import org.junit.jupiter.api.Assertions.assertTrue
@@ -98,6 +99,59 @@ class AgentdRequestWireTest {
         expect("input", Agentd.input(7, Reply.bytes("yes")))
     }
 
+
+    @Test
+    fun `a reply's Return is its own write, in every shape the phone sends`() {
+        // The contract's own example, byte for byte (section 1.2). With
+        // `submit` the daemon writes the CR itself, 80 ms after the text,
+        // because a long burst that ENDS in CR is taken as a paste and the CR
+        // becomes a newline in the agent's prompt instead of a submit.
+        expect("input_submit", Agentd.input(3, "yes please", submit = true))
+        // The older daemon's fallback: text alone, 100 ms on the phone, then
+        // this. It is also what a bare return is, against either daemon.
+        expect("input_bare", Agentd.input(3, "\r"))
+        // And the plan that decides between them emits exactly these.
+        assertEquals(
+            listOf(Reply.Step.Send(Agentd.input(3, "yes please", submit = true))),
+            Reply.plan(3, "yes please\n", submitSupported = true),
+        )
+        // `submit:false` is not a key an older daemon would accept, so it is
+        // never written: false is the absence.
+        assertFalse(Agentd.input(3, "x", submit = false).contains("submit"))
+    }
+
+    @Test
+    fun `rename sends an explicit null to clear, the one builder that does`() {
+        expect("rename", Agentd.rename(3, "auth refactor"))
+        expect("rename_clear", Agentd.rename(3, null))
+        // The mirror of `revoke`'s rule, asserted so nobody "tidies" one into
+        // the other: there the absent key is the wide action, here the null
+        // is the instruction and an absent key would say nothing at all.
+        val cleared = json.parseToJsonElement(Agentd.rename(3, null)).jsonObject
+        assertTrue("name" in cleared.keys, "a clear that omits the name says nothing")
+        assertEquals(kotlinx.serialization.json.JsonNull, cleared["name"])
+        // A name with a quote in it is escaped, not truncated.
+        val quoted = json.parseToJsonElement(Agentd.rename(3, "say \"hi\"")).jsonObject
+        assertEquals("say \"hi\"", quoted["name"]!!.jsonPrimitive.content)
+    }
+
+    @Test
+    fun `peek asks for the tail by size, at the daemon's cap by default`() {
+        expect("peek", Agentd.peek(3))
+        assertEquals(8192, Agentd.PEEK_MAX)
+    }
+
+    @Test
+    fun `remote_hello is rime-remoted's and so is not in the daemon's fixture`() {
+        // The Rust half deserialises EVERY entry into agentd's `Request`, and
+        // `remote_hello` is answered by rime-remoted before agentd ever sees
+        // it — exactly like push_register, which is not here either.
+        assertEquals("""{"cmd":"remote_hello"}""", Agentd.remoteHello())
+        assertFalse(
+            fixture.values.any { (it as? JsonObject)?.get("cmd")?.jsonPrimitive?.content == "remote_hello" },
+            "remote_hello was put in the fixture agentd must parse",
+        )
+    }
 
     @Test
     fun `run omits what it has no value for, rather than sending nulls`() {
@@ -269,6 +323,7 @@ class AgentdRequestWireTest {
         assertEquals(
             setOf(
                 "hello", "list", "info", "attach", "resize", "signal", "input",
+                "input_submit", "input_bare", "rename", "rename_clear", "peek",
                 "clipboard",
                 "receive", "receive_hostile_name",
                 "run_minimal", "run_full", "run_generic_with_args",

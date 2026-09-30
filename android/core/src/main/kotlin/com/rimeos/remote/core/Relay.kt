@@ -151,9 +151,28 @@ sealed class RelayError {
         override fun toString() = "this relay address cannot be used: $why"
     }
 
-    /** The server answered the upgrade with something other than a switch. */
-    data class Upgrade(val why: String) : RelayError() {
+    /**
+     * The server answered the upgrade with something other than a switch.
+     *
+     * [status] is the HTTP status when there was one, so a caller can act on
+     * the one refusal that means "try again in a moment" without matching
+     * the words of [why] — see [noDesktopWaiting].
+     */
+    data class Upgrade(val why: String, val status: Int? = null) : RelayError() {
         override fun toString() = "the relay refused the connection: $why"
+
+        /**
+         * The relay's 409 to a guest: no desktop is waiting at this
+         * rendezvous right now.
+         *
+         * Usually a moment, not a fact. The desktop keeps ONE socket waiting
+         * at the relay, and a guest that joins it uses it up; until the
+         * desktop has dialled its next one — a second or so — the next guest
+         * is told nobody is there. A phone that opened its control connection
+         * and then a terminal a moment later hit exactly that, and reported
+         * the second as the computer being off.
+         */
+        val noDesktopWaiting: Boolean get() = status == 409
     }
 
     /** A frame arrived that RFC 6455 does not permit a server to send. */
@@ -169,7 +188,10 @@ sealed class RelayError {
 }
 
 /** A relay connection that could not be made, or that broke its own rules. */
-class RelayException(val reason: RelayError) : IOException(reason.toString())
+class RelayException(val reason: RelayError) : IOException(reason.toString()) {
+    /** See [RelayError.Upgrade.noDesktopWaiting]. */
+    val noDesktopWaiting: Boolean get() = (reason as? RelayError.Upgrade)?.noDesktopWaiting == true
+}
 
 /**
  * A relay's address, as it was written in the pairing offer.
@@ -616,7 +638,7 @@ class Opening private constructor(val key: String) {
             // means the path is wrong, a 409 that no desktop is waiting at this
             // rendezvous, a 401 that the deployment wants a credential.
             throw RelayException(
-                RelayError.Upgrade("expected HTTP 101, got \"${status.trim()}\""),
+                RelayError.Upgrade("expected HTTP 101, got \"${status.trim()}\"", code.toIntOrNull()),
             )
         }
 

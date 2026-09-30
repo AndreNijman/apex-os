@@ -409,6 +409,11 @@ RUN set -eux; \
     # inherits TERM and looks correct.
     grep -q '^Environment=TERM=' /usr/lib/systemd/user/rime-agentd.service; \
     grep -q '^Environment=COLORTERM=' /usr/lib/systemd/user/rime-agentd.service; \
+    # The daemon starts before the login adds ~/.local/bin to the manager, so
+    # without its own PATH an agent installed there (npm's `codex`) is "not
+    # installed". The user directories must come FIRST, as a login shell has
+    # them, and the system ones must still be there.
+    grep -qx 'Environment=PATH=%h/.local/bin:%h/bin:%h/.cargo/bin:/usr/local/sbin:/usr/local/bin:/usr/bin' /usr/lib/systemd/user/rime-agentd.service; \
     # Opt-in by design: a per-user daemon holding PTYs must not be enabled for
     # users who never run an agent. Assert it is NOT wired into any target.
     test ! -e /usr/lib/systemd/user/default.target.wants/rime-agentd.service; \

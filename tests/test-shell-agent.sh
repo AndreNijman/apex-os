@@ -191,6 +191,61 @@ for v in RIME_NO_AGENT_ALIASES APEX_NO_AGENT_ALIASES; do
         && ok "$v=1 drops the bash shortcuts" || bad "$v=1 drops the bash shortcuts"
 done
 
+# ── bash/zsh `aw`: the worktree names the session (§1.4) ─────────────────────
+# `aw <worktree>` passes the worktree as `--name` unless the command line or
+# $RIME_AGENT_NAME already names it — twice would be refused by the CLI — and
+# leaves a name past the 64-character limit off rather than passing it to be
+# refused. Asserted in bash and zsh against the stub's own log.
+section "bash/zsh aw"
+sh_aw() { # shell extra-env… -- aw-args…
+    local shell="$1"; shift
+    local -a extra=()
+    while [ "$1" != "--" ]; do extra+=("$1"); shift; done
+    shift
+    local q; q="$(printf '%q ' "$@")"
+    : > "$CALLS"
+    case "$shell" in
+        bash) env -i PATH="${BIN}:/usr/bin:/bin" HOME="${WORK}/home" "${extra[@]}" bash --noprofile --norc -c \
+                  ". '${ROOT}/files/desktop/shell/agent.sh'; aw ${q}" >/dev/null 2>&1 ;;
+        zsh)  env -i PATH="${BIN}:/usr/bin:/bin" HOME="${WORK}/home" "${extra[@]}" zsh -f -c \
+                  ". '${ROOT}/files/desktop/shell/agent.sh'; aw ${q}" >/dev/null 2>&1 ;;
+    esac
+    cat "$CALLS"
+}
+for sh in bash zsh; do
+    if ! command -v "$sh" >/dev/null 2>&1; then
+        skipped "$sh aw" "$sh is not installed on this machine"
+        continue
+    fi
+    sections_run=$((sections_run + 1))
+    got="$(sh_aw "$sh" -- feature-x "do the thing")"
+    [ "$got" = "agent run --worktree feature-x --name feature-x do the thing" ] \
+        && ok "$sh \`aw\` names the session after the worktree" \
+        || bad "$sh \`aw\` names the session after the worktree (got '$got')"
+    got="$(sh_aw "$sh" -- feature-x --name "auth refactor" "do it")"
+    [ "$got" = "agent run --worktree feature-x --name auth refactor do it" ] \
+        && ok "$sh \`aw\` leaves a --name that was given alone" \
+        || bad "$sh \`aw\` leaves a --name that was given alone (got '$got')"
+    got="$(sh_aw "$sh" -- feature-x -n mine)"
+    [ "$got" = "agent run --worktree feature-x -n mine" ] \
+        && ok "$sh \`aw\` leaves a -n that was given alone" \
+        || bad "$sh \`aw\` leaves a -n that was given alone (got '$got')"
+    got="$(sh_aw "$sh" RIME_AGENT_NAME=from-env -- feature-x)"
+    [ "$got" = "agent run --worktree feature-x" ] \
+        && ok "$sh \`aw\` leaves \$RIME_AGENT_NAME to the CLI" \
+        || bad "$sh \`aw\` leaves \$RIME_AGENT_NAME to the CLI (got '$got')"
+    # A `--name` after `--` is the agent's argument, not rime's.
+    got="$(sh_aw "$sh" -- feature-x -- --name x)"
+    [ "$got" = "agent run --worktree feature-x --name feature-x -- --name x" ] \
+        && ok "$sh \`aw\` does not read the agent's own arguments as a name" \
+        || bad "$sh \`aw\` does not read the agent's own arguments as a name (got '$got')"
+    long="$(printf 'w%.0s' $(seq 1 65))"
+    got="$(sh_aw "$sh" -- "$long")"
+    [ "$got" = "agent run --worktree $long" ] \
+        && ok "$sh \`aw\` leaves a worktree name past the limit off" \
+        || bad "$sh \`aw\` leaves a worktree name past the limit off (got '$got')"
+done
+
 # ─────────────────────────────────────────────────────────────────────────────
 #  fish
 # ─────────────────────────────────────────────────────────────────────────────
@@ -263,9 +318,27 @@ end')"
 
     : > "$CALLS"
     fishrun "$PROJ" -- 'aw feature-x "do the thing"' >/dev/null
-    grep -qx 'agent run --worktree feature-x do the thing' "$CALLS" \
-        && ok "fish \`aw\` puts the worktree on the command line" \
-        || { bad "fish \`aw\` puts the worktree on the command line"; sed 's/^/      /' "$CALLS"; }
+    grep -qx 'agent run --worktree feature-x --name feature-x do the thing' "$CALLS" \
+        && ok "fish \`aw\` puts the worktree on the command line, and names the session after it" \
+        || { bad "fish \`aw\` puts the worktree on the command line, and names the session after it"; sed 's/^/      /' "$CALLS"; }
+
+    : > "$CALLS"
+    fishrun "$PROJ" -- 'aw feature-x --name "auth refactor"' >/dev/null
+    grep -qx 'agent run --worktree feature-x --name auth refactor' "$CALLS" \
+        && ok "fish \`aw\` leaves a --name that was given alone" \
+        || { bad "fish \`aw\` leaves a --name that was given alone"; sed 's/^/      /' "$CALLS"; }
+
+    : > "$CALLS"
+    fishrun "$PROJ" RIME_AGENT_NAME=from-env -- 'aw feature-x' >/dev/null
+    grep -qx 'agent run --worktree feature-x' "$CALLS" \
+        && ok "fish \`aw\` leaves \$RIME_AGENT_NAME to the CLI" \
+        || { bad "fish \`aw\` leaves \$RIME_AGENT_NAME to the CLI"; sed 's/^/      /' "$CALLS"; }
+
+    : > "$CALLS"
+    fishrun "$PROJ" -- 'aw feature-x -- --name x' >/dev/null
+    grep -qx 'agent run --worktree feature-x --name feature-x -- --name x' "$CALLS" \
+        && ok "fish \`aw\` does not read the agent's own arguments as a name" \
+        || { bad "fish \`aw\` does not read the agent's own arguments as a name"; sed 's/^/      /' "$CALLS"; }
 
     # `aa` with no id: exactly one running session, so no id is needed. The stub
     # reports one, which is the case the shortcut exists for.
@@ -382,6 +455,14 @@ functions -q rime_agent_prompt; and echo prompt-kept; or echo BAD-PROMPT')"
         && ok "the ad shortcut completes session ids" || bad "the ad shortcut completes session ids"
     printf '%s' "$(comp 'a --agent ')" | grep -q '^claude' \
         && ok "the a shortcut completes agent names" || bad "the a shortcut completes agent names"
+    printf '%s' "$(comp 'a -')" | grep -q -- '^--name' \
+        && ok "the a shortcut offers --name" || bad "the a shortcut offers --name"
+    printf '%s' "$(comp 'rime agent ')" | grep -q '^rename' \
+        && ok "completion offers the rename verb" || bad "completion offers the rename verb"
+    printf '%s' "$(comp 'rime agent rename ')" | grep -q '^4' \
+        && ok "rename completes session ids" || bad "rename completes session ids"
+    printf '%s' "$(comp 'rime agent rename 4 --')" | grep -q -- '^--clear' \
+        && ok "rename offers --clear" || bad "rename offers --clear"
     printf '%s' "$(comp 'ap layout ')" | grep -q '^restore' \
         && ok "the ap shortcut completes layout verbs" || bad "the ap shortcut completes layout verbs"
 
@@ -477,9 +558,27 @@ $1" 2>&1)
 
     : > "$CALLS"
     nurun "$PROJ" -- 'aw feature-x "do the thing"' >/dev/null
-    grep -qx 'agent run --worktree feature-x do the thing' "$CALLS" \
-        && ok "nushell \`aw\` puts the worktree on the command line" \
-        || { bad "nushell \`aw\` puts the worktree on the command line"; sed 's/^/      /' "$CALLS"; }
+    grep -qx 'agent run --worktree feature-x --name feature-x do the thing' "$CALLS" \
+        && ok "nushell \`aw\` puts the worktree on the command line, and names the session after it" \
+        || { bad "nushell \`aw\` puts the worktree on the command line, and names the session after it"; sed 's/^/      /' "$CALLS"; }
+
+    : > "$CALLS"
+    nurun "$PROJ" -- 'aw feature-x -n mine' >/dev/null
+    grep -qx 'agent run --worktree feature-x -n mine' "$CALLS" \
+        && ok "nushell \`aw\` leaves a -n that was given alone" \
+        || { bad "nushell \`aw\` leaves a -n that was given alone"; sed 's/^/      /' "$CALLS"; }
+
+    : > "$CALLS"
+    nurun "$PROJ" RIME_AGENT_NAME=from-env -- 'aw feature-x' >/dev/null
+    grep -qx 'agent run --worktree feature-x' "$CALLS" \
+        && ok "nushell \`aw\` leaves \$RIME_AGENT_NAME to the CLI" \
+        || { bad "nushell \`aw\` leaves \$RIME_AGENT_NAME to the CLI"; sed 's/^/      /' "$CALLS"; }
+
+    : > "$CALLS"
+    nurun "$PROJ" -- 'rime agent rename 4 auth refactor' >/dev/null
+    grep -qx 'agent rename 4 auth refactor' "$CALLS" \
+        && ok "nushell's rename extern passes the name through" \
+        || { bad "nushell's rename extern passes the name through"; sed 's/^/      /' "$CALLS"; }
 
     out="$(nurun "$PROJ" -- 'aw')"
     printf '%s' "$out" | grep -q 'usage: aw <worktree-name>' \

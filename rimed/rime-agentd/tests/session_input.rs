@@ -109,8 +109,9 @@ impl Harness {
 
     /// Start a session running `script` under `sh`, and return its id.
     fn run_shell(&self, script: &str) -> Option<u32> {
-        let reply = self.call(&Request::Run(RunRequest {
+        let reply = self.call(&Request::Run(Box::new(RunRequest {
             agent: Some("generic".into()),
+            name: None,
             prompt: None,
             args: vec!["/bin/sh".into(), "-c".into(), script.into()],
             cwd: "/tmp".into(),
@@ -132,7 +133,7 @@ impl Harness {
             env: vec![],
             disposable: false,
             copy_out: None,
-        }));
+        })));
         if reply["reply"] != "session" {
             // A daemon that will not start a session is a broken fixture on
             // this machine — no /dev/pts, no `sh`, no adapter — and not a
@@ -220,6 +221,7 @@ fn text_reaches_a_live_session_and_a_terminator_makes_it_a_line() {
     let reply = h.call(&Request::Input {
         id,
         data: "run the tests".into(),
+        submit: false,
     });
     assert_eq!(reply["reply"], "ok", "the write was refused: {reply}");
 
@@ -240,6 +242,7 @@ fn text_reaches_a_live_session_and_a_terminator_makes_it_a_line() {
     let reply = h.call(&Request::Input {
         id,
         data: "\r".into(),
+        submit: false,
     });
     assert_eq!(reply["reply"], "ok", "{reply}");
     let after = h.logs_until(id, "got:[", 3000);
@@ -266,6 +269,7 @@ fn a_payload_with_quotes_and_backslashes_arrives_unchanged() {
     let reply = h.call(&Request::Input {
         id,
         data: payload.to_string(),
+        submit: false,
     });
     assert_eq!(reply["reply"], "ok", "{reply}");
 
@@ -285,6 +289,7 @@ fn the_three_ways_a_write_can_fail_come_back_as_three_different_kinds() {
     let reply = h.call(&Request::Input {
         id: 9999,
         data: "x".into(),
+        submit: false,
     });
     assert_eq!(
         error_kind(&reply),
@@ -306,6 +311,7 @@ fn the_three_ways_a_write_can_fail_come_back_as_three_different_kinds() {
         let reply = h.call(&Request::Input {
             id,
             data: "x".into(),
+            submit: false,
         });
         kind = error_kind(&reply);
         if kind == "session_exited" {
@@ -335,6 +341,7 @@ fn an_empty_payload_is_accepted_and_writes_nothing() {
     let reply = h.call(&Request::Input {
         id,
         data: String::new(),
+        submit: false,
     });
     assert_eq!(reply["reply"], "ok", "{reply}");
     std::thread::sleep(Duration::from_millis(300));

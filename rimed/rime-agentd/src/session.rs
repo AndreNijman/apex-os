@@ -263,6 +263,12 @@ pub fn start(daemon: &Arc<Daemon>, req: RunRequest, caller: &Caller) -> Result<S
         policy.sandbox.is_confined(),
         policy.effective_network(),
     )?;
+    // §1.4. The same check the CLI already made, made again here because a
+    // client is not a boundary — and made HERE, with the other facts about the
+    // request, so a refused name leaves no reserved id, worktree or grant
+    // behind. A `bad_request` with the validator's own sentence.
+    let session_name = rime_agent_core::session::session_name_opt(req.name.as_deref())
+        .map_err(|why| anyhow!("{why}"))?;
 
     let wanted_grant = policy.needs_grant();
     if wanted_grant.is_none() && req.ttl_ms.is_some() {
@@ -765,6 +771,10 @@ pub fn start(daemon: &Arc<Daemon>, req: RunRequest, caller: &Caller) -> Result<S
         cwd: workdir.to_string_lossy().into_owned(),
         project: detected.as_ref().map(|p| p.root.clone()),
         project_name: detected.as_ref().map(|p| p.name.clone()),
+        name: session_name,
+        // Nothing has been printed yet. The output scanner fills this in from
+        // the agent's first OSC 0 / OSC 2.
+        title: None,
         worktree: worktree_name,
         state: AgentState::Starting,
         detail: None,
@@ -815,10 +825,15 @@ pub fn start(daemon: &Arc<Daemon>, req: RunRequest, caller: &Caller) -> Result<S
     };
     // The spec as built, not as it could be rebuilt later: §6.2 must judge a
     // tool call against the confinement the session is actually running under.
-    handle.lock().expect("session lock").confinement = Some(Box::new(registry::Confinement {
-        spec,
-        allowlist,
-    }));
+    {
+        let mut s = handle.lock().expect("session lock");
+        s.confinement = Some(Box::new(registry::Confinement { spec, allowlist }));
+        // §1.7: the terminal this was started from is the first size it has
+        // for its kind of viewer. For a session started on the desktop that
+        // is what a phone opening it before anybody attached gives back.
+        s.sizes
+            .claim(crate::privilege::viewer(&who), size);
+    }
     registry::write_record(&info);
     // The session owns its record now, so the id stops being a reservation.
     reservation.commit();
@@ -1171,9 +1186,17 @@ fn rime_program() -> Option<PathBuf> {
 
 /// The `PATH` a session inherits.
 ///
-/// Taken from the daemon's environment, which is the user's login environment,
-/// so a toolchain the user installed to `~/.local/bin` still resolves. The
-/// sandbox decides separately whether those directories are actually visible.
+/// Taken from the daemon's environment. That is NOT the login environment,
+/// which this comment used to claim: the daemon starts at boot with whatever
+/// the user manager had then — `/usr/local/sbin:/usr/local/bin:/usr/bin` on
+/// the L16, read from `/proc/<pid>/environ` — and the login session adds
+/// `~/.local/bin` to the manager only later, so a daemon started first never
+/// sees it. `npm i -g @openai/codex` with the npm prefix at `~/.local` puts
+/// `codex` exactly there, and `a -a codex` said codex was not installed. The
+/// unit (`files/system/units/rime-agentd.service`) now sets the user
+/// directories itself, and this hands the same list to every session, so a
+/// tool an agent runs from `~/.local/bin` resolves too. The sandbox decides
+/// separately whether those directories are actually visible.
 fn inherited_path() -> String {
     std::env::var("PATH").unwrap_or_else(|_| "/usr/local/bin:/usr/bin:/bin".to_string())
 }
@@ -1749,6 +1772,31 @@ fn absorb(handle: &Handle, data: &[u8]) {
         .rev()
         .find_map(|sig| sig.detail().map(|d| d.to_string()));
     s.set_state(next, detail);
+    if retitle(&mut s.info, &signals) {
+        // Only on a CHANGE. Claude retitles itself on every spinner frame
+        // while it works; with the glyphs stripped those are one title, so
+        // this writes when the summary changes and not ten times a second.
+        registry::write_record(&s.info);
+    }
+}
+
+/// Apply the last title in a read to a session, and say whether it changed.
+///
+/// The last one, because a read can carry several and the terminal would show
+/// the last. A title of nothing clears the field: the agent took its title
+/// away, and a stale one would outlive it.
+fn retitle(info: &mut SessionInfo, signals: &[logic::Signal]) -> bool {
+    let Some(title) = signals.iter().rev().find_map(|sig| match sig {
+        logic::Signal::Title(t) => Some(t),
+        _ => None,
+    }) else {
+        return false;
+    };
+    if info.title == *title {
+        return false;
+    }
+    info.title = title.clone();
+    true
 }
 
 /// Re-evaluate state for a session that produced nothing this tick.
@@ -1806,8 +1854,10 @@ fn finish(daemon: &Arc<Daemon>, handle: &Handle, code: Option<i32>, signal: Opti
 ///
 /// The response line goes out first, then the connection carries only PTY
 /// bytes in both directions.
+#[allow(clippy::too_many_arguments)]
 pub fn handle_attach(
     daemon: &Arc<Daemon>,
+    caller: &Caller,
     mut writer: UnixStream,
     reader: BufReader<UnixStream>,
     id: u32,
@@ -1815,12 +1865,18 @@ pub fn handle_attach(
     rows: u16,
     replay: usize,
 ) -> Result<()> {
+    // Whose size this attach is (§1.7): a phone's, or the desktop's. Worked
+    // out before any session lock is taken, because resolving an origin walks
+    // the registry and takes each session's lock in turn, and no code path
+    // holds a session lock while it takes another.
+    let viewer = crate::privilege::viewer(&crate::privilege::origin(daemon, caller));
+
     let Some(handle) = daemon.registry.lock().expect("registry lock").get(id) else {
         let resp = Response::error(ErrorKind::NoSuchSession, format!("no session {id}"));
         return write_response(&mut writer, &resp);
     };
 
-    let master = {
+    {
         let s = handle.lock().expect("session lock");
         if !s.info.is_live() {
             let resp = Response::error(
@@ -1832,25 +1888,30 @@ pub fn handle_attach(
             );
             return write_response(&mut writer, &resp);
         }
-        s.master
-    };
+    }
 
     write_response(&mut writer, &Response::Attached { id })?;
 
-    // Adopt the attaching terminal's size, so the agent repaints correctly.
-    let size = WinSize { cols, rows }.or_fallback();
-    if pty::resize(master, size).is_ok() {
-        let mut s = handle.lock().expect("session lock");
-        s.info.cols = size.cols;
-        s.info.rows = size.rows;
-    }
-
-    // Register the output direction before replaying, so nothing produced
-    // between the two is lost.
+    let mirror = writer.try_clone().context("cloning for output mirroring")?;
     {
-        let mirror = writer.try_clone().context("cloning for output mirroring")?;
         let mut s = handle.lock().expect("session lock");
-        s.attach(mirror, replay)?;
+        // Adopt the attaching terminal's size, so the agent repaints
+        // correctly — and remember it for this kind of viewer, so a phone
+        // that leaves can give the desktop's back.
+        //
+        // One lock with the registration below rather than two. Between two,
+        // another phone detaching would see no phone attached and give the
+        // desktop its size back underneath the phone that is arriving.
+        let size = WinSize { cols, rows }.or_fallback();
+        let _ = s.attach_size(viewer, size);
+        // Register the output direction before replaying, so nothing produced
+        // between the two is lost.
+        if let Err(e) = s.attach_as(mirror, replay, viewer) {
+            // A phone that failed to attach after its size was applied is a
+            // phone that is not looking; the desktop gets its size back.
+            s.settle_size();
+            return Err(e);
+        }
     }
 
     // This thread becomes the input pump. It ends when the client shuts down
@@ -1865,10 +1926,16 @@ pub fn handle_attach(
             Err(_) => break,
         };
         let live_master = {
-            let s = handle.lock().expect("session lock");
+            let mut s = handle.lock().expect("session lock");
             if !s.info.is_live() {
                 break;
             }
+            // The person typing is the person looking (§1.7, tmux's
+            // `window-size latest`): keystrokes from this viewer give the
+            // terminal this viewer's size back if another kind took it.
+            // Two compares under a lock this loop already takes; a resize only
+            // when the sizes differ.
+            s.typed(viewer, &buf[..n]);
             s.master
         };
         if live_master < 0 || pty::write_all(live_master, &buf[..n]).is_err() {
@@ -1930,6 +1997,70 @@ pub fn write_input(handle: &Handle, data: &[u8]) -> Input {
     }
 }
 
+/// Write text into a session and then press Enter, as two writes (§1.2).
+///
+/// `data`, then [`logic::SUBMIT_GAP`] with NO lock held — [`write_input`]
+/// releases the session lock before it writes, and the sleep is between two
+/// calls to it — then `\r` on its own. The gap is the whole point: an agent
+/// TUI that reads a burst ending in CR as one chunk treats it as a paste, and
+/// a pasted CR is a newline in the prompt rather than Enter. A lock held
+/// across the sleep would freeze every other verb for the session for as long
+/// as it lasted, which is `write_input`'s own reason for existing.
+///
+/// Nothing is stripped from `data`. An empty `data` is Enter alone, with no
+/// gap in front of it — there is no burst to separate it from.
+pub fn submit_input(handle: &Handle, data: &[u8]) -> Input {
+    if !data.is_empty() {
+        match write_input(handle, data) {
+            Input::Written => {}
+            other => return other,
+        }
+        std::thread::sleep(logic::SUBMIT_GAP);
+    }
+    write_input(handle, b"\r")
+}
+
+/// Rename a live session (§1.5), and answer with what was recorded.
+///
+/// The caller has already been allowed ([`crate::privilege::refuse_rename`])
+/// and the name already checked; this is the part that needs the session.
+/// Live sessions only: an exited one is `session_exited`, the answer every
+/// other verb gives a session the daemon still holds but that has finished.
+pub fn rename(handle: &Handle, name: Option<String>) -> Response {
+    let mut s = handle.lock().expect("session lock");
+    if !s.info.is_live() {
+        return Response::error(
+            ErrorKind::SessionExited,
+            format!("session {} has already exited", s.info.id),
+        );
+    }
+    s.info.name = name;
+    registry::write_record(&s.info);
+    Response::Session(Box::new(s.info.clone()))
+}
+
+/// The tail of a session's output, base64 (§1.6).
+///
+/// From the in-memory scrollback, which is exactly what a reattaching terminal
+/// is repainted with, and never the transcript on disk. Nothing about the
+/// session moves: no resize, no attach, `attached` untouched.
+///
+/// An exited session the daemon still holds is answered too — its scrollback
+/// is still there, and "what did it end on" is a question a phone asks of a
+/// session that just finished. `Logs` answers it the same way.
+pub fn peek(handle: &Handle, bytes: Option<usize>) -> Response {
+    let want = bytes.unwrap_or(logic::PEEK_MAX).min(logic::PEEK_MAX);
+    let s = handle.lock().expect("session lock");
+    let tail = s.scrollback.tail(want);
+    Response::Peek {
+        id: s.info.id,
+        data: rime_agent_core::webauthn::b64_encode(&tail),
+        cols: s.info.cols,
+        rows: s.info.rows,
+        state: s.info.state,
+    }
+}
+
 /// Remove one attached client from a session.
 fn detach(handle: &Handle, stream: &UnixStream) {
     use std::os::unix::io::AsRawFd;
@@ -1937,8 +2068,10 @@ fn detach(handle: &Handle, stream: &UnixStream) {
     let mut s = handle.lock().expect("session lock");
     // Compare by the peer's identity rather than by index: another client may
     // have detached while this one was reading.
-    s.attachers.retain(|a| !same_peer(a.as_raw_fd(), target));
+    s.attachers.retain(|a| !same_peer(a.stream.as_raw_fd(), target));
     s.info.attached = s.attachers.len() as u32;
+    // If that was the last phone, the desktop gets its size back (§1.7).
+    s.settle_size();
 }
 
 /// Whether two descriptors refer to the same socket.
@@ -2287,6 +2420,8 @@ mod tests {
             cwd: "/tmp".into(),
             project: None,
             project_name: None,
+            name: None,
+            title: None,
             worktree: None,
             state: AgentState::Working,
             detail: None,
@@ -2524,5 +2659,236 @@ mod tests {
     fn the_tool_shim_directory_is_the_one_the_image_writes() {
         assert_eq!(TOOL_SHIM_DIR, "/usr/libexec/rime/tools");
         assert!(Path::new(TOOL_SHIM_DIR).is_absolute());
+    }
+
+    // ── docs/remote-live-contract.md §1.2, §1.3, §1.7 ───────────────────────
+
+    /// Every read the program's side of a PTY got for `ms`, with when it got
+    /// it. The slave is raw and non-blocking (`pty::bare_pair`), so a read
+    /// returns whatever the line discipline has, the moment it has it.
+    fn reads_on(slave: RawFd, ms: u64) -> Vec<(std::time::Instant, Vec<u8>)> {
+        let deadline = std::time::Instant::now() + std::time::Duration::from_millis(ms);
+        let mut out = Vec::new();
+        while std::time::Instant::now() < deadline {
+            if !pty::wait_readable(slave, 5) {
+                continue;
+            }
+            let mut buf = [0u8; 4096];
+            if let Ok(Some(n)) = pty::read_nonblocking(slave, &mut buf) {
+                if n > 0 {
+                    out.push((std::time::Instant::now(), buf[..n].to_vec()));
+                }
+            }
+        }
+        out
+    }
+
+    /// Reads that arrived within `gap` of each other, joined: what a program
+    /// that reads as fast as it can would have seen as one burst. Joined
+    /// rather than compared read for read, because the kernel may hand one
+    /// write over in two reads and that is not what is being measured.
+    fn bursts(
+        reads: &[(std::time::Instant, Vec<u8>)],
+        gap: std::time::Duration,
+    ) -> Vec<(std::time::Instant, std::time::Instant, Vec<u8>)> {
+        let mut out: Vec<(std::time::Instant, std::time::Instant, Vec<u8>)> = Vec::new();
+        for (at, bytes) in reads {
+            match out.last_mut() {
+                Some((_, last, acc)) if at.duration_since(*last) < gap => {
+                    acc.extend_from_slice(bytes);
+                    *last = *at;
+                }
+                _ => out.push((*at, *at, bytes.clone())),
+            }
+        }
+        out
+    }
+
+    /// The property `submit` exists for, as the program on the PTY sees it:
+    /// the text as one burst, then Enter as a burst of its own at least 50 ms
+    /// later — 50 ms being the smallest gap measured to submit in Claude Code.
+    fn is_text_then_a_separate_enter(
+        got: &[(std::time::Instant, std::time::Instant, Vec<u8>)],
+        text: &[u8],
+    ) -> bool {
+        got.len() == 2
+            && got[0].2 == text
+            && got[1].2 == b"\r"
+            && got[1].0.duration_since(got[0].1) >= std::time::Duration::from_millis(50)
+    }
+
+    #[test]
+    fn submit_writes_enter_as_its_own_read_a_gap_after_the_text() {
+        let Some((master, slave)) = pty::bare_pair() else {
+            eprintln!("SKIP: no /dev/ptmx on this machine");
+            return;
+        };
+        let dir = std::env::temp_dir().join(format!(
+            "rime-agentd-submit-{}-{master}",
+            std::process::id()
+        ));
+        let mut reg = registry::Registry::with_store(dir.clone());
+        let handle = reg.insert(sample_live_info(5), master, 0, 0);
+        // The size that was measured to be read as a paste.
+        let text = "a".repeat(250);
+
+        let reader = std::thread::spawn(move || reads_on(slave, 600));
+        std::thread::sleep(std::time::Duration::from_millis(50));
+        assert!(matches!(submit_input(&handle, text.as_bytes()), Input::Written));
+        let got = bursts(&reader.join().expect("reader"), std::time::Duration::from_millis(30));
+        assert!(
+            is_text_then_a_separate_enter(&got, text.as_bytes()),
+            "expected the text, then a lone CR at least 50 ms later; got {:?}",
+            got.iter()
+                .map(|(a, b, bytes)| (b.duration_since(*a), String::from_utf8_lossy(bytes).len()))
+                .collect::<Vec<_>>()
+        );
+
+        // The negative control, on the same terminal: the text and the CR in
+        // ONE write — what `rime agent input --submit` did before the flag,
+        // and what a phone did. The same predicate has to fail, or the test
+        // above would pass for a gap nobody put there.
+        let reader = std::thread::spawn(move || reads_on(slave, 400));
+        std::thread::sleep(std::time::Duration::from_millis(50));
+        let mut one = text.clone().into_bytes();
+        one.push(b'\r');
+        assert!(matches!(write_input(&handle, &one), Input::Written));
+        let got = bursts(&reader.join().expect("reader"), std::time::Duration::from_millis(30));
+        assert!(
+            !is_text_then_a_separate_enter(&got, text.as_bytes()),
+            "a single write must not look like a submit"
+        );
+        assert_eq!(got.len(), 1, "one write is one burst");
+        assert_eq!(got[0].2, one);
+
+        pty::close(slave);
+        pty::close(master);
+        std::fs::remove_dir_all(&dir).ok();
+    }
+
+    #[test]
+    fn submit_with_no_text_is_enter_alone() {
+        let Some((master, slave)) = pty::bare_pair() else {
+            eprintln!("SKIP: no /dev/ptmx on this machine");
+            return;
+        };
+        let dir = std::env::temp_dir().join(format!(
+            "rime-agentd-submit-empty-{}-{master}",
+            std::process::id()
+        ));
+        let mut reg = registry::Registry::with_store(dir.clone());
+        let handle = reg.insert(sample_live_info(6), master, 0, 0);
+        let start = std::time::Instant::now();
+        assert!(matches!(submit_input(&handle, b""), Input::Written));
+        assert!(
+            start.elapsed() < logic::SUBMIT_GAP,
+            "an empty submit has no burst to wait behind"
+        );
+        let got = bursts(&reads_on(slave, 200), std::time::Duration::from_millis(30));
+        assert_eq!(got.len(), 1);
+        assert_eq!(got[0].2, b"\r");
+        pty::close(slave);
+        pty::close(master);
+        std::fs::remove_dir_all(&dir).ok();
+    }
+
+    #[test]
+    fn submit_to_an_exited_session_types_nothing_and_says_so() {
+        let dir = std::env::temp_dir().join(format!("rime-agentd-submit-dead-{}", std::process::id()));
+        let mut reg = registry::Registry::with_store(dir.clone());
+        let mut info = sample_live_info(7);
+        info.exit_code = Some(0);
+        let (a, _b) = UnixStream::pair().unwrap();
+        let handle = reg.insert(info, a.as_raw_fd(), 0, 0);
+        let start = std::time::Instant::now();
+        assert!(matches!(submit_input(&handle, b"x"), Input::Exited));
+        assert!(start.elapsed() < logic::SUBMIT_GAP, "no gap is slept for a write that never happened");
+        std::fs::remove_dir_all(&dir).ok();
+    }
+
+    #[test]
+    fn only_a_changed_title_is_worth_writing_down() {
+        use rime_agent_core::session::OutputScanner;
+        let mut info = sample_live_info(8);
+        let mut scanner = OutputScanner::new();
+        // The first title is a change.
+        let signals = scanner.feed("\x1b]0;✳ Rime showcase studio\x07".as_bytes());
+        assert!(retitle(&mut info, &signals));
+        assert_eq!(info.title.as_deref(), Some("Rime showcase studio"));
+        // Claude's spinner cycling while it works: the same title every frame,
+        // so not one of them writes the record.
+        for frame in ["✢", "✳", "✶", "✻", "✽", "·"] {
+            let raw = format!("\x1b]0;{frame} Rime showcase studio\x07");
+            assert!(!retitle(&mut info, &scanner.feed(raw.as_bytes())), "{frame}");
+        }
+        // Output with no title in it leaves the title alone.
+        assert!(!retitle(&mut info, &scanner.feed(b"plain output\r\n")));
+        assert_eq!(info.title.as_deref(), Some("Rime showcase studio"));
+        // The last title in a read is the one kept.
+        let signals = scanner.feed(b"\x1b]0;first\x07\x1b]2;second\x07");
+        assert!(retitle(&mut info, &signals));
+        assert_eq!(info.title.as_deref(), Some("second"));
+        // A cleared title clears the field.
+        assert!(retitle(&mut info, &scanner.feed(b"\x1b]0;\x07")));
+        assert_eq!(info.title, None);
+        // And a name is never touched by any of it: only a person sets that.
+        assert_eq!(info.name, None);
+    }
+
+    #[test]
+    fn a_phone_detaching_gives_the_desktop_its_size_back() {
+        use rime_agent_core::session::Viewer;
+        use rime_agent_core::term::{window_size, WinSize};
+        let Some((master, slave)) = pty::bare_pair() else {
+            eprintln!("SKIP: no /dev/ptmx on this machine");
+            return;
+        };
+        let dir = std::env::temp_dir().join(format!(
+            "rime-agentd-size-{}-{master}",
+            std::process::id()
+        ));
+        let mut reg = registry::Registry::with_store(dir.clone());
+        let handle = reg.insert(sample_live_info(9), master, 0, 0);
+        let desk = WinSize { cols: 180, rows: 50 };
+        let phone = WinSize { cols: 46, rows: 30 };
+
+        let (local, _local_peer) = UnixStream::pair().unwrap();
+        let (remote, _remote_peer) = UnixStream::pair().unwrap();
+        {
+            let mut s = handle.lock().unwrap();
+            s.attach_size(Viewer::Local, desk).unwrap();
+            s.attach_as(local.try_clone().unwrap(), 0, Viewer::Local).unwrap();
+            s.attach_size(Viewer::Remote, phone).unwrap();
+            s.attach_as(remote.try_clone().unwrap(), 0, Viewer::Remote).unwrap();
+        }
+        assert_eq!(window_size(master), phone, "the phone is drawn at the phone's size");
+
+        // The phone's own detach — the path `handle_attach` takes when the
+        // phone closes its terminal.
+        detach(&handle, &remote);
+        assert_eq!(window_size(master), desk, "the desktop did not get its size back");
+        {
+            let s = handle.lock().unwrap();
+            assert_eq!((s.info.cols, s.info.rows), (desk.cols, desk.rows));
+            assert_eq!(s.info.attached, 1);
+        }
+
+        // A late resize from the phone, on its own connection, after it left.
+        let applied = handle
+            .lock()
+            .unwrap()
+            .resize_from(Viewer::Remote, WinSize { cols: 40, rows: 20 })
+            .unwrap();
+        assert!(!applied);
+        assert_eq!(window_size(master), desk, "a stray phone resize shrank the desktop again");
+
+        // And the desktop leaving changes nothing: there is no phone to give
+        // anything back from.
+        detach(&handle, &local);
+        assert_eq!(window_size(master), desk);
+
+        pty::close(slave);
+        pty::close(master);
+        std::fs::remove_dir_all(&dir).ok();
     }
 }

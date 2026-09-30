@@ -270,8 +270,9 @@ impl Harness {
             NetworkPolicy::Allowlist => SandboxPolicy::Project,
             _ => SandboxPolicy::Unrestricted,
         };
-        self.call(&Request::Run(RunRequest {
+        self.call(&Request::Run(Box::new(RunRequest {
             agent: Some("generic".into()),
+            name: None,
             prompt: None,
             args: vec!["/bin/sh".into(), "-c".into(), "sleep 5".into()],
             cwd: self.root.join("work").to_string_lossy().into_owned(),
@@ -294,7 +295,7 @@ impl Harness {
             env: vec![],
             disposable: false,
             copy_out: None,
-        }))
+        })))
     }
 }
 

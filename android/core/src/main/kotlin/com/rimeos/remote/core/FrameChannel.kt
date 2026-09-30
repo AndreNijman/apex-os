@@ -70,4 +70,16 @@ interface FrameChannel : java.io.Closeable {
      * refuse to arm and say so.
      */
     val lastFrameNanos: Long? get() = null
+
+    /**
+     * Send a keepalive of this end's own, so that [lastFrameNanos] moves when
+     * the answer comes back. Returns whether one was sent.
+     *
+     * For the moment waiting for the desktop's next ping is too slow — the
+     * phone has just changed networks, or come back to the foreground, and
+     * the question is whether this connection survived that NOW rather than
+     * within forty seconds. `false` for a channel that cannot, which makes a
+     * probe refuse to judge rather than guess.
+     */
+    fun ping(): Boolean = false
 }

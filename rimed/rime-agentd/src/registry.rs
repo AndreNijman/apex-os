@@ -27,7 +27,10 @@ use rime_agent_core::destination::Allowlist;
 use rime_agent_core::graph;
 use rime_agent_core::hook::{HookEvent, ToolTransition};
 use rime_agent_core::sandbox::SandboxSpec;
-use rime_agent_core::session::{self as logic, OutputScanner, Scrollback, SCROLLBACK_BYTES};
+use rime_agent_core::session::{
+    self as logic, OutputScanner, Scrollback, SizeClaims, Viewer, SCROLLBACK_BYTES,
+};
+use rime_agent_core::term::WinSize;
 
 use crate::pty;
 
@@ -59,6 +62,19 @@ pub struct Confinement {
     pub allowlist: Allowlist,
 }
 
+/// One client mirroring a session's output, and what kind of client it is.
+///
+/// The kind is decided once, from the connection's origin, when it attaches
+/// (§1.7). Carried per attacher rather than as a count beside the list, because
+/// an attacher can leave two ways — its own detach, and [`Session::broadcast`]
+/// dropping a connection whose write failed — and a counter kept in step by
+/// hand in both places is a counter that drifts.
+#[derive(Debug)]
+pub struct Attacher {
+    pub stream: UnixStream,
+    pub viewer: Viewer,
+}
+
 /// One live session.
 #[derive(Debug)]
 pub struct Session {
@@ -70,7 +86,11 @@ pub struct Session {
     pub scrollback: Scrollback,
     pub scanner: OutputScanner,
     /// Connections currently mirroring this session's output.
-    pub attachers: Vec<UnixStream>,
+    pub attachers: Vec<Attacher>,
+    /// The sizes this session's terminal has been asked to be, by the desktop
+    /// and by a phone (§1.7). See [`SizeClaims`] for the rule; the methods
+    /// below are where it is applied to the PTY.
+    pub sizes: SizeClaims,
     /// When a published event last said a tool started, and nothing has said
     /// it finished. `None` for every session no hook speaks for, which is what
     /// leaves the idle rule deciding on its own exactly as it did before.
@@ -139,12 +159,26 @@ impl Session {
         if self.attachers.is_empty() {
             return;
         }
-        self.attachers.retain_mut(|s| s.write_all(data).is_ok());
-        self.info.attached = self.attachers.len() as u32;
+        let before = self.attachers.len();
+        self.attachers.retain_mut(|a| a.stream.write_all(data).is_ok());
+        if self.attachers.len() != before {
+            self.info.attached = self.attachers.len() as u32;
+            // A phone whose connection died mid-write has stopped looking as
+            // surely as one that detached, and the desktop gets its size back
+            // the same way. Without this, a phone that walked out of Wi-Fi
+            // range would leave the terminal at its size until the next
+            // attach.
+            self.settle_size();
+        }
     }
 
-    /// Register a client and hand it the scrollback to repaint with.
-    pub fn attach(&mut self, mut stream: UnixStream, replay: usize) -> Result<()> {
+    /// Register a local client and hand it the scrollback to repaint with.
+    pub fn attach(&mut self, stream: UnixStream, replay: usize) -> Result<()> {
+        self.attach_as(stream, replay, Viewer::Local)
+    }
+
+    /// Register a client of either kind and hand it the scrollback.
+    pub fn attach_as(&mut self, mut stream: UnixStream, replay: usize, viewer: Viewer) -> Result<()> {
         // A client that stops reading must not be able to stall the session.
         // See ATTACH_WRITE_TIMEOUT.
         stream.set_write_timeout(Some(ATTACH_WRITE_TIMEOUT)).ok();
@@ -154,9 +188,75 @@ impl Session {
                 .write_all(&tail)
                 .context("sending scrollback to the attaching client")?;
         }
-        self.attachers.push(stream);
+        self.attachers.push(Attacher { stream, viewer });
         self.info.attached = self.attachers.len() as u32;
         Ok(())
+    }
+
+    /// How many phones are looking at this session right now.
+    pub fn remote_viewers(&self) -> usize {
+        self.attachers
+            .iter()
+            .filter(|a| a.viewer == Viewer::Remote)
+            .count()
+    }
+
+    /// The size the PTY is at, as far as this daemon has set it.
+    pub fn current_size(&self) -> WinSize {
+        WinSize {
+            cols: self.info.cols,
+            rows: self.info.rows,
+        }
+    }
+
+    /// Resize the PTY and record the size, when there is a PTY to resize.
+    ///
+    /// A master of `-1` is a session the reaper has already closed, and there
+    /// is nothing to resize: not an error, and not worth one.
+    fn apply_size(&mut self, size: WinSize) -> Result<()> {
+        if self.master < 0 {
+            return Ok(());
+        }
+        pty::resize(self.master, size)?;
+        self.info.cols = size.cols;
+        self.info.rows = size.rows;
+        Ok(())
+    }
+
+    /// A client is attaching at `size`: remember it for its kind, and take it.
+    pub fn attach_size(&mut self, viewer: Viewer, size: WinSize) -> Result<()> {
+        let size = self.sizes.attached(viewer, size);
+        self.apply_size(size)
+    }
+
+    /// A client sent a `resize`. `Ok(false)` is a phone's resize that arrived
+    /// with no phone attached, remembered and deliberately not applied — see
+    /// [`SizeClaims::resized`].
+    pub fn resize_from(&mut self, viewer: Viewer, size: WinSize) -> Result<bool> {
+        let remote = self.remote_viewers();
+        match self.sizes.resized(viewer, size, remote) {
+            Some(size) => self.apply_size(size).map(|()| true),
+            None => Ok(false),
+        }
+    }
+
+    /// Give the terminal back to the desktop if no phone is looking any more.
+    ///
+    /// Best effort: the ioctl on a live master does not fail, and a session
+    /// whose master is gone has nothing to give back.
+    pub fn settle_size(&mut self) {
+        let current = self.current_size();
+        if let Some(size) = self.sizes.settle(self.remote_viewers(), current) {
+            let _ = self.apply_size(size);
+        }
+    }
+
+    /// A viewer typed `bytes` into its attach: the latest typist's size.
+    pub fn typed(&mut self, viewer: Viewer, bytes: &[u8]) {
+        let current = self.current_size();
+        if let Some(size) = self.sizes.typed(viewer, bytes, self.remote_viewers(), current) {
+            let _ = self.apply_size(size);
+        }
     }
 
     /// Record a state transition, refusing to leave a terminal state.
@@ -359,6 +459,7 @@ impl Registry {
             scrollback: Scrollback::new(SCROLLBACK_BYTES),
             scanner: OutputScanner::new(),
             attachers: Vec::new(),
+            sizes: SizeClaims::default(),
             tool_started: None,
             confinement: None,
             log,
@@ -842,6 +943,8 @@ mod tests {
             cwd: "/tmp".into(),
             project: None,
             project_name: None,
+            name: None,
+            title: None,
             worktree: None,
             state: AgentState::Starting,
             detail: None,
@@ -879,6 +982,7 @@ mod tests {
             scrollback: Scrollback::new(1024),
             scanner: OutputScanner::new(),
             attachers: Vec::new(),
+            sizes: SizeClaims::default(),
             tool_started: None,
             confinement: None,
             log: None,
@@ -1229,5 +1333,89 @@ mod tests {
         assert!(s.idle_secs() >= 30);
         s.absorb(b"x");
         assert!(s.idle_secs() < 2);
+    }
+
+    // ── §1.7, against a real terminal ───────────────────────────────────────
+    //
+    // The rule is `SizeClaims`', and tested there over every case. These are
+    // the two places the daemon applies it that a pure test cannot reach: a
+    // phone whose connection DIED (dropped by `broadcast`, never detached),
+    // and the latest typist, both read back off the PTY with TIOCGWINSZ.
+
+    #[test]
+    fn a_phone_whose_connection_died_gives_the_desktop_its_size_back() {
+        use rime_agent_core::term::window_size;
+        let Some((master, slave)) = pty::bare_pair() else {
+            eprintln!("SKIP: no /dev/ptmx on this machine");
+            return;
+        };
+        let desk = WinSize { cols: 180, rows: 50 };
+        let phone = WinSize { cols: 46, rows: 30 };
+        let mut s = session(1);
+        s.master = master;
+
+        let (local, _local_peer) = UnixStream::pair().unwrap();
+        let (remote, remote_peer) = UnixStream::pair().unwrap();
+        s.attach_size(Viewer::Local, desk).unwrap();
+        s.attach_as(local, 0, Viewer::Local).unwrap();
+        s.attach_size(Viewer::Remote, phone).unwrap();
+        s.attach_as(remote, 0, Viewer::Remote).unwrap();
+        assert_eq!(window_size(master), phone);
+        assert_eq!(s.remote_viewers(), 1);
+
+        // The phone walks out of Wi-Fi range: nothing detaches, the next
+        // write to it fails, and `broadcast` drops it.
+        drop(remote_peer);
+        s.absorb(b"output nobody on the phone will see\r\n");
+        assert_eq!(s.remote_viewers(), 0, "the dead connection was not dropped");
+        assert_eq!(s.info.attached, 1);
+        assert_eq!(window_size(master), desk, "the desktop kept the phone's size");
+
+        pty::close(slave);
+        pty::close(master);
+    }
+
+    #[test]
+    fn typing_on_the_desktop_takes_the_terminal_back_from_an_attached_phone() {
+        use rime_agent_core::term::window_size;
+        let Some((master, slave)) = pty::bare_pair() else {
+            eprintln!("SKIP: no /dev/ptmx on this machine");
+            return;
+        };
+        let desk = WinSize { cols: 180, rows: 50 };
+        let phone = WinSize { cols: 46, rows: 30 };
+        let mut s = session(2);
+        s.master = master;
+        let (local, _lp) = UnixStream::pair().unwrap();
+        let (remote, _rp) = UnixStream::pair().unwrap();
+        s.attach_size(Viewer::Local, desk).unwrap();
+        s.attach_as(local, 0, Viewer::Local).unwrap();
+        s.attach_size(Viewer::Remote, phone).unwrap();
+        s.attach_as(remote, 0, Viewer::Remote).unwrap();
+
+        // The desktop terminal answering a query is not the desktop typing.
+        s.typed(Viewer::Local, b"\x1b[24;1R");
+        assert_eq!(window_size(master), phone);
+        // A key is.
+        s.typed(Viewer::Local, b"y");
+        assert_eq!(window_size(master), desk);
+        assert_eq!((s.info.cols, s.info.rows), (desk.cols, desk.rows));
+        // And the phone typing gives it back to the phone.
+        s.typed(Viewer::Remote, b"\r");
+        assert_eq!(window_size(master), phone);
+
+        pty::close(slave);
+        pty::close(master);
+    }
+
+    #[test]
+    fn a_session_with_no_terminal_left_resizes_nothing_and_does_not_fail() {
+        // The reaper sets `master` to -1 as the child goes; a phone detaching
+        // in that moment must not surface an EBADF.
+        let mut s = session(3);
+        assert_eq!(s.master, -1);
+        s.attach_size(Viewer::Remote, WinSize { cols: 40, rows: 20 })
+            .expect("nothing to resize is not an error");
+        s.settle_size();
     }
 }

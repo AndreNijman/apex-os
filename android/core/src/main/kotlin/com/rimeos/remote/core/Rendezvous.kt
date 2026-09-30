@@ -58,13 +58,17 @@ object Rendezvous {
     }
 
     /**
-     * The order a client tries paths in.
+     * Which path is preferred: the LAN.
      *
-     * LAN first, always. It is faster, it involves nobody else, and when it
-     * works the relay never learns the session happened at all. A client that
-     * raced both and took whichever answered first would leak a rendezvous
-     * connection every time, including on the network where it was
-     * unnecessary.
+     * It is faster, it involves nobody else, and when it wins before the relay
+     * is dialled the relay never learns the session happened at all. That is
+     * what this order means now, and it no longer means "try the LAN to the
+     * end before asking the relay": connecting RACES the paths, with the LAN
+     * given a head start (`link.ConnectPlan`), because waiting out every
+     * stored address's timeout first was most of why connecting was slow.
+     * The cost of the race — on a slow LAN, or when the relay was the last
+     * good path, the relay learns that this phone connected at that moment —
+     * is written down there.
      */
     val PREFERENCE = listOf(Path.LAN, Path.RELAY)
 

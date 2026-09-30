@@ -86,14 +86,26 @@ fn the_worktrees_verb_exists_in_both_forms() {
 
 #[test]
 fn input_is_a_verb_and_carries_the_terminator_the_daemon_does_not_add() {
-    // `session::write_input` writes raw bytes and appends nothing, so a reply
-    // built without a terminator would sit on the agent's input line
-    // unsubmitted — which on a phone looks exactly like nothing happening.
-    // CR, not LF: a terminal delivers `\r` for the return key.
+    // `session::write_input` writes raw bytes and appends nothing to `data`,
+    // so a reply built with neither a terminator nor `submit` would sit on the
+    // agent's input line unsubmitted — which on a phone looks exactly like
+    // nothing happening. CR, not LF: a terminal delivers `\r` for the return
+    // key.
+    //
+    // Two shapes are right, and exactly one of them at a time
+    // (`docs/remote-live-contract.md` §1.2). The older phone puts the CR on
+    // the end of the text. A phone built against the contract sends the text
+    // bare with `submit: true`, and the daemon writes the CR itself, a
+    // `SUBMIT_GAP` later, because a long burst ending in CR is read as a
+    // paste and not sent. Both at once would press Enter twice.
     match parse("input") {
-        Request::Input { id, data } => {
+        Request::Input { id, data, submit } => {
             assert_eq!(id, 7);
-            assert_eq!(data, "yes\r", "the reply must arrive submitted");
+            if submit {
+                assert_eq!(data, "yes", "with submit the text must arrive bare");
+            } else {
+                assert_eq!(data, "yes\r", "the reply must arrive submitted");
+            }
         }
         other => panic!("`input` parsed as {other:?}"),
     }

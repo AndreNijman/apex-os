@@ -49,9 +49,30 @@
          the one the release published — so there is no download directory, no
          FileProvider, no content:// URI, and nothing for
          `InsecureStorageTest`'s byte-by-byte walk of app storage to account
-         for. `ManifestTest` asserts that the permission list is exactly these
-         five and no more. -->
+         for. `ManifestTest` asserts that the permission list is exactly the
+         seven in this file and no more. -->
     <uses-permission android:name="android.permission.REQUEST_INSTALL_PACKAGES" />
+
+    <!-- "I want it just always connected." While the app is unlocked, a
+         foreground service (`link.LinkService`) keeps the connection to the
+         computer open, so that opening a machine or a terminal is not a fresh
+         handshake over the relay every time — which is what made the app slow
+         enough to be the complaint.
+
+         FOREGROUND_SERVICE is what any foreground service needs, and
+         FOREGROUND_SERVICE_SPECIAL_USE is what its type needs on Android 14
+         and later. Neither is a runtime prompt. What they cost is a
+         notification the whole time the service runs, which is the honest
+         price: a low-importance, silent one that says which computer is
+         connected and nothing else, with a Lock button that ends it.
+
+         The service stops when the app is locked, and is not restarted by
+         Android after the process dies — the unwrapped device keys live only
+         in memory, so a restarted service would have nothing to connect with.
+         Push (P1-058) still needs none of this: `PushManifestTest` says so,
+         with this exception written down. -->
+    <uses-permission android:name="android.permission.FOREGROUND_SERVICE" />
+    <uses-permission android:name="android.permission.FOREGROUND_SERVICE_SPECIAL_USE" />
 
     <!-- Push-to-talk, and what is NOT here is the point of it.
 
@@ -157,6 +178,23 @@
                 <data android:scheme="apex-remote" /> <!-- rime-rename: keep -->
             </intent-filter>
         </activity>
+
+        <!-- The connection keeper. `specialUse`, because no named type fits:
+             it is not dataSync (nothing is transferred on its behalf), not
+             connectedDevice (that type is for Bluetooth, USB and NFC, and
+             requires their permissions), not remoteMessaging. The subtype
+             property says in plain words what it is for, as Android asks of a
+             specialUse service. The app is sideloaded, so no store reviews
+             this; that is a reason to write it truthfully. Not exported:
+             nothing outside this app may start or stop it. -->
+        <service
+            android:name=".link.LinkService"
+            android:exported="false"
+            android:foregroundServiceType="specialUse">
+            <property
+                android:name="android.app.PROPERTY_SPECIAL_USE_FGS_SUBTYPE"
+                android:value="Keeps an end-to-end encrypted session open to the user's own paired computer while the app is unlocked, so the coding agents running there can be seen and answered at once." />
+        </service>
 
         <!-- Where `PackageInstaller` answers, and where the user's install
              prompt is actually raised: `commit()` shows nothing by itself, it
