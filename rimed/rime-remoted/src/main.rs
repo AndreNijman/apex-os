@@ -294,12 +294,34 @@ fn run(args: &[String]) -> Result<(), String> {
         // what its own comment said: a LAN peer that connected and sent
         // nothing held a thread forever, on the only network listener in the
         // stack.
-        stream.set_read_timeout(Some(handshake)).ok();
+        prepare_accepted(&stream, handshake);
         let state = Arc::clone(&state);
         let agentd = agentd.clone();
         std::thread::spawn(move || serve::connection(stream, state, agentd));
     }
     Ok(())
+}
+
+/// The two options every accepted socket gets before its thread starts.
+///
+/// **`TCP_NODELAY`**, which this listener never set, so every socket it
+/// accepted ran Nagle's algorithm: a small segment waits until the previous
+/// one is acknowledged, and a phone delays its acknowledgements by up to
+/// 40 ms. The traffic here is nothing BUT small segments — a keystroke echo,
+/// a control reply, a ping — so each of them could sit out a delayed ACK, and
+/// the handshake, which is a request and an answer, paid it on the way in.
+/// The relay dial and the loopback splice already set it; this was the one
+/// path that had been missed, and it is the LAN path, the fast one. Set on
+/// the accepted descriptor, so every `try_clone` of it downstream has it too.
+///
+/// **The handshake deadline**, cleared by `serve::session` once the peer has
+/// authenticated; see the comment at the call site.
+///
+/// A function of its own so a test can hold the socket afterwards and read
+/// both options back.
+fn prepare_accepted(stream: &std::net::TcpStream, handshake: std::time::Duration) {
+    stream.set_nodelay(true).ok();
+    stream.set_read_timeout(Some(handshake)).ok();
 }
 
 /// Refuse to run somewhere that would make every forwarded request look local.
@@ -413,6 +435,27 @@ mod tests {
         assert_eq!(clamp(2_000), std::time::Duration::from_secs(2));
         assert!(serve::HANDSHAKE_TIMEOUT >= std::time::Duration::from_secs(1));
         assert!(serve::HANDSHAKE_TIMEOUT <= std::time::Duration::from_secs(120));
+    }
+
+    #[test]
+    fn an_accepted_socket_has_nagle_off_and_a_handshake_deadline() {
+        // Read back from the kernel on a real accepted socket rather than
+        // assumed from the call: `set_nodelay(...).ok()` swallows a failure,
+        // so the only evidence that it took is the option itself.
+        let listener = std::net::TcpListener::bind(("127.0.0.1", 0)).expect("bind");
+        let addr = listener.local_addr().expect("addr");
+        let _client = std::net::TcpStream::connect(addr).expect("connect");
+        let (accepted, _) = listener.accept().expect("accept");
+        assert!(!accepted.nodelay().expect("read TCP_NODELAY"), "the kernel default changed");
+        prepare_accepted(&accepted, std::time::Duration::from_secs(7));
+        assert!(accepted.nodelay().expect("read TCP_NODELAY"), "Nagle is still on");
+        assert_eq!(
+            accepted.read_timeout().expect("read SO_RCVTIMEO"),
+            Some(std::time::Duration::from_secs(7))
+        );
+        // And a clone — which is what `serve` reads and writes through — is
+        // the same descriptor's option, not a copy that could disagree.
+        assert!(accepted.try_clone().expect("clone").nodelay().expect("read"));
     }
 
     #[test]
